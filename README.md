@@ -10,7 +10,7 @@
 > 为了社区的长远发展，我们痛定思痛进行了底层重构。本项目是全新的接替者，基于 **SillyTavern 1.16.0 官方版本** 构建，采用了更加现代和优雅的架构设计。
 
 ---
-## 新仓库地址：[`zhaiiker/SillyTavernMOD`](https://github.com/zhaiiker/SillyTavernMOD/tree/stc-mod)（基于 1.16.0）。
+## 新仓库地址：[`zhaiiker/SillyTavernMOD`](https://github.com/zhaiiker/SillyTavernMOD/)（基于 1.16.0）。
 
 ## 💡 架构亮点：低侵入，易升级
 
