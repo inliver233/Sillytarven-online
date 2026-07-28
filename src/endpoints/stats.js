@@ -306,7 +306,11 @@ const calculateStats = (chatsPath, item) => {
     let uniqueGenStartTimes = new Set();
 
     if (fs.existsSync(chatDir)) {
-        const chats = fs.readdirSync(chatDir);
+        // Chunked-chat sidecar directories are not standalone JSONL files.
+        // Trying to read them creates an EISDIR error for every affected chat.
+        const chats = fs.readdirSync(chatDir, { withFileTypes: true })
+            .filter(entry => entry.isFile())
+            .map(entry => entry.name);
         if (Array.isArray(chats) && chats.length) {
             for (const chat of chats) {
                 const result = calculateTotalGenTimeAndWordCount(

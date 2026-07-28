@@ -58,7 +58,14 @@ async function calculateDirectorySize(dirPath) {
 
         for (const item of items) {
             const itemPath = path.join(dirPath, item);
-            const stats = await fsPromises.stat(itemPath);
+            // Do not follow extension-created symlinks. Besides counting data
+            // outside the user's root, cyclic links can raise ELOOP or
+            // ENAMETOOLONG and make every admin refresh noisy.
+            const stats = await fsPromises.lstat(itemPath);
+
+            if (stats.isSymbolicLink()) {
+                continue;
+            }
 
             if (stats.isDirectory()) {
                 totalSize += await calculateDirectorySize(itemPath);
