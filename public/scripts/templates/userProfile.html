@@ -65,6 +65,14 @@
                         <span data-i18n="Expires:">到期时间:</span>
                         <span class="userExpiresAt"></span>
                     </div>
+                    <div class="userStorageBlock">
+                        <span data-i18n="Storage:">存储空间:</span>
+                        <span class="userStorageUsage"></span>
+                    </div>
+                    <div class="userStorageBlock">
+                        <span data-i18n="Remaining:">剩余空间:</span>
+                        <span class="userStorageRemaining"></span>
+                    </div>
                 </div>
             </div>
         </div>
@@ -94,6 +102,17 @@
                     <span data-i18n="Download Backup">Download Backup</span>
                 </div>
             </div>
+            <div class="flex-container userStorageActions">
+                <div class="userStorageRedeemButton menu_button menu_button_icon" title="使用扩容激活码">
+                    <i class="fa-fw fa-solid fa-ticket"></i>
+                    <span data-i18n="Redeem Storage Code">激活码扩容</span>
+                </div>
+                <div class="userStorageCheckInButton menu_button menu_button_icon" title="每日签到增加空间">
+                    <i class="fa-fw fa-solid fa-calendar-check"></i>
+                    <span data-i18n="Check-in Reward">签到奖励</span>
+                </div>
+            </div>
+            <div class="userStorageWarning" style="display: none;"></div>
         </div>
     </div>
     <div>

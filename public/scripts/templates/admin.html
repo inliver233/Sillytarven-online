@@ -24,6 +24,9 @@
         <button type="button" class="defaultConfigButton menu_button menu_button_icon" data-target-tab="defaultConfigBlock">
             <h4 data-i18n="Default Config">默认配置</h4>
         </button>
+        <button type="button" class="userStorageButton menu_button menu_button_icon" data-target-tab="userStorageAdminBlock">
+            <h4 data-i18n="User Storage">用户空间</h4>
+        </button>
     </nav>
 
     <div class="userAccountTemplate template_element">
@@ -995,6 +998,62 @@
                 <small style="opacity: 0.8;">
                     默认模板保存在 <code>data/default-template</code>，新用户注册时会自动应用。
                 </small>
+            </div>
+        </div>
+    </div>
+
+    <!-- 用户空间限制选项卡 -->
+    <div class="navTab userStorageAdminBlock" style="display: none;">
+        <div class="flex-container flexFlowColumn flexGap10">
+            <h3 data-i18n="User Storage Limits">用户空间限制</h3>
+
+            <div class="flex-container flexFlowColumn flexGap10" style="max-width: 720px; margin: 0 auto;">
+                <label class="checkbox_label">
+                    <input type="checkbox" id="userStorageEnabled" />
+                    <span data-i18n="Enable Storage Limits">启用用户存储空间限制</span>
+                </label>
+
+                <div class="flex-container flexFlowColumn flexGap5">
+                    <span data-i18n="Default Storage Limit (MiB):">默认空间上限 (MiB):</span>
+                    <input id="userStorageDefaultLimit" class="text_pole" type="number" min="0" step="1" placeholder="例如: 50">
+                </div>
+
+                <div class="flex-container flexFlowColumn flexGap5">
+                    <span data-i18n="Daily Check-in Reward (MiB):">每日签到奖励 (MiB):</span>
+                    <input id="userStorageCheckInReward" class="text_pole" type="number" min="0" step="0.1" placeholder="例如: 1">
+                    <small style="opacity: 0.8;">设置为 0 可关闭签到奖励</small>
+                </div>
+
+                <div class="flex-container flexGap10">
+                    <button type="button" class="menu_button menu_button_icon" id="loadUserStorageConfig">
+                        <i class="fa-fw fa-solid fa-sync"></i>
+                        <span data-i18n="Load Configuration">加载配置</span>
+                    </button>
+                    <button type="button" class="menu_button menu_button_icon" id="saveUserStorageConfig">
+                        <i class="fa-fw fa-solid fa-save"></i>
+                        <span data-i18n="Save">保存配置</span>
+                    </button>
+                </div>
+                <small style="opacity: 0.8;">保存后建议重启服务以确保配置生效。</small>
+            </div>
+
+            <div class="flex-container flexFlowColumn flexGap10" style="max-width: 720px; margin: 10px auto 0;">
+                <h4 data-i18n="Storage Expansion Codes">空间扩容激活码</h4>
+                <div class="flex-container flexGap10">
+                    <div class="flex-container flexFlowColumn flexGap5 flex1">
+                        <span data-i18n="Generate Count:">生成数量:</span>
+                        <input id="storageCodeCount" class="text_pole" type="number" min="1" step="1" placeholder="例如: 20">
+                    </div>
+                    <div class="flex-container flexFlowColumn flexGap5 flex1">
+                        <span data-i18n="Add Size (MiB):">扩容大小 (MiB):</span>
+                        <input id="storageCodeAddMiB" class="text_pole" type="number" min="0.1" step="0.1" placeholder="例如: 5">
+                    </div>
+                </div>
+                <button type="button" class="menu_button menu_button_icon" id="generateStorageCodes">
+                    <i class="fa-fw fa-solid fa-ticket"></i>
+                    <span data-i18n="Generate Codes">生成激活码</span>
+                </button>
+                <textarea id="storageCodesOutput" class="text_pole" rows="6" placeholder="生成的激活码会显示在这里"></textarea>
             </div>
         </div>
     </div>

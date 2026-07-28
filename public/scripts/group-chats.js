@@ -643,6 +643,10 @@ async function saveGroupChat(groupId, shouldSaveGroup, force = false) {
 
     if (!response.ok) {
         const errorData = await response.json();
+        if (errorData?.error === 'storage_limit') {
+            toastr.error(errorData.message || '存储空间不足，无法保存群聊记录。请删除内容或使用激活码扩容。', '存储空间不足');
+            return;
+        }
         const isIntegrityError = errorData?.error === 'integrity' && !force;
         if (!isIntegrityError) {
             toastr.error(t`Check the server connection and reload the page to prevent data loss.`, t`Group Chat could not be saved`);
@@ -2311,7 +2315,7 @@ export async function importGroupChat(formData, { refresh = true } = {}) {
                 group.chats.push(chatId);
                 await editGroup(selected_group, true, true);
                 if (refresh) {
-                    await displayPastChats();
+                    await displayPastChats([`${chatId}.jsonl`]);
                 }
             }
 
@@ -2362,6 +2366,15 @@ export async function saveGroupBookmarkChat(groupId, name, metadata, mesId) {
     });
 
     if (!response.ok) {
+        try {
+            const errorData = await response.json();
+            if (errorData?.error === 'storage_limit') {
+                toastr.error(errorData.message || '存储空间不足，无法保存群聊记录。请删除内容或使用激活码扩容。', '存储空间不足');
+                return;
+            }
+        } catch (error) {
+            console.warn('Failed to parse group chat save error:', error);
+        }
         toastr.error(t`Check the server connection and reload the page to prevent data loss.`, t`Group chat could not be saved`);
         console.error('Group chat could not be saved', response);
     }

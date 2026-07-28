@@ -14,6 +14,8 @@ import { isEmailServiceAvailable, sendVerificationCode, sendPasswordRecoveryCode
 
 const DISCREET_LOGIN = getConfigValue('enableDiscreetLogin', false, 'boolean');
 const PREFER_REAL_IP_HEADER = getConfigValue('rateLimiting.preferRealIpHeader', false, 'boolean');
+const USER_STORAGE_ENABLED = getConfigValue('userStorage.enabled', false, 'boolean');
+const USER_STORAGE_DEFAULT_LIMIT_MIB = getConfigValue('userStorage.defaultLimitMiB', 0, 'number');
 const MFA_CACHE = new Cache(5 * 60 * 1000);
 const VERIFICATION_CODE_CACHE = new Cache(5 * 60 * 1000); // 验证码缓存，5分钟有效
 
@@ -552,6 +554,11 @@ router.post('/register', async (request, response) => {
             enabled: true,
             expiresAt: userExpiresAt,
         };
+
+        if (USER_STORAGE_ENABLED) {
+            const limitMiB = Number(USER_STORAGE_DEFAULT_LIMIT_MIB) || 0;
+            newUser.storageLimitMiB = Math.max(0, limitMiB);
+        }
 
         // 只有在有邮箱时才保存
         if (normalizedEmail) {

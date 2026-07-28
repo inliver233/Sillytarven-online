@@ -22,6 +22,8 @@ import { checkForNewContent, CONTENT_TYPES } from './content-manager.js';
 import { applyDefaultTemplateToUser } from '../default-template.js';
 
 export const router = express.Router();
+const USER_STORAGE_ENABLED = getConfigValue('userStorage.enabled', false, 'boolean');
+const USER_STORAGE_DEFAULT_LIMIT_MIB = getConfigValue('userStorage.defaultLimitMiB', 0, 'number');
 
 /**
  * 处理 Discourse avatar template
@@ -129,6 +131,8 @@ function buildCallbackUrl(request, provider) {
 // 存储 OIDC 配置的缓存（避免频繁请求）
 const oidcConfigCache = new Map();
 const OIDC_CACHE_TTL = 60 * 60 * 1000; // 1小时缓存
+const OIDC_FAILURE_TTL = 5 * 60 * 1000; // 5分钟失败缓存
+const OIDC_REQUEST_TIMEOUT = 3000; // 3秒超时
 
 /**
  * 从 OIDC 配置端点获取配置
@@ -139,19 +143,29 @@ async function fetchOIDCConfig(wellKnownEndpoint) {
     try {
         // 检查缓存
         const cached = oidcConfigCache.get(wellKnownEndpoint);
-        if (cached && (Date.now() - cached.timestamp < OIDC_CACHE_TTL)) {
-            return cached.config;
+        if (cached) {
+            if (cached.failed && (Date.now() - cached.timestamp < OIDC_FAILURE_TTL)) {
+                return null;
+            }
+            if (cached.config && (Date.now() - cached.timestamp < OIDC_CACHE_TTL)) {
+                return cached.config;
+            }
         }
 
         // 从端点获取配置
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), OIDC_REQUEST_TIMEOUT);
         const response = await fetch(wellKnownEndpoint, {
             headers: {
                 'Accept': 'application/json',
             },
+            signal: controller.signal,
         });
+        clearTimeout(timeoutId);
 
         if (!response.ok) {
             console.error(`Failed to fetch OIDC config from ${wellKnownEndpoint}: ${response.status}`);
+            oidcConfigCache.set(wellKnownEndpoint, { failed: true, timestamp: Date.now() });
             return null;
         }
 
@@ -161,6 +175,7 @@ async function fetchOIDCConfig(wellKnownEndpoint) {
         // 验证必需的字段
         if (!config.authorization_endpoint || !config.token_endpoint) {
             console.error('Invalid OIDC config: missing required endpoints');
+            oidcConfigCache.set(wellKnownEndpoint, { failed: true, timestamp: Date.now() });
             return null;
         }
 
@@ -169,11 +184,13 @@ async function fetchOIDCConfig(wellKnownEndpoint) {
             config: config,
             timestamp: Date.now(),
         });
-
-        console.log('OIDC config loaded from', wellKnownEndpoint);
         return config;
     } catch (error) {
-        console.error(`Error fetching OIDC config from ${wellKnownEndpoint}:`, error.message);
+        const errorMessage = error && error.name === 'AbortError'
+            ? `timeout after ${OIDC_REQUEST_TIMEOUT}ms`
+            : error?.message;
+        console.error(`Error fetching OIDC config from ${wellKnownEndpoint}:`, errorMessage);
+        oidcConfigCache.set(wellKnownEndpoint, { failed: true, timestamp: Date.now() });
         return null;
     }
 }
@@ -189,6 +206,7 @@ async function getOAuthConfig(request) {
     const discordCallbackUrl = getConfigValue('oauth.discord.callbackUrl', '', null) || buildCallbackUrl(request, 'discord');
     const linuxdoCallbackUrl = getConfigValue('oauth.linuxdo.callbackUrl', '', null) || buildCallbackUrl(request, 'linuxdo');
 
+    const linuxdoEnabled = getConfigValue('oauth.linuxdo.enabled', false, 'boolean');
     // Linux.do 配置：支持从 OIDC 配置端点自动发现
     // 默认端点参考官方文档：https://connect.linux.do/oauth2/authorize, token, /api/user
     let linuxdoAuthUrl = String(getConfigValue('oauth.linuxdo.authUrl', 'https://connect.linux.do/oauth2/authorize') || 'https://connect.linux.do/oauth2/authorize');
@@ -197,7 +215,7 @@ async function getOAuthConfig(request) {
 
     // 如果配置了 OIDC 配置端点，尝试从端点获取配置
     const wellKnownEndpoint = getConfigValue('oauth.linuxdo.wellKnownEndpoint', '', null);
-    if (wellKnownEndpoint && wellKnownEndpoint.trim()) {
+    if (linuxdoEnabled && wellKnownEndpoint && wellKnownEndpoint.trim()) {
         const oidcConfig = await fetchOIDCConfig(wellKnownEndpoint.trim());
         if (oidcConfig) {
             // 使用从 OIDC 配置端点获取的端点
@@ -228,7 +246,7 @@ async function getOAuthConfig(request) {
             userInfoUrl: 'https://discord.com/api/users/@me',
         },
         linuxdo: {
-            enabled: getConfigValue('oauth.linuxdo.enabled', false, 'boolean'),
+            enabled: linuxdoEnabled,
             clientId: String(getConfigValue('oauth.linuxdo.clientId', '') || ''),
             clientSecret: String(getConfigValue('oauth.linuxdo.clientSecret', '') || ''),
             callbackUrl: linuxdoCallbackUrl,
@@ -792,6 +810,11 @@ router.post('/verify-invitation', async (request, response) => {
             avatar: pendingUser.avatar || null,
         };
 
+        if (USER_STORAGE_ENABLED) {
+            const limitMiB = Number(USER_STORAGE_DEFAULT_LIMIT_MIB) || 0;
+            user.storageLimitMiB = Math.max(0, limitMiB);
+        }
+
         // 如果邀请码有用户过期时间，设置用户过期时间
         let userExpiresAt = null;
         if (validation.invitation && validation.invitation.durationDays) {
@@ -842,4 +865,3 @@ router.post('/verify-invitation', async (request, response) => {
         return response.status(500).json({ error: '邀请码验证失败' });
     }
 });
-

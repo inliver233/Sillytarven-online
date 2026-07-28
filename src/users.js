@@ -60,6 +60,8 @@ const STORAGE_KEYS = {
  * @property {string} [oauthProvider] - OAuth provider (github/discord/linuxdo) for third-party login users
  * @property {string} [oauthUserId] - OAuth user ID from the provider
  * @property {string} [avatar] - Avatar URL for the user
+ * @property {number} [storageLimitMiB] - User storage limit in MiB (when enabled)
+ * @property {string} [storageLastCheckInDate] - Last storage check-in date (YYYY-MM-DD)
  */
 
 /**
@@ -75,6 +77,7 @@ const STORAGE_KEYS = {
  * @property {number | null} [expiresAt] - The timestamp when the user subscription expires (null for permanent users)
  * @property {string} [email] - The user's email address (optional)
  * @property {string} [oauthProvider] - The OAuth provider used for authentication (github, discord, linuxdo)
+ * @property {number} [storageLimitMiB] - User storage limit in MiB (when enabled)
  */
 
 /**
@@ -987,6 +990,13 @@ export async function setUserDataMiddleware(request, response, next) {
         }
 
         return response.status(401).json(errorResponse);
+    }
+
+    const storageLimitsEnabled = getConfigValue('userStorage.enabled', false, 'boolean');
+    if (storageLimitsEnabled && !Number.isFinite(user.storageLimitMiB)) {
+        const defaultLimit = Number(getConfigValue('userStorage.defaultLimitMiB', 0, 'number')) || 0;
+        user.storageLimitMiB = Math.max(0, defaultLimit);
+        await storage.setItem(toKey(handle), user);
     }
 
     const directories = getUserDirectories(handle);

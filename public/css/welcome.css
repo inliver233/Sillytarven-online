@@ -5,24 +5,292 @@
 .welcomePanel {
     display: flex;
     flex-direction: column;
-    gap: 5px;
-    padding: 10px;
+    gap: 15px;
+    padding: 15px;
     width: 100%;
 }
 
-.welcomePanel:has(.showMoreChats) {
-    padding-bottom: 5px;
+/* ===== 角色卡展示区域样式 ===== */
+.welcomeCharacters {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 15px;
+    border-radius: 12px;
+    background: linear-gradient(135deg, rgba(102, 126, 234, 0.08) 0%, rgba(118, 75, 162, 0.08) 100%);
+    border: 1px solid rgba(102, 126, 234, 0.2);
 }
 
-.welcomePanel.recentHidden .welcomeRecent,
-.welcomePanel.recentHidden .recentChatsTitle,
-.welcomePanel.recentHidden .hideRecentChats,
-.welcomePanel:not(.recentHidden) .showRecentChats {
-    display: none;
+.welcomeCharactersHeader {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.welcomeCharactersTitle {
+    margin: 0;
+    font-size: calc(var(--mainFontSize) * 1.15);
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--SmartThemeBodyColor);
+}
+
+.welcomeCharactersTitle i {
+    color: #667eea;
+}
+
+.welcomeCharactersCount {
+    font-size: calc(var(--mainFontSize) * 0.85);
+    color: var(--SmartThemeQuoteColor);
+    background: rgba(102, 126, 234, 0.15);
+    padding: 4px 10px;
+    border-radius: 12px;
+}
+
+/* 角色卡网格 - 9:16比例 */
+.welcomeCharactersGrid {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 12px;
+    width: 100%;
+}
+
+.welcomeCharacterCard {
+    display: flex;
+    flex-direction: column;
+    border-radius: 10px;
+    overflow: hidden;
+    cursor: pointer;
+    transition: all 0.25s ease;
+    background: var(--SmartThemeBlurTintColor);
+    border: 1px solid var(--SmartThemeBorderColor);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.welcomeCharacterCard:hover {
+    transform: translateY(-4px);
+    box-shadow: 0 8px 24px rgba(102, 126, 234, 0.25);
+    border-color: #667eea;
+}
+
+.welcomeCharacterCard:active {
+    transform: translateY(-2px);
+}
+
+.welcomeCharacterAvatar {
+    position: relative;
+    width: 100%;
+    padding-top: 177.78%; /* 9:16 比例 = 16/9 = 1.7778 */
+    overflow: hidden;
+    background: linear-gradient(135deg, #2d2d30 0%, #1e1e20 100%);
+}
+
+.welcomeCharacterAvatar img {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transition: transform 0.3s ease, opacity 0.3s ease;
+    z-index: 2;
+}
+
+.welcomeCharacterAvatar img.lazy-load {
+    opacity: 0;
+}
+
+.welcomeCharacterAvatar img:not(.lazy-load) {
+    opacity: 1;
+}
+
+.welcomeCharacterCard:hover .welcomeCharacterAvatar img {
+    transform: scale(1.05);
+}
+
+/* 图片占位符 */
+.welcomeCharacterAvatar .imagePlaceholder {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, #2d2d30 0%, #1e1e20 100%);
+    z-index: 1;
+    transition: opacity 0.3s ease;
+    pointer-events: none;
+}
+
+.welcomeCharacterAvatar .imagePlaceholder i {
+    font-size: 2.5rem;
+    color: rgba(255, 255, 255, 0.2);
+    animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+    0%, 100% {
+        opacity: 0.2;
+    }
+    50% {
+        opacity: 0.4;
+    }
+}
+
+.welcomeCharacterAvatar img:not(.lazy-load) ~ .imagePlaceholder {
+    opacity: 0;
+}
+
+.welcomeCharacterName {
+    padding: 8px 10px;
+    font-size: calc(var(--mainFontSize) * 0.9);
+    font-weight: 500;
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    background: linear-gradient(180deg, transparent 0%, rgba(0, 0, 0, 0.3) 100%);
+    color: var(--SmartThemeBodyColor);
+}
+
+/* 无角色卡提示 */
+.noCharacters {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 40px 20px;
+    gap: 10px;
+    color: var(--SmartThemeQuoteColor);
+}
+
+.noCharacters i {
+    font-size: 3rem;
+    opacity: 0.5;
+    color: #667eea;
+}
+
+.noCharacters span {
+    font-size: calc(var(--mainFontSize) * 1.1);
+    font-weight: 500;
+}
+
+.noCharacters small {
+    font-size: calc(var(--mainFontSize) * 0.85);
+    opacity: 0.7;
+}
+
+/* 分页控件 */
+.welcomeCharactersPagination {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 15px;
+    padding-top: 10px;
+}
+
+.welcomeCharactersPagination .menu_button {
+    padding: 8px 14px;
+    border-radius: 8px;
+    transition: all 0.2s ease;
+}
+
+.welcomeCharactersPagination .menu_button:not(:disabled):hover {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+}
+
+.welcomeCharactersPagination .menu_button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.characterPageInfo {
+    font-size: calc(var(--mainFontSize) * 0.95);
+    font-weight: 500;
+    color: var(--SmartThemeQuoteColor);
+    min-width: 60px;
+    text-align: center;
+}
+
+/* 最近聊天区域头部 */
+.welcomeRecentHeader {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 0 5px;
+}
+
+.welcomeRecentHeader .recentChatsTitle {
+    margin: 0;
+    font-size: calc(var(--mainFontSize) * 1.1);
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.welcomeRecentHeader .recentChatsTitle i {
+    color: #4CAF50;
+}
+
+/* 响应式布局 */
+@media screen and (max-width: 1400px) {
+    .welcomeCharactersGrid {
+        grid-template-columns: repeat(5, 1fr);
+    }
+}
+
+@media screen and (max-width: 1100px) {
+    .welcomeCharactersGrid {
+        grid-template-columns: repeat(4, 1fr);
+    }
+}
+
+@media screen and (max-width: 900px) {
+    .welcomeCharactersGrid {
+        grid-template-columns: repeat(3, 1fr);
+    }
+}
+
+@media screen and (max-width: 650px) {
+    .welcomeCharactersGrid {
+        grid-template-columns: repeat(2, 1fr);
+        gap: 8px;
+    }
+
+    .welcomeCharacterName {
+        font-size: calc(var(--mainFontSize) * 0.8);
+        padding: 6px 8px;
+    }
+
+    .welcomeCharacters {
+        padding: 10px;
+    }
+}
+
+@media screen and (max-width: 400px) {
+    .welcomeCharactersGrid {
+        grid-template-columns: repeat(2, 1fr);
+        gap: 6px;
+    }
+}
+
+.welcomePanel:has(.showMoreChats) {
+    padding-bottom: 10px;
 }
 
 body.bubblechat .welcomePanel {
-    border-radius: 10px;
+    border-radius: 12px;
     background-color: var(--SmartThemeBotMesBlurTintColor);
     border: 1px solid var(--SmartThemeBorderColor);
     margin-bottom: 5px;
@@ -32,126 +300,46 @@ body.hideChatAvatars .welcomePanel .recentChatList .recentChat .avatar {
     display: none;
 }
 
-.welcomePanel .welcomeHeader {
-    display: flex;
-    flex-direction: row;
-    align-items: center;
-    justify-content: flex-end;
-}
-
-.welcomePanel .recentChatsTitle {
-    flex-grow: 1;
-    font-size: calc(var(--mainFontSize) * 1.15);
-    font-weight: 600;
-}
-
 .welcomePanel .welcomeHeaderTitle {
     margin: 0;
-    flex-grow: 1;
     display: flex;
     flex-direction: row;
     align-items: center;
-    gap: 10px;
+    gap: 12px;
+    padding: 5px 0 10px 0;
+    border-bottom: 1px solid var(--SmartThemeBorderColor);
 }
 
 .welcomePanel .welcomeHeaderVersionDisplay {
-    font-size: calc(var(--mainFontSize) * 1.3);
-    font-weight: 600;
-    flex-grow: 1;
+    font-size: calc(var(--mainFontSize) * 1.4);
+    font-weight: 700;
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
 }
 
 .welcomePanel .welcomeHeaderLogo {
-    width: 30px;
-    height: 30px;
+    width: 36px;
+    height: 36px;
 }
 
-.welcomePanel .welcomeShortcuts {
-    display: flex;
-    flex-direction: row;
-    flex-wrap: wrap;
-    align-items: center;
-    justify-content: center;
-    gap: 5px;
-}
 
-/* 大按钮容器 */
-.welcomeBigButtons,
-.custom-welcomeBigButtons {
+.welcomeRecent {
     display: flex;
+    flex-direction: column;
     gap: 10px;
-    justify-content: center;
-    align-items: center;
-    padding: 10px 0 0 0;
-}
-
-/* 大按钮公共样式 */
-.welcomeBigButtons .wb,
-.mes .welcomeBigButtons .wb,
-.custom-welcomeBigButtons .custom-wb,
-.mes .custom-welcomeBigButtons .custom-wb {
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    padding: 10px 16px !important;
-    border-radius: 10px !important;
-    font-weight: 700 !important;
-    text-decoration: none !important;
-    border: 1px solid var(--SmartThemeBorderColor) !important;
-    line-height: 1 !important;
-    font-size: calc(var(--mainFontSize) * 0.95) !important;
-}
-
-.welcomeBigButtons .btnWelcome,
-.mes .welcomeBigButtons .btnWelcome,
-.custom-welcomeBigButtons .custom-btnWelcome,
-.mes .custom-welcomeBigButtons .custom-btnWelcome {
-    background: linear-gradient(135deg, #4CAF50 0%, #2e7d32 100%) !important;
-    color: #fff !important;
-    border-color: rgba(76, 175, 80, 0.6) !important;
-}
-
-.welcomeBigButtons .btnCharacters,
-.mes .welcomeBigButtons .btnCharacters,
-.custom-welcomeBigButtons .custom-btnCharacters,
-.mes .custom-welcomeBigButtons .custom-btnCharacters {
-    background: linear-gradient(135deg, #2196F3 0%, #1565C0 100%) !important;
-    color: #fff !important;
-    border-color: rgba(33, 150, 243, 0.6) !important;
-}
-
-.welcomeBigButtons .btnForum,
-.mes .welcomeBigButtons .btnForum,
-.custom-welcomeBigButtons .custom-btnForum,
-.mes .custom-welcomeBigButtons .custom-btnForum {
-    background: linear-gradient(135deg, #FF9800 0%, #EF6C00 100%) !important;
-    color: #fff !important;
-    border-color: rgba(255, 152, 0, 0.6) !important;
-}
-
-.welcomeBigButtons .wb:hover,
-.mes .welcomeBigButtons .wb:hover,
-.custom-welcomeBigButtons .custom-wb:hover,
-.mes .custom-welcomeBigButtons .custom-wb:hover {
-    filter: brightness(1.05);
-}
-
-/* 在欢迎提示中与下面的灰色按钮分隔开 */
-.mes .welcomeBigButtons,
-.mes .custom-welcomeBigButtons {
-    margin: 6px 0 2px 0;
-}
-
-.welcomePanel .welcomeShortcuts .welcomeShortcutsSeparator {
-    margin: 0 2px;
-    color: var(--SmartThemeBorderColor);
-    font-size: calc(var(--mainFontSize) * 1.1);
+    padding: 15px;
+    border-radius: 12px;
+    background: rgba(76, 175, 80, 0.05);
+    border: 1px solid rgba(76, 175, 80, 0.2);
 }
 
 .welcomeRecent .recentChatList {
     display: flex;
     flex-direction: column;
     width: 100%;
-    gap: 2px;
+    gap: 4px;
 }
 
 .welcomeRecent .welcomePanelLoader {
@@ -289,8 +477,80 @@ body.big-avatars .welcomeRecent .recentChatList .recentChat .chatMessageContaine
     transform: rotate(180deg);
 }
 
-@media screen and (max-width: 1000px) {
-    .welcomePanel .welcomeShortcuts a span {
+/* 底部快捷按钮 */
+.welcomeFooterButtons {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: center;
+    gap: 15px;
+    padding: 15px;
+    border-radius: 12px;
+    background: linear-gradient(135deg, rgba(255, 255, 255, 0.05) 0%, rgba(255, 255, 255, 0.02) 100%);
+    border: 1px solid var(--SmartThemeBorderColor);
+}
+
+.welcomeFooterBtn {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 12px 20px !important;
+    border-radius: 10px !important;
+    font-weight: 600 !important;
+    text-decoration: none !important;
+    transition: all 0.25s ease !important;
+}
+
+.welcomeFooterBtn:nth-child(1) {
+    background: linear-gradient(135deg, #4CAF50 0%, #2e7d32 100%) !important;
+    color: #fff !important;
+    border: 1px solid rgba(76, 175, 80, 0.4) !important;
+}
+
+.welcomeFooterBtn:nth-child(2) {
+    background: linear-gradient(135deg, #2196F3 0%, #1565C0 100%) !important;
+    color: #fff !important;
+    border: 1px solid rgba(33, 150, 243, 0.4) !important;
+}
+
+.welcomeFooterBtn:nth-child(3) {
+    background: linear-gradient(135deg, #FF9800 0%, #EF6C00 100%) !important;
+    color: #fff !important;
+    border: 1px solid rgba(255, 152, 0, 0.4) !important;
+}
+
+.welcomeFooterBtn:hover {
+    transform: translateY(-2px) !important;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25) !important;
+    filter: brightness(1.1) !important;
+}
+
+@media screen and (max-width: 650px) {
+    .welcomeFooterButtons {
+        flex-direction: column;
+        gap: 10px;
+    }
+
+    .welcomeFooterBtn {
+        width: 100%;
+        justify-content: center;
+    }
+}
+
+@media screen and (max-width: 500px) {
+    .welcomeRecentHeader {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 8px;
+    }
+
+    .welcomeRecentHeader .openTemporaryChat span {
         display: none;
+    }
+
+    .welcomeCharactersHeader {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 6px;
     }
 }

@@ -22,9 +22,12 @@ import { applyDefaultTemplateToUser } from '../default-template.js';
 import { DEFAULT_USER } from '../constants.js';
 import systemMonitor from '../system-monitor.js';
 import { isEmailServiceAvailable, sendInactiveUserDeletionNotice } from '../email-service.js';
+import { getConfigValue } from '../util.js';
 
 
 export const router = express.Router();
+const USER_STORAGE_ENABLED = getConfigValue('userStorage.enabled', false, 'boolean');
+const USER_STORAGE_DEFAULT_LIMIT_MIB = getConfigValue('userStorage.defaultLimitMiB', 0, 'number');
 
 /**
  * @typedef {import('../users.js').UserViewModel & {
@@ -331,6 +334,11 @@ router.post('/create', requireAdminMiddleware, async (request, response) => {
             enabled: true,
             expiresAt: null, // 管理员创建的用户默认为永久账户
         };
+
+        if (USER_STORAGE_ENABLED) {
+            const limitMiB = Number(USER_STORAGE_DEFAULT_LIMIT_MIB) || 0;
+            newUser.storageLimitMiB = Math.max(0, limitMiB);
+        }
 
         await storage.setItem(toKey(handle), newUser);
 

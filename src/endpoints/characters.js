@@ -25,6 +25,7 @@ import { getChatInfo } from './chats.js';
 import { ByafParser } from '../byaf.js';
 import { CharXParser, persistCharXAssets } from '../charx.js';
 import cacheBuster from '../middleware/cacheBuster.js';
+import { canConsumeStorage } from '../storage-quota.js';
 
 // With 100 MB limit it would take roughly 3000 characters to reach this limit
 const memoryCacheCapacity = getConfigValue('performance.memoryCacheCapacity', '100mb');
@@ -35,6 +36,38 @@ const isAndroid = process.platform === 'android';
 const useShallowCharacters = !!getConfigValue('performance.lazyLoadCharacters', false, 'boolean');
 const useDiskCache = !!getConfigValue('performance.useDiskCache', true, 'boolean');
 const chatDirStatsCache = new Map();
+const CHARACTER_SIZE_OVERHEAD = 2048;
+
+async function ensureCharacterStorageCapacity(request, response, additionalBytes) {
+    const result = await canConsumeStorage(request.user.profile, request.user.directories, additionalBytes);
+    if (!result.allowed) {
+        return response.status(403).json({
+            error: 'storage_limit',
+            message: '存储空间不足，无法保存角色卡，请删除角色或使用激活码扩容。',
+            usedBytes: result.usedBytes,
+            limitBytes: result.limitBytes,
+            remainingBytes: result.remainingBytes,
+        });
+    }
+
+    return null;
+}
+
+function estimateCharacterCardBytes(inputFile, data) {
+    let imageSize = 0;
+    try {
+        if (Buffer.isBuffer(inputFile)) {
+            imageSize = inputFile.length;
+        } else if (typeof inputFile === 'string') {
+            imageSize = fs.statSync(inputFile).size;
+        }
+    } catch (error) {
+        console.warn('Failed to estimate character image size:', error);
+    }
+
+    const dataSize = Buffer.byteLength(String(data || ''), 'utf8');
+    return imageSize + dataSize + CHARACTER_SIZE_OVERHEAD;
+}
 
 class DiskCache {
     /**
@@ -1064,11 +1097,22 @@ router.post('/create', getFileNameValidationFunction('file_name'), async functio
         if (!fs.existsSync(chatsPath)) fs.mkdirSync(chatsPath);
 
         if (!request.file) {
+            const estimateBytes = estimateCharacterCardBytes(DEFAULT_AVATAR_PATH, char);
+            const storageError = await ensureCharacterStorageCapacity(request, response, estimateBytes);
+            if (storageError) {
+                return storageError;
+            }
             await writeCharacterData(DEFAULT_AVATAR_PATH, char, internalName, request);
             return response.send(avatarName);
         } else {
             const crop = tryParse(request.query.crop);
             const uploadPath = path.join(request.file.destination, request.file.filename);
+            const estimateBytes = estimateCharacterCardBytes(uploadPath, char);
+            const storageError = await ensureCharacterStorageCapacity(request, response, estimateBytes);
+            if (storageError) {
+                fs.unlinkSync(uploadPath);
+                return storageError;
+            }
             await writeCharacterData(uploadPath, char, internalName, request, crop);
             fs.unlinkSync(uploadPath);
             return response.send(avatarName);
@@ -1470,6 +1514,24 @@ router.post('/import', async function (request, response) {
     };
 
     try {
+        let estimateBytes = 0;
+        try {
+            const uploadStats = fs.statSync(uploadPath);
+            estimateBytes = uploadStats.size + CHARACTER_SIZE_OVERHEAD;
+            if (['json', 'yaml', 'yml'].includes(format)) {
+                const defaultAvatarSize = fs.statSync(DEFAULT_AVATAR_PATH).size;
+                estimateBytes += defaultAvatarSize;
+            }
+        } catch (error) {
+            console.warn('Failed to estimate import size:', error);
+        }
+
+        const storageError = await ensureCharacterStorageCapacity(request, response, estimateBytes);
+        if (storageError) {
+            fs.unlinkSync(uploadPath);
+            return storageError;
+        }
+
         const importFunction = formatImportFunctions[format];
 
         if (!importFunction) {
@@ -1505,6 +1567,11 @@ router.post('/duplicate', validateAvatarUrlMiddleware, async function (request, 
         if (!fs.existsSync(filename)) {
             console.error('file for dupe not found', filename);
             return response.sendStatus(404);
+        }
+        const estimateBytes = fs.statSync(filename).size + CHARACTER_SIZE_OVERHEAD;
+        const storageError = await ensureCharacterStorageCapacity(request, response, estimateBytes);
+        if (storageError) {
+            return storageError;
         }
         let suffix = 1;
         let newFilename = filename;

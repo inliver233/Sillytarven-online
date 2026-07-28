@@ -977,6 +977,67 @@ async function resetEverything(callback) {
 
 }
 
+function formatStorageMiB(value) {
+    if (!Number.isFinite(value)) {
+        return '0';
+    }
+
+    const rounded = Math.round(value * 100) / 100;
+    return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(2);
+}
+
+async function loadUserStorageStatus(template) {
+    try {
+        const response = await fetch('/api/user-storage/status', {
+            method: 'GET',
+            headers: getRequestHeaders(),
+        });
+
+        if (!response.ok) {
+            throw new Error('Failed to load storage status');
+        }
+
+        const status = await response.json();
+        const storageBlocks = template.find('.userStorageBlock, .userStorageActions, .userStorageWarning');
+
+        if (!status.enabled) {
+            storageBlocks.hide();
+            return;
+        }
+
+        storageBlocks.show();
+        const usedLabel = `${formatStorageMiB(status.usedMiB)} MiB`;
+        const limitLabel = `${formatStorageMiB(status.limitMiB)} MiB`;
+        const remainingLabel = `${formatStorageMiB(status.remainingMiB)} MiB`;
+        template.find('.userStorageUsage').text(`${usedLabel} / ${limitLabel}`);
+        template.find('.userStorageRemaining').text(remainingLabel);
+
+        const warning = template.find('.userStorageWarning');
+        if (Number(status.remainingBytes) <= 0) {
+            warning.text('空间已用完，无法继续新增聊天或角色卡。请删除内容或使用激活码扩容。');
+            warning.show();
+        } else {
+            warning.hide();
+        }
+
+        const checkInButton = template.find('.userStorageCheckInButton');
+        if (Number(status.checkInRewardMiB) > 0) {
+            checkInButton.show();
+        } else {
+            checkInButton.hide();
+        }
+
+        if (status.canCheckIn) {
+            checkInButton.removeClass('disabled');
+        } else {
+            checkInButton.addClass('disabled');
+        }
+    } catch (error) {
+        console.error('Error loading storage status:', error);
+        template.find('.userStorageBlock, .userStorageActions, .userStorageWarning').hide();
+    }
+}
+
 async function openUserProfile() {
     await getCurrentUser();
 
@@ -1113,6 +1174,58 @@ async function openUserProfile() {
             $(this).removeClass('disabled');
         });
     });
+    template.find('.userStorageRedeemButton').on('click', async () => {
+        const code = await callGenericPopup('请输入扩容激活码', POPUP_TYPE.INPUT, '', { okButton: '确认', cancelButton: '取消' });
+        if (!code) {
+            return;
+        }
+
+        try {
+            const response = await fetch('/api/user-storage/redeem', {
+                method: 'POST',
+                headers: getRequestHeaders(),
+                body: JSON.stringify({ code }),
+            });
+            const data = await response.json();
+
+            if (!response.ok) {
+                toastr.error(data.error || '激活码无效', '扩容失败');
+                return;
+            }
+
+            toastr.success(`扩容成功，增加 ${data.addedMiB} MiB`, '扩容成功');
+            await loadUserStorageStatus(template);
+        } catch (error) {
+            console.error('Storage redeem failed:', error);
+            toastr.error('激活码使用失败，请稍后重试', '扩容失败');
+        }
+    });
+
+    template.find('.userStorageCheckInButton').on('click', async function () {
+        const button = $(this);
+        if (button.hasClass('disabled')) {
+            return;
+        }
+
+        try {
+            const response = await fetch('/api/user-storage/check-in', {
+                method: 'POST',
+                headers: getRequestHeaders(),
+            });
+            const data = await response.json();
+
+            if (!response.ok) {
+                toastr.error(data.error || '签到失败', '签到失败');
+                return;
+            }
+
+            toastr.success(`签到成功，增加 ${data.addedMiB} MiB`, '签到成功');
+            await loadUserStorageStatus(template);
+        } catch (error) {
+            console.error('Storage check-in failed:', error);
+            toastr.error('签到失败，请稍后重试', '签到失败');
+        }
+    });
     template.find('.userResetSettingsButton').on('click', () => resetSettings(currentUser.handle, () => location.reload()));
     template.find('.userResetAllButton').on('click', () => resetEverything(() => location.reload()));
     template.find('.userAvatarChange').on('click', () => template.find('.avatarUpload').trigger('click'));
@@ -1140,6 +1253,8 @@ async function openUserProfile() {
         template.find('[data-require-accounts]').hide();
         template.find('.accountsDisabledHint').show();
     }
+
+    await loadUserStorageStatus(template);
 
     const popupOptions = {
         okButton: 'Close',

@@ -2,56 +2,25 @@
     <div class="welcomeHeaderTitle">
         <img src="img/logo.png" alt="SillyTavern Logo" class="welcomeHeaderLogo">
         <span class="welcomeHeaderVersionDisplay">{{version}}</span>
-        <div class="mes_button showRecentChats" title="Show recent chats" data-i18n="[title]Show recent chats">
-            <i class="fa-solid fa-circle-chevron-down fa-fw fa-lg"></i>
-        </div>
-        <div class="mes_button hideRecentChats" title="Hide recent chats" data-i18n="[title]Hide recent chats">
-            <i class="fa-solid fa-circle-xmark fa-fw fa-lg"></i>
-        </div>
     </div>
-    <div class="welcomeHeader">
-        <div class="recentChatsTitle" data-i18n="Recent Chats">
-            Recent Chats
-        </div>
-        <div class="welcomeShortcuts">
-            <a class="menu_button menu_button_icon" href="/welcome">
-                <i class="fa-solid fa-house"></i>
-                <span>欢迎首页</span>
-            </a>
-            <a class="menu_button menu_button_icon" href="/public-characters" id="publicCharactersLink">
-                <i class="fa-solid fa-id-card"></i>
-                <span>角色卡分享</span>
-            </a>
-            <a class="menu_button menu_button_icon" href="/forum" id="forumLink">
-                <i class="fa-solid fa-comments"></i>
-                <span>交流平台</span>
-            </a>
-            <span class="welcomeShortcutsSeparator">&vert;</span>
-            <a class="menu_button menu_button_icon" target="_blank" href="https://docs.sillytavern.app/">
-                <i class="fa-solid fa-question-circle"></i>
-                <span data-i18n="Docs">Docs</span>
-            </a>
-            <a class="menu_button menu_button_icon" target="_blank" href="https://github.com/SillyTavern/SillyTavern">
-                <i class="fa-brands fa-github"></i>
-                <span data-i18n="GitHub">GitHub</span>
-            </a>
-            <a class="menu_button menu_button_icon" target="_blank" href="https://discord.gg/sillytavern">
-                <i class="fa-brands fa-discord"></i>
-                <span data-i18n="Discord">Discord</span>
-            </a>
-            <span class="welcomeShortcutsSeparator">&vert;</span>
-            <button class="openTemporaryChat menu_button menu_button_icon">
+
+    <!-- 最近聊天区域 (移到最上面) -->
+    <div class="welcomeRecent">
+        <div class="welcomeRecentHeader">
+            <h3 class="recentChatsTitle" data-i18n="Recent Chats">
+                <i class="fa-solid fa-clock-rotate-left"></i>
+                最近聊天
+            </h3>
+            <button class="menu_button menu_button_icon openTemporaryChat" title="开始临时聊天">
                 <i class="fa-solid fa-comment-dots"></i>
-                <span data-i18n="Temporary Chat">Temporary Chat</span>
+                <span>临时聊天</span>
             </button>
         </div>
-    </div>
-    <div class="welcomeRecent">
         <div class="recentChatList">
         {{#if empty}}
             <div class="noRecentChat">
                 <i class="fa-solid fa-comment-dots"></i>
-                <span data-i18n="No recent chats">No recent chats</span>
+                <span data-i18n="No recent chats">暂无最近聊天</span>
             </div>
         {{/if}}
         {{#each chats}}
@@ -99,5 +68,64 @@
             </button>
         {{/if}}
         </div>
+    </div>
+
+    <!-- 角色卡展示区域 -->
+    <div class="welcomeCharacters">
+        <div class="welcomeCharactersHeader">
+            <h3 class="welcomeCharactersTitle">
+                <i class="fa-solid fa-id-card"></i>
+                我的角色卡
+            </h3>
+            <span class="welcomeCharactersCount">{{characterCount}} 个角色</span>
+        </div>
+        <div class="welcomeCharactersGrid" id="welcomeCharactersGrid">
+            {{#if noCharacters}}
+            <div class="noCharacters">
+                <i class="fa-solid fa-user-plus"></i>
+                <span>暂无角色卡</span>
+                <small>从角色管理页面创建或导入角色卡</small>
+            </div>
+            {{/if}}
+            {{#each displayCharacters}}
+            <div class="welcomeCharacterCard" data-chid="{{this.index}}" data-avatar="{{this.avatar}}" title="{{this.name}}">
+                <div class="welcomeCharacterAvatar">
+                    <!-- 所有图片都通过缓存延迟加载 -->
+                    <img data-src="{{this.avatarUrl}}" alt="{{this.name}}" class="characterImage lazy-load" src="/img/default-expressions/neutral.png" onerror="this.src='/img/default-expressions/neutral.png';">
+                    <div class="imagePlaceholder">
+                        <i class="fa-solid fa-image"></i>
+                    </div>
+                </div>
+                <div class="welcomeCharacterName">{{this.name}}</div>
+            </div>
+            {{/each}}
+        </div>
+        {{#if hasMorePages}}
+        <div class="welcomeCharactersPagination">
+            <button class="menu_button characterPagePrev" {{#unless canGoPrev}}disabled{{/unless}}>
+                <i class="fa-solid fa-chevron-left"></i>
+            </button>
+            <span class="characterPageInfo">{{currentPage}} / {{totalPages}}</span>
+            <button class="menu_button characterPageNext" {{#unless canGoNext}}disabled{{/unless}}>
+                <i class="fa-solid fa-chevron-right"></i>
+            </button>
+        </div>
+        {{/if}}
+    </div>
+
+    <!-- 底部快捷按钮 -->
+    <div class="welcomeFooterButtons">
+        <a class="menu_button menu_button_icon welcomeFooterBtn" href="/welcome">
+            <i class="fa-solid fa-house"></i>
+            <span>欢迎首页</span>
+        </a>
+        <a class="menu_button menu_button_icon welcomeFooterBtn" href="/public-characters" id="publicCharactersLink">
+            <i class="fa-solid fa-id-card"></i>
+            <span>角色卡分享</span>
+        </a>
+        <a class="menu_button menu_button_icon welcomeFooterBtn" href="/forum" id="forumLink">
+            <i class="fa-solid fa-comments"></i>
+            <span>交流平台</span>
+        </a>
     </div>
 </div>

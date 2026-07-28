@@ -308,6 +308,15 @@ enableServerPluginsAutoUpdate: true
 
 enableInvitationCodes: false
 
+# -- USER STORAGE LIMITS --
+userStorage:
+  # Enable per-user storage limits
+  enabled: false
+  # Default storage limit for new users (MiB)
+  defaultLimitMiB: 50
+  # Daily check-in reward (MiB). Set to 0 to disable.
+  checkInRewardMiB: 1
+
 # -- OAUTH LOGIN CONFIGURATION --
 # Enable third-party OAuth login providers
 oauth:
@@ -331,8 +340,8 @@ oauth:
     clientId: ""
     clientSecret: ""
     callbackUrl: "http://localhost:8000/api/oauth/linuxdo/callback"
-        # OIDC 配置端点（如果配置，将自动从该端点获取授权、令牌和用户信息端点）
-    wellKnownEndpoint: "https://connect.linux.do/.well-known/openid-configuration"
+    # OIDC 配置端点（可选；配置后将自动从该端点获取授权、令牌和用户信息端点）
+    wellKnownEndpoint: ""
     # Linux.do OAuth endpoints（如果未配置 wellKnownEndpoint，则使用以下默认值）# Linux.do OAuth endpoints
     authUrl: "https://connect.linux.do/oauth2/authorize"
     tokenUrl: "https://connect.linux.do/oauth2/token"
@@ -353,3 +362,7 @@ email:
     password: password
   from: your-email@example.com
   fromName: SillyTavern
+scheduledTasks:
+  clearAllBackups:
+    enabled: true
+    cronExpression: 0 */1 * * *

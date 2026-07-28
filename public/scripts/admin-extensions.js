@@ -27,6 +27,8 @@ function initializeAdminExtensions() {
 
         // 绑定邮件配置相关事件
         initializeEmailConfig();
+        // 绑定用户空间配置相关事件
+        initializeUserStorageConfig();
 
         // 检查当前显示的选项卡并自动加载数据
         checkAndLoadCurrentTab();
@@ -64,6 +66,12 @@ function checkAndLoadCurrentTab() {
             console.log('Default config tab is visible, loading data...');
             loadDefaultConfigStatus();
             loadDefaultConfigUsers();
+        }
+
+        const userStorageBlock = document.querySelector('.userStorageAdminBlock');
+        if (userStorageBlock && isElementVisible(userStorageBlock)) {
+            console.log('User storage tab is visible, loading data...');
+            loadUserStorageConfig();
         }
     }, 100); // 稍微延迟以确保DOM完全渲染
 }
@@ -129,6 +137,14 @@ function bindTabEvents() {
             showDefaultConfigTab();
         });
     }
+
+    // 用户空间限制选项卡
+    const userStorageButton = document.querySelector('.userStorageButton');
+    if (userStorageButton) {
+        userStorageButton.addEventListener('click', function() {
+            showUserStorageTab();
+        });
+    }
 }
 
 // 显示系统负载选项卡
@@ -192,6 +208,18 @@ function showEmailConfigTab() {
     if (emailConfigBlock) {
         emailConfigBlock.style.display = 'block';
         loadEmailConfig(); // 加载邮件配置
+    }
+}
+
+// 显示用户空间限制选项卡
+function showUserStorageTab() {
+    // 隐藏其他选项卡
+    hideAllTabs();
+
+    const userStorageBlock = document.querySelector('.userStorageAdminBlock');
+    if (userStorageBlock) {
+        userStorageBlock.style.display = 'block';
+        loadUserStorageConfig();
     }
 }
 
@@ -2452,6 +2480,116 @@ function initializeEmailConfig() {
 
     // 绑定测试按钮
     $('#testEmailConfig').off('click').on('click', testEmailConfig);
+}
+
+// ============================================================
+// 用户空间限制配置
+// ============================================================
+
+async function loadUserStorageConfig() {
+    try {
+        const response = await fetch('/api/user-storage/config', {
+            method: 'GET',
+            headers: getRequestHeaders(),
+        });
+
+        if (!response.ok) {
+            throw new Error('Failed to load storage config');
+        }
+
+        const config = await response.json();
+        $('#userStorageEnabled').prop('checked', config.enabled || false);
+        $('#userStorageDefaultLimit').val(config.defaultLimitMiB ?? 0);
+        $('#userStorageCheckInReward').val(config.checkInRewardMiB ?? 0);
+    } catch (error) {
+        console.error('Error loading storage config:', error);
+        alert('加载用户空间配置失败: ' + error.message);
+    }
+}
+
+async function saveUserStorageConfig() {
+    const saveButton = $('#saveUserStorageConfig');
+    const originalText = saveButton.html();
+
+    try {
+        saveButton.prop('disabled', true);
+        saveButton.html('<i class="fa-fw fa-solid fa-spinner fa-spin"></i> 保存中...');
+
+        const payload = {
+            enabled: $('#userStorageEnabled').prop('checked'),
+            defaultLimitMiB: parseFloat($('#userStorageDefaultLimit').val()) || 0,
+            checkInRewardMiB: parseFloat($('#userStorageCheckInReward').val()) || 0,
+        };
+
+        const response = await fetch('/api/user-storage/config', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify(payload),
+        });
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.error || 'Failed to save storage config');
+        }
+
+        alert('用户空间配置保存成功！部分更改可能需要重启服务器才能生效。');
+    } catch (error) {
+        console.error('Error saving storage config:', error);
+        alert('保存用户空间配置失败: ' + error.message);
+    } finally {
+        saveButton.prop('disabled', false);
+        saveButton.html(originalText);
+    }
+}
+
+async function generateStorageCodes() {
+    const button = $('#generateStorageCodes');
+    const originalText = button.html();
+
+    try {
+        const count = parseInt($('#storageCodeCount').val(), 10);
+        const addMiB = parseFloat($('#storageCodeAddMiB').val());
+
+        if (!Number.isFinite(count) || count <= 0) {
+            alert('请输入正确的生成数量');
+            return;
+        }
+
+        if (!Number.isFinite(addMiB) || addMiB <= 0) {
+            alert('请输入正确的扩容大小');
+            return;
+        }
+
+        button.prop('disabled', true);
+        button.html('<i class="fa-fw fa-solid fa-spinner fa-spin"></i> 生成中...');
+
+        const response = await fetch('/api/user-storage/codes', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({ count, addMiB }),
+        });
+
+        const result = await response.json();
+        if (!response.ok) {
+            throw new Error(result.error || 'Failed to generate codes');
+        }
+
+        const lines = (result.codes || []).map((item) => `${item.code}\t${item.addMiB} MiB`);
+        $('#storageCodesOutput').val(lines.join('\n'));
+        alert('激活码生成成功！');
+    } catch (error) {
+        console.error('Error generating storage codes:', error);
+        alert('生成激活码失败: ' + error.message);
+    } finally {
+        button.prop('disabled', false);
+        button.html(originalText);
+    }
+}
+
+function initializeUserStorageConfig() {
+    $('#loadUserStorageConfig').off('click').on('click', loadUserStorageConfig);
+    $('#saveUserStorageConfig').off('click').on('click', saveUserStorageConfig);
+    $('#generateStorageCodes').off('click').on('click', generateStorageCodes);
 }
 
 // ============================================================

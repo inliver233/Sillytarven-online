@@ -4394,6 +4394,14 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
         return Promise.resolve();
     }
 
+    if (!dryRun && type !== 'quiet') {
+        const canProceed = await ensureStorageAvailableForChatAction();
+        if (!canProceed) {
+            unblockGeneration(type);
+            return Promise.resolve();
+        }
+    }
+
     if (!dryRun) {
         // Ping server to make sure it is still alive
         const pingResult = await pingServer();
@@ -4512,12 +4520,12 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
             sendSystemMessage(system_message_types.GENERIC, ' ', { bias: messageBias });
         }
         else {
-            await sendMessageAsUser(textareaText, messageBias);
+            await sendMessageAsUser(textareaText, messageBias, null, false, name1, user_avatar, { skipStorageCheck: true });
         }
     }
     else if (textareaText == '' && !automatic_trigger && !dryRun && type === undefined && main_api == 'openai' && oai_settings.send_if_empty.trim().length > 0) {
         // Use send_if_empty if set and the user message is empty. Only when sending messages normally
-        await sendMessageAsUser(oai_settings.send_if_empty.trim(), messageBias);
+        await sendMessageAsUser(oai_settings.send_if_empty.trim(), messageBias, null, false, name1, user_avatar, { skipStorageCheck: true });
     }
 
     let {
@@ -5931,7 +5939,15 @@ export function removeMacros(str) {
  * @param {string} [avatar] Avatar of the user sending the message. Defaults to user_avatar.
  * @returns {Promise<any>} A promise that resolves to the message when it is inserted.
  */
-export async function sendMessageAsUser(messageText, messageBias, insertAt = null, compact = false, name = name1, avatar = user_avatar) {
+export async function sendMessageAsUser(messageText, messageBias, insertAt = null, compact = false, name = name1, avatar = user_avatar, options = null) {
+    const { skipStorageCheck = false } = options && typeof options === 'object' ? options : {};
+    if (!skipStorageCheck) {
+        const canProceed = await ensureStorageAvailableForChatAction();
+        if (!canProceed) {
+            return null;
+        }
+    }
+
     messageText = getRegexedString(messageText, regex_placement.USER_INPUT);
 
     const message = {
@@ -7361,6 +7377,50 @@ export function saveChatDebounced() {
     }, DEFAULT_SAVE_EDIT_TIMEOUT);
 }
 
+const STORAGE_STATUS_TTL = 10_000;
+let cachedStorageStatus = null;
+let cachedStorageStatusAt = 0;
+
+async function fetchStorageStatus({ force = false } = {}) {
+    const now = Date.now();
+    if (!force && cachedStorageStatus && now - cachedStorageStatusAt < STORAGE_STATUS_TTL) {
+        return cachedStorageStatus;
+    }
+
+    try {
+        const response = await fetch('/api/user-storage/status', {
+            method: 'GET',
+            headers: getRequestHeaders(),
+        });
+
+        if (!response.ok) {
+            throw new Error('Failed to load storage status');
+        }
+
+        const status = await response.json();
+        cachedStorageStatus = status;
+        cachedStorageStatusAt = now;
+        return status;
+    } catch (error) {
+        console.warn('Failed to fetch storage status:', error);
+        return null;
+    }
+}
+
+async function ensureStorageAvailableForChatAction() {
+    const status = await fetchStorageStatus();
+    if (!status?.enabled) {
+        return true;
+    }
+
+    if (Number(status.remainingBytes) <= 0) {
+        toastr.error('存储空间不足，无法发送或生成消息。请删除内容或使用激活码扩容。', '存储空间不足');
+        return false;
+    }
+
+    return true;
+}
+
 /**
  * @param {Partial<SaveChatTailOptions>} [options]
  */
@@ -7398,6 +7458,10 @@ async function saveChatTail(options = {}) {
     }
 
     const errorData = await result.json();
+    if (errorData?.error === 'storage_limit') {
+        toastr.error(errorData.message || '存储空间不足，无法保存聊天记录。请删除内容或使用激活码扩容。', '存储空间不足');
+        return;
+    }
     const isIntegrityError = errorData?.error === 'integrity' && !force;
     if (!isIntegrityError) {
         throw new Error(result.statusText);
@@ -7505,6 +7569,10 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false } 
         }
 
         const errorData = await result.json();
+        if (errorData?.error === 'storage_limit') {
+            toastr.error(errorData.message || '存储空间不足，无法保存聊天记录。请删除内容或使用激活码扩容。', '存储空间不足');
+            return;
+        }
         const isIntegrityError = errorData?.error === 'integrity' && !force;
         if (!isIntegrityError) {
             throw new Error(result.statusText);
@@ -9506,7 +9574,7 @@ async function importCharacterChat(formData, { refresh = true } = {}) {
     if (fetchResult.ok) {
         const data = await fetchResult.json();
         if (data.res && refresh) {
-            await displayPastChats();
+            await displayPastChats(data?.fileNames || []);
         }
         return data?.fileNames || [];
     }
