@@ -1,0 +1,19 @@
+/root/1panel/1panel/www/sites/st.pixcora.com/log/access.log {
+    size 1G
+    rotate 5
+    missingok
+    notifempty
+    compress
+    delaycompress
+    dateext
+    dateformat -%Y%m%d-%H%M%S
+    nocreate
+    su root root
+    sharedscripts
+    postrotate
+        container_id=$(/usr/bin/docker ps --filter 'name=^/1Panel-openresty-' --format '{{.ID}}' | /usr/bin/head -n 1)
+        if [ -n "$container_id" ]; then
+            /usr/bin/docker kill --signal=USR1 "$container_id" >/dev/null 2>&1 || true
+        fi
+    endscript
+}

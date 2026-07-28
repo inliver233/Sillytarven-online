@@ -1,0 +1,11 @@
+/root/.pm2/logs/sillytavern-out.log /root/.pm2/logs/sillytavern-error.log {
+    size 100M
+    rotate 7
+    missingok
+    notifempty
+    compress
+    dateext
+    dateformat -%Y%m%d-%H%M%S
+    copytruncate
+    su root root
+}

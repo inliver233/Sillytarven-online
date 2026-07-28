@@ -1,0 +1,11 @@
+/root/SillyTavernchat/data/access.log {
+    size 100M
+    rotate 5
+    missingok
+    notifempty
+    compress
+    dateext
+    dateformat -%Y%m%d-%H%M%S
+    create 0644 root root
+    su root root
+}

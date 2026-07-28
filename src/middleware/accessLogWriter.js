@@ -6,6 +6,29 @@ import { color, getConfigValue } from '../util.js';
 const enableAccessLog = getConfigValue('logging.enableAccessLog', true, 'boolean');
 
 const knownIPs = new Set();
+const MAX_KNOWN_IPS = 50_000;
+
+/**
+ * Remembers a bounded number of recently seen addresses. A public server can
+ * otherwise retain every scanner/bot IP until the process restarts.
+ * @param {string} clientIp Normalized client IP
+ * @returns {boolean} Whether this is a newly remembered address
+ */
+function rememberClientIp(clientIp) {
+    if (knownIPs.has(clientIp)) {
+        return false;
+    }
+
+    if (knownIPs.size >= MAX_KNOWN_IPS) {
+        const oldestIp = knownIPs.values().next().value;
+        if (oldestIp) {
+            knownIPs.delete(oldestIp);
+        }
+    }
+
+    knownIPs.add(clientIp);
+    return true;
+}
 
 export const getAccessLogPath = () => path.join(globalThis.DATA_ROOT, 'access.log');
 
@@ -33,12 +56,12 @@ export function migrateAccessLog() {
 export default function accessLoggerMiddleware() {
     return function (req, res, next) {
         const clientIp = getRealIpFromHeader(req);
-        const userAgent = req.headers['user-agent'];
+        const userAgent = String(req.headers['user-agent'] || 'unknown')
+            .replace(/[\r\n\u0000-\u001F\u007F]+/g, ' ')
+            .slice(0, 512);
 
-        if (!knownIPs.has(clientIp)) {
+        if (rememberClientIp(clientIp)) {
             // Log new connection
-            knownIPs.add(clientIp);
-
             // Write to access log if enabled
             if (enableAccessLog) {
                 console.info(color.yellow(`New connection from ${clientIp}; User Agent: ${userAgent}\n`));
