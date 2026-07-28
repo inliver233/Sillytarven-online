@@ -62,7 +62,7 @@ import { ensureThumbnailCache } from './endpoints/thumbnails.js';
 
 // Routers
 import { router as usersPublicRouter } from './endpoints/users-public.js';
-import { router as oauthRouter } from './endpoints/oauth.js';
+import { router as oauthRouter, linuxdoCallbackHandler } from './endpoints/oauth.js';
 import { init as statsInit, onExit as statsOnExit } from './endpoints/stats.js';
 import { checkForNewContent } from './endpoints/content-manager.js';
 import { init as settingsInit } from './endpoints/settings.js';
@@ -240,6 +240,10 @@ app.get('/callback/:source?', (request, response) => {
     const path = `/?${searchParams.toString()}`;
     return response.redirect(307, path);
 });
+
+// Linux.do 应用平台注册的兼容回调地址。
+// 标准内部路由仍保留为 /api/oauth/linuxdo/callback。
+app.get('/oauth', linuxdoCallbackHandler);
 
 // Host login page
 app.get('/login', loginPageMiddleware);

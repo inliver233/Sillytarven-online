@@ -23,7 +23,9 @@ class SystemMonitor {
         this.maxCpuHistoryLength = 6; // 保存最近6次测量（30秒）
 
         // 数据持久化相关
-        this.dataDir = path.join(process.cwd(), 'data', 'system-monitor');
+        // Respect --dataRoot so secondary/test instances never read or write the
+        // production monitor files merely because they share the same cwd.
+        this.dataDir = path.join(globalThis.DATA_ROOT, 'system-monitor');
         this.userStatsFile = path.join(this.dataDir, 'user-stats.json');
         this.loadHistoryFile = path.join(this.dataDir, 'load-history.json');
         this.systemStatsFile = path.join(this.dataDir, 'system-stats.json');

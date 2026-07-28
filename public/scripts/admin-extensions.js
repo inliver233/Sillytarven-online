@@ -4,6 +4,7 @@ let systemLoadInterval;
 let systemLoadAutoPaused = false;
 let currentSystemData = null;
 let currentInvitationCodes = [];
+const selectedInvitationCodes = new Set();
 let csrfToken = null;
 
 // 初始化管理员扩展功能
@@ -759,11 +760,15 @@ function bindInvitationCodeEvents() {
     const statusFilter = document.getElementById('invitationStatusFilter');
     if (typeFilter) {
         typeFilter.addEventListener('change', function() {
+            selectedInvitationCodes.clear();
+            currentCodePage = 1;
             renderInvitationCodes();
         });
     }
     if (statusFilter) {
         statusFilter.addEventListener('change', function() {
+            selectedInvitationCodes.clear();
+            currentCodePage = 1;
             renderInvitationCodes();
         });
     }
@@ -921,6 +926,7 @@ async function loadInvitationCodes() {
         const data = await response.json();
         // 过滤掉无效的邀请码（code为undefined、null或空字符串）
         currentInvitationCodes = (data.codes || []).filter(code => code && code.code && typeof code.code === 'string');
+        selectedInvitationCodes.clear();
 
         // 如果发现有无效数据，提示用户
         const totalCodes = data.codes ? data.codes.length : 0;
@@ -936,6 +942,37 @@ async function loadInvitationCodes() {
     }
 }
 
+// 获取当前筛选条件下的全部邀请码（不限于当前页）
+function getFilteredInvitationCodes() {
+    const typeFilter = document.getElementById('invitationTypeFilter');
+    const statusFilter = document.getElementById('invitationStatusFilter');
+    const selectedType = typeFilter ? typeFilter.value : 'all';
+    const selectedStatus = statusFilter ? statusFilter.value : 'all';
+
+    let filteredCodes = currentInvitationCodes.filter(code => code && code.code && typeof code.code === 'string');
+
+    if (selectedType !== 'all') {
+        filteredCodes = filteredCodes.filter(code => code.durationType === selectedType);
+    }
+
+    if (selectedStatus === 'used') {
+        filteredCodes = filteredCodes.filter(code => code.used === true);
+    } else if (selectedStatus === 'unused') {
+        filteredCodes = filteredCodes.filter(code => code.used === false);
+    }
+
+    if (codeSearchTerm) {
+        const normalizedSearch = codeSearchTerm.toLowerCase();
+        filteredCodes = filteredCodes.filter(code =>
+            code.code.toLowerCase().includes(normalizedSearch) ||
+            (code.createdBy && code.createdBy.toLowerCase().includes(normalizedSearch)) ||
+            (code.usedBy && code.usedBy.toLowerCase().includes(normalizedSearch))
+        );
+    }
+
+    return filteredCodes;
+}
+
 // 渲染邀请码列表
 function renderInvitationCodes() {
     const container = document.getElementById('invitationCodesContainer');
@@ -943,44 +980,16 @@ function renderInvitationCodes() {
 
     if (currentInvitationCodes.length === 0) {
         container.innerHTML = createEmptyState('fa-ticket', '暂无邀请码', '点击上方按钮创建新的邀请码');
+        updateSelectAllButton();
         return;
     }
 
-    // 获取筛选条件
-    const typeFilter = document.getElementById('invitationTypeFilter');
-    const statusFilter = document.getElementById('invitationStatusFilter');
-    const selectedType = typeFilter ? typeFilter.value : 'all';
-    const selectedStatus = statusFilter ? statusFilter.value : 'all';
-
-    // 筛选邀请码（同时再次过滤无效数据）
-    let filteredCodes = currentInvitationCodes.filter(code => code && code.code && typeof code.code === 'string');
-
-    // 按类型筛选
-    if (selectedType !== 'all') {
-        filteredCodes = filteredCodes.filter(code => code.durationType === selectedType);
-    }
-
-    // 按状态筛选
-    if (selectedStatus !== 'all') {
-        if (selectedStatus === 'used') {
-            filteredCodes = filteredCodes.filter(code => code.used === true);
-        } else if (selectedStatus === 'unused') {
-            filteredCodes = filteredCodes.filter(code => code.used === false);
-        }
-    }
-
-    // 按搜索词筛选
-    if (codeSearchTerm) {
-        filteredCodes = filteredCodes.filter(code =>
-            code.code.toLowerCase().includes(codeSearchTerm.toLowerCase()) ||
-            (code.createdBy && code.createdBy.toLowerCase().includes(codeSearchTerm.toLowerCase())) ||
-            (code.usedBy && code.usedBy.toLowerCase().includes(codeSearchTerm.toLowerCase()))
-        );
-    }
+    const filteredCodes = getFilteredInvitationCodes();
 
     // 显示筛选结果
     if (filteredCodes.length === 0) {
         container.innerHTML = createEmptyState('fa-filter', '没有符合条件的邀请码', '请调整筛选条件或搜索词');
+        updateSelectAllButton();
         return;
     }
 
@@ -1027,6 +1036,7 @@ function renderInvitationCodes() {
     if (searchInput) {
         searchInput.addEventListener('input', debounceSearch(function(e) {
             codeSearchTerm = e.target.value.trim();
+            selectedInvitationCodes.clear();
             currentCodePage = 1; // 重置到第一页
             renderInvitationCodes();
         }, 300));
@@ -1157,8 +1167,8 @@ function createInvitationCodeItem(code) {
     const usedBy = code.usedBy || '未知';
 
     return `
-        <div class="invitationCodeItem" data-code="${code.code}">
-            <input type="checkbox" class="invitationCodeCheckbox" data-code="${code.code}" onchange="toggleCodeSelection('${code.code}')">
+        <div class="invitationCodeItem${selectedInvitationCodes.has(code.code) ? ' selected' : ''}" data-code="${code.code}">
+            <input type="checkbox" class="invitationCodeCheckbox" data-code="${code.code}" onchange="toggleCodeSelection('${code.code}')" ${selectedInvitationCodes.has(code.code) ? 'checked' : ''}>
             <div class="invitationCodeInfo">
                 <div class="invitationCodeValue" title="点击复制" onclick="copyToClipboard('${code.code}')">${code.code}</div>
                 <div class="invitationCodeMeta">
@@ -1358,8 +1368,10 @@ function toggleCodeSelection(code) {
     const checkbox = document.querySelector(`input[data-code="${code}"]`);
 
     if (checkbox.checked) {
+        selectedInvitationCodes.add(code);
         item.classList.add('selected');
     } else {
+        selectedInvitationCodes.delete(code);
         item.classList.remove('selected');
     }
 
@@ -1368,46 +1380,43 @@ function toggleCodeSelection(code) {
 
 // 全选/取消全选
 function toggleSelectAll() {
-    const checkboxes = document.querySelectorAll('.invitationCodeCheckbox');
-    const selectAllBtn = document.getElementById('selectAllCodes');
-    const allChecked = Array.from(checkboxes).every(cb => cb.checked);
+    const filteredCodes = getFilteredInvitationCodes();
+    const allSelected = filteredCodes.length > 0 && filteredCodes.every(code => selectedInvitationCodes.has(code.code));
 
-    checkboxes.forEach(checkbox => {
-        checkbox.checked = !allChecked;
-        const code = checkbox.dataset.code;
-        const item = document.querySelector(`[data-code="${code}"]`);
-
-        if (checkbox.checked) {
-            item.classList.add('selected');
+    for (const code of filteredCodes) {
+        if (allSelected) {
+            selectedInvitationCodes.delete(code.code);
         } else {
-            item.classList.remove('selected');
+            selectedInvitationCodes.add(code.code);
         }
-    });
+    }
 
-    updateSelectAllButton();
+    // 重新渲染当前页；选择集合会保留其余分页的状态。
+    renderInvitationCodes();
 }
 
 // 更新全选按钮状态
 function updateSelectAllButton() {
-    const checkboxes = document.querySelectorAll('.invitationCodeCheckbox');
     const selectAllBtn = document.getElementById('selectAllCodes');
+    if (!selectAllBtn) return;
 
-    if (!selectAllBtn || checkboxes.length === 0) return;
+    const filteredCodes = getFilteredInvitationCodes();
+    const selectedCount = filteredCodes.filter(code => selectedInvitationCodes.has(code.code)).length;
+    const allSelected = filteredCodes.length > 0 && selectedCount === filteredCodes.length;
 
-    const checkedCount = Array.from(checkboxes).filter(cb => cb.checked).length;
-    const allChecked = checkedCount === checkboxes.length;
-
-    if (allChecked) {
-        selectAllBtn.innerHTML = '<i class="fa-fw fa-solid fa-square"></i><span>取消全选</span>';
+    selectAllBtn.disabled = filteredCodes.length === 0;
+    if (allSelected) {
+        selectAllBtn.innerHTML = `<i class="fa-fw fa-solid fa-square"></i><span>取消全选（${filteredCodes.length}）</span>`;
     } else {
-        selectAllBtn.innerHTML = '<i class="fa-fw fa-solid fa-check-square"></i><span>全选</span>';
+        const progress = selectedCount > 0 ? `，已选 ${selectedCount}` : '';
+        selectAllBtn.innerHTML = `<i class="fa-fw fa-solid fa-check-square"></i><span>全选筛选结果（${filteredCodes.length}${progress}）</span>`;
     }
 }
 
 // 获取选中的邀请码
 function getSelectedCodes() {
-    const selectedCheckboxes = document.querySelectorAll('.invitationCodeCheckbox:checked');
-    return Array.from(selectedCheckboxes).map(cb => cb.dataset.code);
+    const existingCodes = new Set(currentInvitationCodes.map(code => code.code));
+    return Array.from(selectedInvitationCodes).filter(code => existingCodes.has(code));
 }
 
 // 下载选中的邀请码
@@ -1431,27 +1440,8 @@ function downloadAllCodes() {
         return;
     }
 
-    // 获取当前显示的邀请码（考虑筛选）
-    const typeFilter = document.getElementById('invitationTypeFilter');
-    const statusFilter = document.getElementById('invitationStatusFilter');
-    const selectedType = typeFilter ? typeFilter.value : 'all';
-    const selectedStatus = statusFilter ? statusFilter.value : 'all';
-
-    let filteredCodes = currentInvitationCodes;
-
-    // 按类型筛选
-    if (selectedType !== 'all') {
-        filteredCodes = filteredCodes.filter(code => code.durationType === selectedType);
-    }
-
-    // 按状态筛选
-    if (selectedStatus !== 'all') {
-        if (selectedStatus === 'used') {
-            filteredCodes = filteredCodes.filter(code => code.used === true);
-        } else if (selectedStatus === 'unused') {
-            filteredCodes = filteredCodes.filter(code => code.used === false);
-        }
-    }
+    // 获取当前筛选条件下的全部邀请码（包含搜索条件且不限分页）
+    const filteredCodes = getFilteredInvitationCodes();
 
     if (filteredCodes.length === 0) {
         alert('没有符合条件的邀请码可下载');
@@ -1517,7 +1507,10 @@ async function deleteSelectedCodes() {
         return;
     }
 
-    if (!confirm(`确定要删除选中的 ${selectedCodes.length} 个邀请码吗？此操作不可恢复。`)) {
+    const filteredCodes = getFilteredInvitationCodes();
+    const selectedAllFiltered = filteredCodes.length > 0 && filteredCodes.every(code => selectedInvitationCodes.has(code.code));
+    const scopeText = selectedAllFiltered ? '当前筛选条件下全部（跨所有分页）' : '选中的';
+    if (!confirm(`确定要删除${scopeText} ${selectedCodes.length} 个邀请码吗？此操作不可恢复。`)) {
         return;
     }
 
@@ -1536,6 +1529,9 @@ async function deleteSelectedCodes() {
         const result = await response.json();
         let message = `成功删除了 ${result.deletedCount}/${result.totalRequested} 个邀请码`;
 
+        if (result.notFoundCount > 0) {
+            message += `\n其中 ${result.notFoundCount} 个在删除前已不存在或删除失败`;
+        }
         if (result.errors && result.errors.length > 0) {
             message += `\n\n错误信息:\n${result.errors.join('\n')}`;
         }

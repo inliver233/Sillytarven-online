@@ -5,6 +5,7 @@ import { getConfigValue } from './util.js';
 const INVITATION_PREFIX = 'invitation:';
 const PURCHASE_LINK_KEY = 'invitation:purchaseLink';
 const ENABLE_INVITATION_CODES = getConfigValue('enableInvitationCodes', false, 'boolean');
+const invitationUseLocks = new Set();
 
 /**
  * @typedef {Object} InvitationCode
@@ -121,31 +122,46 @@ export async function validateInvitationCode(code) {
  * @param {string} code 邀请码
  * @param {string} usedBy 使用者用户句柄
  * @param {number | null} userExpiresAt 用户到期时间
- * @returns {Promise<{success: boolean, invitation?: InvitationCode}>} 使用结果及邀请码信息
+ * @returns {Promise<{success: boolean, reason?: string, invitation?: InvitationCode}>} 使用结果及邀请码信息
  */
 export async function useInvitationCode(code, usedBy, userExpiresAt = null) {
     if (!ENABLE_INVITATION_CODES) {
         return { success: true }; // 如果功能未启用，则认为成功
     }
 
-    const validation = await validateInvitationCode(code);
-    if (!validation.valid) {
-        return { success: false };
+    if (!code || typeof code !== 'string') {
+        return { success: false, reason: '邀请码格式无效' };
     }
 
-    const invitation = validation.invitation;
-    if (!invitation) {
-        return { success: false };
+    const normalizedCode = code.toUpperCase();
+    if (invitationUseLocks.has(normalizedCode)) {
+        return { success: false, reason: '邀请码正在被使用，请稍后重试' };
     }
-    invitation.used = true;
-    invitation.usedBy = usedBy;
-    invitation.usedAt = Date.now();
-    invitation.userExpiresAt = userExpiresAt; // 记录用户的到期时间
 
-    await storage.setItem(toInvitationKey(code.toUpperCase()), invitation);
-    console.log(`Invitation code used: ${code} by ${usedBy}, duration: ${invitation.durationType}, user expires: ${userExpiresAt ? new Date(userExpiresAt).toLocaleString() : 'permanent'}`);
+    invitationUseLocks.add(normalizedCode);
+    try {
+        // 在锁内重新读取，避免两个并发注册同时消费同一个邀请码。
+        const validation = await validateInvitationCode(normalizedCode);
+        if (!validation.valid) {
+            return { success: false, reason: validation.reason || '邀请码无效' };
+        }
 
-    return { success: true, invitation };
+        const invitation = validation.invitation;
+        if (!invitation) {
+            return { success: false, reason: '邀请码无效' };
+        }
+        invitation.used = true;
+        invitation.usedBy = usedBy;
+        invitation.usedAt = Date.now();
+        invitation.userExpiresAt = userExpiresAt; // 记录用户的到期时间
+
+        await storage.setItem(toInvitationKey(normalizedCode), invitation);
+        console.log(`Invitation code used by ${usedBy}, duration: ${invitation.durationType}, user expires: ${userExpiresAt ? new Date(userExpiresAt).toLocaleString() : 'permanent'}`);
+
+        return { success: true, invitation };
+    } finally {
+        invitationUseLocks.delete(normalizedCode);
+    }
 }
 
 /**

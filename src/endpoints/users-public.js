@@ -18,6 +18,7 @@ const USER_STORAGE_ENABLED = getConfigValue('userStorage.enabled', false, 'boole
 const USER_STORAGE_DEFAULT_LIMIT_MIB = getConfigValue('userStorage.defaultLimitMiB', 0, 'number');
 const MFA_CACHE = new Cache(5 * 60 * 1000);
 const VERIFICATION_CODE_CACHE = new Cache(5 * 60 * 1000); // 验证码缓存，5分钟有效
+const registrationLocks = new Set();
 
 const getIpAddress = (request) => PREFER_REAL_IP_HEADER ? getRealIpFromHeader(request) : getIpFromRequest(request);
 
@@ -500,7 +501,6 @@ router.post('/register', async (request, response) => {
             return response.status(400).json({ error: invitationValidation.reason || '邀请码无效' });
         }
 
-        const handles = await getAllUserHandles();
         // 规范化用户名：支持英文大小写、数字和横杠
         const normalizedHandle = normalizeHandle(handle);
 
@@ -521,26 +521,30 @@ router.post('/register', async (request, response) => {
             return response.status(400).json({ error: '用户名过于简单或在黑名单中，请使用更有辨识度的用户名' });
         }
 
-        if (handles.some(x => x === normalizedHandle)) {
-            console.warn('Register failed: User with that handle already exists');
-            return response.status(409).json({ error: '该用户名已存在' });
+        // 同一用户名的注册过程必须串行，避免并发请求互相覆盖或错误回滚账号。
+        if (registrationLocks.has(normalizedHandle)) {
+            return response.status(409).json({ error: '该用户名正在注册，请稍后重试' });
         }
+        registrationLocks.add(normalizedHandle);
 
-        const salt = getPasswordSalt();
-        const hashedPassword = getPasswordHash(password, salt);
-
-        // 计算用户过期时间
-        let userExpiresAt = null;
-        // 只有在邀请码功能启用且提供了邀请码时，才根据邀请码设置过期时间
-        if (isInvitationCodesEnabled() && invitationCode) {
-            const invitationValidationResult = await validateInvitationCode(invitationCode);
-            if (invitationValidationResult.valid && invitationValidationResult.invitation) {
-                const invitation = invitationValidationResult.invitation;
-                if (invitation.durationDays !== null && invitation.durationDays > 0) {
-                    userExpiresAt = Date.now() + (invitation.durationDays * 24 * 60 * 60 * 1000);
-                }
-                // durationDays为null表示永久，userExpiresAt保持null
+        try {
+            const handles = await getAllUserHandles();
+            if (handles.some(x => x === normalizedHandle)) {
+                console.warn('Register failed: User with that handle already exists');
+                return response.status(409).json({ error: '该用户名已存在' });
             }
+
+            const salt = getPasswordSalt();
+            const hashedPassword = getPasswordHash(password, salt);
+
+        // 计算用户过期时间。复用前面的验证结果，避免注册过程中重复读取邀请码状态。
+        let userExpiresAt = null;
+        if (isInvitationCodesEnabled() && invitationValidation.invitation) {
+            const invitation = invitationValidation.invitation;
+            if (invitation.durationDays !== null && invitation.durationDays > 0) {
+                userExpiresAt = Date.now() + (invitation.durationDays * 24 * 60 * 60 * 1000);
+            }
+            // durationDays为null表示永久，userExpiresAt保持null
         }
         // 如果邀请码功能关闭，则 userExpiresAt 保持为 null（永久账户）
 
@@ -567,14 +571,19 @@ router.post('/register', async (request, response) => {
 
         await storage.setItem(toKey(normalizedHandle), newUser);
 
+        // 消费邀请码时必须检查结果；若并发请求已先使用该邀请码，则回滚刚创建的用户。
+        if (isInvitationCodesEnabled() && invitationCode) {
+            const invitationUse = await useInvitationCode(invitationCode, normalizedHandle, userExpiresAt);
+            if (!invitationUse.success) {
+                await storage.removeItem(toKey(normalizedHandle));
+                console.warn('Register failed: Invitation code could not be consumed');
+                return response.status(400).json({ error: invitationUse.reason || '邀请码无效' });
+            }
+        }
+
         // 清除已使用的验证码（如果使用了邮件验证）
         if (normalizedEmail && isEmailServiceAvailable()) {
             VERIFICATION_CODE_CACHE.remove(normalizedEmail);
-        }
-
-        // 使用邀请码（如果邀请码功能启用且提供了邀请码）
-        if (isInvitationCodesEnabled() && invitationCode) {
-            await useInvitationCode(invitationCode, normalizedHandle, userExpiresAt);
         }
 
         // Create user directories
@@ -588,12 +597,15 @@ router.post('/register', async (request, response) => {
         console.info('User registered successfully:', newUser.handle, 'from', ip);
 
         // 返回规范化后的用户名，让用户知道真实的用户名
-        return response.json({
-            handle: newUser.handle,
-            message: handle !== normalizedHandle
-                ? `注册成功！您的用户名已规范化为: ${normalizedHandle}`
-                : '注册成功！'
-        });
+            return response.json({
+                handle: newUser.handle,
+                message: handle !== normalizedHandle
+                    ? `注册成功！您的用户名已规范化为: ${normalizedHandle}`
+                    : '注册成功！'
+            });
+        } finally {
+            registrationLocks.delete(normalizedHandle);
+        }
     } catch (error) {
         if (error instanceof RateLimiterRes) {
             console.error('Register failed: Rate limited from', getIpAddress(request));

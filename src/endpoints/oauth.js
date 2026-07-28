@@ -8,8 +8,8 @@ import {
     toKey,
     getUserAvatar,
     normalizeHandle,
-    KEY_PREFIX,
     getUserDirectories,
+    getAllUserHandles,
     ensurePublicDirectoriesExist,
     toAvatarKey
 } from '../users.js';
@@ -24,6 +24,7 @@ import { applyDefaultTemplateToUser } from '../default-template.js';
 export const router = express.Router();
 const USER_STORAGE_ENABLED = getConfigValue('userStorage.enabled', false, 'boolean');
 const USER_STORAGE_DEFAULT_LIMIT_MIB = getConfigValue('userStorage.defaultLimitMiB', 0, 'number');
+const oauthRegistrationLocks = new Set();
 
 /**
  * 处理 Discourse avatar template
@@ -259,12 +260,60 @@ async function getOAuthConfig(request) {
 
 // 存储OAuth状态的临时缓存
 const oauthStateCache = new Map();
+const OAUTH_PENDING_TTL = 10 * 60 * 1000;
 
 /**
  * 生成随机state用于OAuth安全验证
  */
 function generateState() {
     return crypto.randomBytes(32).toString('hex');
+}
+
+/**
+ * 将 OAuth state 同时绑定到服务端缓存和当前浏览器会话，防止登录 CSRF。
+ */
+function storeOAuthState(request, provider, state) {
+    if (!request.session) {
+        throw new Error('OAuth session is unavailable');
+    }
+
+    oauthStateCache.set(state, { provider, timestamp: Date.now() });
+    const sessionStates = request.session.oauthStates && typeof request.session.oauthStates === 'object'
+        ? request.session.oauthStates
+        : {};
+    request.session.oauthStates = { ...sessionStates, [provider]: state };
+
+    for (const [key, value] of oauthStateCache.entries()) {
+        if (Date.now() - value.timestamp > OAUTH_PENDING_TTL) {
+            oauthStateCache.delete(key);
+        }
+    }
+}
+
+/**
+ * 验证并一次性消费 OAuth state。
+ */
+function consumeOAuthState(request, provider, state) {
+    if (typeof state !== 'string' || !state || !request.session) {
+        return false;
+    }
+
+    const cachedState = oauthStateCache.get(state);
+    const sessionState = request.session.oauthStates?.[provider];
+    if (!cachedState || cachedState.provider !== provider ||
+        Date.now() - cachedState.timestamp > OAUTH_PENDING_TTL || sessionState !== state) {
+        return false;
+    }
+
+    oauthStateCache.delete(state);
+    const remainingStates = { ...request.session.oauthStates };
+    delete remainingStates[provider];
+    if (Object.keys(remainingStates).length > 0) {
+        request.session.oauthStates = remainingStates;
+    } else {
+        delete request.session.oauthStates;
+    }
+    return true;
 }
 
 /**
@@ -302,14 +351,7 @@ router.get('/github', async (request, response) => {
         }
 
         const state = generateState();
-        oauthStateCache.set(state, { provider: 'github', timestamp: Date.now() });
-
-        // 清理过期的state（超过10分钟）
-        for (const [key, value] of oauthStateCache.entries()) {
-            if (Date.now() - value.timestamp > 10 * 60 * 1000) {
-                oauthStateCache.delete(key);
-            }
-        }
+        storeOAuthState(request, 'github', state);
 
         const params = new URLSearchParams({
             client_id: oauthConfig.github.clientId,
@@ -337,14 +379,7 @@ router.get('/discord', async (request, response) => {
         }
 
         const state = generateState();
-        oauthStateCache.set(state, { provider: 'discord', timestamp: Date.now() });
-
-        // 清理过期的state
-        for (const [key, value] of oauthStateCache.entries()) {
-            if (Date.now() - value.timestamp > 10 * 60 * 1000) {
-                oauthStateCache.delete(key);
-            }
-        }
+        storeOAuthState(request, 'discord', state);
 
         const params = new URLSearchParams({
             client_id: oauthConfig.discord.clientId,
@@ -373,14 +408,7 @@ router.get('/linuxdo', async (request, response) => {
         }
 
         const state = generateState();
-        oauthStateCache.set(state, { provider: 'linuxdo', timestamp: Date.now() });
-
-        // 清理过期的state
-        for (const [key, value] of oauthStateCache.entries()) {
-            if (Date.now() - value.timestamp > 10 * 60 * 1000) {
-                oauthStateCache.delete(key);
-            }
-        }
+        storeOAuthState(request, 'linuxdo', state);
 
         // Linux.do 支持标准 OAuth2 和 OIDC
         // 根据官方文档，基本参数为 response_type=code, client_id, state
@@ -389,6 +417,7 @@ router.get('/linuxdo', async (request, response) => {
             client_id: oauthConfig.linuxdo.clientId,
             redirect_uri: oauthConfig.linuxdo.callbackUrl,
             response_type: 'code',
+            scope: 'openid profile email',
             state: state,
         });
 
@@ -406,14 +435,15 @@ router.get('/linuxdo', async (request, response) => {
 router.get('/github/callback', async (request, response) => {
     try {
         const { code, state } = request.query;
+        if (typeof code !== 'string' || !code || typeof state !== 'string' || !state) {
+            return response.status(400).send('Missing OAuth code or state');
+        }
         const oauthConfig = await getOAuthConfig(request);
 
         // 验证state
-        const cachedState = oauthStateCache.get(state);
-        if (!cachedState || cachedState.provider !== 'github') {
+        if (!consumeOAuthState(request, 'github', state)) {
             return response.status(400).send('Invalid state parameter');
         }
-        oauthStateCache.delete(state);
 
         // 交换access token
         const tokenResponse = await fetch(oauthConfig.github.tokenUrl, {
@@ -462,14 +492,15 @@ router.get('/github/callback', async (request, response) => {
 router.get('/discord/callback', async (request, response) => {
     try {
         const { code, state } = request.query;
+        if (typeof code !== 'string' || !code || typeof state !== 'string' || !state) {
+            return response.status(400).send('Missing OAuth code or state');
+        }
         const oauthConfig = await getOAuthConfig(request);
 
         // 验证state
-        const cachedState = oauthStateCache.get(state);
-        if (!cachedState || cachedState.provider !== 'discord') {
+        if (!consumeOAuthState(request, 'discord', state)) {
             return response.status(400).send('Invalid state parameter');
         }
-        oauthStateCache.delete(state);
 
         // 交换access token
         const codeStr = String(code || '');
@@ -517,17 +548,18 @@ router.get('/discord/callback', async (request, response) => {
 /**
  * Linux.do OAuth回调处理
  */
-router.get('/linuxdo/callback', async (request, response) => {
+export async function linuxdoCallbackHandler(request, response) {
     try {
         const { code, state } = request.query;
+        if (typeof code !== 'string' || !code || typeof state !== 'string' || !state) {
+            return response.status(400).send('Missing OAuth code or state');
+        }
         const oauthConfig = await getOAuthConfig(request);
 
         // 验证state
-        const cachedState = oauthStateCache.get(state);
-        if (!cachedState || cachedState.provider !== 'linuxdo') {
+        if (!consumeOAuthState(request, 'linuxdo', state)) {
             return response.status(400).send('Invalid state parameter');
         }
-        oauthStateCache.delete(state);
 
         // 交换access token
         const codeStr = String(code || '');
@@ -626,7 +658,43 @@ router.get('/linuxdo/callback', async (request, response) => {
         console.error('Error in Linux.do OAuth callback:', error);
         return response.status(500).send('Linux.do OAuth callback failed');
     }
-});
+}
+
+router.get('/linuxdo/callback', linuxdoCallbackHandler);
+
+/**
+ * 根据稳定的第三方用户 ID 查找账号。不能只按第三方用户名查找，否则同名的本地账号
+ * 可能被错误绑定并造成越权登录。
+ */
+async function findUserByOAuthIdentity(provider, userId) {
+    const handles = await getAllUserHandles();
+    for (const handle of handles) {
+        const candidate = await storage.getItem(toKey(handle));
+        if (candidate?.oauthProvider === provider && candidate?.oauthUserId === userId) {
+            return candidate;
+        }
+    }
+    return null;
+}
+
+/**
+ * 为首次 OAuth 注册选择不会覆盖现有本地用户的句柄。
+ */
+async function getAvailableOAuthHandle(preferredHandle, provider, userId) {
+    if (!await storage.getItem(toKey(preferredHandle))) {
+        return preferredHandle;
+    }
+
+    const suffix = crypto.createHash('sha256').update(`${provider}:${userId}`).digest('hex').slice(0, 8);
+    for (let index = 0; index < 100; index++) {
+        const candidate = normalizeHandle(`${preferredHandle}-${suffix}${index ? `-${index}` : ''}`);
+        if (candidate && !await storage.getItem(toKey(candidate))) {
+            return candidate;
+        }
+    }
+
+    throw new Error('Unable to allocate a unique OAuth user handle');
+}
 
 /**
  * 处理OAuth登录逻辑
@@ -638,12 +706,18 @@ async function handleOAuthLogin(request, response, provider, userData) {
 
         switch (provider) {
             case 'github':
+                if (userData.id === undefined || userData.id === null) {
+                    throw new Error('GitHub OAuth response is missing a user ID');
+                }
                 userId = `github_${userData.id}`;
                 username = userData.login || `github_user_${userData.id}`;
                 email = userData.email;
                 avatar = userData.avatar_url;
                 break;
             case 'discord':
+                if (userData.id === undefined || userData.id === null) {
+                    throw new Error('Discord OAuth response is missing a user ID');
+                }
                 userId = `discord_${userData.id}`;
                 username = userData.username || `discord_user_${userData.id}`;
                 email = userData.email;
@@ -658,6 +732,9 @@ async function handleOAuthLogin(request, response, provider, userData) {
 
                 // 提取用户ID
                 const rawUserId = userInfo.id || userData.id || userInfo.sub || userData.sub;
+                if (rawUserId === undefined || rawUserId === null || String(rawUserId).trim() === '') {
+                    throw new Error('Linux.do OAuth response is missing a user ID');
+                }
                 userId = `linuxdo_${rawUserId}`;
 
                 // 提取用户名
@@ -684,37 +761,40 @@ async function handleOAuthLogin(request, response, provider, userData) {
         }
 
         // 规范化用户名
-        const normalizedHandle = normalizeHandle(username);
-        if (!normalizedHandle) {
+        const preferredHandle = normalizeHandle(String(username || ''));
+        if (!preferredHandle) {
             return response.redirect(`/login?error=${encodeURIComponent('用户名格式无效')}`);
         }
 
-        // 检查用户是否已存在
-        let user = await storage.getItem(toKey(normalizedHandle));
+        // 登录只能按稳定的 OAuth 身份匹配，绝不按同名本地账号自动绑定。
+        let user = await findUserByOAuthIdentity(provider, userId);
+        const selectedHandle = user?.handle || await getAvailableOAuthHandle(preferredHandle, provider, userId);
 
         if (!user) {
             // 如果开启了邀请码，需要先验证邀请码
             if (isInvitationCodesEnabled()) {
                 // 将用户信息存储到session，等待输入邀请码
-                if (request.session) {
-                    request.session.oauthPendingUser = {
-                        handle: normalizedHandle,
-                        name: username,
-                        email: email,
-                        avatar: avatar,
-                        provider: provider,
-                        userId: userId,
-                    };
+                if (!request.session) {
+                    throw new Error('OAuth session is unavailable');
                 }
+                request.session.oauthPendingUser = {
+                    handle: selectedHandle,
+                    name: String(username || selectedHandle),
+                    email: typeof email === 'string' ? email : '',
+                    avatar: typeof avatar === 'string' ? avatar : null,
+                    provider,
+                    userId,
+                    createdAt: Date.now(),
+                };
                 // 重定向到邀请码输入页面
                 return response.redirect('/login?oauth_pending=true');
             }
 
             // 创建新用户（第三方登录用户，标记 oauthProvider，不设置密码）
             user = {
-                handle: normalizedHandle,
-                name: username || normalizedHandle,
-                email: email || '',
+                handle: selectedHandle,
+                name: String(username || selectedHandle),
+                email: typeof email === 'string' ? email : '',
                 created: Date.now(),
                 admin: false,
                 enabled: true,
@@ -722,21 +802,21 @@ async function handleOAuthLogin(request, response, provider, userData) {
                 salt: null,
                 oauthProvider: provider,  // 标记为第三方登录用户
                 oauthUserId: userId,
-                avatar: avatar || null,
+                avatar: typeof avatar === 'string' ? avatar : null,
             };
 
-            await storage.setItem(toKey(normalizedHandle), user);
-            console.log(`Created new user via ${provider} OAuth:`, normalizedHandle);
+            await storage.setItem(toKey(selectedHandle), user);
+            console.log(`Created new user via ${provider} OAuth:`, selectedHandle);
 
             // 保存头像 URL
-            if (avatar) {
-                await storage.setItem(toAvatarKey(normalizedHandle), avatar);
+            if (user.avatar) {
+                await storage.setItem(toAvatarKey(selectedHandle), user.avatar);
             }
 
             // 创建用户目录并初始化默认内容
-            console.info('Creating data directories for', normalizedHandle);
+            console.info('Creating data directories for', selectedHandle);
             await ensurePublicDirectoriesExist();
-            const directories = getUserDirectories(normalizedHandle);
+            const directories = getUserDirectories(selectedHandle);
             // 确保用户目录实际存在
             for (const dir of Object.values(directories)) {
                 if (!fs.existsSync(dir)) {
@@ -747,20 +827,26 @@ async function handleOAuthLogin(request, response, provider, userData) {
             await checkForNewContent([directories], [CONTENT_TYPES.SETTINGS]);
             applyDefaultTemplateToUser(directories, { userName: user.name });
         } else {
-            // 更新OAuth信息
-            user.oauthProvider = provider;
-            user.oauthUserId = userId;
-            if (avatar) {
+            if (!user.enabled) {
+                return response.redirect(`/login?error=${encodeURIComponent('该账号已被禁用')}`);
+            }
+            if (user.expiresAt && user.expiresAt <= Date.now()) {
+                return response.redirect(`/login?error=${encodeURIComponent('该账号已过期，请联系管理员续期')}`);
+            }
+
+            // 只更新已经由同一 OAuth 身份绑定的账号，不改变密码等原有数据。
+            if (typeof avatar === 'string' && avatar) {
                 user.avatar = avatar;
                 // 更新头像 URL
-                await storage.setItem(toAvatarKey(normalizedHandle), avatar);
+                await storage.setItem(toAvatarKey(user.handle), avatar);
             }
-            await storage.setItem(toKey(normalizedHandle), user);
+            await storage.setItem(toKey(user.handle), user);
         }
 
         // 设置session
         if (request.session) {
             request.session.handle = user.handle;
+            request.session.userId = user.id || user.handle;
             request.session.authenticated = true;
         }
 
@@ -788,6 +874,43 @@ router.post('/verify-invitation', async (request, response) => {
         }
 
         const pendingUser = request.session.oauthPendingUser;
+        if (!isInvitationCodesEnabled()) {
+            delete request.session.oauthPendingUser;
+            return response.status(403).json({ error: '当前未启用邀请码注册' });
+        }
+        if (!pendingUser.createdAt || Date.now() - pendingUser.createdAt > OAUTH_PENDING_TTL) {
+            delete request.session.oauthPendingUser;
+            return response.status(400).json({ error: 'OAuth注册已超时，请重新使用第三方登录' });
+        }
+
+        const validProviders = new Set(['github', 'discord', 'linuxdo']);
+        const normalizedPendingHandle = normalizeHandle(String(pendingUser.handle || ''));
+        if (!validProviders.has(pendingUser.provider) ||
+            typeof pendingUser.userId !== 'string' || !pendingUser.userId ||
+            !normalizedPendingHandle || normalizedPendingHandle !== pendingUser.handle) {
+            delete request.session.oauthPendingUser;
+            return response.status(400).json({ error: 'OAuth注册状态无效，请重新使用第三方登录' });
+        }
+
+        // 同一 OAuth 身份或同一目标用户名只能有一个正在进行的注册，避免并发覆盖和误回滚。
+        const registrationLockKeys = [
+            `identity:${pendingUser.provider}:${pendingUser.userId}`,
+            `handle:${pendingUser.handle}`,
+        ];
+        if (registrationLockKeys.some(key => oauthRegistrationLocks.has(key))) {
+            return response.status(409).json({ error: '该OAuth账号正在注册，请稍后重试' });
+        }
+        registrationLockKeys.forEach(key => oauthRegistrationLocks.add(key));
+
+        try {
+
+        // 回调与提交邀请码之间再次检查，防止覆盖现有账号或重复创建同一 OAuth 身份。
+        const existingOAuthUser = await findUserByOAuthIdentity(pendingUser.provider, pendingUser.userId);
+        const existingHandleOwner = await storage.getItem(toKey(pendingUser.handle));
+        if (existingOAuthUser || existingHandleOwner) {
+            delete request.session.oauthPendingUser;
+            return response.status(409).json({ error: '账号已存在，请重新使用第三方登录' });
+        }
 
         // 验证邀请码
         const validation = await validateInvitationCode(invitationCode);
@@ -833,8 +956,15 @@ router.post('/verify-invitation', async (request, response) => {
             await storage.setItem(toAvatarKey(pendingUser.handle), pendingUser.avatar);
         }
 
-        // 使用邀请码
-        await useInvitationCode(invitationCode, pendingUser.handle, userExpiresAt);
+        // 使用邀请码。若并发请求已先消费该邀请码，必须回滚刚创建的 OAuth 用户。
+        const invitationUse = await useInvitationCode(invitationCode, pendingUser.handle, userExpiresAt);
+        if (!invitationUse.success) {
+            await storage.removeItem(toKey(pendingUser.handle));
+            if (pendingUser.avatar) {
+                await storage.removeItem(toAvatarKey(pendingUser.handle));
+            }
+            return response.status(400).json({ error: invitationUse.reason || '邀请码无效' });
+        }
 
         // 创建用户目录并初始化默认内容
         console.info('Creating data directories for', pendingUser.handle);
@@ -856,10 +986,14 @@ router.post('/verify-invitation', async (request, response) => {
 
             // 设置session
             request.session.handle = user.handle;
+            request.session.userId = user.id || user.handle;
             request.session.authenticated = true;
         }
 
-        return response.json({ success: true, handle: user.handle });
+            return response.json({ success: true, handle: user.handle });
+        } finally {
+            registrationLockKeys.forEach(key => oauthRegistrationLocks.delete(key));
+        }
     } catch (error) {
         console.error('Error verifying invitation code for OAuth:', error);
         return response.status(500).json({ error: '邀请码验证失败' });

@@ -111,28 +111,37 @@ router.post('/batch-delete', requireAdminMiddleware, async (request, response) =
         if (!codes || !Array.isArray(codes) || codes.length === 0) {
             return response.status(400).json({ error: '未提供要删除的邀请码' });
         }
+        if (codes.length > 10000) {
+            return response.status(400).json({ error: '单次最多删除10000个邀请码' });
+        }
+
+        const uniqueCodes = [...new Set(codes.map(code => String(code).toUpperCase()))];
+        if (uniqueCodes.some(code => !/^[A-F0-9]{16}$/.test(code))) {
+            return response.status(400).json({ error: '包含格式无效的邀请码' });
+        }
 
         let deletedCount = 0;
-        const errors = [];
+        let notFoundCount = 0;
 
-        for (const code of codes) {
+        for (const code of uniqueCodes) {
             try {
                 const success = await deleteInvitationCode(code);
                 if (success) {
                     deletedCount++;
                 } else {
-                    errors.push(`Code ${code} not found`);
+                    notFoundCount++;
                 }
             } catch (error) {
-                errors.push(`Failed to delete code ${code}: ${error.message}`);
+                console.error('Failed to delete an invitation code during batch deletion:', error.message);
+                notFoundCount++;
             }
         }
 
         response.json({
             success: true,
             deletedCount,
-            totalRequested: codes.length,
-            errors: errors.length > 0 ? errors : undefined,
+            totalRequested: uniqueCodes.length,
+            notFoundCount,
         });
     } catch (error) {
         console.error('Error batch deleting invitation codes:', error);
