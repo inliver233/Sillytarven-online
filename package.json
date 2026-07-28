@@ -125,6 +125,7 @@
         "start:bun": "bun server.js",
         "start:no-csrf": "node server.js --disableCsrf",
         "postinstall": "node post-install.js",
+        "test:optimizations": "node --test tests/optimization.node.test.mjs",
         "lint": "eslint \"src/**/*.js\" \"public/**/*.js\" ./*.js",
         "lint:fix": "eslint \"src/**/*.js\" \"public/**/*.js\" ./*.js --fix",
         "plugins:update": "node plugins update",

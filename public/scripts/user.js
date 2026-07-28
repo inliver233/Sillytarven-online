@@ -109,15 +109,23 @@ async function getCurrentUser() {
 
 /**
  * Get a list of all users.
- * @param {boolean} includeStorageSize - 是否包含存储大小信息（默认false以提高性能）
- * @returns {Promise<import('../../src/users.js').UserViewModel[]>} Users
+ * @param {number} page Page number
+ * @param {number} pageSize Users per page
+ * @param {string} search Server-side search term
+ * @returns {Promise<{users: import('../../src/users.js').UserViewModel[], pagination: {page: number, pageSize: number, total: number, totalPages: number}}|undefined>} Users
  */
-async function getUsers(includeStorageSize = false) {
+async function getUsers(page, pageSize, search) {
     try {
         const response = await fetch('/api/users/get', {
             method: 'POST',
             headers: getRequestHeaders(),
-            body: JSON.stringify({ includeStorageSize }),
+            body: JSON.stringify({
+                includeStorageSize: false,
+                paginated: true,
+                page,
+                pageSize,
+                search,
+            }),
         });
 
         if (!response.ok) {
@@ -310,33 +318,74 @@ async function createUser(form, callback) {
  * @returns {Promise<void>}
  */
 async function backupUserData(handle, callback) {
+    let progressToast;
     try {
-        toastr.info('Please wait for the download to start.', 'Backup Requested');
-        const response = await fetch('/api/users/backup', {
+        progressToast = toastr.info('正在后台整理文件，请保持页面打开。', '正在生成全量备份', {
+            timeOut: 0,
+            extendedTimeOut: 0,
+            tapToDismiss: false,
+        });
+
+        const response = await fetch('/api/users/backup/start', {
             method: 'POST',
             headers: getRequestHeaders(),
             body: JSON.stringify({ handle }),
         });
 
         if (!response.ok) {
-            const data = await response.json();
+            const data = await response.json().catch(() => ({}));
             toastr.error(data.error || 'Unknown error', 'Failed to backup user data');
             throw new Error('Failed to backup user data');
         }
 
-        const blob = await response.blob();
-        const header = response.headers.get('Content-Disposition');
-        const parts = header.split(';');
-        const filename = parts[1].split('=')[1].replaceAll('"', '');
-        const url = URL.createObjectURL(blob);
+        let job = await response.json();
+        const pollStartedAt = Date.now();
+        const maxWaitMs = 6 * 60 * 60 * 1000;
+
+        while (['queued', 'running'].includes(job.status)) {
+            if (Date.now() - pollStartedAt > maxWaitMs) {
+                throw new Error('Backup generation timed out');
+            }
+
+            const processedMiB = (Number(job.processedBytes || 0) / 1024 / 1024).toFixed(1);
+            progressToast?.find('.toast-message').text(`正在后台压缩，已处理 ${processedMiB} MiB…`);
+            await new Promise(resolve => setTimeout(resolve, 1500));
+
+            const statusResponse = await fetch(`/api/users/backup/status/${encodeURIComponent(job.id)}`, {
+                method: 'GET',
+                credentials: 'include',
+                cache: 'no-store',
+            });
+            if (!statusResponse.ok) {
+                throw new Error('Backup job was interrupted');
+            }
+            job = await statusResponse.json();
+        }
+
+        if (job.status !== 'ready') {
+            throw new Error(job.error || 'Backup generation failed');
+        }
+
+        // Let the browser download manager stream the file directly to disk.
+        // This avoids buffering a multi-gigabyte ZIP inside JavaScript memory.
         const a = document.createElement('a');
-        a.href = url;
-        a.download = filename;
+        a.href = `/api/users/backup/download/${encodeURIComponent(job.id)}`;
+        a.download = job.filename || `${handle}-backup.zip`;
+        a.style.display = 'none';
+        document.body.appendChild(a);
         a.click();
-        URL.revokeObjectURL(url);
-        callback();
+        a.remove();
+        toastr.success('备份已生成，浏览器正在下载。若网络中断，可使用支持断点续传的下载器重试该地址。', '备份就绪');
     } catch (error) {
         console.error('Error backing up user data:', error);
+        toastr.error(error.message || '备份失败，请稍后重试', '全量备份失败');
+    } finally {
+        if (progressToast) {
+            toastr.clear(progressToast);
+        }
+        if (typeof callback === 'function') {
+            callback();
+        }
     }
 }
 
@@ -1309,39 +1358,34 @@ async function changeAvatar(handle, avatar) {
 }
 
 async function openAdminPanel() {
+    if (typeof window.initializeAdminExtensions !== 'function') {
+        try {
+            await import('./admin-extensions.js');
+        } catch (error) {
+            console.error('Failed to load admin extensions:', error);
+        }
+    }
+
     // 用户列表分页相关变量
     let currentUserPage = 1;
     const usersPerPage = 20; // 每页显示20个用户
     let userSearchTerm = '';
-    let allUsers = []; // 存储所有用户数据
+    let renderSequence = 0;
 
     async function renderUsers() {
-        // 先快速加载用户列表（不包含存储大小）
-        const users = await getUsers(false);
-        allUsers = users; // 保存所有用户数据
-
-        // 应用搜索过滤
-        let filteredUsers = users;
-        if (userSearchTerm) {
-            filteredUsers = users.filter(user =>
-                user.name.toLowerCase().includes(userSearchTerm.toLowerCase()) ||
-                user.handle.toLowerCase().includes(userSearchTerm.toLowerCase())
-            );
+        const sequence = ++renderSequence;
+        const result = await getUsers(currentUserPage, usersPerPage, userSearchTerm);
+        if (sequence !== renderSequence || !result) {
+            return;
         }
 
-        // 计算分页
-        const totalPages = Math.ceil(filteredUsers.length / usersPerPage);
-
-        // 如果当前页超出范围，自动调整到最后一页
-        if (currentUserPage > totalPages && totalPages > 0) {
-            currentUserPage = totalPages;
-        } else if (totalPages === 0) {
-            currentUserPage = 1;
-        }
-
+        const pageUsers = Array.isArray(result.users) ? result.users : [];
+        const pagination = result.pagination || {};
+        const totalUsers = Number(pagination.total) || 0;
+        const totalPages = Math.max(1, Number(pagination.totalPages) || 1);
+        currentUserPage = Math.max(1, Number(pagination.page) || currentUserPage);
         const startIndex = (currentUserPage - 1) * usersPerPage;
         const endIndex = startIndex + usersPerPage;
-        const pageUsers = filteredUsers.slice(startIndex, endIndex);
 
         // 清除旧的用户卡片
         template.find('.navTab.usersList .userAccount').remove();
@@ -1352,6 +1396,7 @@ async function openAdminPanel() {
             usersListContainer = $('<div class="usersListContainer"></div>');
             template.find('.navTab.usersList').append(usersListContainer);
         }
+        usersListContainer.empty();
 
         // 存储用户块的引用，用于后续更新存储大小
         const userBlocks = new Map();
@@ -1376,7 +1421,8 @@ async function openAdminPanel() {
         }
 
         controlsHtml.find('#userSearchInput').val(userSearchTerm);
-        controlsHtml.find('.userCount').text(`显示 ${startIndex + 1}-${Math.min(endIndex, filteredUsers.length)} / ${filteredUsers.length} 个用户`);
+        const firstVisibleUser = totalUsers > 0 ? startIndex + 1 : 0;
+        controlsHtml.find('.userCount').text(`显示 ${firstVisibleUser}-${Math.min(endIndex, totalUsers)} / ${totalUsers} 个用户`);
 
         // 绑定搜索事件（使用防抖）
         controlsHtml.find('#userSearchInput').off('input').on('input', debounceSearch(function() {
@@ -1386,11 +1432,12 @@ async function openAdminPanel() {
         }, 300));
 
         // 如果没有用户，显示提示
-        if (filteredUsers.length === 0) {
+        if (totalUsers === 0) {
             const emptyMessage = userSearchTerm
                 ? `<div style="text-align: center; padding: 40px; opacity: 0.7;">没有找到匹配的用户</div>`
                 : `<div style="text-align: center; padding: 40px; opacity: 0.7;">暂无用户</div>`;
             usersListContainer.append(emptyMessage);
+            template.find('.navTab.usersList .usersPaginationBottom').empty();
             return;
         }
 
@@ -1474,7 +1521,7 @@ async function openAdminPanel() {
             paginationBottom = $('<div class="usersPaginationBottom"></div>');
             template.find('.navTab.usersList').append(paginationBottom);
         }
-        paginationBottom.html(createUserPaginationControls(currentUserPage, totalPages, filteredUsers.length));
+        paginationBottom.html(createUserPaginationControls(currentUserPage, totalPages, totalUsers));
 
         // 绑定分页按钮事件
         bindUserPaginationEvents();
@@ -1661,9 +1708,12 @@ if (typeof window.initializeAdminExtensions === 'function') {
     // 绑定定时任务相关按钮
     initScheduledTasksHandlers(template);
 
-    callGenericPopup(template, POPUP_TYPE.TEXT, '', { okButton: 'Close', wide: true, large: true, allowVerticalScrolling: true, allowHorizontalScrolling: true });
-
+    const popupPromise = callGenericPopup(template, POPUP_TYPE.TEXT, '', { okButton: 'Close', wide: true, large: true, allowVerticalScrolling: true, allowHorizontalScrolling: true });
     renderUsers();
+    await popupPromise;
+    if (typeof window.disposeAdminExtensions === 'function') {
+        window.disposeAdminExtensions();
+    }
 }
 
 /**

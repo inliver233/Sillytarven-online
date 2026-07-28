@@ -12,19 +12,31 @@ export const urlencodedParser = noopMiddleware;
  * @returns {string} IP address of the client
  */
 export function getIpFromRequest(req) {
-    let clientIp = req.socket.remoteAddress;
+    return normalizeIpAddress(req.socket.remoteAddress);
+}
+
+/**
+ * Normalizes IPv4-mapped IPv6 addresses without throwing on malformed input.
+ * @param {string|undefined} input IP address
+ * @returns {string} Normalized IP address
+ */
+function normalizeIpAddress(input) {
+    let clientIp = input;
     if (!clientIp) {
         return 'unknown';
     }
-    let ip = ipaddr.parse(clientIp);
-    // Check if the IP address is IPv4-mapped IPv6 address
-    if (ip.kind() === 'ipv6' && ip instanceof ipaddr.IPv6 && ip.isIPv4MappedAddress()) {
-        const ipv4 = ip.toIPv4Address().toString();
-        clientIp = ipv4;
-    } else {
-        clientIp = ip.toString();
+
+    try {
+        const ip = ipaddr.parse(clientIp);
+        // Check if the IP address is IPv4-mapped IPv6 address
+        if (ip.kind() === 'ipv6' && ip instanceof ipaddr.IPv6 && ip.isIPv4MappedAddress()) {
+            return ip.toIPv4Address().toString();
+        }
+
+        return ip.toString();
+    } catch {
+        return 'unknown';
     }
-    return clientIp;
 }
 
 /**
@@ -34,11 +46,10 @@ export function getIpFromRequest(req) {
  * @returns {string} IP address of the client
  */
 export function getRealIpFromHeader(req) {
-    if (req.headers['x-real-ip']) {
-        return req.headers['x-real-ip'].toString();
-    }
-
-    return getIpFromRequest(req);
+    // Express only derives req.ip from forwarding headers when the immediate
+    // peer matches app.set('trust proxy'). Never trust a raw client-supplied
+    // X-Real-IP header here.
+    return normalizeIpAddress(typeof req.ip === 'string' ? req.ip : req.socket.remoteAddress);
 }
 
 /**

@@ -7,9 +7,10 @@ export const router = express.Router();
 // 获取系统负载信息（管理员功能）
 router.get('/', requireAdminMiddleware, async (request, response) => {
     try {
+        const summaryOnly = ['1', 'true'].includes(String(request.query.summary || '').toLowerCase());
         const systemLoad = systemMonitor.getSystemLoad();
-        const userStats = systemMonitor.getAllUserLoadStats();
-        const loadHistory = systemMonitor.getSystemLoadHistory(50); // 获取最近50条记录
+        const userStats = systemMonitor.getAllUserLoadStats({ includeDetails: !summaryOnly });
+        const loadHistory = summaryOnly ? [] : systemMonitor.getSystemLoadHistory(50);
 
         response.json({
             system: systemLoad,

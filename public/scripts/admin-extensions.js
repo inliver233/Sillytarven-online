@@ -9,6 +9,12 @@ let csrfToken = null;
 
 // 初始化管理员扩展功能
 function initializeAdminExtensions() {
+    const adminNav = document.querySelector('.adminNav');
+    if (!adminNav || adminNav.dataset.extensionsInitialized === 'true') {
+        return;
+    }
+    adminNav.dataset.extensionsInitialized = 'true';
+
     // 获取CSRF token
     getCsrfToken().then(() => {
         // 绑定选项卡切换事件
@@ -33,6 +39,9 @@ function initializeAdminExtensions() {
 
         // 检查当前显示的选项卡并自动加载数据
         checkAndLoadCurrentTab();
+    }).catch(error => {
+        delete adminNav.dataset.extensionsInitialized;
+        console.error('Failed to initialize admin extensions:', error);
     });
 }
 
@@ -194,7 +203,6 @@ function showAnnouncementsTab() {
     const announcementsBlock = document.querySelector('.announcementsBlock');
     if (announcementsBlock) {
         announcementsBlock.style.display = 'block';
-        bindAnnouncementEvents(); // 重新绑定事件
         loadAnnouncements();
     }
 }
@@ -265,13 +273,22 @@ function bindSystemLoadEvents() {
 	}
 
 	// 页面不可见时暂停，返回时恢复
-	document.addEventListener('visibilitychange', function() {
-		if (document.hidden) {
-			pauseSystemLoadAutoRefresh();
-		} else {
-			resumeSystemLoadAutoRefresh();
-		}
-	});
+		document.removeEventListener('visibilitychange', handleAdminVisibilityChange);
+		document.addEventListener('visibilitychange', handleAdminVisibilityChange);
+	}
+
+function handleAdminVisibilityChange() {
+    if (document.hidden) {
+        pauseSystemLoadAutoRefresh();
+    } else {
+        resumeSystemLoadAutoRefresh();
+    }
+}
+
+function disposeAdminExtensions() {
+    stopSystemLoadAutoRefresh();
+    document.removeEventListener('visibilitychange', handleAdminVisibilityChange);
+    currentSystemData = null;
 }
 
 // 加载系统负载数据
@@ -279,7 +296,7 @@ async function loadSystemLoadData() {
     try {
         showLoadingState('userActivityList');
 
-        const response = await fetch('/api/system-load/', {
+        const response = await fetch('/api/system-load/?summary=1', {
             method: 'GET',
             headers: getRequestHeaders()
         });
@@ -2984,6 +3001,7 @@ async function clearDefaultConfigTemplate() {
 // 导出函数供外部调用
 if (typeof window !== 'undefined') {
     window.initializeAdminExtensions = initializeAdminExtensions;
+    window.disposeAdminExtensions = disposeAdminExtensions;
     window.toggleAnnouncement = toggleAnnouncement;
     window.deleteAnnouncement = deleteAnnouncement;
     window.showOAuthConfigTab = showOAuthConfigTab;

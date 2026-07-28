@@ -62,6 +62,7 @@ import { ensureThumbnailCache } from './endpoints/thumbnails.js';
 
 // Routers
 import { router as usersPublicRouter } from './endpoints/users-public.js';
+import { router as publicConfigRouter } from './endpoints/public-config.js';
 import { router as oauthRouter, linuxdoCallbackHandler } from './endpoints/oauth.js';
 import { init as statsInit, onExit as statsOnExit } from './endpoints/stats.js';
 import { checkForNewContent } from './endpoints/content-manager.js';
@@ -79,9 +80,10 @@ if (process.versions && process.versions.node && process.versions.node.match(/20
     if (net.setDefaultAutoSelectFamily) net.setDefaultAutoSelectFamily(false);
 }
 
-// Unrestrict console logs display limit
-util.inspect.defaultOptions.maxArrayLength = null;
-util.inspect.defaultOptions.maxStringLength = null;
+// Keep accidental prompt/object logging bounded in production. Debug logging
+// can still inspect useful context without retaining entire conversations.
+util.inspect.defaultOptions.maxArrayLength = 100;
+util.inspect.defaultOptions.maxStringLength = 2000;
 util.inspect.defaultOptions.depth = 4;
 
 /** @type {import('./command-line.js').CommandLineArguments} */
@@ -93,7 +95,9 @@ if (!cliArgs.enableIPv6 && !cliArgs.enableIPv4) {
 }
 
 const app = express();
-app.set('trust proxy', 1);
+// Only trust forwarding headers from the local reverse proxy. This prevents a
+// direct connection to the Node port from spoofing its client IP.
+app.set('trust proxy', 'loopback');
 app.use(helmet({
     contentSecurityPolicy: false,
 }));
@@ -145,6 +149,18 @@ app.use(cookieSession({
 }));
 
 app.use(setUserDataMiddleware);
+
+/**
+ * Pages whose contents or navigation depend on the current login cookie must
+ * never be reused from a public/browser cache.
+ * @param {import('express').Response} response Express response
+ */
+function setPrivateNoStoreHeaders(response) {
+    response.setHeader('Cache-Control', 'private, no-store, max-age=0');
+    response.setHeader('Pragma', 'no-cache');
+    response.setHeader('Expires', '0');
+    response.vary('Cookie');
+}
 
 // CSRF Protection //
 if (!cliArgs.disableCsrf) {
@@ -214,6 +230,7 @@ if (!cliArgs.disableCsrf) {
 }
 
 app.get('/', cacheBuster.middleware, (request, response) => {
+    setPrivateNoStoreHeaders(response);
     if (request.session && (request.session.userId || request.session.handle)) {
         return response.sendFile('index.html', { root: path.join(serverDirectory, 'public') });
     }
@@ -222,11 +239,13 @@ app.get('/', cacheBuster.middleware, (request, response) => {
 
 // Explicit welcome route
 app.get('/welcome', (request, response) => {
+    setPrivateNoStoreHeaders(response);
     return response.sendFile('welcome.html', { root: path.join(serverDirectory, 'public') });
 });
 
 // Keep original app at /app
 app.get('/app', cacheBuster.middleware, (request, response) => {
+    setPrivateNoStoreHeaders(response);
     return response.sendFile('index.html', { root: path.join(serverDirectory, 'public') });
 });
 
@@ -243,17 +262,25 @@ app.get('/callback/:source?', (request, response) => {
 
 // Linux.do 应用平台注册的兼容回调地址。
 // 标准内部路由仍保留为 /api/oauth/linuxdo/callback。
-app.get('/oauth', linuxdoCallbackHandler);
+app.get('/oauth', (request, response, next) => {
+    setPrivateNoStoreHeaders(response);
+    return linuxdoCallbackHandler(request, response, next);
+});
 
 // Host login page
-app.get('/login', loginPageMiddleware);
+app.get('/login', (request, response, next) => {
+    setPrivateNoStoreHeaders(response);
+    return loginPageMiddleware(request, response, next);
+});
 
 // Host additional pages
 app.get('/register', (request, response) => {
+    setPrivateNoStoreHeaders(response);
     return response.sendFile('register.html', { root: path.join(serverDirectory, 'public') });
 });
 
 app.get('/forum', (request, response) => {
+    setPrivateNoStoreHeaders(response);
     const enableForum = getConfigValue('enableForum', true, 'boolean');
     if (!enableForum) {
         return response.status(404).send('页面未启用');
@@ -262,6 +289,7 @@ app.get('/forum', (request, response) => {
 });
 
 app.get('/public-characters', (request, response) => {
+    setPrivateNoStoreHeaders(response);
     const enablePublicCharacters = getConfigValue('enablePublicCharacters', true, 'boolean');
     if (!enablePublicCharacters) {
         return response.status(404).send('页面未启用');
@@ -272,24 +300,32 @@ app.get('/public-characters', (request, response) => {
 // Host frontend assets
 const webpackMiddleware = getWebpackServeMiddleware();
 app.use(webpackMiddleware);
-app.use(express.static(path.join(serverDirectory, 'public'), {
-    maxAge: '1d',           // 缓存 1 天
-    etag: true,             // 启用 ETag
-    lastModified: true,     // 启用 Last-Modified
+const publicDirectory = path.join(serverDirectory, 'public');
+app.use(express.static(publicDirectory, {
+    maxAge: 0,
+    etag: true,
+    lastModified: true,
     setHeaders: (res, filePath) => {
-        // 对于不经常变化的资源，设置更长的缓存时间
-        if (filePath.match(/\.(js|css|woff|woff2|ttf|svg|png|jpg|jpeg|gif|ico)$/)) {
-            res.setHeader('Cache-Control', 'public, max-age=86400, must-revalidate'); // 1 天
-        }
-        // 对于 HTML 文件，使用较短的缓存或协商缓存
-        if (filePath.match(/\.html$/)) {
-            res.setHeader('Cache-Control', 'public, max-age=3600, must-revalidate'); // 1 小时
+        const extension = path.extname(filePath).toLowerCase();
+
+        if (extension === '.html') {
+            setPrivateNoStoreHeaders(res);
+        } else if (['.woff', '.woff2', '.ttf', '.otf', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico'].includes(extension)) {
+            // Binary assets are expensive and do not influence login routing.
+            res.setHeader('Cache-Control', 'public, max-age=604800, stale-while-revalidate=86400');
+        } else if (['.js', '.mjs', '.css'].includes(extension)) {
+            // Source filenames are not content-hashed, so keep the freshness
+            // window short enough for smooth production deployments.
+            res.setHeader('Cache-Control', 'public, max-age=300, must-revalidate');
+        } else {
+            res.setHeader('Cache-Control', 'public, max-age=0, must-revalidate');
         }
     },
 }));
 
 // Public API
 app.use('/api/users', usersPublicRouter);
+app.use('/api/public-config', publicConfigRouter);
 
 // OAuth routes (no auth required for initial flow)
 app.use('/api/oauth', oauthRouter);

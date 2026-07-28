@@ -20,7 +20,7 @@ import { parse, read, write } from '../character-card-parser.js';
 import { readWorldInfoFile } from './worldinfo.js';
 import { invalidateThumbnail } from './thumbnails.js';
 import { importRisuSprites } from './sprites.js';
-import { getUserDirectories } from '../users.js';
+import { getUserDirectories, getUserDirectoriesList } from '../users.js';
 import { getChatInfo } from './chats.js';
 import { ByafParser } from '../byaf.js';
 import { CharXParser, persistCharXAssets } from '../charx.js';
@@ -108,7 +108,9 @@ class DiskCache {
      * @returns {string[]}
      */
     get hashedKeys() {
-        return fs.readdirSync(this.cachePath);
+        return fs.readdirSync(this.cachePath, { withFileTypes: true })
+            .filter(entry => entry.isFile())
+            .map(entry => entry.name);
     }
 
     /**
@@ -121,9 +123,10 @@ class DiskCache {
                 return;
             }
 
-            const directories = [...this.syncQueue].map(entry => getUserDirectories(entry));
+            // Cache files are shared by all users. Verifying only the users in
+            // the queue would make every other user's valid cache look stale.
             this.syncQueue.clear();
-
+            const directories = await getUserDirectoriesList();
             await this.verify(directories);
         } catch (error) {
             console.error('Error while synchronizing cache entries:', error);
@@ -173,10 +176,30 @@ class DiskCache {
                     validKeys.add(path.parse(cache.getDatumPath(cacheKey)).base);
                 }
             }
-            for (const key of this.hashedKeys) {
-                if (!validKeys.has(key)) {
-                    await cache.removeItem(key);
-                }
+            const staleKeys = this.hashedKeys.filter(key => !validKeys.has(key));
+            const batchSize = 64;
+            let removed = 0;
+
+            for (let index = 0; index < staleKeys.length; index += batchSize) {
+                const batch = staleKeys.slice(index, index + batchSize);
+                await Promise.all(batch.map(async key => {
+                    // node-persist filenames are already SHA-256 hashes. Passing
+                    // one to removeItem() hashes it a second time and leaves the
+                    // original cache file behind, so remove the resolved file.
+                    const cacheFile = path.join(this.cachePath, key);
+                    try {
+                        await fsPromises.unlink(cacheFile);
+                        removed++;
+                    } catch (error) {
+                        if (error?.code !== 'ENOENT') {
+                            throw error;
+                        }
+                    }
+                }));
+            }
+
+            if (removed > 0) {
+                console.info(`[Character cache] Pruned ${removed} stale disk cache entries.`);
             }
         } catch (error) {
             console.error('Error while verifying disk cache:', error);

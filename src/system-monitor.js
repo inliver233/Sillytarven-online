@@ -14,6 +14,7 @@ class SystemMonitor {
         this.startTime = Date.now();
         this.lastCpuUsage = process.cpuUsage();
         this.lastNetworkStats = this.getNetworkStats();
+        this.lastNetworkTime = Date.now();
         this.lastDurationUpdate = 0; // 上次更新在线时长的时间
 
         // CPU使用率计算相关
@@ -41,10 +42,11 @@ class SystemMonitor {
             this.updateSystemLoad();
         }, 5000); // 每5秒更新一次
 
-        // 定期保存数据（每30秒）
+        // Monitoring data is not transactional user data. Saving every five
+        // minutes avoids rewriting a multi-megabyte JSON file 2,880 times/day.
         this.saveInterval = setInterval(() => {
             this.saveDataToDisk();
-        }, 30000);
+        }, 5 * 60 * 1000);
 
         // 定期更新用户在线时长（每1分钟）
         this.userUpdateInterval = setInterval(() => {
@@ -115,10 +117,13 @@ class SystemMonitor {
     getCpuUsage() {
         const currentTime = Date.now();
         const currentCpuInfo = this.getCpuInfo();
+        const previousCpuInfo = this.lastCpuInfo;
 
         // 计算时间差和CPU时间差
-        const totalDelta = currentCpuInfo.total - this.lastCpuInfo.total;
-        const idleDelta = currentCpuInfo.idle - this.lastCpuInfo.idle;
+        const totalDelta = currentCpuInfo.total - previousCpuInfo.total;
+        const idleDelta = currentCpuInfo.idle - previousCpuInfo.idle;
+        const userDelta = currentCpuInfo.user - previousCpuInfo.user;
+        const systemDelta = currentCpuInfo.sys - previousCpuInfo.sys;
 
         let cpuPercent = 0;
         if (totalDelta > 0) {
@@ -147,8 +152,8 @@ class SystemMonitor {
             model: cpus[0]?.model || 'Unknown',
             speed: cpus[0]?.speed || 0,
             loadAverage: os.loadavg(), // 添加系统负载平均值
-            user: totalDelta > 0 ? ((currentCpuInfo.user - this.lastCpuInfo?.user || 0) / totalDelta) * 100 : 0,
-            system: totalDelta > 0 ? ((currentCpuInfo.sys - this.lastCpuInfo?.sys || 0) / totalDelta) * 100 : 0,
+            user: totalDelta > 0 ? (userDelta / totalDelta) * 100 : 0,
+            system: totalDelta > 0 ? (systemDelta / totalDelta) * 100 : 0,
             idle: totalDelta > 0 ? (idleDelta / totalDelta) * 100 : 0,
         };
     }
@@ -204,7 +209,8 @@ class SystemMonitor {
      */
     getNetworkUsage() {
         const currentStats = this.getNetworkStats();
-        const deltaTime = 5; // 5秒间隔
+        const currentTime = Date.now();
+        const deltaTime = Math.max(0.001, (currentTime - this.lastNetworkTime) / 1000);
 
         let bytesIn = 0;
         let bytesOut = 0;
@@ -215,9 +221,9 @@ class SystemMonitor {
         }
 
         this.lastNetworkStats = currentStats;
+        this.lastNetworkTime = currentTime;
 
         return {
-            interfaces: os.networkInterfaces(),
             bytesPerSecIn: Math.max(0, bytesIn),
             bytesPerSecOut: Math.max(0, bytesOut),
             totalBytesIn: currentStats.bytesIn,
@@ -230,11 +236,28 @@ class SystemMonitor {
      * @returns {Object} 网络统计
      */
     getNetworkStats() {
-        // 简化实现，实际项目中可能需要读取 /proc/net/dev (Linux) 或其他系统特定文件
-        return {
-            bytesIn: Math.floor(Math.random() * 1000000), // 模拟数据
-            bytesOut: Math.floor(Math.random() * 1000000),
-        };
+        try {
+            if (process.platform !== 'linux') {
+                return { bytesIn: 0, bytesOut: 0 };
+            }
+
+            const lines = fs.readFileSync('/proc/net/dev', 'utf8').split('\n').slice(2);
+            let bytesIn = 0;
+            let bytesOut = 0;
+            for (const line of lines) {
+                const [interfaceName, counters] = line.trim().split(':');
+                if (!interfaceName || !counters || interfaceName.trim() === 'lo') {
+                    continue;
+                }
+                const values = counters.trim().split(/\s+/).map(Number);
+                bytesIn += Number.isFinite(values[0]) ? values[0] : 0;
+                bytesOut += Number.isFinite(values[8]) ? values[8] : 0;
+            }
+
+            return { bytesIn, bytesOut };
+        } catch {
+            return { bytesIn: 0, bytesOut: 0 };
+        }
     }
 
     /**
@@ -660,9 +683,10 @@ class SystemMonitor {
     /**
      * 获取用户聊天统计
      * @param {string} userHandle 用户句柄
+     * @param {{includeDetails?: boolean}} [options] Response options
      * @returns {Object} 用户聊天统计
      */
-    getUserLoadStats(userHandle) {
+    getUserLoadStats(userHandle, { includeDetails = true } = {}) {
         const userStats = this.userLoadStats.get(userHandle);
         if (!userStats) {
             return null;
@@ -713,7 +737,7 @@ class SystemMonitor {
             }
         }
 
-        return {
+        const result = {
             userHandle: userHandle,
             userName: userStats.userName || userHandle,
             totalMessages: userStats.totalMessages,
@@ -746,10 +770,15 @@ class SystemMonitor {
             avgMessagesPerDay: this.calculateAvgMessagesPerDay(userStats),
             lastMessageTime: userStats.lastMessageTime,
             lastMessageTimeFormatted: new Date(userStats.lastMessageTime).toLocaleString('zh-CN'),
-            characterChats: userStats.characterChats,
-            todayStats: todayStats,
             chatActivityLevel: this.calculateChatActivityLevel(userStats),
         };
+
+        if (includeDetails) {
+            result.characterChats = userStats.characterChats;
+            result.todayStats = todayStats;
+        }
+
+        return result;
     }
 
     /**
@@ -782,9 +811,10 @@ class SystemMonitor {
 
     /**
      * 获取所有用户统计
+     * @param {{includeDetails?: boolean}} [options] Response options
      * @returns {Array} 用户统计数组
      */
-    getAllUserLoadStats() {
+    getAllUserLoadStats({ includeDetails = true } = {}) {
         const allStats = [];
         const now = Date.now();
 
@@ -796,7 +826,7 @@ class SystemMonitor {
 
         for (const [userHandle] of this.userLoadStats) {
             // 统计所有用户，不限制活跃时间
-            const userStats = this.getUserLoadStats(userHandle);
+            const userStats = this.getUserLoadStats(userHandle, { includeDetails });
             if (userStats) {
                 allStats.push(userStats);
             }
@@ -924,18 +954,18 @@ class SystemMonitor {
         try {
             // 保存用户统计数据
             const userStatsObj = Object.fromEntries(this.userLoadStats);
-            fs.writeFileSync(this.userStatsFile, JSON.stringify(userStatsObj, null, 2));
+            fs.writeFileSync(this.userStatsFile, JSON.stringify(userStatsObj));
 
             // 保存系统负载历史（只保存最近的记录）
             const recentHistory = this.systemLoadHistory.slice(-this.maxHistoryLength);
-            fs.writeFileSync(this.loadHistoryFile, JSON.stringify(recentHistory, null, 2));
+            fs.writeFileSync(this.loadHistoryFile, JSON.stringify(recentHistory));
 
             // 保存系统统计信息
             const systemStats = {
                 startTime: this.startTime,
                 lastSave: Date.now(),
             };
-            fs.writeFileSync(this.systemStatsFile, JSON.stringify(systemStats, null, 2));
+            fs.writeFileSync(this.systemStatsFile, JSON.stringify(systemStats));
 
             if (process.env.NODE_ENV === 'development') {
                 console.log(`数据已保存: 用户=${this.userLoadStats.size}, 历史=${recentHistory.length}`);

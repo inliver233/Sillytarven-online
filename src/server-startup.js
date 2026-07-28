@@ -53,7 +53,6 @@ import { router as invitationCodesRouter } from './endpoints/invitation-codes.js
 import { router as systemLoadRouter } from './endpoints/system-load.js';
 import { router as publicCharactersRouter } from './endpoints/public-characters.js';
 import { router as announcementsRouter } from './endpoints/announcements.js';
-import { router as publicConfigRouter } from './endpoints/public-config.js';
 import { router as emailConfigRouter } from './endpoints/email-config.js';
 import { router as oauthRouter } from './endpoints/oauth.js';
 import { router as oauthConfigRouter } from './endpoints/oauth-config.js';
@@ -209,7 +208,6 @@ export function setupPrivateEndpoints(app) {
     }
 
     app.use('/api/announcements', announcementsRouter);
-    app.use('/api/public-config', publicConfigRouter);
     app.use('/api/scheduled-tasks', scheduledTasksRouter);
     app.use('/api/user-storage', userStorageRouter);
 }

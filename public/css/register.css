@@ -19,7 +19,7 @@
     background: linear-gradient(145deg, rgba(30, 30, 35, 0.95) 0%, rgba(20, 20, 25, 0.98) 100%);
     backdrop-filter: blur(20px);
     border-radius: 24px;
-    padding: 40px 35%;
+    padding: 40px 35px;
     width: 100%;
     max-width: 520px;
     box-shadow:
@@ -524,6 +524,17 @@ body.register-page #dialogue_popup {
             0 20px 60px rgba(0, 0, 0, 0.7),
             0 0 0 1px rgba(255, 255, 255, 0.03),
             inset 0 1px 0 rgba(255, 255, 255, 0.08);
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .register-card::before,
+    .register-logo,
+    .form-section,
+    .message-box,
+    .error-message {
+        animation: none !important;
+        transition: none !important;
     }
 }
 

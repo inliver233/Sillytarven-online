@@ -951,11 +951,13 @@ export async function setUserDataMiddleware(request, response, next) {
 
     if (!user) {
         console.error('User not found:', handle);
+        request.session = null;
         return next();
     }
 
     if (!user.enabled) {
         console.error('User is disabled:', handle);
+        request.session = null;
         return next();
     }
 
@@ -972,11 +974,8 @@ export async function setUserDataMiddleware(request, response, next) {
             console.error('Error getting purchase link for expired user:', error);
         }
 
-        // 清除会话中的用户标识
-        if (request.session && request.session.handle) {
-            // @ts-ignore - 清除过期用户的会话
-            request.session.handle = null;
-        }
+        // 清除整个会话，避免残留的 userId 继续把首页导向应用页。
+        request.session = null;
 
         // 返回特定的过期错误
         const errorResponse = {
@@ -1009,7 +1008,8 @@ export async function setUserDataMiddleware(request, response, next) {
     if (request.method === 'GET' && request.path === '/') {
         request.session.touch = Date.now();
     }
-    // 记录用户会话活动到系统监控器
+    // 记录用户会话活动到系统监控器。静态资源不应刷新 Cookie
+    // Session，否则一个页面会因为每张图片和脚本重复签发 Cookie。
     const now = Date.now();
     const lastActivity = request.session.lastActivity || 0;
     const timeSinceLastActivity = now - lastActivity;
@@ -1020,23 +1020,19 @@ export async function setUserDataMiddleware(request, response, next) {
                               request.path.startsWith('/api/chats') ||
                               request.path.startsWith('/api/users/heartbeat');
 
-    // 新会话阈值：5分钟没有重要活动，或15分钟没有任何活动
-    const newSessionThreshold = isImportantRequest ? 5 * 60 * 1000 : 15 * 60 * 1000;
-
-    if (timeSinceLastActivity > newSessionThreshold) {
-        // 开始新会话
-        systemMonitor.recordUserLogin(handle, { userName: user.name });
-        console.log(`New session started for ${handle} after ${Math.floor(timeSinceLastActivity / 60000)} minutes of inactivity`);
-    } else if (isImportantRequest) {
-        // 更新用户活动状态（仅对重要请求）
-        systemMonitor.updateUserActivity(handle, {
-            userName: user.name,
-            requestType: request.method + ' ' + request.path,
-        });
+    if (isImportantRequest) {
+        const sessionRefreshInterval = 5 * 60 * 1000;
+        if (timeSinceLastActivity > sessionRefreshInterval) {
+            systemMonitor.recordUserLogin(handle, { userName: user.name });
+            request.session.lastActivity = now;
+            console.debug(`Session activity refreshed for ${handle} after ${Math.floor(timeSinceLastActivity / 60000)} minutes`);
+        } else {
+            systemMonitor.updateUserActivity(handle, {
+                userName: user.name,
+                requestType: request.method + ' ' + request.path,
+            });
+        }
     }
-
-    // 更新最后活动时间（所有请求）
-    request.session.lastActivity = now;
 
     return next();
 }
@@ -1174,15 +1170,27 @@ export async function createBackupArchive(handle, response) {
 
     console.info('Backup requested for', handle);
     const archive = archiver('zip');
+    let completed = false;
 
     archive.on('error', function (err) {
-        response.status(500).send({ error: err.message });
+        console.error('Backup archive failed:', err);
+        if (!response.headersSent) {
+            response.status(500).send({ error: err.message });
+        } else {
+            response.destroy(err);
+        }
     });
 
-    // On stream closed we can end the request
+    // Piping ends the response automatically. Track completion so a client
+    // disconnect can stop expensive compression work promptly.
     archive.on('end', function () {
+        completed = true;
         console.info('Archive wrote %d bytes', archive.pointer());
-        response.end(); // End the Express response
+    });
+    response.once('close', () => {
+        if (!completed) {
+            archive.abort();
+        }
     });
 
     const timestamp = generateTimestamp();

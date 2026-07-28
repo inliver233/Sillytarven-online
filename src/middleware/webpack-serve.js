@@ -17,6 +17,9 @@ export default function getWebpackServeMiddleware() {
         const parsedPath = path.parse(req.path);
 
         if (req.method === 'GET' && parsedPath.dir === '/' && parsedPath.base === outputFile) {
+            // lib.js is generated under DATA_ROOT and bypasses express.static.
+            // Give it the same short freshness window as other scripts.
+            res.setHeader('Cache-Control', 'public, max-age=300, must-revalidate');
             return res.sendFile(outputFile, { root: outputPath });
         }
 

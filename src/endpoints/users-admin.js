@@ -22,12 +22,13 @@ import { applyDefaultTemplateToUser } from '../default-template.js';
 import { DEFAULT_USER } from '../constants.js';
 import systemMonitor from '../system-monitor.js';
 import { isEmailServiceAvailable, sendInactiveUserDeletionNotice } from '../email-service.js';
-import { getConfigValue } from '../util.js';
+import { Cache, getConfigValue } from '../util.js';
 
 
 export const router = express.Router();
 const USER_STORAGE_ENABLED = getConfigValue('userStorage.enabled', false, 'boolean');
 const USER_STORAGE_DEFAULT_LIMIT_MIB = getConfigValue('userStorage.defaultLimitMiB', 0, 'number');
+const DIRECTORY_SIZE_CACHE = new Cache(60 * 1000);
 
 /**
  * @typedef {import('../users.js').UserViewModel & {
@@ -72,29 +73,69 @@ async function calculateDirectorySize(dirPath) {
     return totalSize;
 }
 
+/**
+ * Reuses recent directory scans and coalesces concurrent requests for the same
+ * user. Storage sizes in the admin panel are informational, so a one-minute
+ * freshness window is preferable to repeatedly walking active chat folders.
+ * @param {string} dirPath User data directory
+ * @returns {Promise<number>} Directory size in bytes
+ */
+async function getCachedDirectorySize(dirPath) {
+    const cached = DIRECTORY_SIZE_CACHE.get(dirPath);
+    if (cached !== null) {
+        return await cached;
+    }
+
+    const pendingSize = calculateDirectorySize(dirPath);
+    DIRECTORY_SIZE_CACHE.set(dirPath, pendingSize);
+    return await pendingSize;
+}
+
 router.post('/get', requireAdminMiddleware, async (request, response) => {
     try {
         /** @type {import('../users.js').User[]} */
-        const users = await storage.values(x => x.key.startsWith(KEY_PREFIX));
+        let users = await storage.values(x => x.key.startsWith(KEY_PREFIX));
 
         // 是否计算存储大小（默认为false以提高性能）
         const includeStorageSize = request.body?.includeStorageSize === true;
+        const paginated = request.body?.paginated === true;
+        const search = String(request.body?.search || '').trim().toLowerCase();
+        const requestedPageSize = Number.parseInt(request.body?.pageSize, 10);
+        const pageSize = Math.min(100, Math.max(10, Number.isFinite(requestedPageSize) ? requestedPageSize : 20));
+
+        users.sort((x, y) => (x.created ?? 0) - (y.created ?? 0));
+        if (search) {
+            users = users.filter(user =>
+                String(user.name || '').toLowerCase().includes(search) ||
+                String(user.handle || '').toLowerCase().includes(search),
+            );
+        }
+
+        const total = users.length;
+        const totalPages = Math.max(1, Math.ceil(total / pageSize));
+        const requestedPage = Number.parseInt(request.body?.page, 10);
+        const page = Math.min(totalPages, Math.max(1, Number.isFinite(requestedPage) ? requestedPage : 1));
+        const selectedUsers = paginated ? users.slice((page - 1) * pageSize, page * pageSize) : users;
 
         /** @type {Promise<AdminUserViewModel>[]} */
-        const viewModelPromises = users
-            .map(user => new Promise(async (resolve) => {
-                const avatar = await getUserAvatar(user.handle);
+        const viewModelPromises = selectedUsers
+            .map(async user => {
+                // Paginated responses use an authenticated image endpoint so
+                // base64 avatars are not repeated inside a large JSON payload.
+                const avatar = paginated
+                    ? `/api/users/admin-avatar/${encodeURIComponent(user.handle)}`
+                    : await getUserAvatar(user.handle);
                 // 获取用户负载统计（如果可用）
-                const loadStats = systemMonitor.getUserLoadStats(user.handle);
+                const loadStats = systemMonitor.getUserLoadStats(user.handle, { includeDetails: false });
 
                 // 只有在明确请求时才计算用户目录大小
                 let storageSize = undefined;
                 if (includeStorageSize) {
                     const directories = getUserDirectories(user.handle);
-                    storageSize = await calculateDirectorySize(directories.root);
+                    storageSize = await getCachedDirectorySize(directories.root);
                 }
 
-                resolve({
+                return {
                     handle: user.handle,
                     name: user.name,
                     avatar: avatar,
@@ -110,14 +151,56 @@ router.post('/get', requireAdminMiddleware, async (request, response) => {
                         totalMessages: loadStats.totalMessages,
                         lastActivityFormatted: loadStats.lastActivityFormatted,
                     } : null,
-                });
-            }));
+                };
+            });
 
         const viewModels = await Promise.all(viewModelPromises);
-        viewModels.sort((x, y) => (x.created ?? 0) - (y.created ?? 0));
-        return response.json(viewModels);
+        if (!paginated) {
+            return response.json(viewModels);
+        }
+
+        return response.json({
+            users: viewModels,
+            pagination: {
+                page,
+                pageSize,
+                total,
+                totalPages,
+            },
+        });
     } catch (error) {
         console.error('User list failed:', error);
+        return response.sendStatus(500);
+    }
+});
+
+router.get('/admin-avatar/:handle', requireAdminMiddleware, async (request, response) => {
+    try {
+        const handle = normalizeHandle(request.params.handle);
+        if (!handle) {
+            return response.sendStatus(400);
+        }
+
+        const user = await storage.getItem(toKey(handle));
+        if (!user) {
+            return response.sendStatus(404);
+        }
+
+        const avatar = await getUserAvatar(handle);
+        const dataUrl = /^data:(image\/[a-z0-9.+-]+);base64,([a-z0-9+/=\r\n]+)$/i.exec(avatar);
+        if (dataUrl) {
+            response.setHeader('Content-Type', dataUrl[1]);
+            response.setHeader('Cache-Control', 'private, max-age=300');
+            return response.send(Buffer.from(dataUrl[2], 'base64'));
+        }
+
+        if (typeof avatar === 'string' && avatar.startsWith('/')) {
+            return response.redirect(302, avatar);
+        }
+
+        return response.sendStatus(404);
+    } catch (error) {
+        console.error('Admin avatar failed:', error);
         return response.sendStatus(500);
     }
 });
@@ -136,24 +219,30 @@ router.post('/storage-size', requireAdminMiddleware, async (request, response) =
         }
 
         const results = {};
+        const uniqueHandles = [...new Set(handles)].slice(0, 100);
+        const scanBatchSize = 4;
 
-        // 并行计算所有用户的存储大小
-        await Promise.all(handles.map(async (handle) => {
-            try {
-                const normalizedHandle = normalizeHandle(handle);
-                if (!normalizedHandle) {
-                    results[handle] = { error: 'Invalid handle format' };
-                    return;
+        // A small concurrency window avoids turning one admin-page request
+        // into dozens of simultaneous recursive disk walks.
+        for (let index = 0; index < uniqueHandles.length; index += scanBatchSize) {
+            const batch = uniqueHandles.slice(index, index + scanBatchSize);
+            await Promise.all(batch.map(async (handle) => {
+                try {
+                    const normalizedHandle = normalizeHandle(handle);
+                    if (!normalizedHandle) {
+                        results[handle] = { error: 'Invalid handle format' };
+                        return;
+                    }
+
+                    const directories = getUserDirectories(normalizedHandle);
+                    const storageSize = await getCachedDirectorySize(directories.root);
+                    results[normalizedHandle] = { storageSize };
+                } catch (error) {
+                    console.error(`Error calculating storage size for ${handle}:`, error);
+                    results[handle] = { error: error.message };
                 }
-
-                const directories = getUserDirectories(normalizedHandle);
-                const storageSize = await calculateDirectorySize(directories.root);
-                results[normalizedHandle] = { storageSize };
-            } catch (error) {
-                console.error(`Error calculating storage size for ${handle}:`, error);
-                results[handle] = { error: error.message };
-            }
-        }));
+            }));
+        }
 
         return response.json(results);
     } catch (error) {

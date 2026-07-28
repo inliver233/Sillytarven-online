@@ -23,8 +23,7 @@
             box-sizing: border-box !important;
         }
 
-        * {
-            max-width: 100vw !important;
+        *, *::before, *::after {
             box-sizing: border-box !important;
         }
 
@@ -221,65 +220,6 @@
     </div>
 
     <script src="lib/jquery-3.5.1.min.js"></script>
-    <script>
-        // 彻底防止横向滚动的JavaScript解决方案
-        function preventHorizontalScroll() {
-            // 强制设置body样式
-            document.body.style.overflowX = 'hidden';
-            document.body.style.maxWidth = '100vw';
-            document.body.style.width = '100vw';
-            document.body.style.boxSizing = 'border-box';
-
-            // 强制设置html样式
-            document.documentElement.style.overflowX = 'hidden';
-            document.documentElement.style.maxWidth = '100vw';
-            document.documentElement.style.width = '100vw';
-            document.documentElement.style.boxSizing = 'border-box';
-
-            // 检查并修复所有可能导致横向滚动的元素
-            const elements = document.querySelectorAll('*');
-            elements.forEach(el => {
-                const rect = el.getBoundingClientRect();
-                if (rect.width > window.innerWidth) {
-                    el.style.maxWidth = '100vw';
-                    el.style.width = '100%';
-                    el.style.boxSizing = 'border-box';
-                    el.style.overflowX = 'hidden';
-                }
-            });
-
-            // 特别处理弹窗元素
-            const popup = document.getElementById('dialogue_popup');
-            if (popup) {
-                popup.style.width = 'calc(100vw - 40px)';
-                popup.style.maxWidth = 'calc(100vw - 40px)';
-                popup.style.left = '20px';
-                popup.style.right = '20px';
-                popup.style.marginLeft = '0';
-                popup.style.marginRight = '0';
-                popup.style.boxSizing = 'border-box';
-                popup.style.overflowX = 'hidden';
-            }
-
-            const shadowPopup = document.getElementById('shadow_popup');
-            if (shadowPopup) {
-                shadowPopup.style.width = '100vw';
-                shadowPopup.style.maxWidth = '100vw';
-                shadowPopup.style.overflowX = 'hidden';
-                shadowPopup.style.left = '0';
-                shadowPopup.style.right = '0';
-            }
-        }
-
-        // 页面加载完成后执行
-        document.addEventListener('DOMContentLoaded', preventHorizontalScroll);
-
-        // 窗口大小变化时重新执行
-        window.addEventListener('resize', preventHorizontalScroll);
-
-        // 定期检查（防止动态添加的元素）
-        setInterval(preventHorizontalScroll, 1000);
-    </script>
     <script src="scripts/register.js"></script>
 </body>
 

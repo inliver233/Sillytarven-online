@@ -345,7 +345,7 @@ async function loadCharacters() {
     try {
         showLoading();
 
-        const response = await fetch('/api/public-characters/', {
+        const response = await fetch('/api/public-characters/?summary=1', {
             method: 'GET',
             credentials: 'include'
         });

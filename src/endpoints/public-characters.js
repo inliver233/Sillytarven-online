@@ -102,14 +102,57 @@ function getPublicCharacter(characterId) {
     }
 }
 
+/**
+ * Builds the lightweight representation used by character list/search pages.
+ * Full card data remains available from GET /:characterId and import routes.
+ * @param {object} character Public character
+ * @returns {object} Character metadata without the potentially large card body
+ */
+export function toPublicCharacterSummary(character) {
+    const summary = { ...character };
+    delete summary.character_data;
+    return summary;
+}
+
 // 获取所有公用角色卡
 router.get('/', async function (request, response) {
     try {
         const characters = getAllPublicCharacters();
-        response.json(characters);
+        const summaryOnly = ['1', 'true'].includes(String(request.query.summary || '').toLowerCase());
+        response.json(summaryOnly ? characters.map(toPublicCharacterSummary) : characters);
     } catch (error) {
         console.error('Error getting public characters:', error);
         response.status(500).json({ error: 'Failed to get public characters' });
+    }
+});
+
+// 搜索公用角色卡。This route must be declared before /:characterId.
+router.get('/search', async function (request, response) {
+    try {
+        const { q, uploader } = request.query;
+        let characters = getAllPublicCharacters();
+
+        if (q) {
+            const query = String(q).toLowerCase();
+            characters = characters.filter(character =>
+                character.name.toLowerCase().includes(query) ||
+                character.description.toLowerCase().includes(query) ||
+                (character.tags && character.tags.some(tag => tag.toLowerCase().includes(query))),
+            );
+        }
+
+        if (uploader) {
+            characters = characters.filter(character =>
+                character.uploader.handle === uploader ||
+                character.uploader.name === uploader,
+            );
+        }
+
+        const summaryOnly = ['1', 'true'].includes(String(request.query.summary || '').toLowerCase());
+        response.json(summaryOnly ? characters.map(toPublicCharacterSummary) : characters);
+    } catch (error) {
+        console.error('Error searching public characters:', error);
+        response.status(500).json({ error: 'Failed to search characters' });
     }
 });
 
@@ -319,37 +362,6 @@ router.delete('/:characterId', async function (request, response) {
     } catch (error) {
         console.error('Error deleting public character:', error);
         response.status(500).json({ error: 'Failed to delete character' });
-    }
-});
-
-// 搜索公用角色卡
-router.get('/search', async function (request, response) {
-    try {
-        const { q, uploader } = request.query;
-        let characters = getAllPublicCharacters();
-
-        // 关键词搜索
-        if (q) {
-            const query = String(q).toLowerCase();
-            characters = characters.filter(character =>
-                character.name.toLowerCase().includes(query) ||
-                character.description.toLowerCase().includes(query) ||
-                (character.tags && character.tags.some(tag => tag.toLowerCase().includes(query))),
-            );
-        }
-
-        // 上传者筛选
-        if (uploader) {
-            characters = characters.filter(character =>
-                character.uploader.handle === uploader ||
-                character.uploader.name === uploader,
-            );
-        }
-
-        response.json(characters);
-    } catch (error) {
-        console.error('Error searching public characters:', error);
-        response.status(500).json({ error: 'Failed to search characters' });
     }
 });
 

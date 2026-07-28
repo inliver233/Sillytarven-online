@@ -212,8 +212,7 @@ async function sendClaudeRequest(request, response) {
 
     try {
         const controller = new AbortController();
-        request.socket.removeAllListeners('close');
-        request.socket.on('close', function () {
+        response.once('close', function () {
             controller.abort();
         });
         const additionalHeaders = {};
@@ -596,8 +595,7 @@ async function sendMakerSuiteRequest(request, response) {
 
     try {
         const controller = new AbortController();
-        request.socket.removeAllListeners('close');
-        request.socket.on('close', function () {
+        response.once('close', function () {
             controller.abort();
         });
 
@@ -733,8 +731,7 @@ async function sendAI21Request(request, response) {
 
     const bodyParams = {};
     const controller = new AbortController();
-    request.socket.removeAllListeners('close');
-    request.socket.on('close', function () {
+    response.once('close', function () {
         controller.abort();
     });
     // Hack to support JSON schema
@@ -815,8 +812,7 @@ async function sendMistralAIRequest(request, response) {
     try {
         const messages = convertMistralMessages(request.body.messages, getPromptNames(request));
         const controller = new AbortController();
-        request.socket.removeAllListeners('close');
-        request.socket.on('close', function () {
+        response.once('close', function () {
             controller.abort();
         });
 
@@ -896,8 +892,7 @@ async function sendMistralAIRequest(request, response) {
 async function sendCohereRequest(request, response) {
     const apiKey = readSecret(request.user.directories, SECRET_KEYS.COHERE);
     const controller = new AbortController();
-    request.socket.removeAllListeners('close');
-    request.socket.on('close', function () {
+    response.once('close', function () {
         controller.abort();
     });
 
@@ -1003,8 +998,7 @@ async function sendDeepSeekRequest(request, response) {
     }
 
     const controller = new AbortController();
-    request.socket.removeAllListeners('close');
-    request.socket.on('close', function () {
+    response.once('close', function () {
         controller.abort();
     });
 
@@ -1113,8 +1107,7 @@ async function sendXaiRequest(request, response) {
     }
 
     const controller = new AbortController();
-    request.socket.removeAllListeners('close');
-    request.socket.on('close', function () {
+    response.once('close', function () {
         controller.abort();
     });
 
@@ -1230,8 +1223,7 @@ async function sendAimlapiRequest(request, response) {
     }
 
     const controller = new AbortController();
-    request.socket.removeAllListeners('close');
-    request.socket.on('close', function () {
+    response.once('close', function () {
         controller.abort();
     });
 
@@ -1335,8 +1327,7 @@ async function sendElectronHubRequest(request, response) {
     }
 
     const controller = new AbortController();
-    request.socket.removeAllListeners('close');
-    request.socket.on('close', function () {
+    response.once('close', function () {
         controller.abort();
     });
 
@@ -1448,8 +1439,7 @@ async function sendChutesRequest(request, response) {
     }
 
     const controller = new AbortController();
-    request.socket.removeAllListeners('close');
-    request.socket.on('close', function () {
+    response.once('close', function () {
         controller.abort();
     });
 
@@ -1589,8 +1579,7 @@ async function sendAzureOpenAIRequest(request, response) {
         : undefined;
 
     const controller = new AbortController();
-    request.socket.removeAllListeners('close');
-    request.socket.on('close', () => controller.abort());
+    response.once('close', () => controller.abort());
 
     const config = {
         method: 'POST',
@@ -2320,8 +2309,7 @@ router.post('/generate', async function (request, response) {
             `${apiUrl}/chat/completions`;
 
         const controller = new AbortController();
-        request.socket.removeAllListeners('close');
-        request.socket.on('close', function () {
+        response.once('close', function () {
             controller.abort();
         });
 
