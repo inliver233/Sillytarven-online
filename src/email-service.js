@@ -379,7 +379,10 @@ export async function sendInactiveUserDeletionNotice(to, userName, daysInactive,
     const durationLabelMap = new Map([
         [7, '1周'],
         [15, '半个月'],
+        [20, '20天'],
         [30, '1个月'],
+        [40, '40天'],
+        [45, '1.5个月'],
         [60, '2个月'],
     ]);
     const durationLabel = durationLabelMap.get(daysInactive) || `${daysInactive} 天`;

@@ -8,7 +8,8 @@ import sanitize from 'sanitize-filename';
 import fetch from 'node-fetch';
 
 import { UNSAFE_EXTENSIONS } from '../constants.js';
-import { clientRelativePath } from '../util.js';
+import { clientRelativePath, isValidUrl } from '../util.js';
+import { getHostFromUrl, isHostWhitelisted } from './content-manager.js';
 
 const VALID_CATEGORIES = ['bgm', 'ambient', 'blip', 'live2d', 'vrm', 'character', 'temp'];
 
@@ -189,8 +190,19 @@ router.post('/get', async (request, response) => {
  * @returns {void}
  */
 router.post('/download', async (request, response) => {
-    const url = request.body.url;
+    if (!isValidUrl(request.body.url)) {
+        console.warn('Asset download failed: Must be a valid URL');
+        return response.sendStatus(400);
+    }
+
+    const url = String(request.body.url);
     const inputCategory = request.body.category;
+
+    const host = getHostFromUrl(url);
+    if (!isHostWhitelisted(host)) {
+        console.error(`Received an import for "${host}", but site is not whitelisted. This domain must be added to the config key "whitelistImportDomains" to allow import from this source.`);
+        return response.sendStatus(404);
+    }
 
     // Check category
     let category = null;

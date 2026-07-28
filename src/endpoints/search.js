@@ -1,5 +1,8 @@
+import dns from 'node:dns/promises';
+
 import fetch from 'node-fetch';
 import express from 'express';
+import ipaddr from 'ipaddr.js';
 
 import { decode } from 'html-entities';
 import { readSecret, SECRET_KEYS } from './secrets.js';
@@ -24,6 +27,37 @@ const visitHeaders = {
     'Sec-Fetch-Site': 'none',
     'Sec-Fetch-User': '?1',
 };
+
+function normalizeHostname(hostname) {
+    return String(hostname ?? '').replace(/^\[/, '').replace(/\]$/, '').toLowerCase();
+}
+
+function isPublicIpAddress(address) {
+    if (!ipaddr.isValid(address)) {
+        return false;
+    }
+
+    let parsed = ipaddr.parse(address);
+    if (parsed.kind() === 'ipv6' && parsed.isIPv4MappedAddress()) {
+        parsed = parsed.toIPv4Address();
+    }
+
+    return parsed.range() === 'unicast';
+}
+
+async function isSafeVisitHostname(hostname) {
+    const normalized = normalizeHostname(hostname);
+    if (!normalized || normalized === 'localhost' || normalized.endsWith('.localhost')) {
+        return false;
+    }
+
+    if (ipaddr.isValid(normalized)) {
+        return isPublicIpAddress(normalized);
+    }
+
+    const addresses = await dns.lookup(normalized, { all: true });
+    return addresses.length > 0 && addresses.every(address => isPublicIpAddress(address.address));
+}
 
 /**
  * Extract the transcript of a YouTube video
@@ -415,8 +449,8 @@ router.post('/visit', async (request, response) => {
                 throw new Error('Invalid port');
             }
 
-            // Reject IP addresses
-            if (urlObj.hostname.match(/^\d+\.\d+\.\d+\.\d+$/)) {
+            // Reject local/private IPs and hostnames that resolve to them
+            if (!await isSafeVisitHostname(urlObj.hostname)) {
                 throw new Error('Invalid hostname');
             }
         } catch (error) {

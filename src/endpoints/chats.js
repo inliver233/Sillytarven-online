@@ -18,6 +18,7 @@ import {
     generateTimestamp,
     removeOldBackups,
     formatBytes,
+    isPathUnderParent,
 } from '../util.js';
 
 const isBackupEnabled = !!getConfigValue('backups.chat.enabled', true, 'boolean');
@@ -1328,6 +1329,9 @@ router.post('/save', validateAvatarUrlMiddleware, async function (request, respo
         }
         const fileName = `${String(request.body.file_name)}.jsonl`;
         const filePath = path.join(request.user.directories.chats, directoryName, sanitize(fileName));
+        if (!isPathUnderParent(request.user.directories.chats, filePath)) {
+            return response.sendStatus(400);
+        }
         if (checkIntegrity && !request.body.force) {
             const integritySlug = header?.chat_metadata?.integrity;
             const isIntact = await checkChatIntegrity(filePath, integritySlug);
@@ -1394,6 +1398,9 @@ router.post('/save-tail', validateAvatarUrlMiddleware, async function (request, 
         const directoryName = String(request.body.avatar_url).replace('.png', '');
         const fileName = `${String(request.body.file_name)}.jsonl`;
         const filePath = path.join(request.user.directories.chats, directoryName, sanitize(fileName));
+        if (!isPathUnderParent(request.user.directories.chats, filePath)) {
+            return response.sendStatus(400);
+        }
         const header = request.body.header && typeof request.body.header === 'object'
             ? /** @type {any} */ (request.body.header)
             : null;
@@ -1551,6 +1558,9 @@ router.post('/get', validateAvatarUrlMiddleware, async function (request, respon
     try {
         const dirName = String(request.body.avatar_url).replace('.png', '');
         const directoryPath = path.join(request.user.directories.chats, dirName);
+        if (!isPathUnderParent(request.user.directories.chats, directoryPath)) {
+            return response.sendStatus(400);
+        }
         const chatDirExists = fs.existsSync(directoryPath);
 
         //if no chat dir for the character is found, make one with the character name
@@ -1597,6 +1607,9 @@ router.post('/get-range', validateAvatarUrlMiddleware, async function (request, 
     try {
         const dirName = String(request.body.avatar_url).replace('.png', '');
         const directoryPath = path.join(request.user.directories.chats, dirName);
+        if (!isPathUnderParent(request.user.directories.chats, directoryPath)) {
+            return response.sendStatus(400);
+        }
 
         if (!request.body.file_name) {
             return response.send({ header: null, messages: [], cursor: 0, hasMore: false });
@@ -1645,6 +1658,9 @@ router.post('/rename', validateAvatarUrlMiddleware, async function (request, res
         const pathToFolder = request.body.is_group
             ? request.user.directories.groupChats
             : path.join(request.user.directories.chats, String(request.body.avatar_url).replace('.png', ''));
+        if (!request.body.is_group && !isPathUnderParent(request.user.directories.chats, pathToFolder)) {
+            return response.sendStatus(400);
+        }
         const pathToOriginalFile = path.join(pathToFolder, sanitize(request.body.original_file));
         const pathToRenamedFile = path.join(pathToFolder, sanitize(request.body.renamed_file));
         const sanitizedFileName = path.parse(pathToRenamedFile).name;
@@ -1692,6 +1708,9 @@ router.post('/delete', validateAvatarUrlMiddleware, function (request, response)
         const dirName = String(request.body.avatar_url).replace('.png', '');
         const fileName = String(request.body.chatfile);
         const filePath = path.join(request.user.directories.chats, dirName, sanitize(fileName));
+        if (!isPathUnderParent(request.user.directories.chats, filePath)) {
+            return response.sendStatus(400);
+        }
         const chatFileExists = fs.existsSync(filePath);
 
         if (!chatFileExists) {
@@ -1731,7 +1750,10 @@ router.post('/export', validateAvatarUrlMiddleware, async function (request, res
     const pathToFolder = request.body.is_group
         ? request.user.directories.groupChats
         : path.join(request.user.directories.chats, String(request.body.avatar_url).replace('.png', ''));
-    let filename = path.join(pathToFolder, request.body.file);
+    const filename = path.join(pathToFolder, sanitize(request.body.file));
+    if (!request.body.is_group && !isPathUnderParent(request.user.directories.chats, filename)) {
+        return response.sendStatus(400);
+    }
     let exportfilename = request.body.exportfilename;
     if (!fs.existsSync(filename)) {
         const errorMessage = {
@@ -1863,12 +1885,18 @@ router.post('/import', validateAvatarUrlMiddleware, async function (request, res
     if (!request.body) return response.sendStatus(400);
 
     const format = request.body.file_type;
-    const avatarUrl = (request.body.avatar_url).replace('.png', '');
-    const characterName = request.body.character_name;
+    const avatarUrl = String(request.body.avatar_url).replace('.png', '');
+    const characterName = String(request.body.character_name ?? 'Character');
+    const safeCharacterName = sanitize(characterName) || 'Character';
     const userName = request.body.user_name || 'User';
     const fileNames = [];
 
     if (!request.file) {
+        return response.sendStatus(400);
+    }
+
+    const directoryPath = path.join(request.user.directories.chats, avatarUrl);
+    if (!isPathUnderParent(request.user.directories.chats, directoryPath)) {
         return response.sendStatus(400);
     }
 
@@ -1899,8 +1927,8 @@ router.post('/import', validateAvatarUrlMiddleware, async function (request, res
             }
 
             const handleChat = async (chat) => {
-                const fileName = `${characterName} - ${humanizedISO8601DateTime()} imported.jsonl`;
-                const filePath = path.join(request.user.directories.chats, avatarUrl, fileName);
+                const fileName = `${safeCharacterName} - ${humanizedISO8601DateTime()} imported.jsonl`;
+                const filePath = path.join(directoryPath, fileName);
                 fileNames.push(fileName);
                 if (chatChunkingEnabled) {
                     const lines = String(chat).split('\n').filter(line => line.length > 0);
@@ -1951,8 +1979,8 @@ router.post('/import', validateAvatarUrlMiddleware, async function (request, res
                 console.warn('Failed to flatten Chub Chat data: ', error);
             }
 
-            const fileName = `${characterName} - ${humanizedISO8601DateTime()} imported.jsonl`;
-            const filePath = path.join(request.user.directories.chats, avatarUrl, fileName);
+            const fileName = `${safeCharacterName} - ${humanizedISO8601DateTime()} imported.jsonl`;
+            const filePath = path.join(directoryPath, fileName);
             fileNames.push(fileName);
             if (chatChunkingEnabled) {
                 const lines = String(flattenedChat ?? '').split('\n').filter(line => line.length > 0);
