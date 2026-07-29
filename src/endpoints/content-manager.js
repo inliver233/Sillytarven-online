@@ -117,6 +117,7 @@ async function seedContentForUser(contentIndex, directories, forceCategories) {
 
     const contentLogPath = path.join(directories.root, 'content.log');
     const contentLog = getContentLog(contentLogPath);
+    const initialContentLogLength = contentLog.length;
 
     for (const contentItem of contentIndex) {
         // If the content item is already in the log, skip it
@@ -158,7 +159,9 @@ async function seedContentForUser(contentIndex, directories, forceCategories) {
         anyContentAdded = true;
     }
 
-    writeFileAtomicSync(contentLogPath, contentLog.join('\n'));
+    if (contentLog.length !== initialContentLogLength) {
+        writeFileAtomicSync(contentLogPath, contentLog.join('\n'));
+    }
     return anyContentAdded;
 }
 
