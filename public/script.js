@@ -753,12 +753,11 @@ function setupFetchInterceptor() {
     window.fetch = async function(...args) {
         const response = await originalFetch.apply(this, args);
 
-        // 克隆响应以便可以多次读取
-        const clonedResponse = response.clone();
-
         // 只处理401状态码
         if (response.status === 401) {
             try {
+                // 克隆响应以便可以多次读取
+                const clonedResponse = response.clone();
                 const data = await clonedResponse.json();
                 // 检查是否为用户过期错误
                 if (data.expired === true) {
