@@ -672,7 +672,7 @@ router.get('/images/:filename', async function (request, response) {
         response.setHeader('Content-Type', contentType);
 
         // 设置缓存头
-        response.setHeader('Cache-Control', 'public, max-age=31536000'); // 1年缓存
+        response.setHeader('Cache-Control', 'private, max-age=31536000, immutable'); // 1年缓存
 
         // 发送文件 - 直接使用绝对路径
         response.sendFile(imagePath);

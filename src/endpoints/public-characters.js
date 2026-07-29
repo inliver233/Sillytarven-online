@@ -416,7 +416,7 @@ router.get('/avatar/:filename', async function (request, response) {
         }
 
         response.setHeader('Content-Type', contentType);
-        response.setHeader('Cache-Control', 'public, max-age=31536000'); // 缓存1年
+        response.setHeader('Cache-Control', 'private, max-age=31536000'); // 缓存1年
 
         const avatarBuffer = fs.readFileSync(avatarPath);
         response.send(avatarBuffer);
