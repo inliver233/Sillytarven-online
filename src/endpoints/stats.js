@@ -11,6 +11,18 @@ const readdir = fs.promises.readdir;
 import { getAllUserHandles, getUserDirectories } from '../users.js';
 
 const STATS_FILE = 'stats.json';
+const MAX_STATS_BODY_SIZE = 1024 * 1024;
+const STAT_FIELDS = new Set([
+    'total_gen_time',
+    'user_word_count',
+    'non_user_word_count',
+    'user_msg_count',
+    'non_user_msg_count',
+    'total_swipe_count',
+    'chat_size',
+    'date_last_chat',
+    'date_first_chat',
+]);
 
 /**
  * @type {Map<string, Object>} The stats object for each user.
@@ -353,6 +365,38 @@ function setCharStats(handle, stats) {
 }
 
 /**
+ * Checks whether a stats payload contains only supported numeric fields.
+ * @param {unknown} stats Stats payload
+ * @returns {boolean} Whether the payload is valid
+ */
+function isValidStats(stats) {
+    if (!stats || typeof stats !== 'object' || Array.isArray(stats)) {
+        return false;
+    }
+
+    for (const [key, value] of Object.entries(stats)) {
+        if (key === 'timestamp') {
+            if (typeof value !== 'number' || !Number.isFinite(value)) {
+                return false;
+            }
+            continue;
+        }
+
+        if (!value || typeof value !== 'object' || Array.isArray(value)) {
+            return false;
+        }
+
+        for (const [field, fieldValue] of Object.entries(value)) {
+            if (!STAT_FIELDS.has(field) || typeof fieldValue !== 'number' || !Number.isFinite(fieldValue)) {
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+/**
  * Calculates the total generation time and word count for a chat with a character.
  *
  * @param {string} chatDir - The directory path where character chat files are stored.
@@ -490,6 +534,21 @@ router.post('/recreate', async function (request, response) {
 */
 router.post('/update', function (request, response) {
     if (!request.body) return response.sendStatus(400);
+
+    const contentLength = Number(request.get('content-length'));
+    if (Number.isFinite(contentLength) && contentLength > MAX_STATS_BODY_SIZE) {
+        return response.status(413).send('Stats payload exceeds 1 MB limit');
+    }
+
+    const serializedSize = Buffer.byteLength(JSON.stringify(request.body), 'utf8');
+    if (serializedSize > MAX_STATS_BODY_SIZE) {
+        return response.status(413).send('Stats payload exceeds 1 MB limit');
+    }
+
+    if (!isValidStats(request.body)) {
+        return response.status(400).send('Invalid stats payload');
+    }
+
     setCharStats(request.user.profile.handle, request.body);
     return response.sendStatus(200);
 });
