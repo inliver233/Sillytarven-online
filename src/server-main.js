@@ -56,6 +56,7 @@ import {
     setupLogLevel,
     setWindowTitle,
     getConfigValue,
+    isPathUnderParent,
 } from './util.js';
 import { UPLOADS_DIRECTORY } from './constants.js';
 import { ensureThumbnailCache } from './endpoints/thumbnails.js';
@@ -301,19 +302,21 @@ app.get('/public-characters', (request, response) => {
 const webpackMiddleware = getWebpackServeMiddleware();
 app.use(webpackMiddleware);
 const publicDirectory = path.join(serverDirectory, 'public');
+const templatesDirectory = path.join(publicDirectory, 'scripts', 'templates');
 app.use(express.static(publicDirectory, {
     maxAge: 0,
     etag: true,
     lastModified: true,
     setHeaders: (res, filePath) => {
         const extension = path.extname(filePath).toLowerCase();
+        const isTemplate = extension === '.html' && isPathUnderParent(templatesDirectory, filePath);
 
-        if (extension === '.html') {
+        if (extension === '.html' && !isTemplate) {
             setPrivateNoStoreHeaders(res);
         } else if (['.woff', '.woff2', '.ttf', '.otf', '.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg', '.ico'].includes(extension)) {
             // Binary assets are expensive and do not influence login routing.
             res.setHeader('Cache-Control', 'public, max-age=604800, stale-while-revalidate=86400');
-        } else if (['.js', '.mjs', '.css'].includes(extension)) {
+        } else if (isTemplate || ['.js', '.mjs', '.css'].includes(extension)) {
             // Source filenames are not content-hashed, so keep the freshness
             // window short enough for smooth production deployments.
             res.setHeader('Cache-Control', 'public, max-age=300, must-revalidate');
