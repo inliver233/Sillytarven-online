@@ -16,7 +16,7 @@ import { sync as writeFileAtomicSync } from 'write-file-atomic';
 import sanitize from 'sanitize-filename';
 
 import { USER_DIRECTORY_TEMPLATE, DEFAULT_USER, PUBLIC_DIRECTORIES, SETTINGS_FILE, UPLOADS_DIRECTORY } from './constants.js';
-import { getConfigValue, color, delay, generateTimestamp, invalidateFirefoxCache, isPathUnderParent } from './util.js';
+import { getConfigValue, color, delay, generateTimestamp, isPathUnderParent } from './util.js';
 import { readSecret, writeSecret } from './endpoints/secrets.js';
 import { getContentOfType } from './endpoints/content-manager.js';
 import systemMonitor from './system-monitor.js';
@@ -28,6 +28,7 @@ const ENABLE_ACCOUNTS = getConfigValue('enableUserAccounts', false, 'boolean');
 const AUTHELIA_AUTH = getConfigValue('sso.autheliaAuth', false, 'boolean');
 const AUTHENTIK_AUTH = getConfigValue('sso.authentikAuth', false, 'boolean');
 const PER_USER_BASIC_AUTH = getConfigValue('perUserBasicAuth', false, 'boolean');
+const PRIVATE_CACHE_CONTROL = 'private, max-age=300, must-revalidate';
 const ANON_CSRF_SECRET = crypto.randomBytes(64).toString('base64');
 
 /**
@@ -1095,8 +1096,7 @@ function createRouteHandler(directoryFn) {
                 return res.sendStatus(404);
             }
 
-            invalidateFirefoxCache(filePath, req, res);
-            return res.sendFile(filePath, { root: directory });
+            return res.sendFile(filePath, { root: directory, headers: { 'Cache-Control': PRIVATE_CACHE_CONTROL } });
         } catch (error) {
             return res.sendStatus(500);
         }

@@ -1,5 +1,4 @@
 import fs from 'node:fs';
-import { promises as fsPromises } from 'node:fs';
 import path from 'node:path';
 
 import mime from 'mime-types';
@@ -8,11 +7,12 @@ import sanitize from 'sanitize-filename';
 import { Jimp, JimpMime } from '../jimp.js';
 import { sync as writeFileAtomicSync } from 'write-file-atomic';
 
-import { getConfigValue, invalidateFirefoxCache } from '../util.js';
+import { getConfigValue } from '../util.js';
 
 const thumbnailsEnabled = !!getConfigValue('thumbnails.enabled', true, 'boolean');
 const quality = Math.min(100, Math.max(1, parseInt(getConfigValue('thumbnails.quality', 95, 'number'))));
 const pngFormat = String(getConfigValue('thumbnails.format', 'jpg')).toLowerCase().trim() === 'png';
+const PRIVATE_CACHE_CONTROL = 'private, max-age=300, must-revalidate';
 
 /**
  * @typedef {'bg' | 'avatar' | 'persona'} ThumbnailType
@@ -256,12 +256,9 @@ router.get('/', async function (request, response) {
                 return response.sendStatus(404);
             }
             const contentType = mime.lookup(pathToOriginalFile) || 'image/png';
-            const originalFile = await fsPromises.readFile(pathToOriginalFile);
             response.setHeader('Content-Type', contentType);
 
-            invalidateFirefoxCache(pathToOriginalFile, request, response);
-
-            return response.send(originalFile);
+            return response.sendFile(pathToOriginalFile, { headers: { 'Cache-Control': PRIVATE_CACHE_CONTROL } });
         }
 
         const pathToCachedFile = await generateThumbnail(request.user.directories, type, file);
@@ -275,12 +272,9 @@ router.get('/', async function (request, response) {
         }
 
         const contentType = mime.lookup(pathToCachedFile) || 'image/jpeg';
-        const cachedFile = await fsPromises.readFile(pathToCachedFile);
         response.setHeader('Content-Type', contentType);
 
-        invalidateFirefoxCache(file, request, response);
-
-        return response.send(cachedFile);
+        return response.sendFile(pathToCachedFile, { headers: { 'Cache-Control': PRIVATE_CACHE_CONTROL } });
     } catch (error) {
         console.error('Failed getting thumbnail', error);
         return response.sendStatus(500);

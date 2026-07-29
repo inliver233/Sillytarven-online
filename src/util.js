@@ -21,7 +21,6 @@ import bytes from 'bytes';
 import { LOG_LEVELS, CHAT_COMPLETION_SOURCES, MEDIA_REQUEST_TYPE } from './constants.js';
 import { serverDirectory } from './server-directory.js';
 import { sync as writeFileAtomicSync } from 'write-file-atomic';
-import { isFirefox } from './express-common.js';
 
 /**
  * Parsed config object.
@@ -258,7 +257,6 @@ export async function extractFileFromZipBuffer(archiveBuffer, fileExtension) {
         }
     });
 }
-
 /**
  * Normalizes a ZIP entry path for safe extraction.
  * @param {string} entryName The entry name from the ZIP archive
@@ -1550,19 +1548,4 @@ export function readFirstLine(filePath) {
             }
         });
     });
-}
-
-/**
- * If the file is an image, and the request's user agent matches Firefox, then the response's headers are set to invalidate the cache.
- * Without this, Firefox ignores updated images even after a refresh.
- * https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Cache-Control
- * @param {string} file File path
- * @param {import('express').Request} request Request object
- * @param {import('express').Response} response Response object
- */
-export function invalidateFirefoxCache(file, request, response) {
-    const mimeType = isFirefox(request) && mime.lookup(file);
-    if (mimeType && mimeType.startsWith('image/')) {
-        response.setHeader('Cache-Control', 'must-understand, no-store');
-    }
 }
