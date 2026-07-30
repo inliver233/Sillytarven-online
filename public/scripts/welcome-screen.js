@@ -187,6 +187,97 @@ function getWelcomeCharactersData(page = 1) {
 }
 
 /**
+ * 仅刷新角色卡网格与分页控件 DOM（零 API 请求，单帧内完成）。
+ * 用于角色卡翻页，避免整页重建与 /api/chats/recent 全量磁盘扫描。
+ * DOM 结构与 welcomePanel 模板保持一致，并复用现有懒加载机制。
+ */
+function renderCharactersGridOnly() {
+    const gridContainer = document.getElementById('welcomeCharactersGrid');
+    if (!gridContainer) {
+        return;
+    }
+
+    const { displayCharacters, noCharacters, totalPages, canGoPrev, canGoNext, currentPage } = getWelcomeCharactersData(welcomeCharactersCurrentPage);
+
+    // 清空旧网格
+    gridContainer.innerHTML = '';
+
+    // 使用 DOM API 构建（避免角色名等用户可控数据造成 XSS）
+    if (noCharacters) {
+        const empty = document.createElement('div');
+        empty.className = 'noCharacters';
+
+        const icon = document.createElement('i');
+        icon.className = 'fa-solid fa-user-plus';
+
+        const span = document.createElement('span');
+        span.textContent = '暂无角色卡';
+
+        const small = document.createElement('small');
+        small.textContent = '从角色管理页面创建或导入角色卡';
+
+        empty.append(icon, span, small);
+        gridContainer.append(empty);
+    } else {
+        const fragment = document.createDocumentFragment();
+        displayCharacters.forEach((char) => {
+            const card = document.createElement('div');
+            card.className = 'welcomeCharacterCard';
+            card.setAttribute('data-chid', String(char.index));
+            card.setAttribute('data-avatar', char.avatar || '');
+            card.setAttribute('title', char.name);
+
+            const avatarWrap = document.createElement('div');
+            avatarWrap.className = 'welcomeCharacterAvatar';
+
+            const img = document.createElement('img');
+            img.className = 'characterImage lazy-load';
+            img.setAttribute('data-src', char.avatarUrl);
+            img.alt = char.name;
+            img.src = '/img/default-expressions/neutral.png';
+            img.onerror = function () { this.onerror = null; this.src = '/img/default-expressions/neutral.png'; };
+
+            const placeholder = document.createElement('div');
+            placeholder.className = 'imagePlaceholder';
+            const placeholderIcon = document.createElement('i');
+            placeholderIcon.className = 'fa-solid fa-image';
+            placeholder.append(placeholderIcon);
+
+            avatarWrap.append(img, placeholder);
+
+            const nameEl = document.createElement('div');
+            nameEl.className = 'welcomeCharacterName';
+            nameEl.textContent = char.name;
+
+            card.append(avatarWrap, nameEl);
+            fragment.append(card);
+        });
+        gridContainer.append(fragment);
+    }
+
+    // 重新绑定点击卡片进入聊天事件
+    gridContainer.querySelectorAll('.welcomeCharacterCard').forEach((card) => {
+        card.addEventListener('click', async () => {
+            const chid = card.getAttribute('data-chid');
+            if (chid !== null) {
+                await selectCharacterById(Number(chid));
+            }
+        });
+    });
+
+    // 重新初始化懒加载（IntersectionObserver + HTTP 缓存，零额外 API）
+    initLazyLoadCharacters(gridContainer);
+
+    // 更新分页按钮禁用状态与页码文本
+    const prevBtn = document.querySelector('.characterPagePrev');
+    const nextBtn = document.querySelector('.characterPageNext');
+    const pageInfo = document.querySelector('.characterPageInfo');
+    if (prevBtn) prevBtn.disabled = !canGoPrev;
+    if (nextBtn) nextBtn.disabled = !canGoNext;
+    if (pageInfo) pageInfo.textContent = `${currentPage} / ${totalPages}`;
+}
+
+/**
  * Sends the welcome panel to the chat.
  * @param {RecentChat[]} chats List of recent chats
  * @param {boolean} [expand=false] If true, expands the recent chats section
@@ -286,7 +377,7 @@ async function sendWelcomePanel(chats, expand = false) {
             button.addEventListener('click', async () => {
                 if (welcomeCharactersCurrentPage > 1) {
                     welcomeCharactersCurrentPage--;
-                    await refreshWelcomeScreen();
+                    renderCharactersGridOnly();
                 }
             });
         });
@@ -296,7 +387,7 @@ async function sendWelcomePanel(chats, expand = false) {
                 const totalPages = Math.ceil(characters.length / CHARACTERS_PER_PAGE) || 1;
                 if (welcomeCharactersCurrentPage < totalPages) {
                     welcomeCharactersCurrentPage++;
-                    await refreshWelcomeScreen();
+                    renderCharactersGridOnly();
                 }
             });
         });
