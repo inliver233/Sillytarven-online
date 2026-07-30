@@ -92,24 +92,24 @@ function getOnlineDurationMs(handle) {
 async function evaluateEligibility(handle) {
     const config = await getUserInvitationConfig();
 
-    // 主邀请码系统未启用 → 用户系统也不可用
-    if (!isInvitationCodesEnabled()) {
-        return { eligible: false, reasons: ['邀请码功能未启用'], metrics: {}, config };
-    }
-    if (!config.enabled) {
-        return { eligible: false, reasons: ['用户发放系统已暂停'], metrics: {}, config, systemPaused: true };
-    }
-
-    // 读取用户对象拿 created（注册时间）
+    // 读取用户对象
     /** @type {any} */
     const user = await storage.getItem(toKey(handle));
     if (!user) {
         return { eligible: false, reasons: ['用户不存在'], metrics: {}, config };
     }
 
-    // 管理员直接拥有发放资格，无需满足注册/在线时长门槛
+    // 管理员：完全豁免（不受系统开关/门槛/配额限制），保证管理员随时可管理与发放
     if (user.admin) {
         return { eligible: true, reasons: [], metrics: {}, config, isAdmin: true };
+    }
+
+    // 以下仅普通用户：主邀请码系统未启用 → 用户系统也不可用
+    if (!isInvitationCodesEnabled()) {
+        return { eligible: false, reasons: ['邀请码功能未启用'], metrics: {}, config };
+    }
+    if (!config.enabled) {
+        return { eligible: false, reasons: ['用户发放系统已暂停'], metrics: {}, config, systemPaused: true };
     }
 
     const now = Date.now();
@@ -284,9 +284,14 @@ export async function getIssuerStats({ limit = 100 } = {}) {
  */
 export async function getMyInvitationData(handle) {
     const config = await getUserInvitationConfig();
-    // systemEnabled：功能总开关（非门槛信息，可明确告知前端，用于区分"已关闭"与"未达资格"）
-    const systemEnabled = config.enabled && isInvitationCodesEnabled();
-    const { eligible } = await isUserEligible(handle);
+    const evalResult = await evaluateEligibility(handle);
     const codes = await getUserIssuedInvitations(handle);
-    return { eligible, codes, systemEnabled };
+    // 管理员总能进入（便于管理与开启）；普通用户受系统开关限制
+    const systemEnabled = !!evalResult.isAdmin || (config.enabled && isInvitationCodesEnabled());
+    return {
+        eligible: evalResult.eligible,
+        codes,
+        systemEnabled,
+        isAdmin: !!evalResult.isAdmin,
+    };
 }
