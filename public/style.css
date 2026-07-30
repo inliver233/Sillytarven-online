@@ -21,6 +21,33 @@
     --doc-height: 100%;
     --transparent: rgba(0, 0, 0, 0);
 
+    /* ===== 顶级大厂 UX/UI 设计系统 Token (Apple / Google M3 风格) ===== */
+    /* 主主题色：克制的高雅天蓝点缀（无刺眼紫/粉） */
+    --st-primary: #3b82f6;
+    --st-primary-hover: #2563eb;
+    --st-primary-subtle: rgba(59, 130, 246, 0.12);
+    /* 容器背景分层（兼容 SmartTheme 动态主题系统） */
+    --st-surface-0: var(--SmartThemeBodyColor, #090d16);
+    --st-surface-1: var(--SmartThemeBlurTintColor, rgba(15, 23, 42, 0.75));
+    --st-surface-2: rgba(30, 41, 59, 0.50);
+    --st-surface-hover: rgba(255, 255, 255, 0.05);
+    /* 极细微 1px 优雅边缘 */
+    --st-border-subtle: var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.07));
+    --st-border-highlight: rgba(59, 130, 246, 0.35);
+    /* 文字色阶 */
+    --st-text-main: #f8fafc;
+    --st-text-secondary: #cbd5e1;
+    --st-text-muted: #64748b;
+    /* 自然沉稳阴影（摒弃刺眼发光） */
+    --st-shadow-card: 0 4px 16px -2px rgba(0, 0, 0, 0.25);
+    --st-shadow-hover: 0 8px 24px -4px rgba(0, 0, 0, 0.35);
+    /* 圆角阶梯 */
+    --st-radius-sm: 6px;
+    --st-radius-md: 10px;
+    --st-radius-lg: 16px;
+    /* Apple 级平滑缓动曲线 */
+    --st-ease-apple: cubic-bezier(0.16, 1, 0.3, 1);
+
     --black30a: rgba(0, 0, 0, 0.3);
     --black50a: rgba(0, 0, 0, 0.5);
     --black60a: rgba(0, 0, 0, 0.6);
@@ -806,7 +833,7 @@ hr {
     cursor: -webkit-grab;
     display: none;
     filter: drop-shadow(0px 0px 0px black);
-    transition: all var(--animation-duration-2x);
+    transition: opacity var(--animation-duration-2x), filter var(--animation-duration-2x);
     font-size: calc(var(--mainFontSize)*1.3);
 }
 
@@ -822,7 +849,7 @@ body .panelControlBar {
     min-width: 55px;
     justify-content: flex-end;
     gap: 0px;
-    transition: all var(--animation-duration-2x);
+    transition: opacity var(--animation-duration-2x);
 }
 
 .zoomed_avatar .panelControlBar {
@@ -2529,8 +2556,8 @@ body[data-stscript-style] .hljs.language-stscript {
     margin: 3px;
     opacity: 0.75;
     filter: grayscale(1);
-    -webkit-transition: all var(--animation-duration-2x) ease-in-out;
-    transition: all var(--animation-duration-2x) ease-in-out;
+    -webkit-transition: opacity var(--animation-duration-2x) ease-in-out, filter var(--animation-duration-2x) ease-in-out;
+    transition: opacity var(--animation-duration-2x) ease-in-out, filter var(--animation-duration-2x) ease-in-out;
 }
 
 #character_popup .editor_maximize:hover {
@@ -2688,8 +2715,8 @@ input[type="file"] {
     margin-top: 0;
     padding: 1px;
     filter: brightness(75%);
-    -webkit-transition: all var(--animation-duration-3x) ease-in-out;
-    transition: all var(--animation-duration-3x) ease-in-out;
+    -webkit-transition: filter var(--animation-duration-3x) ease-in-out;
+    transition: filter var(--animation-duration-3x) ease-in-out;
 }
 
 .right_menu_button.active,
@@ -2937,7 +2964,7 @@ input[type="file"] {
     aspect-ratio: 1 / 1;
     font-size: 20px;
     opacity: 0.5;
-    transition: all var(--animation-duration-2x);
+    transition: opacity var(--animation-duration-2x);
 }
 
 .floating_panel_maximize:hover,
@@ -2951,7 +2978,7 @@ input[type="file"] {
     aspect-ratio: 1 / 1;
     font-size: calc(var(--mainFontSize)*1.3);
     opacity: 0.5;
-    transition: all var(--animation-duration-2x);
+    transition: opacity var(--animation-duration-2x), filter var(--animation-duration-2x);
     filter: drop-shadow(0px 0px 2px black);
     text-shadow: none;
 }
@@ -4209,7 +4236,7 @@ input[type="range"] {
     background-repeat: no-repeat;
     box-shadow: inset 0 0 2px black;
     cursor: ew-resize;
-    transition: all var(--animation-duration-2x) ease-in-out;
+    transition: filter var(--animation-duration-2x) ease-in-out;
     filter: brightness(0.75);
 }
 
@@ -4345,7 +4372,7 @@ input[type="range"]::-webkit-slider-thumb {
     border-radius: 100%;
     box-shadow: 0 0 3px black;
     */
-    transition: all var(--animation-duration-2x);
+    transition: opacity var(--animation-duration-2x);
 }
 
 .topRightInset {
@@ -4398,7 +4425,7 @@ input[type="range"]::-webkit-slider-thumb {
     gap: 4px;
     flex-wrap: nowrap;
     justify-content: flex-end;
-    transition: all var(--animation-duration-2x);
+    transition: opacity var(--animation-duration-2x), transform var(--animation-duration-2x);
     overflow-x: hidden;
     padding: 1px;
 }
@@ -5042,7 +5069,7 @@ a:hover {
     display: none;
     position: relative;
     width: fit-content;
-    transition: all var(--animation-duration);
+    transition: opacity var(--animation-duration);
     border-radius: 5px;
     overflow: hidden;
 }
@@ -5263,7 +5290,7 @@ body:not(.caption) .mes_img_caption {
     border-radius: 10px;
     padding: 2px 5px;
     border: 1px solid var(--SmartThemeBorderColor);
-    transition: all var(--animation-duration-2x);
+    transition: background-color var(--animation-duration-2x), border-color var(--animation-duration-2x), color var(--animation-duration-2x);
 }
 
 .standoutHeader.inline-drawer-header {
@@ -5346,12 +5373,12 @@ body:has(#character_popup.open) #top-settings-holder:has(.drawer-content.openDra
 }
 
 .drawer-icon.openIcon {
-    transition: all var(--animation-duration-2x);
+    transition: opacity var(--animation-duration-2x), transform var(--animation-duration-2x);
 }
 
 .drawer-icon.closedIcon {
     opacity: 0.3;
-    transition: all var(--animation-duration-2x);
+    transition: opacity var(--animation-duration-2x), transform var(--animation-duration-2x);
 }
 
 .drawer-icon.closedIcon:hover {
@@ -5787,7 +5814,7 @@ body:not(.movingUI) .drawer-content.maximized {
     aspect-ratio: 1 / 1;
     font-size: 20px;
     opacity: 0.5;
-    transition: all var(--animation-duration-2x);
+    transition: opacity var(--animation-duration-2x);
 }
 
 /* #groupMemberListPopout,
