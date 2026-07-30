@@ -278,7 +278,7 @@ import { clearItemizedPrompts, deleteItemizedPrompts, findItemizedPromptSet, ini
 import { getSystemMessageByType, initSystemMessages, SAFETY_CHAT, sendSystemMessage, system_message_types, system_messages } from './scripts/system-messages.js';
 import { event_types, eventSource } from './scripts/events.js';
 import { initAccessibility } from './scripts/a11y.js';
-import { applyStreamFadeIn } from './scripts/util/stream-fadein.js';
+import { applyStreamFadeIn, StreamRenderBuffer } from './scripts/util/stream-fadein.js';
 import { initDomHandlers } from './scripts/dom-handlers.js';
 import { SimpleMutex } from './scripts/util/SimpleMutex.js';
 import { AudioPlayer } from './scripts/audio-player.js';
@@ -464,6 +464,8 @@ let dialogueCloseStop = false;
 export let chat_metadata = {};
 /** @type {StreamingProcessor} */
 export let streamingProcessor = null;
+/** @type {StreamRenderBuffer | null} 流式渲染 rAF 节流合帧器（单例，随单条流复用） */
+let streamRenderBuffer = null;
 let crop_data = undefined;
 let is_delete_mode = false;
 let fav_ch_checked = false;
@@ -3819,21 +3821,36 @@ class StreamingProcessor {
                 };
             }
 
-            const formattedText = messageFormatting(
-                processedText,
-                chat[messageId].name,
-                chat[messageId].is_system,
-                chat[messageId].is_user,
-                messageId,
-                {},
-                false,
-            );
-            if (this.messageTextDom instanceof HTMLElement) {
-                if (power_user.stream_fade_in) {
-                    applyStreamFadeIn(this.messageTextDom, formattedText);
-                } else {
-                    this.messageTextDom.innerHTML = formattedText;
+            // messageFormatting 是昂贵的全量 Markdown 重绘；用 rAF 节流合帧避免每个 chunk 全量重绘。
+            // chat[messageId].mes 等状态在上面已每帧同步更新（真相源），此处只节流“渲染”。
+            if (!streamRenderBuffer) {
+                streamRenderBuffer = new StreamRenderBuffer();
+            }
+            const renderMessageText = () => {
+                const formattedText = messageFormatting(
+                    processedText,
+                    chat[messageId].name,
+                    chat[messageId].is_system,
+                    chat[messageId].is_user,
+                    messageId,
+                    {},
+                    false,
+                );
+                if (this.messageTextDom instanceof HTMLElement) {
+                    if (power_user.stream_fade_in) {
+                        applyStreamFadeIn(this.messageTextDom, formattedText);
+                    } else {
+                        this.messageTextDom.innerHTML = formattedText;
+                    }
                 }
+            };
+
+            if (isFinal) {
+                // 终帧：丢弃未决的中间帧（防止其回调在终帧之后用过期文本覆盖导致丢字），同步完整渲染
+                streamRenderBuffer.cancel();
+                renderMessageText();
+            } else {
+                streamRenderBuffer.schedule(renderMessageText);
             }
 
             const timeStartedValue = this.timeStarted instanceof Date ? this.timeStarted.getTime() : this.timeStarted;
@@ -3909,6 +3926,8 @@ class StreamingProcessor {
     }
 
     onErrorStreaming() {
+        // 错误时强制应用最后一次缓冲的渲染帧，避免延迟到下一个 rAF
+        streamRenderBuffer?.flush();
         this.abortController.abort();
         this.isStopped = true;
 
