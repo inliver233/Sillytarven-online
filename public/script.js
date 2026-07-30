@@ -8075,28 +8075,52 @@ async function doOnboarding(avatarId) {
     }
 }
 
-function reloadLoop() {
-    const MAX_RELOADS = 5;
-    let reloads = Number(sessionStorage.getItem('reloads') || 0);
-    if (reloads < MAX_RELOADS) {
-        reloads++;
-        sessionStorage.setItem('reloads', String(reloads));
-        window.location.reload();
+/**
+ * 带指数退避的 /api/settings/get 重试 (1s -> 2s -> 4s -> 8s)
+ * 取代旧的整页刷新风暴：服务器未就绪时原地重试只读请求，
+ * 利用首屏 Preloader 的状态文本展示重试进度，禁止 location.reload()。
+ * @returns {Promise<Response>} 成功的响应对象
+ */
+async function fetchSettingsWithRetry() {
+    const BACKOFF_DELAYS = [1000, 2000, 4000, 8000];
+    let lastError = null;
+
+    for (let attempt = 0; attempt <= BACKOFF_DELAYS.length; attempt++) {
+        try {
+            const response = await fetch('/api/settings/get', {
+                method: 'POST',
+                headers: getRequestHeaders(),
+                body: JSON.stringify({}),
+                cache: 'no-cache',
+            });
+
+            if (response.ok) {
+                sessionStorage.removeItem('reloads');
+                return response;
+            }
+            lastError = new Error(`Settings HTTP ${response.status}`);
+        } catch (error) {
+            lastError = error;
+        }
+
+        if (attempt < BACKOFF_DELAYS.length) {
+            const waitSec = Math.round(BACKOFF_DELAYS[attempt] / 1000);
+            updateLoaderProgress(undefined, `服务器响应较慢，${waitSec} 秒后重试（第 ${attempt + 1} 次）…`);
+            await delay(BACKOFF_DELAYS[attempt]);
+        }
     }
+
+    updateLoaderProgress(undefined, '服务器暂未就绪，请稍后刷新页面重试');
+    throw lastError ?? new Error('Settings fetch failed');
 }
 
 //MARK: getSettings()
 ///////////////////////////////////////////
 export async function getSettings() {
-    const response = await fetch('/api/settings/get', {
-        method: 'POST',
-        headers: getRequestHeaders(),
-        body: JSON.stringify({}),
-        cache: 'no-cache',
-    });
-
-    if (!response.ok) {
-        reloadLoop();
+    let response;
+    try {
+        response = await fetchSettingsWithRetry();
+    } catch {
         toastr.error(t`Settings could not be loaded after multiple attempts. Please try again later.`);
         throw new Error('Error getting settings');
     }
