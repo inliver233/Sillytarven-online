@@ -1,3 +1,4 @@
+// public/scripts/loader.js
 import { POPUP_RESULT, POPUP_TYPE, Popup } from './popup.js';
 
 /** @type {Popup} */
@@ -6,10 +7,11 @@ let preloaderYoinked = false;
 
 /**
  * 动态更新载入屏进度与状态文本
- * @param {number} [percentage] 0 - 100 进度百分比（省略则只更新状态文本）
+ * @param {number} [percentage] 0 - 100 进度百分比（省略则只更新状态文本，不改动进度）
  * @param {string} [statusText] 中文状态描述（省略则保留原文本）
  */
 export function updateLoaderProgress(percentage, statusText) {
+    // 仅在传入有效数字时更新进度，避免 undefined/NaN 破坏百分比与宽度显示
     if (typeof percentage === 'number' && !Number.isNaN(percentage)) {
         const clamped = Math.min(100, Math.max(0, percentage));
         const bar = document.getElementById('st-loader-progress-bar');
@@ -26,66 +28,60 @@ export function updateLoaderProgress(percentage, statusText) {
 
 /**
  * 显示载入屏
- * - 首屏场景：#preloader 仍在 DOM 中，确保可见即可（不重置进度，由 firstLoadInit 埋点驱动）
+ * - 首屏场景：#preloader 仍在 DOM 中，确保可见并推进基础进度
  * - 后续场景：#preloader 已被移除，回退到 Popup 备用加载器
- * @param {string} [statusText] 可选的状态文本（仅首屏生效）
+ * @param {string} [statusText] 可选的状态文本
  */
-export function showLoader(statusText) {
+export function showLoader(statusText = '加载中...') {
     const preloader = document.getElementById('preloader');
     if (preloader) {
         preloader.style.display = 'flex';
         preloader.style.opacity = '1';
         preloader.style.filter = 'none';
-        if (statusText) updateLoaderProgress(undefined, statusText);
+        updateLoaderProgress(20, statusText);
         return;
     }
 
     // 备用 Popup 加载器 (后续加载场景)
     if (loaderPopup) loaderPopup.complete(POPUP_RESULT.CANCELLED);
-
     loaderPopup = new Popup(`
         <div id="loader">
-            <div id="load-spinner" class="fa-solid fa-circle-notch fa-spin fa-3x"></div>
+            <div id="load-spinner" class="fa-solid fa-circle-notch fa-spin fa-2x" style="color: #3b82f6;"></div>
         </div>`, POPUP_TYPE.DISPLAY, null, { transparent: true, animation: 'none', wide: true, large: true });
-
-    // 加载器不可关闭
     loaderPopup.closeButton.style.display = 'none';
     loaderPopup.show();
 }
 
 /**
- * 隐藏载入屏
- * - 首屏场景：将进度推到 100%，350ms 平滑淡出后移除 #preloader
- * - Popup 场景：直接关闭备用 Popup
+ * 隐藏载入屏：将进度推到 100%，380ms 平滑淡出后移除 #preloader
  * @returns {Promise<void>}
  */
 export async function hideLoader() {
-    const preloader = document.getElementById('preloader');
-    if (preloader) {
+    return new Promise((resolve) => {
         updateLoaderProgress(100, '加载完成，准备就绪！');
-        return new Promise((resolve) => {
+
+        const preloader = document.getElementById('preloader');
+        if (preloader) {
             preloader.style.opacity = '0';
-            preloader.style.filter = 'blur(8px)';
+            preloader.style.filter = 'blur(12px)';
+
             setTimeout(() => {
                 yoinkPreloader();
                 resolve();
-            }, 350);
-        });
-    }
+            }, 380);
+            return;
+        }
 
-    if (!loaderPopup) {
-        console.warn('There is no loader showing to hide');
-        return Promise.resolve();
-    }
-
-    const popup = loaderPopup;
-    return new Promise((resolve) => {
-        popup.complete(POPUP_RESULT.AFFIRMATIVE)
-            .catch((err) => console.error('Error completing loaderPopup:', err))
-            .finally(() => {
-                if (loaderPopup === popup) loaderPopup = null;
-                resolve();
-            });
+        if (loaderPopup) {
+            loaderPopup.complete(POPUP_RESULT.AFFIRMATIVE)
+                .catch((err) => console.error('Error completing loaderPopup:', err))
+                .finally(() => {
+                    loaderPopup = null;
+                    resolve();
+                });
+        } else {
+            resolve();
+        }
     });
 }
 

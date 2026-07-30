@@ -1,6 +1,5 @@
-/* ===== 顶级大厂 UX/UI 极简沉浸式 Preloader 全局样式 (Apple / Google M3 风格) ===== */
-#preloader,
-#loader-overlay {
+/* ===== 顶级 Glassmorphic Preloader 全局样式 (Apple macOS Sequoia / Windows Fluent 极光磨砂) ===== */
+#preloader, #loader-overlay {
     position: fixed;
     top: 0;
     left: 0;
@@ -9,59 +8,118 @@
     height: 100vh;
     width: 100dvw;
     height: 100dvh;
-    background: radial-gradient(circle at center, rgba(15, 23, 42, 0.96) 0%, rgba(9, 13, 22, 0.99) 100%);
+    background: #090d16; /* 深邃 Slate 深色底色 */
     display: flex;
     align-items: center;
     justify-content: center;
+    overflow: hidden;
     opacity: 1;
-    transition: opacity 0.35s var(--st-ease-apple, cubic-bezier(0.16, 1, 0.3, 1)),
-                filter 0.35s var(--st-ease-apple, cubic-bezier(0.16, 1, 0.3, 1));
+    transition: opacity 0.4s cubic-bezier(0.16, 1, 0.3, 1), filter 0.4s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
+/* ===== 1. 背景弥散极光光晕 (核心：为 backdrop-filter 提供折射源) ===== */
+.st-loader-aura {
+    position: absolute;
+    border-radius: 50%;
+    filter: blur(90px);
+    opacity: 0.35;
+    pointer-events: none;
+    will-change: transform;
+}
+
+.st-aura-1 {
+    width: 480px;
+    height: 480px;
+    background: radial-gradient(circle, #3b82f6 0%, rgba(59, 130, 246, 0) 70%);
+    top: calc(50% - 300px);
+    left: calc(50% - 280px);
+    animation: st-aura-float-1 12s ease-in-out infinite alternate;
+}
+
+.st-aura-2 {
+    width: 420px;
+    height: 420px;
+    background: radial-gradient(circle, #06b6d4 0%, rgba(6, 182, 212, 0) 70%);
+    bottom: calc(50% - 260px);
+    right: calc(50% - 260px);
+    animation: st-aura-float-2 10s ease-in-out infinite alternate;
+}
+
+.st-aura-3 {
+    width: 350px;
+    height: 350px;
+    background: radial-gradient(circle, #6366f1 0%, rgba(99, 102, 241, 0) 70%);
+    top: calc(50% - 170px);
+    right: calc(50% - 180px);
+    animation: st-aura-float-1 15s ease-in-out infinite alternate-reverse;
+}
+
+/* ===== 2. 高透磨砂玻璃面板 (Apple macOS Sequoia 级折射) ===== */
 .st-loader-card {
+    position: relative;
+    z-index: 2;
     display: flex;
     flex-direction: column;
     align-items: center;
-    padding: 40px 36px;
+    padding: 42px 36px 36px 36px;
     width: 90%;
-    max-width: 360px;
-    background: var(--SmartThemeBlurTintColor, rgba(15, 23, 42, 0.70));
-    border: 1px solid var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.08));
-    border-radius: 16px;
-    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.35);
-    backdrop-filter: blur(20px);
-    -webkit-backdrop-filter: blur(20px);
+    max-width: 380px;
+    background: rgba(15, 23, 42, 0.55); /* 55% 高透 Slate 背景 */
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-top: 1px solid rgba(255, 255, 255, 0.22); /* 顶部物理光感亮边 */
+    border-radius: 24px;
+    box-shadow:
+        0 24px 60px -12px rgba(0, 0, 0, 0.6),
+        0 0 40px rgba(59, 130, 246, 0.15),
+        inset 0 1px 1px rgba(255, 255, 255, 0.18); /* 内微光反射 */
+    backdrop-filter: blur(28px) saturate(180%); /* 苹果级饱和度升频磨砂 */
+    -webkit-backdrop-filter: blur(28px) saturate(180%);
     box-sizing: border-box;
     text-align: center;
 }
 
-/* Logo 徽章 (极简微阴影) */
-.st-loader-logo {
-    width: 56px;
-    height: 56px;
-    margin-bottom: 20px;
+/* Logo 徽章与柔和背光 */
+.st-loader-logo-wrapper {
+    position: relative;
+    width: 60px;
+    height: 60px;
+    margin-bottom: 22px;
     display: flex;
     align-items: center;
     justify-content: center;
 }
 
-.st-loader-logo img {
+.st-loader-logo-glow {
+    position: absolute;
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    background: rgba(59, 130, 246, 0.4);
+    filter: blur(16px);
+    z-index: 0;
+}
+
+.st-loader-logo {
+    position: relative;
+    z-index: 1;
     width: 100%;
     height: 100%;
     object-fit: contain;
-    filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.3));
+    filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.4));
 }
 
-.st-loader-logo i {
+#st-loader-fallback-icon {
+    position: relative;
+    z-index: 1;
     font-size: 2.2rem;
-    color: var(--st-primary, #3b82f6);
+    color: #3b82f6;
 }
 
-/* Apple 级克制单色 Spinner */
+/* Apple 级极简环形 Spinner */
 .st-loader-spinner-container {
     position: relative;
-    width: 44px;
-    height: 44px;
+    width: 40px;
+    height: 40px;
     margin-bottom: 20px;
 }
 
@@ -70,24 +128,35 @@
     height: 100%;
     border-radius: 50%;
     border: 2.5px solid rgba(255, 255, 255, 0.08);
-    border-top-color: var(--st-primary, #3b82f6);
-    border-right-color: rgba(59, 130, 246, 0.4);
-    animation: st-spin 0.9s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+    border-top-color: #3b82f6;
+    border-right-color: #06b6d4;
+    animation: st-spin 0.85s cubic-bezier(0.4, 0, 0.2, 1) infinite;
     will-change: transform;
 }
 
-/* 标题与描述文字 (克制不张扬) */
+.st-loader-ring-glow {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    box-shadow: 0 0 15px rgba(59, 130, 246, 0.4);
+    pointer-events: none;
+}
+
+/* 标题与中文描述文字 (高雅 Slate 中性色) */
 .st-loader-title {
-    font-size: 1.1rem;
+    font-size: 1.15rem;
     font-weight: 600;
-    color: var(--SmartThemeBodyColor, #f8fafc);
-    letter-spacing: 0.3px;
+    color: #f8fafc;
+    letter-spacing: 0.5px;
     margin-bottom: 6px;
 }
 
 .st-loader-status {
-    font-size: 0.82rem;
-    color: var(--SmartThemeQuoteColor, #94a3b8);
+    font-size: 0.84rem;
+    color: #cbd5e1; /* 高雅 Slate 300 替代突兀橙色 */
     height: 20px;
     line-height: 20px;
     margin-bottom: 24px;
@@ -95,48 +164,93 @@
     overflow: hidden;
     text-overflow: ellipsis;
     width: 100%;
-    transition: opacity 0.2s ease;
+    font-weight: 400;
 }
 
-/* 进度条轨道 (M3 极细平滑轨道) */
+/* 进度条轨道 (M3 极细光纤风格) */
 .st-loader-progress-box {
     width: 100%;
     display: flex;
     flex-direction: column;
-    align-items: center;
     gap: 8px;
 }
 
 .st-loader-progress-track {
+    position: relative;
     width: 100%;
-    height: 4px;
+    height: 6px;
     background: rgba(255, 255, 255, 0.08);
-    border-radius: 4px;
+    border-radius: 99px;
     overflow: hidden;
+    box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.4);
 }
 
 .st-loader-progress-bar {
+    position: relative;
     height: 100%;
-    background: var(--st-primary, #3b82f6);
-    border-radius: 4px;
-    transition: width 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    background: linear-gradient(90deg, #3b82f6 0%, #06b6d4 100%);
+    border-radius: 99px;
+    box-shadow: 0 0 12px rgba(59, 130, 246, 0.6);
+    transition: width 0.35s cubic-bezier(0.16, 1, 0.3, 1);
     will-change: width;
+    overflow: hidden;
+}
+
+/* 进度条微光扫过效果 */
+.st-loader-progress-shimmer {
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(90deg, transparent 0%, rgba(255, 255, 255, 0.4) 50%, transparent 100%);
+    animation: st-shimmer 2s infinite;
 }
 
 .st-loader-progress-info {
     display: flex;
-    justify-content: flex-end;
+    justify-content: space-between;
+    align-items: center;
     width: 100%;
+    padding: 0 2px;
+}
+
+.st-loader-progress-label {
+    font-size: 0.68rem;
+    font-weight: 600;
+    letter-spacing: 1px;
+    color: #64748b;
 }
 
 .st-loader-progress-text {
-    font-size: 0.75rem;
-    font-weight: 500;
-    color: var(--SmartThemeQuoteColor, #64748b);
-    font-variant-numeric: tabular-nums; /* 数字等宽避抖 */
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: #38bdf8;
+    font-variant-numeric: tabular-nums; /* 数字防跳动 */
 }
 
-/* 兼容原有 Popup 备用系统的 #loader 遮罩 */
+/* Keyframe 硬件加速动画 (仅 transform/opacity，GPU 友好) */
+@keyframes st-spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+@keyframes st-shimmer {
+    0% { transform: translateX(0); }
+    100% { transform: translateX(200%); }
+}
+
+@keyframes st-aura-float-1 {
+    0% { transform: translate(0, 0) scale(1); }
+    100% { transform: translate(60px, 40px) scale(1.15); }
+}
+
+@keyframes st-aura-float-2 {
+    0% { transform: translate(0, 0) scale(1); }
+    100% { transform: translate(-50px, -35px) scale(1.1); }
+}
+
+/* ===== 兼容原有 Popup 备用系统的 #loader 遮罩 (首屏后调用回退路径) ===== */
 #loader {
     display: flex;
     align-items: center;
@@ -145,26 +259,25 @@
 }
 
 #load-spinner {
-    color: var(--st-primary, #3b82f6);
+    color: #3b82f6;
     transition: opacity 0.3s ease, filter 0.3s ease;
-}
-
-/* GPU 硬件加速匀速 Keyframe 动画 (只作用于 transform) */
-@keyframes st-spin {
-    0% { transform: rotate(0deg); }
-    100% { transform: rotate(360deg); }
 }
 
 /* 移动端平稳自适应 */
 @media (max-width: 480px) {
     .st-loader-card {
-        padding: 32px 24px;
-        width: 85%;
+        padding: 36px 24px 28px 24px;
+        width: 86%;
+        border-radius: 20px;
     }
 }
 
 /* 尊重用户的减少动画偏好 */
 @media (prefers-reduced-motion: reduce) {
+    .st-loader-aura,
+    .st-loader-progress-shimmer {
+        animation: none;
+    }
     .st-loader-ring {
         animation-duration: 2.4s;
     }

@@ -51,30 +51,41 @@
 </head>
 
 <body class="no-blur">
-    <!-- 顶级大厂 UX/UI 极简沉浸式 Preloader 载入屏幕 -->
+    <!-- 顶级 Apple macOS / Windows Fluent 极光磨砂玻璃 Preloader -->
     <div id="preloader">
+        <!-- 1. 背景弥散极光光晕 (为高斯模糊提供折射源) -->
+        <div class="st-loader-aura st-aura-1"></div>
+        <div class="st-loader-aura st-aura-2"></div>
+        <div class="st-loader-aura st-aura-3"></div>
+
+        <!-- 2. 高透磨砂玻璃卡片 -->
         <div class="st-loader-card">
-            <!-- 顶部品牌 Logo / 徽章 -->
-            <div class="st-loader-logo">
-                <img src="img/logo.png" alt="SillyTavern Logo" onerror="this.style.display='none'; document.getElementById('st-loader-fallback-icon').style.display='block';">
+            <!-- Logo 徽章与发光底晕 -->
+            <div class="st-loader-logo-wrapper">
+                <div class="st-loader-logo-glow"></div>
+                <img src="img/logo.png" alt="SillyTavern Logo" class="st-loader-logo" onerror="this.style.display='none'; document.getElementById('st-loader-fallback-icon').style.display='block';">
                 <i id="st-loader-fallback-icon" class="fa-solid fa-wine-glass-empty" style="display:none;"></i>
             </div>
 
-            <!-- Apple 级克制单色微光 Spinner -->
+            <!-- Apple 级同调双色微光 Spinner -->
             <div class="st-loader-spinner-container">
                 <div class="st-loader-ring"></div>
+                <div class="st-loader-ring-glow"></div>
             </div>
 
-            <!-- 标题与中文状态描述 -->
+            <!-- 标题与状态提示 (色彩统一收敛) -->
             <div class="st-loader-title">SillyTavern 云酒馆</div>
-            <div id="st-loader-status" class="st-loader-status">正在初始化系统核心...</div>
+            <div id="st-loader-status" class="st-loader-status">正在初始化系统核心组件...</div>
 
-            <!-- M3 风格拉丝进度条与百分比 -->
+            <!-- 动态流光进度条与百分比 -->
             <div class="st-loader-progress-box">
                 <div class="st-loader-progress-track">
-                    <div id="st-loader-progress-bar" class="st-loader-progress-bar" style="width: 5%;"></div>
+                    <div id="st-loader-progress-bar" class="st-loader-progress-bar" style="width: 5%;">
+                        <div class="st-loader-progress-shimmer"></div>
+                    </div>
                 </div>
                 <div class="st-loader-progress-info">
+                    <span class="st-loader-progress-label">SYSTEM LOADING</span>
                     <span id="st-loader-progress-text" class="st-loader-progress-text">5%</span>
                 </div>
             </div>
