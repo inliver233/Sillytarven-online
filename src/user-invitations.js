@@ -107,6 +107,11 @@ async function evaluateEligibility(handle) {
         return { eligible: false, reasons: ['用户不存在'], metrics: {}, config };
     }
 
+    // 管理员直接拥有发放资格，无需满足注册/在线时长门槛
+    if (user.admin) {
+        return { eligible: true, reasons: [], metrics: {}, config, isAdmin: true };
+    }
+
     const now = Date.now();
     const registeredDays = (now - (user.created || now)) / 86_400_000;
     const onlineHours = getOnlineDurationMs(handle) / 3_600_000;
@@ -209,10 +214,17 @@ export async function issueUserInvitation(handle) {
             return { success: false, reason: '未达到发放邀请码的资格' };
         }
 
-        // 2. 配额
-        const quota = await evaluateQuota(handle, elig.config);
-        if (!quota.canIssue) {
-            return { success: false, reason: quota.quotaReason };
+        // 2. 配额（管理员豁免周期配额与未使用上限，仅保留全局上限保护）
+        if (elig.isAdmin) {
+            const all = await getAllInvitationCodes();
+            if (all.length >= elig.config.maxTotalCodes) {
+                return { success: false, reason: '系统邀请码总量已达上限，请联系管理员' };
+            }
+        } else {
+            const quota = await evaluateQuota(handle, elig.config);
+            if (!quota.canIssue) {
+                return { success: false, reason: quota.quotaReason };
+            }
         }
 
         // 3. 真正创建（永久码）
