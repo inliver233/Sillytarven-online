@@ -258,7 +258,7 @@ router.get('/', async function (request, response) {
             const contentType = mime.lookup(pathToOriginalFile) || 'image/png';
             response.setHeader('Content-Type', contentType);
 
-            return response.sendFile(pathToOriginalFile, { headers: { 'Cache-Control': PRIVATE_CACHE_CONTROL } });
+            return response.sendFile(path.resolve(pathToOriginalFile), { headers: { 'Cache-Control': PRIVATE_CACHE_CONTROL } });
         }
 
         const pathToCachedFile = await generateThumbnail(request.user.directories, type, file);
@@ -274,7 +274,7 @@ router.get('/', async function (request, response) {
         const contentType = mime.lookup(pathToCachedFile) || 'image/jpeg';
         response.setHeader('Content-Type', contentType);
 
-        return response.sendFile(pathToCachedFile, { headers: { 'Cache-Control': PRIVATE_CACHE_CONTROL } });
+        return response.sendFile(path.resolve(pathToCachedFile), { headers: { 'Cache-Control': PRIVATE_CACHE_CONTROL } });
     } catch (error) {
         console.error('Failed getting thumbnail', error);
         return response.sendStatus(500);
