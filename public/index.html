@@ -51,7 +51,35 @@
 </head>
 
 <body class="no-blur">
-    <div id="preloader"></div>
+    <!-- 顶级大厂 UX/UI 极简沉浸式 Preloader 载入屏幕 -->
+    <div id="preloader">
+        <div class="st-loader-card">
+            <!-- 顶部品牌 Logo / 徽章 -->
+            <div class="st-loader-logo">
+                <img src="img/logo.png" alt="SillyTavern Logo" onerror="this.style.display='none'; document.getElementById('st-loader-fallback-icon').style.display='block';">
+                <i id="st-loader-fallback-icon" class="fa-solid fa-wine-glass-empty" style="display:none;"></i>
+            </div>
+
+            <!-- Apple 级克制单色微光 Spinner -->
+            <div class="st-loader-spinner-container">
+                <div class="st-loader-ring"></div>
+            </div>
+
+            <!-- 标题与中文状态描述 -->
+            <div class="st-loader-title">SillyTavern 云酒馆</div>
+            <div id="st-loader-status" class="st-loader-status">正在初始化系统核心...</div>
+
+            <!-- M3 风格拉丝进度条与百分比 -->
+            <div class="st-loader-progress-box">
+                <div class="st-loader-progress-track">
+                    <div id="st-loader-progress-bar" class="st-loader-progress-bar" style="width: 5%;"></div>
+                </div>
+                <div class="st-loader-progress-info">
+                    <span id="st-loader-progress-text" class="st-loader-progress-text">5%</span>
+                </div>
+            </div>
+        </div>
+    </div>
     <div id="bg1"></div>
     <div id="character_context_menu" class="hidden">
         <ul>

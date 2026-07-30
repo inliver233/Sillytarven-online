@@ -245,7 +245,7 @@ import {
     isPersonaPanelOpen,
 } from './scripts/personas.js';
 import { getBackgrounds, initBackgrounds, loadBackgroundSettings, background_settings } from './scripts/backgrounds.js';
-import { hideLoader, showLoader } from './scripts/loader.js';
+import { hideLoader, showLoader, updateLoaderProgress } from './scripts/loader.js';
 import { BulkEditOverlay } from './scripts/BulkEditOverlay.js';
 import { initTextGenModels } from './scripts/textgen-models.js';
 import { appendFileContent, hasPendingFileAttachment, populateFileAttachment, decodeStyleTags, encodeStyleTags, isExternalMediaAllowed, preserveNeutralChat, restoreNeutralChat, formatCreatorNotes, initChatUtilities, addDOMPurifyHooks } from './scripts/chats.js';
@@ -811,6 +811,7 @@ export async function pingServer() {
 async function firstLoadInit() {
  // 设置全局fetch拦截器，处理用户过期
     setupFetchInterceptor();
+    updateLoaderProgress(10, '正在验证身份与安全 Token...');
     try {
         const tokenResponse = await fetch('/csrf-token');
         const tokenData = await tokenResponse.json();
@@ -820,7 +821,7 @@ async function firstLoadInit() {
         throw new Error('Initialization failed');
     }
 
-    showLoader();
+    showLoader('正在初始化应用底层组件...');
     registerPromptManagerMigration();
     initDomHandlers();
     initStandaloneMode();
@@ -830,6 +831,7 @@ async function firstLoadInit() {
     reloadMarkdownProcessor();
     applyBrowserFixes();
     await getClientVersion();
+    updateLoaderProgress(35, '正在载入语言包与密钥配置...');
     await initSecrets();
     await readSecretState();
     await initLocales();
@@ -847,11 +849,13 @@ async function firstLoadInit() {
     await initPresetManager();
     await initSystemMessages();
     await getSettings();
+    updateLoaderProgress(60, '正在装载标签、宏与界面配置...');
     initKeyboard();
     initDynamicStyles();
     initTags();
     initBookmarks();
     initMacros();
+    updateLoaderProgress(80, '正在同步角色卡与用户数据...');
     await getUserAvatars(true, user_avatar);
     await getCharacters();
     await getBackgrounds();
@@ -879,6 +883,7 @@ async function firstLoadInit() {
     initAccessibility();
     addDebugFunctions();
     doDailyExtensionUpdatesCheck();
+    updateLoaderProgress(95, '正在构建界面面板与欢迎屏...');
     await hideLoader();
     await fixViewport();
     await eventSource.emit(event_types.APP_READY);
