@@ -1145,8 +1145,15 @@ async function refreshMyInvitations(template) {
         }
         const data = await response.json();
 
-        // 资格状态：未达资格不透露门槛
-        if (data.eligible) {
+        // 系统关闭优先判断（关闭状态非门槛，可明确告知用户）
+        if (data.systemEnabled === false) {
+            statusBox.html(
+                '<div style="padding: 12px 16px; border-radius: 10px; background: rgba(255,255,255,0.04); border: 1px solid var(--st-border-subtle, rgba(255,255,255,0.07)); color: var(--st-text-secondary, #cbd5e1);">' +
+                '<i class="fa-fw fa-solid fa-lock" style="color: var(--st-text-muted, #64748b); margin-right: 6px;"></i>' +
+                '邀请码发放功能当前已关闭</div>'
+            );
+            genBox.hide();
+        } else if (data.eligible) {
             statusBox.html(
                 '<div style="padding: 12px 16px; border-radius: 10px; background: var(--st-primary-subtle, rgba(59,130,246,0.12)); border: 1px solid var(--st-border-highlight, rgba(59,130,246,0.35)); color: var(--st-text-main, #f8fafc);">' +
                 '<i class="fa-fw fa-solid fa-circle-check" style="color: var(--st-primary, #3b82f6); margin-right: 6px;"></i>' +

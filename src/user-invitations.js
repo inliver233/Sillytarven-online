@@ -271,7 +271,10 @@ export async function getIssuerStats({ limit = 100 } = {}) {
  * @returns {Promise<{eligible: boolean, codes: object[]}>}
  */
 export async function getMyInvitationData(handle) {
+    const config = await getUserInvitationConfig();
+    // systemEnabled：功能总开关（非门槛信息，可明确告知前端，用于区分"已关闭"与"未达资格"）
+    const systemEnabled = config.enabled && isInvitationCodesEnabled();
     const { eligible } = await isUserEligible(handle);
     const codes = await getUserIssuedInvitations(handle);
-    return { eligible, codes };
+    return { eligible, codes, systemEnabled };
 }
