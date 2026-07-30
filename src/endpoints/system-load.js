@@ -1,6 +1,10 @@
 import express from 'express';
 import systemMonitor from '../system-monitor.js';
 import { requireAdminMiddleware } from '../users.js';
+import {
+    clearSystemStatsPreservingInvitationDurations,
+    resetUserStatsPreservingInvitationDuration,
+} from '../user-invitations.js';
 
 export const router = express.Router();
 
@@ -55,7 +59,7 @@ router.get('/users/:userHandle', requireAdminMiddleware, async (request, respons
 router.post('/users/:userHandle/reset', requireAdminMiddleware, async (request, response) => {
     try {
         const { userHandle } = request.params;
-        systemMonitor.resetUserStats(userHandle);
+        await resetUserStatsPreservingInvitationDuration(userHandle);
         response.json({ success: true });
     } catch (error) {
         console.error('Error resetting user stats:', error);
@@ -66,7 +70,7 @@ router.post('/users/:userHandle/reset', requireAdminMiddleware, async (request, 
 // 清除所有统计数据（管理员功能）
 router.post('/clear', requireAdminMiddleware, async (request, response) => {
     try {
-        systemMonitor.clearAllStats();
+        await clearSystemStatsPreservingInvitationDurations();
         response.json({ success: true });
     } catch (error) {
         console.error('Error clearing stats:', error);

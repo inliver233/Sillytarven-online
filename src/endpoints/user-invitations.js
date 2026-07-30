@@ -9,6 +9,7 @@
  *   GET  /api/user-invitations/config       读规则配置
  *   POST /api/user-invitations/config       写规则配置
  *   GET  /api/user-invitations/issuer-stats 发放者统计（谁邀请了谁）
+ *   DELETE /api/user-invitations/:code      撤销用户系统邀请码
  */
 import express from 'express';
 import { requireLoginMiddleware, requireAdminMiddleware } from '../users.js';
@@ -17,14 +18,15 @@ import {
     issueUserInvitation,
     getUserInvitationConfig,
     setUserInvitationConfig,
-    getIssuerStats,
+    getUserInvitationAdminData,
+    deleteUserInvitation,
 } from '../user-invitations.js';
 
 export const router = express.Router();
 
 /** 从请求中取当前用户 handle */
 function getHandle(request) {
-    return request.session?.handle || request.user?.profile?.handle || null;
+    return request.user?.profile?.handle || null;
 }
 
 // ===== 用户级 =====
@@ -92,10 +94,29 @@ router.post('/config', requireAdminMiddleware, async (request, response) => {
 router.get('/issuer-stats', requireAdminMiddleware, async (request, response) => {
     try {
         const limit = Math.min(1000, Math.max(1, Number(request.query.limit) || 100));
-        const stats = await getIssuerStats({ limit });
-        response.json({ stats });
+        const data = await getUserInvitationAdminData({ limit });
+        response.json(data);
     } catch (error) {
         console.error('GET /api/user-invitations/issuer-stats failed:', error);
         response.status(500).json({ error: '获取统计失败' });
+    }
+});
+
+// 撤销用户发放的邀请码（不会误删旧管理员系统的邀请码）
+router.delete('/:code', requireAdminMiddleware, async (request, response) => {
+    try {
+        const code = String(request.params.code || '').toUpperCase();
+        if (!/^[A-F0-9]{16}$/.test(code)) {
+            return response.status(400).json({ error: '邀请码格式无效' });
+        }
+        const result = await deleteUserInvitation(code);
+        if (!result.deleted) {
+            const status = result.reason?.includes('已使用') ? 409 : 404;
+            return response.status(status).json({ error: result.reason || '用户邀请码不存在' });
+        }
+        response.json({ success: true });
+    } catch (error) {
+        console.error('DELETE /api/user-invitations/:code failed:', error);
+        response.status(500).json({ error: '撤销邀请码失败' });
     }
 });

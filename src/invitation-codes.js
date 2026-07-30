@@ -1,6 +1,11 @@
 import storage from 'node-persist';
 import crypto from 'node:crypto';
 import { getConfigValue } from './util.js';
+import {
+    ADMIN_INVITATION_SOURCE,
+    getInvitationSource,
+    USER_INVITATION_SOURCE,
+} from './user-invitation-policy.js';
 
 const INVITATION_PREFIX = 'invitation:';
 const PURCHASE_LINK_KEY = 'invitation:purchaseLink';
@@ -18,6 +23,7 @@ const invitationUseLocks = new Set();
  * @property {string} durationType - 有效期类型：'1day'|'1week'|'1month'|'1quarter'|'6months'|'1year'|'permanent'
  * @property {number | null} durationDays - 有效期天数（如果是永久则为null）
  * @property {number | null} userExpiresAt - 使用该邀请码的用户到期时间（使用后设置）
+ * @property {'admin' | 'user'} [issuanceSource] - 发放来源（旧数据缺失时视为 admin）
  */
 
 /**
@@ -59,9 +65,10 @@ function getDurationDays(durationType) {
  * 创建邀请码
  * @param {string} createdBy 创建者用户句柄
  * @param {string} durationType 有效期类型：'1day'|'1week'|'1month'|'1quarter'|'6months'|'1year'|'permanent'
+ * @param {{issuanceSource?: 'admin' | 'user'}} [options] 发放来源
  * @returns {Promise<InvitationCode>} 创建的邀请码对象
  */
-export async function createInvitationCode(createdBy, durationType = 'permanent') {
+export async function createInvitationCode(createdBy, durationType = 'permanent', { issuanceSource = ADMIN_INVITATION_SOURCE } = {}) {
     if (!ENABLE_INVITATION_CODES) {
         throw new Error('邀请码功能未启用');
     }
@@ -69,6 +76,9 @@ export async function createInvitationCode(createdBy, durationType = 'permanent'
     const code = generateInvitationCode();
     const now = Date.now();
     const durationDays = getDurationDays(durationType);
+    const normalizedSource = issuanceSource === USER_INVITATION_SOURCE
+        ? USER_INVITATION_SOURCE
+        : ADMIN_INVITATION_SOURCE;
 
     const invitation = {
         code,
@@ -80,10 +90,11 @@ export async function createInvitationCode(createdBy, durationType = 'permanent'
         durationType: durationType || 'permanent',
         durationDays,
         userExpiresAt: null,  // 使用后会设置为用户的到期时间
+        issuanceSource: normalizedSource,
     };
 
     await storage.setItem(toInvitationKey(code), invitation);
-    console.log(`Invitation code created: ${code} by ${createdBy}, duration: ${durationType}`);
+    console.log(`Invitation code created: ${code} by ${createdBy}, duration: ${durationType}, source: ${normalizedSource}`);
 
     return invitation;
 }
@@ -174,7 +185,14 @@ export async function getAllInvitationCodes() {
     }
 
     const keys = await storage.keys();
-    const invitationKeys = keys.filter(key => key.startsWith(INVITATION_PREFIX) && key !== PURCHASE_LINK_KEY);
+    // Only 16-character hexadecimal suffixes are invitation records. Do not
+    // delete unrelated values that happen to share the "invitation:" namespace.
+    const invitationKeys = keys.filter(key => {
+        if (!key.startsWith(INVITATION_PREFIX) || key === PURCHASE_LINK_KEY) {
+            return false;
+        }
+        return /^[A-F0-9]{16}$/.test(key.slice(INVITATION_PREFIX.length));
+    });
 
     const invitations = [];
     for (const key of invitationKeys) {
@@ -193,11 +211,42 @@ export async function getAllInvitationCodes() {
 }
 
 /**
+ * 获取指定发放系统的邀请码。
+ * @param {'admin' | 'user'} issuanceSource 发放来源
+ * @returns {Promise<InvitationCode[]>} 邀请码列表
+ */
+export async function getInvitationCodesBySource(issuanceSource) {
+    const invitations = await getAllInvitationCodes();
+    return invitations.filter(invitation => getInvitationSource(invitation) === issuanceSource);
+}
+
+/**
+ * 为旧邀请码补写发放来源。
+ * @param {string} code 邀请码
+ * @param {'admin' | 'user'} issuanceSource 发放来源
+ * @returns {Promise<boolean>} 是否更新成功
+ */
+export async function setInvitationCodeSource(code, issuanceSource) {
+    if (!code || ![ADMIN_INVITATION_SOURCE, USER_INVITATION_SOURCE].includes(issuanceSource)) {
+        return false;
+    }
+    const normalizedCode = String(code).toUpperCase();
+    const invitation = await storage.getItem(toInvitationKey(normalizedCode));
+    if (!invitation) {
+        return false;
+    }
+    invitation.issuanceSource = issuanceSource;
+    await storage.setItem(toInvitationKey(normalizedCode), invitation);
+    return true;
+}
+
+/**
  * 删除邀请码
  * @param {string} code 邀请码
+ * @param {{issuanceSource?: 'admin' | 'user'}} [options] 限定来源，防止跨系统误删
  * @returns {Promise<boolean>} 是否成功删除
  */
-export async function deleteInvitationCode(code) {
+export async function deleteInvitationCode(code, { issuanceSource } = {}) {
     if (!ENABLE_INVITATION_CODES) {
         return false;
     }
@@ -206,6 +255,10 @@ export async function deleteInvitationCode(code) {
     const invitation = await storage.getItem(key);
 
     if (!invitation) {
+        return false;
+    }
+
+    if (issuanceSource && getInvitationSource(invitation) !== issuanceSource) {
         return false;
     }
 

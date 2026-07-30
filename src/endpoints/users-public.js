@@ -7,6 +7,7 @@ import { getIpFromRequest, getRealIpFromHeader } from '../express-common.js';
 import { color, Cache, getConfigValue } from '../util.js';
 import { KEY_PREFIX, getUserAvatar, toKey, getPasswordHash, getPasswordSalt, getAllUserHandles, getUserDirectories, ensurePublicDirectoriesExist, normalizeHandle } from '../users.js';
 import { validateInvitationCode, useInvitationCode, getPurchaseLink, isInvitationCodesEnabled } from '../invitation-codes.js';
+import { isUserIssuedInvitation } from '../user-invitation-policy.js';
 import { checkForNewContent, CONTENT_TYPES } from './content-manager.js';
 import { applyDefaultTemplateToUser } from '../default-template.js';
 import systemMonitor from '../system-monitor.js';
@@ -684,6 +685,9 @@ router.post('/renew', async (request, response) => {
         if (!invitation) {
             return response.status(400).json({ error: '续费码无效' });
         }
+        if (isUserIssuedInvitation(invitation)) {
+            return response.status(400).json({ error: '用户邀请码仅可用于新用户注册' });
+        }
 
         // 计算新的过期时间
         let newExpiresAt = null;
@@ -755,6 +759,9 @@ router.post('/renew-expired', async (request, response) => {
         const invitation = invitationValidation.invitation;
         if (!invitation) {
             return response.status(400).json({ error: '续费码无效' });
+        }
+        if (isUserIssuedInvitation(invitation)) {
+            return response.status(400).json({ error: '用户邀请码仅可用于新用户注册' });
         }
 
         // 计算新的过期时间

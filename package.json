@@ -126,6 +126,7 @@
         "start:no-csrf": "node server.js --disableCsrf",
         "postinstall": "node post-install.js",
         "test:optimizations": "node --test tests/optimization.node.test.mjs",
+        "test:user-invitations": "node --test tests/user-invitations.node.test.mjs",
         "lint": "eslint \"src/**/*.js\" \"public/**/*.js\" ./*.js",
         "lint:fix": "eslint \"src/**/*.js\" \"public/**/*.js\" ./*.js --fix",
         "plugins:update": "node plugins update",

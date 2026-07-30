@@ -7,13 +7,32 @@ let currentInvitationCodes = [];
 const selectedInvitationCodes = new Set();
 let csrfToken = null;
 
-// 初始化管理员扩展功能
-// ===== 用户层邀请码发放系统（管理员端：规则配置 + 发放统计） =====
+// ===== 独立用户邀请码系统（管理员端） =====
 function bindUserInvitationSystemEvents() {
-    loadUserInvitationConfig();
-    loadUserInvitationStats();
     $('#userInvSaveConfig').off('click').on('click', saveUserInvitationConfig);
     $('#userInvRefreshStats').off('click').on('click', loadUserInvitationStats);
+    $('#userInvStatsContainer').off('click', '.userInvDeleteCode').on('click', '.userInvDeleteCode', async function() {
+        const code = String($(this).data('code') || '');
+        if (!code || !confirm(`确定撤销用户邀请码 ${code} 吗？`)) {
+            return;
+        }
+        try {
+            const response = await fetch(`/api/user-invitations/${encodeURIComponent(code)}`, {
+                method: 'DELETE',
+                headers: getRequestHeaders(),
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                toastr.error(data.error || '撤销失败');
+                return;
+            }
+            toastr.success('用户邀请码已撤销');
+            await loadUserInvitationStats();
+        } catch (error) {
+            console.error('撤销用户邀请码失败:', error);
+            toastr.error('撤销失败，请稍后重试');
+        }
+    });
 }
 
 async function loadUserInvitationConfig() {
@@ -26,7 +45,6 @@ async function loadUserInvitationConfig() {
         $('#userInvMinOnlineHours').val(cfg.minOnlineHours);
         $('#userInvQuota').val(cfg.quotaPerPeriod);
         $('#userInvPeriodDays').val(cfg.periodDays);
-        $('#userInvMaxUnused').val(cfg.maxUnusedPending);
         $('#userInvMaxTotal').val(cfg.maxTotalCodes);
     } catch (e) {
         console.error('加载用户邀请配置失败:', e);
@@ -40,7 +58,6 @@ async function saveUserInvitationConfig() {
         minOnlineHours: Number($('#userInvMinOnlineHours').val()),
         quotaPerPeriod: Number($('#userInvQuota').val()),
         periodDays: Number($('#userInvPeriodDays').val()),
-        maxUnusedPending: Number($('#userInvMaxUnused').val()),
         maxTotalCodes: Number($('#userInvMaxTotal').val()),
     };
     try {
@@ -63,25 +80,63 @@ async function saveUserInvitationConfig() {
 
 async function loadUserInvitationStats() {
     const container = $('#userInvStatsContainer');
+    const summaryContainer = $('#userInvSummary');
     container.html('<div style="color: var(--st-text-muted, #64748b); padding: 14px; text-align: center;">加载中...</div>');
+    summaryContainer.empty();
     try {
-        const response = await fetch('/api/user-invitations/issuer-stats', { headers: getRequestHeaders() });
+        const response = await fetch('/api/user-invitations/issuer-stats?limit=1000', { headers: getRequestHeaders() });
         if (!response.ok) {
             container.html('<div style="color:#ef4444;padding:14px;text-align:center;">加载失败</div>');
             return;
         }
         const data = await response.json();
         const stats = data.stats || [];
+        const summary = data.summary || {};
+        const summaryItems = [
+            ['发放者', summary.totalIssuers || 0],
+            ['累计发放', summary.totalIssued || 0],
+            ['已使用', summary.totalUsed || 0],
+            ['待使用', summary.unusedPending || 0],
+        ];
+        summaryContainer.html(summaryItems.map(([label, value]) =>
+            `<div style="padding:8px 12px;border-radius:8px;background:rgba(255,255,255,0.04);border:1px solid var(--st-border-subtle,rgba(255,255,255,0.07));">
+                <span style="color:var(--st-text-muted,#64748b);">${label}</span>
+                <b style="margin-left:6px;color:var(--st-text-main,#f8fafc);">${value}</b>
+            </div>`,
+        ).join(''));
         if (stats.length === 0) {
             container.html('<div style="color: var(--st-text-muted, #64748b); padding: 14px; text-align: center;">暂无发放记录</div>');
             return;
         }
-        const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+        const esc = value => String(value == null ? '' : value).replace(/[&<>"']/g, character => ({
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            '\'': '&#39;',
+        }[character]));
         const rows = stats.map(s => {
             const last = s.lastIssueAt ? new Date(s.lastIssueAt).toLocaleString() : '—';
             const invited = s.invitedUsers && s.invitedUsers.length
                 ? s.invitedUsers.map(u => esc(u)).join(', ')
                 : '—';
+            const invitations = (s.invitations || []).map(invitation => {
+                const createdAt = invitation.createdAt ? new Date(invitation.createdAt).toLocaleString() : '—';
+                const usedText = invitation.used
+                    ? `已由 ${esc(invitation.usedBy || '未知用户')} 使用`
+                    : '未使用';
+                const revokeButton = invitation.used ? '' : `
+                    <button type="button" class="menu_button menu_button_icon userInvDeleteCode" data-code="${esc(invitation.code)}" title="撤销此用户邀请码">
+                        <i class="fa-fw fa-solid fa-trash"></i><span>撤销</span>
+                    </button>`;
+                return `<div style="display:flex;justify-content:space-between;gap:8px;align-items:center;padding:6px 8px;margin-top:5px;border-radius:6px;background:rgba(0,0,0,0.12);">
+                    <div style="min-width:0;">
+                        <code style="color:var(--st-primary,#3b82f6);">${esc(invitation.code)}</code>
+                        <span style="margin-left:6px;color:var(--st-text-muted,#64748b);">${usedText} · ${createdAt}</span>
+                    </div>
+                    ${revokeButton}
+                </div>`;
+            }).join('');
             return `<div style="padding: 10px 12px; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid var(--st-border-subtle, rgba(255,255,255,0.07)); font-size: 0.82rem;">
                 <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;">
                     <span style="font-weight:600;color:var(--st-text-main,#f8fafc);">${esc(s.handle)}</span>
@@ -91,6 +146,7 @@ async function loadUserInvitationStats() {
                     累计 <b style="color:var(--st-primary,#3b82f6);">${s.totalIssued}</b> · 已用 <b style="color:#22c55e;">${s.totalUsed}</b> · 待用 ${s.unusedPending}
                 </div>
                 <div style="margin-top:4px;color:var(--st-text-muted,#64748b);">邀请了: ${invited}</div>
+                <div style="margin-top:7px;">${invitations}</div>
             </div>`;
         }).join('');
         container.html(rows);
@@ -158,6 +214,12 @@ function checkAndLoadCurrentTab() {
             loadInvitationCodes();
         }
 
+        const userInvitationsAdminBlock = document.querySelector('.userInvitationsAdminBlock');
+        if (userInvitationsAdminBlock && isElementVisible(userInvitationsAdminBlock)) {
+            loadUserInvitationConfig();
+            loadUserInvitationStats();
+        }
+
         // 检查公告管理选项卡是否显示
         const announcementsBlock = document.querySelector('.announcementsBlock');
         if (announcementsBlock && isElementVisible(announcementsBlock)) {
@@ -208,6 +270,14 @@ function bindTabEvents() {
     if (invitationCodesButton) {
         invitationCodesButton.addEventListener('click', function() {
             showInvitationCodesTab();
+        });
+    }
+
+    // 独立用户邀请码管理选项卡
+    const userInvitationsAdminButton = document.querySelector('.userInvitationsAdminButton');
+    if (userInvitationsAdminButton) {
+        userInvitationsAdminButton.addEventListener('click', function() {
+            showUserInvitationsAdminTab();
         });
     }
 
@@ -286,6 +356,17 @@ function showInvitationCodesTab() {
     if (invitationCodesBlock) {
         invitationCodesBlock.style.display = 'block';
         loadInvitationCodes();
+    }
+}
+
+// 显示独立用户邀请码管理选项卡；系统关闭时管理员仍可进入并重新开启。
+function showUserInvitationsAdminTab() {
+    hideAllTabs();
+    const block = document.querySelector('.userInvitationsAdminBlock');
+    if (block) {
+        block.style.display = 'block';
+        loadUserInvitationConfig();
+        loadUserInvitationStats();
     }
 }
 

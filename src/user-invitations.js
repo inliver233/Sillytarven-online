@@ -1,127 +1,228 @@
 /**
- * 用户层邀请码发放系统 (User-tier Invitation Issuance)
+ * User invitation issuance system.
  *
- * 在现有管理员邀请码系统 (./invitation-codes.js) 之上，新增一层：
- *   - 资格判断（注册时长 + 在线时长，后端判断，前端不透露具体门槛）
- *   - 配额控制（周期配额 + 未使用上限 + 全局上限，服务端锁防超额）
- *   - 规则配置（node-persist，管理员可随时调节）
- *   - 发放统计聚合（管理员查看谁邀请了谁）
- *
- * 设计原则：
- *   1. 复用 invitation-codes.js 的存储与 createInvitationCode，不改动其签名
- *   2. 用户发放的邀请码固定为「永久」(permanent)
- *   3. 不建独立统计索引 —— 直接基于 getAllInvitationCodes() 过滤（≤800 条，毫秒级），零额外存储/零漂移
- *   4. 所有资格/配额校验在服务端，前端只做展示
+ * It reuses invitation redemption while keeping issuance policy, source
+ * metadata, statistics, limits and administration separate from legacy
+ * administrator-created invitation codes.
  */
 import storage from 'node-persist';
 import systemMonitor from './system-monitor.js';
 import { toKey } from './users.js';
 import {
     createInvitationCode,
+    deleteInvitationCode,
     getAllInvitationCodes,
     isInvitationCodesEnabled,
+    setInvitationCodeSource,
 } from './invitation-codes.js';
+import {
+    ADMIN_INVITATION_SOURCE,
+    calculateUserInvitationQuota,
+    DEFAULT_USER_INVITATION_CONFIG,
+    isUserIssuedInvitation,
+    mergeUserInvitationConfig,
+    USER_INVITATION_SOURCE,
+} from './user-invitation-policy.js';
 
-const CONFIG_KEY = 'invitation:user-system-config';
+// Keep user-system data outside the invitation:<code> namespace.
+const CONFIG_KEY = 'user-invitation:config';
+const LEGACY_CONFIG_KEY = 'invitation:user-system-config';
+const ONLINE_BASELINE_PREFIX = 'user-invitation:online-baseline:';
 
-/** 默认规则配置（管理员可改） */
-const DEFAULT_CONFIG = Object.freeze({
-    enabled: true,                  // 用户发放系统总开关
-    minRegisteredDays: 30,          // 注册时长门槛（天）
-    minOnlineHours: 72,             // 在线时长门槛（小时）
-    quotaPerPeriod: 1,              // 每周期可生成数量
-    periodDays: 1,                  // 周期天数（每天 = 1）
-    requireUnusedConsumed: true,    // 上一个未使用前不能生成下一个
-    maxUnusedPending: 1,            // 同时未使用上限（配合 requireUnusedConsumed）
-    maxTotalCodes: 800,             // 全系统邀请码总量上限
-});
-
-/** per-handle 发放并发锁（防止连点绕过配额） */
+/** Per-handle fast rejection for duplicate button clicks. */
 const userIssueLocks = new Set();
+/** Serializes all issuers so the configured global cap cannot be raced. */
+let globalIssueQueue = Promise.resolve();
+/** Stable online-duration values while monitor statistics are being reset. */
+const onlineDurationSnapshots = new Map();
 
-/**
- * 读取规则配置（缺失则写入默认值）
- * @returns {Promise<typeof DEFAULT_CONFIG>}
- */
-export async function getUserInvitationConfig() {
-    const stored = await storage.getItem(CONFIG_KEY);
-    if (!stored || typeof stored !== 'object') {
-        await storage.setItem(CONFIG_KEY, DEFAULT_CONFIG);
-        return { ...DEFAULT_CONFIG };
+function getOnlineBaselineKey(handle) {
+    return `${ONLINE_BASELINE_PREFIX}${handle}`;
+}
+
+async function runWithGlobalIssueLock(task) {
+    const previous = globalIssueQueue;
+    let release;
+    globalIssueQueue = new Promise(resolve => {
+        release = resolve;
+    });
+    await previous;
+    try {
+        return await task();
+    } finally {
+        release();
     }
-    // 合并默认值，保证新增字段有默认
-    return { ...DEFAULT_CONFIG, ...stored };
 }
 
 /**
- * 写入规则配置（合并）
- * @param {Partial<typeof DEFAULT_CONFIG>} partial
- * @returns {Promise<typeof DEFAULT_CONFIG>}
+ * Read rule configuration, migrating the original key if necessary.
+ * @returns {Promise<typeof DEFAULT_USER_INVITATION_CONFIG>}
+ */
+export async function getUserInvitationConfig() {
+    let stored = await storage.getItem(CONFIG_KEY);
+    const hasCurrentConfig = Boolean(stored && typeof stored === 'object');
+    let migratedLegacy = false;
+    if (!hasCurrentConfig) {
+        const legacy = await storage.getItem(LEGACY_CONFIG_KEY);
+        if (legacy && typeof legacy === 'object') {
+            stored = legacy;
+            migratedLegacy = true;
+        }
+    }
+
+    const config = mergeUserInvitationConfig(DEFAULT_USER_INVITATION_CONFIG, stored || {});
+    if (!hasCurrentConfig) {
+        await storage.setItem(CONFIG_KEY, config);
+    }
+    if (migratedLegacy) {
+        await storage.removeItem(LEGACY_CONFIG_KEY);
+    }
+    return config;
+}
+
+/**
+ * Update administrator-controlled rules using a strict allow-list.
+ * @param {Partial<typeof DEFAULT_USER_INVITATION_CONFIG>} partial Changes
+ * @returns {Promise<typeof DEFAULT_USER_INVITATION_CONFIG>}
  */
 export async function setUserInvitationConfig(partial) {
     const current = await getUserInvitationConfig();
-    const merged = { ...current, ...partial };
-    // 数值字段防御性 clamp
-    merged.minRegisteredDays = Math.max(0, Number(merged.minRegisteredDays) || 0);
-    merged.minOnlineHours = Math.max(0, Number(merged.minOnlineHours) || 0);
-    merged.quotaPerPeriod = Math.max(1, Number(merged.quotaPerPeriod) || 1);
-    merged.periodDays = Math.max(1, Number(merged.periodDays) || 1);
-    merged.maxUnusedPending = Math.max(1, Number(merged.maxUnusedPending) || 1);
-    merged.maxTotalCodes = Math.max(1, Number(merged.maxTotalCodes) || 1);
-    merged.enabled = !!merged.enabled;
-    merged.requireUnusedConsumed = !!merged.requireUnusedConsumed;
+    const merged = mergeUserInvitationConfig(current, partial);
     await storage.setItem(CONFIG_KEY, merged);
     return merged;
 }
 
-/**
- * 取用户累计在线时长（毫秒，含当前会话）
- * @param {string} handle
- * @returns {number}
- */
-function getOnlineDurationMs(handle) {
+async function getOnlineBaselineMs(handle) {
+    const stored = await storage.getItem(getOnlineBaselineKey(handle));
+    const value = typeof stored === 'object' ? stored?.durationMs : stored;
+    return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+async function getOnlineDurationMs(handle) {
+    if (onlineDurationSnapshots.has(handle)) {
+        return onlineDurationSnapshots.get(handle);
+    }
+    const baselineMs = await getOnlineBaselineMs(handle);
     const stats = systemMonitor.getUserLoadStats(handle, { includeDetails: false });
-    return stats?.onlineDuration ?? 0;
+    return baselineMs + (stats?.onlineDuration ?? 0);
+}
+
+async function persistOnlineBaseline(handle, durationMs) {
+    await storage.setItem(getOnlineBaselineKey(handle), {
+        durationMs: Math.max(0, Number(durationMs) || 0),
+        preservedAt: Date.now(),
+    });
 }
 
 /**
- * 内部资格判断 —— 返回完整诊断（仅供后端日志/管理员，不返回给普通用户）
- * @param {string} handle
- * @returns {Promise<{eligible: boolean, reasons: string[], metrics: object}>}
+ * Reset one monitor record without resetting invitation eligibility time.
+ * @param {string} handle User handle
+ * @returns {Promise<void>}
+ */
+export async function resetUserStatsPreservingInvitationDuration(handle) {
+    const totalDurationMs = await getOnlineDurationMs(handle);
+    onlineDurationSnapshots.set(handle, totalDurationMs);
+    try {
+        await persistOnlineBaseline(handle, totalDurationMs);
+        systemMonitor.resetUserStats(handle);
+        systemMonitor.saveDataToDisk();
+    } finally {
+        onlineDurationSnapshots.delete(handle);
+    }
+}
+
+/**
+ * Clear monitor data while retaining the cumulative duration used by policy.
+ * @returns {Promise<void>}
+ */
+export async function clearSystemStatsPreservingInvitationDurations() {
+    const stats = systemMonitor.getAllUserLoadStats({ includeDetails: false });
+    try {
+        for (const userStats of stats) {
+            const handle = userStats.userHandle;
+            const totalDurationMs = await getOnlineDurationMs(handle);
+            onlineDurationSnapshots.set(handle, totalDurationMs);
+            await persistOnlineBaseline(handle, totalDurationMs);
+        }
+        systemMonitor.clearAllStats();
+    } finally {
+        onlineDurationSnapshots.clear();
+    }
+}
+
+/**
+ * Upgrade source-less records. Legacy issuance was admin-only, so a record
+ * created by a currently known non-admin can safely be attributed to the user
+ * issuance feature. All other source-less records remain legacy/admin records.
+ * @param {object[]} invitations All invitation records
+ * @returns {Promise<object[]>} Records with normalized source metadata
+ */
+async function migrateLegacyInvitationSources(invitations) {
+    const userCache = new Map();
+    for (const invitation of invitations) {
+        if (invitation.issuanceSource) {
+            continue;
+        }
+        const handle = invitation.createdBy;
+        if (!userCache.has(handle)) {
+            userCache.set(handle, handle ? await storage.getItem(toKey(handle)) : null);
+        }
+        const creator = userCache.get(handle);
+        const source = creator && !creator.admin ? USER_INVITATION_SOURCE : ADMIN_INVITATION_SOURCE;
+        invitation.issuanceSource = source;
+        await setInvitationCodeSource(invitation.code, source);
+    }
+    return invitations;
+}
+
+async function getAllUserSystemInvitations() {
+    const all = await migrateLegacyInvitationSources(await getAllInvitationCodes());
+    return all.filter(isUserIssuedInvitation);
+}
+
+/**
+ * Run storage-key and source metadata migrations before accepting requests.
+ * @returns {Promise<void>}
+ */
+export async function initializeUserInvitationSystem() {
+    try {
+        await getUserInvitationConfig();
+        await getAllUserSystemInvitations();
+    } catch (error) {
+        // This optional feature must not prevent the main server from starting.
+        console.error('Failed to initialize user invitation system:', error);
+    }
+}
+
+/**
+ * Evaluate hidden registration and online-duration requirements.
+ * @param {string} handle User handle
+ * @returns {Promise<object>} Internal diagnostic result
  */
 async function evaluateEligibility(handle) {
     const config = await getUserInvitationConfig();
-
-    // 读取用户对象
-    /** @type {any} */
-    const user = await storage.getItem(toKey(handle));
-    if (!user) {
-        return { eligible: false, reasons: ['用户不存在'], metrics: {}, config };
-    }
-
-    // 管理员：完全豁免（不受系统开关/门槛/配额限制），保证管理员随时可管理与发放
-    if (user.admin) {
-        return { eligible: true, reasons: [], metrics: {}, config, isAdmin: true };
-    }
-
-    // 以下仅普通用户：主邀请码系统未启用 → 用户系统也不可用
     if (!isInvitationCodesEnabled()) {
-        return { eligible: false, reasons: ['邀请码功能未启用'], metrics: {}, config };
+        return { eligible: false, reasons: ['邀请码功能未启用'], metrics: {}, config, systemPaused: true };
     }
     if (!config.enabled) {
         return { eligible: false, reasons: ['用户发放系统已暂停'], metrics: {}, config, systemPaused: true };
     }
 
-    const now = Date.now();
-    const registeredDays = (now - (user.created || now)) / 86_400_000;
-    const onlineHours = getOnlineDurationMs(handle) / 3_600_000;
+    const user = await storage.getItem(toKey(handle));
+    if (!user) {
+        return { eligible: false, reasons: ['用户不存在'], metrics: {}, config };
+    }
 
+    const now = Date.now();
+    const createdAt = Number.isFinite(user.created) ? user.created : now;
+    const registeredDays = Math.max(0, now - createdAt) / 86_400_000;
+    const onlineHours = await getOnlineDurationMs(handle) / 3_600_000;
     const reasons = [];
     if (registeredDays < config.minRegisteredDays) {
-        reasons.push(`注册时长不足`);
+        reasons.push('注册时长不足');
     }
     if (onlineHours < config.minOnlineHours) {
-        reasons.push(`在线时长不足`);
+        reasons.push('在线时长不足');
     }
 
     return {
@@ -133,8 +234,8 @@ async function evaluateEligibility(handle) {
 }
 
 /**
- * 用户端：是否拥有发放资格（只返回布尔，不泄露门槛）
- * @param {string} handle
+ * User-facing eligibility check; does not reveal thresholds.
+ * @param {string} handle User handle
  * @returns {Promise<{eligible: boolean}>}
  */
 export async function isUserEligible(handle) {
@@ -143,114 +244,79 @@ export async function isUserEligible(handle) {
 }
 
 /**
- * 取某用户发放的全部邀请码（按创建时间降序）
- * @param {string} handle
+ * Return only invitations issued by this user through the user system.
+ * @param {string} handle User handle
  * @returns {Promise<object[]>}
  */
 export async function getUserIssuedInvitations(handle) {
-    const all = await getAllInvitationCodes();
-    return all.filter(c => c.createdBy === handle);
+    const all = await getAllUserSystemInvitations();
+    return all.filter(invitation => invitation.createdBy === handle);
+}
+
+function toClientIssuanceState(quota) {
+    return {
+        canIssue: quota.canIssue,
+        blockedReason: quota.reason,
+        nextIssueAt: quota.nextIssueAt,
+    };
 }
 
 /**
- * 计算当前配额状态（基于主数据实时聚合，无索引）
- * @param {string} handle
- * @param {object} config
- * @returns {Promise<{canIssue: boolean, quotaReason: string | null, periodIssued: number, unusedPending: number}>}
- */
-async function evaluateQuota(handle, config) {
-    const issued = await getUserIssuedInvitations(handle);
-    const now = Date.now();
-    const periodMs = config.periodDays * 86_400_000;
-
-    // 本周期起点（对齐到 periodDays 天的边界）
-    const periodStart = now - (now % periodMs);
-    const periodIssued = issued.filter(c => c.createdAt >= periodStart).length;
-    const unusedPending = issued.filter(c => !c.used).length;
-
-    // 1. 周期配额
-    if (periodIssued >= config.quotaPerPeriod) {
-        return { canIssue: false, quotaReason: '当前周期可生成数量已达上限，请稍后再试', periodIssued, unusedPending };
-    }
-    // 2. 未使用上限（上一个用完才能发下一个）
-    if (config.requireUnusedConsumed && unusedPending >= config.maxUnusedPending) {
-        return { canIssue: false, quotaReason: '您还有未使用的邀请码，待其被使用后方可生成新的', periodIssued, unusedPending };
-    }
-    // 3. 全局上限
-    const all = await getAllInvitationCodes();
-    if (all.length >= config.maxTotalCodes) {
-        return { canIssue: false, quotaReason: '系统邀请码总量已达上限，请联系管理员', periodIssued, unusedPending };
-    }
-
-    return { canIssue: true, quotaReason: null, periodIssued, unusedPending };
-}
-
-/**
- * 用户端：发放一个永久邀请码（全套服务端校验 + 锁）
- * @param {string} handle
+ * Issue one permanent user-system invitation with all checks under one global
+ * critical section.
+ * @param {string} handle User handle
  * @returns {Promise<{success: boolean, reason?: string, invitation?: object}>}
  */
 export async function issueUserInvitation(handle) {
     if (!handle) {
         return { success: false, reason: '无效的用户' };
     }
-
-    // per-handle 并发锁
     if (userIssueLocks.has(handle)) {
         return { success: false, reason: '请稍候，正在处理上一个请求' };
     }
+
     userIssueLocks.add(handle);
     try {
-        // 1. 资格（不泄露门槛，失败只返回通用提示）
-        const elig = await evaluateEligibility(handle);
-        if (!elig.eligible) {
-            // 系统暂停/功能关闭属配置类，可明确告知；资格门槛不足一律模糊提示
-            if (elig.systemPaused) {
-                return { success: false, reason: '用户邀请码发放系统暂未开放' };
+        return await runWithGlobalIssueLock(async () => {
+            const eligibility = await evaluateEligibility(handle);
+            if (!eligibility.eligible) {
+                return {
+                    success: false,
+                    reason: eligibility.systemPaused ? '用户邀请码发放系统暂未开放' : '未达到发放邀请码的资格',
+                };
             }
-            if (!isInvitationCodesEnabled()) {
-                return { success: false, reason: '邀请码功能未启用' };
-            }
-            return { success: false, reason: '未达到发放邀请码的资格' };
-        }
 
-        // 2. 配额（管理员豁免周期配额与未使用上限，仅保留全局上限保护）
-        if (elig.isAdmin) {
-            const all = await getAllInvitationCodes();
-            if (all.length >= elig.config.maxTotalCodes) {
-                return { success: false, reason: '系统邀请码总量已达上限，请联系管理员' };
-            }
-        } else {
-            const quota = await evaluateQuota(handle, elig.config);
+            // Re-read all user-system records inside the lock. This makes both
+            // per-user quota and the global maximum authoritative server-side.
+            const allUserCodes = await getAllUserSystemInvitations();
+            const issuedByUser = allUserCodes.filter(invitation => invitation.createdBy === handle);
+            const quota = calculateUserInvitationQuota(
+                issuedByUser,
+                allUserCodes.length,
+                eligibility.config,
+            );
             if (!quota.canIssue) {
-                return { success: false, reason: quota.quotaReason };
+                return { success: false, reason: quota.reason };
             }
-        }
 
-        // 3. 真正创建（永久码）
-        const invitation = await createInvitationCode(handle, 'permanent');
-        console.log(`User invitation issued by ${handle}: ${invitation.code}`);
-        return { success: true, invitation };
+            const invitation = await createInvitationCode(handle, 'permanent', {
+                issuanceSource: USER_INVITATION_SOURCE,
+            });
+            console.log(`User invitation issued by ${handle}: ${invitation.code}`);
+            return { success: true, invitation };
+        });
     } catch (error) {
         console.error('issueUserInvitation failed:', error);
-        return { success: false, reason: error.message || '生成邀请码失败' };
+        return { success: false, reason: '生成邀请码失败' };
     } finally {
         userIssueLocks.delete(handle);
     }
 }
 
-/**
- * 管理员端：发放者统计聚合（谁发了多少 / 邀请了谁）
- * @param {object} [opts]
- * @param {number} [opts.limit=100]
- * @returns {Promise<object[]>}
- */
-export async function getIssuerStats({ limit = 100 } = {}) {
-    const all = await getAllInvitationCodes();
-    /** @type {Map<string, {handle: string, totalIssued: number, totalUsed: number, unusedPending: number, lastIssueAt: number, invitedUsers: string[]})>} */
+function aggregateIssuerStats(all, limit) {
     const map = new Map();
-    for (const c of all) {
-        const key = c.createdBy || '(unknown)';
+    for (const invitation of all) {
+        const key = invitation.createdBy || '(unknown)';
         if (!map.has(key)) {
             map.set(key, {
                 handle: key,
@@ -259,17 +325,27 @@ export async function getIssuerStats({ limit = 100 } = {}) {
                 unusedPending: 0,
                 lastIssueAt: 0,
                 invitedUsers: [],
+                invitations: [],
             });
         }
-        const s = map.get(key);
-        s.totalIssued++;
-        if (c.used) {
-            s.totalUsed++;
-            if (c.usedBy) s.invitedUsers.push(c.usedBy);
+        const stats = map.get(key);
+        stats.totalIssued++;
+        if (invitation.used) {
+            stats.totalUsed++;
+            if (invitation.usedBy) {
+                stats.invitedUsers.push(invitation.usedBy);
+            }
         } else {
-            s.unusedPending++;
+            stats.unusedPending++;
         }
-        if (c.createdAt > s.lastIssueAt) s.lastIssueAt = c.createdAt;
+        stats.lastIssueAt = Math.max(stats.lastIssueAt, invitation.createdAt || 0);
+        stats.invitations.push({
+            code: invitation.code,
+            createdAt: invitation.createdAt,
+            used: Boolean(invitation.used),
+            usedBy: invitation.usedBy || null,
+            usedAt: invitation.usedAt || null,
+        });
     }
     return [...map.values()]
         .sort((a, b) => b.totalIssued - a.totalIssued)
@@ -277,21 +353,80 @@ export async function getIssuerStats({ limit = 100 } = {}) {
 }
 
 /**
- * 用户端：一次性返回面板所需全部数据（资格布尔 + 我的邀请码列表）
- * 注意：不返回 reasons/metrics/config，防止泄露门槛
- * @param {string} handle
- * @returns {Promise<{eligible: boolean, codes: object[]}>}
+ * Administrator issuer statistics for the independent user system only.
+ * @param {object} [options] Query options
+ * @param {number} [options.limit=100] Maximum issuers
+ * @returns {Promise<object[]>} Issuer rows
+ */
+export async function getIssuerStats({ limit = 100 } = {}) {
+    const all = await getAllUserSystemInvitations();
+    return aggregateIssuerStats(all, limit);
+}
+
+/**
+ * Return administrator dashboard data in one storage scan.
+ * @param {object} [options] Query options
+ * @param {number} [options.limit=100] Maximum issuers
+ * @returns {Promise<{stats: object[], summary: object}>} Dashboard data
+ */
+export async function getUserInvitationAdminData({ limit = 100 } = {}) {
+    const all = await getAllUserSystemInvitations();
+    const issuerCount = new Set(all.map(invitation => invitation.createdBy)).size;
+    return {
+        stats: aggregateIssuerStats(all, limit),
+        summary: {
+            totalIssued: all.length,
+            totalUsed: all.filter(invitation => invitation.used).length,
+            unusedPending: all.filter(invitation => !invitation.used).length,
+            totalIssuers: issuerCount,
+        },
+    };
+}
+
+/**
+ * Delete one user-system invitation without allowing cross-system deletion.
+ * @param {string} code Invitation code
+ * @returns {Promise<{deleted: boolean, reason?: string}>} Deletion result
+ */
+export async function deleteUserInvitation(code) {
+    const normalizedCode = String(code || '').toUpperCase();
+    const invitation = (await getAllUserSystemInvitations())
+        .find(item => item.code === normalizedCode);
+    if (!invitation) {
+        return { deleted: false, reason: '用户邀请码不存在' };
+    }
+    if (invitation.used) {
+        return { deleted: false, reason: '已使用的邀请码需要保留邀请关系，不能撤销' };
+    }
+    const deleted = await deleteInvitationCode(normalizedCode, {
+        issuanceSource: USER_INVITATION_SOURCE,
+    });
+    return { deleted, reason: deleted ? undefined : '用户邀请码不存在' };
+}
+
+/**
+ * Return all data needed by the user panel without exposing qualification
+ * thresholds or metrics.
+ * @param {string} handle User handle
+ * @returns {Promise<object>} User panel data
  */
 export async function getMyInvitationData(handle) {
-    const config = await getUserInvitationConfig();
-    const evalResult = await evaluateEligibility(handle);
-    const codes = await getUserIssuedInvitations(handle);
-    // 管理员总能进入（便于管理与开启）；普通用户受系统开关限制
-    const systemEnabled = !!evalResult.isAdmin || (config.enabled && isInvitationCodesEnabled());
+    const eligibility = await evaluateEligibility(handle);
+    const allUserCodes = await getAllUserSystemInvitations();
+    const codes = allUserCodes.filter(invitation => invitation.createdBy === handle);
+    const systemEnabled = eligibility.config.enabled && isInvitationCodesEnabled();
+    const issuance = eligibility.eligible
+        ? toClientIssuanceState(calculateUserInvitationQuota(
+            codes,
+            allUserCodes.length,
+            eligibility.config,
+        ))
+        : { canIssue: false, blockedReason: null, nextIssueAt: null };
+
     return {
-        eligible: evalResult.eligible,
+        eligible: eligibility.eligible,
         codes,
         systemEnabled,
-        isAdmin: !!evalResult.isAdmin,
+        issuance,
     };
 }

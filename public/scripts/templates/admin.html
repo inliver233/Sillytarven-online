@@ -12,6 +12,9 @@
         <button type="button" class="invitationCodesButton menu_button menu_button_icon" data-target-tab="invitationCodesBlock">
             <h4 data-i18n="Invitation Codes">邀请码管理</h4>
         </button>
+        <button type="button" class="userInvitationsAdminButton menu_button menu_button_icon" data-target-tab="userInvitationsAdminBlock">
+            <h4>用户邀请管理</h4>
+        </button>
         <button type="button" class="announcementsButton menu_button menu_button_icon" data-target-tab="announcementsBlock">
             <h4 data-i18n="Announcements">公告管理</h4>
         </button>
@@ -351,12 +354,10 @@
         </div>
     </div>
 
-    <!-- 邀请码管理选项卡 -->
-    <div class="navTab invitationCodesBlock" style="display: none;">
+    <!-- 用户邀请码发放系统：与旧管理员邀请码系统独立 -->
+    <div class="navTab userInvitationsAdminBlock" style="display: none;">
         <div class="flex-container flexFlowColumn flexGap10">
-            <h3 data-i18n="Invitation Code Management">邀请码管理</h3>
-
-            <!-- ===== 用户层邀请码发放系统（独立配置与统计） ===== -->
+            <h3>用户邀请管理</h3>
             <div class="userInvSystemBlock" style="border: 1px solid var(--st-border-subtle, rgba(255,255,255,0.07)); border-radius: 12px; padding: 16px; margin-bottom: 8px; background: rgba(255,255,255,0.02);">
                 <h4 class="margin0 flex-container alignItemsCenter" style="gap: 8px; margin-bottom: 12px;">
                     <i class="fa-fw fa-solid fa-users-gear" style="color: var(--st-primary, #3b82f6);"></i>
@@ -386,15 +387,14 @@
                         <span style="display:block;font-size:0.78rem;color:var(--st-text-muted,#64748b);margin-bottom:2px;">周期（天）</span>
                         <input id="userInvPeriodDays" class="text_pole" type="number" min="1" step="1">
                     </div>
-                    <div class="flex1" style="min-width: 110px;">
-                        <span style="display:block;font-size:0.78rem;color:var(--st-text-muted,#64748b);margin-bottom:2px;">未使用上限</span>
-                        <input id="userInvMaxUnused" class="text_pole" type="number" min="1" step="1">
-                    </div>
                     <div class="flex1" style="min-width: 120px;">
-                        <span style="display:block;font-size:0.78rem;color:var(--st-text-muted,#64748b);margin-bottom:2px;">全局邀请码上限</span>
+                        <span style="display:block;font-size:0.78rem;color:var(--st-text-muted,#64748b);margin-bottom:2px;">用户邀请码总上限</span>
                         <input id="userInvMaxTotal" class="text_pole" type="number" min="1" step="1">
                     </div>
                 </div>
+                <small style="display:block;color:var(--st-text-muted,#64748b);margin-bottom:12px;">
+                    用户必须等待上一个邀请码成功使用后才能继续生成；这里的总上限不包含旧管理员邀请码。
+                </small>
                 <div class="flex-container" style="gap: 10px; margin-bottom: 14px;">
                     <button type="button" class="menu_button menu_button_icon" id="userInvSaveConfig">
                         <i class="fa-fw fa-solid fa-floppy-disk"></i><span>保存规则</span>
@@ -403,6 +403,7 @@
                         <i class="fa-fw fa-solid fa-rotate"></i><span>刷新统计</span>
                     </button>
                 </div>
+                <div id="userInvSummary" class="flex-container" style="gap: 8px; flex-wrap: wrap; margin-bottom: 12px;"></div>
                 <div class="flex-container alignItemsCenter" style="justify-content: space-between; margin-bottom: 6px;">
                     <h5 class="margin0">发放者统计（谁邀请了谁）</h5>
                 </div>
@@ -410,7 +411,13 @@
                     <div style="color: var(--st-text-muted, #64748b); padding: 14px; text-align: center; font-size: 0.85rem;">点击「刷新统计」加载</div>
                 </div>
             </div>
+        </div>
+    </div>
 
+    <!-- 旧管理员邀请码管理选项卡 -->
+    <div class="navTab invitationCodesBlock" style="display: none;">
+        <div class="flex-container flexFlowColumn flexGap10">
+            <h3 data-i18n="Invitation Code Management">邀请码管理</h3>
             <!-- 使用说明 -->
             <div class="usage-notice" style="background-color: #fff3cd; border: 1px solid #ffeaa7; border-radius: 5px; padding: 10px; margin-bottom: 15px;">
                 <h4 style="margin-top: 0; color: #856404;">

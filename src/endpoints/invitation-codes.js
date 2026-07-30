@@ -1,13 +1,14 @@
 import express from 'express';
 import {
     createInvitationCode,
-    getAllInvitationCodes,
+    getInvitationCodesBySource,
     deleteInvitationCode,
     isInvitationCodesEnabled,
     cleanupExpiredInvitationCodes,
     setPurchaseLink,
     getPurchaseLink,
 } from '../invitation-codes.js';
+import { ADMIN_INVITATION_SOURCE } from '../user-invitation-policy.js';
 import { requireAdminMiddleware } from '../users.js';
 
 export const router = express.Router();
@@ -19,7 +20,7 @@ router.get('/', requireAdminMiddleware, async (request, response) => {
             return response.json({ enabled: false, codes: [] });
         }
 
-        const codes = await getAllInvitationCodes();
+        const codes = await getInvitationCodesBySource(ADMIN_INVITATION_SOURCE);
         response.json({ enabled: true, codes });
     } catch (error) {
         console.error('Error getting invitation codes:', error);
@@ -86,7 +87,7 @@ router.delete('/:code', requireAdminMiddleware, async (request, response) => {
         }
 
         const { code } = request.params;
-        const success = await deleteInvitationCode(code);
+        const success = await deleteInvitationCode(code, { issuanceSource: ADMIN_INVITATION_SOURCE });
 
         if (success) {
             response.json({ success: true });
@@ -125,7 +126,7 @@ router.post('/batch-delete', requireAdminMiddleware, async (request, response) =
 
         for (const code of uniqueCodes) {
             try {
-                const success = await deleteInvitationCode(code);
+                const success = await deleteInvitationCode(code, { issuanceSource: ADMIN_INVITATION_SOURCE });
                 if (success) {
                     deletedCount++;
                 } else {

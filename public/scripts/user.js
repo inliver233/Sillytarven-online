@@ -1104,8 +1104,8 @@ async function openMyInvitationCodes() {
 
     template.find('.myInvitationGenerateButton').on('click', async function () {
         const btn = $(this);
-        if (btn.hasClass('disabled')) return;
-        btn.addClass('disabled');
+        if (btn.hasClass('disabled') || btn.hasClass('requestPending')) return;
+        btn.addClass('requestPending disabled');
         try {
             const response = await fetch('/api/user-invitations/create', {
                 method: 'POST',
@@ -1117,16 +1117,75 @@ async function openMyInvitationCodes() {
                 await refreshMyInvitations(template);
             } else {
                 toastr.warning(data.reason || data.error || '生成失败');
+                await refreshMyInvitations(template);
             }
         } catch (error) {
             console.error('生成邀请码失败:', error);
             toastr.error('生成失败，请稍后重试');
+            await refreshMyInvitations(template);
         } finally {
-            btn.removeClass('disabled');
+            btn.removeClass('requestPending');
         }
     });
 
     await popupPromise;
+    clearMyInvitationCountdown(template);
+}
+
+function clearMyInvitationCountdown(template) {
+    const timer = template.data('invitationCountdownTimer');
+    if (timer) {
+        clearInterval(timer);
+        template.removeData('invitationCountdownTimer');
+    }
+}
+
+function formatInvitationCountdown(remainingMs) {
+    const totalSeconds = Math.max(0, Math.ceil(remainingMs / 1000));
+    const days = Math.floor(totalSeconds / 86400);
+    const hours = Math.floor((totalSeconds % 86400) / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    const segments = [];
+    if (days > 0) segments.push(`${days}天`);
+    if (hours > 0 || days > 0) segments.push(`${hours}小时`);
+    segments.push(`${minutes}分`);
+    segments.push(`${seconds}秒`);
+    return segments.join(' ');
+}
+
+function renderMyInvitationIssuanceState(template, issuance) {
+    const button = template.find('.myInvitationGenerateButton');
+    const quotaBox = template.find('.myInvitationQuotaBox');
+    clearMyInvitationCountdown(template);
+
+    if (issuance?.canIssue) {
+        button.removeClass('disabled').attr('aria-disabled', 'false');
+        quotaBox.html('<span style="color:#22c55e;"><i class="fa-fw fa-solid fa-circle-check"></i> 当前可以生成一个邀请码</span>');
+        return;
+    }
+
+    button.addClass('disabled').attr('aria-disabled', 'true');
+    const reason = issuance?.blockedReason || '当前暂时无法生成新的邀请码';
+    if (!issuance?.nextIssueAt) {
+        quotaBox.text(reason).css('color', 'var(--st-text-muted, #64748b)');
+        return;
+    }
+
+    const updateCountdown = () => {
+        const remainingMs = Number(issuance.nextIssueAt) - Date.now();
+        if (remainingMs <= 0) {
+            clearMyInvitationCountdown(template);
+            button.removeClass('disabled').attr('aria-disabled', 'false');
+            quotaBox.html('<span style="color:#22c55e;">现在可以生成新的邀请码</span>');
+            return;
+        }
+        quotaBox.text(`${reason}，距离下次可生成：${formatInvitationCountdown(remainingMs)}`)
+            .css('color', 'var(--st-text-muted, #64748b)');
+    };
+    updateCountdown();
+    const timer = setInterval(updateCountdown, 1000);
+    template.data('invitationCountdownTimer', timer);
 }
 
 async function refreshMyInvitations(template) {
@@ -1136,6 +1195,7 @@ async function refreshMyInvitations(template) {
 
     statusBox.html('<span style="color: var(--st-text-muted, #64748b);">加载中...</span>');
     genBox.hide();
+    clearMyInvitationCountdown(template);
 
     try {
         const response = await fetch('/api/user-invitations/my', { headers: getRequestHeaders() });
@@ -1150,21 +1210,22 @@ async function refreshMyInvitations(template) {
             statusBox.html(
                 '<div style="padding: 12px 16px; border-radius: 10px; background: rgba(255,255,255,0.04); border: 1px solid var(--st-border-subtle, rgba(255,255,255,0.07)); color: var(--st-text-secondary, #cbd5e1);">' +
                 '<i class="fa-fw fa-solid fa-lock" style="color: var(--st-text-muted, #64748b); margin-right: 6px;"></i>' +
-                '邀请码发放功能当前已关闭</div>'
+                '邀请码发放功能当前已关闭</div>',
             );
             genBox.hide();
         } else if (data.eligible) {
             statusBox.html(
                 '<div style="padding: 12px 16px; border-radius: 10px; background: var(--st-primary-subtle, rgba(59,130,246,0.12)); border: 1px solid var(--st-border-highlight, rgba(59,130,246,0.35)); color: var(--st-text-main, #f8fafc);">' +
                 '<i class="fa-fw fa-solid fa-circle-check" style="color: var(--st-primary, #3b82f6); margin-right: 6px;"></i>' +
-                '您已获得邀请码发放资格</div>'
+                '您已获得邀请码发放资格</div>',
             );
             genBox.show();
+            renderMyInvitationIssuanceState(template, data.issuance);
         } else {
             statusBox.html(
                 '<div style="padding: 12px 16px; border-radius: 10px; background: rgba(255,255,255,0.04); border: 1px solid var(--st-border-subtle, rgba(255,255,255,0.07)); color: var(--st-text-secondary, #cbd5e1);">' +
                 '<i class="fa-fw fa-solid fa-circle-info" style="color: var(--st-text-muted, #64748b); margin-right: 6px;"></i>' +
-                '暂未达到邀请码发放资格</div>'
+                '暂未达到邀请码发放资格</div>',
             );
             genBox.hide();
         }
@@ -1183,7 +1244,13 @@ async function refreshMyInvitations(template) {
 
 function renderMyCodeItem(c) {
     // 服务端数据转义防 XSS（code 为 hex 安全，usedBy 为用户句柄需转义）
-    const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+    const esc = value => String(value == null ? '' : value).replace(/[&<>"']/g, character => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        '\'': '&#39;',
+    }[character]));
     const created = c.createdAt ? new Date(c.createdAt).toLocaleString() : '';
     let statusHtml;
     if (c.used) {
@@ -1327,7 +1394,18 @@ async function openUserProfile() {
         }
     });
 
-    template.find('.userInvitationCodesButton').on('click', () => openMyInvitationCodes());
+    if (currentUser.admin) {
+        template.find('.userInvitationCodesButton')
+            .attr('title', '管理用户发放的邀请码')
+            .find('span').text('用户邀请管理');
+    }
+    template.find('.userInvitationCodesButton').on('click', () => {
+        if (currentUser.admin) {
+            openAdminPanel('userInvitationsAdminBlock');
+        } else {
+            openMyInvitationCodes();
+        }
+    });
 
     template.find('.userBackupButton').on('click', function () {
         $(this).addClass('disabled');
@@ -1469,7 +1547,7 @@ async function changeAvatar(handle, avatar) {
     }
 }
 
-async function openAdminPanel() {
+async function openAdminPanel(initialTab = 'usersList') {
     if (typeof window.initializeAdminExtensions !== 'function') {
         try {
             await import('./admin-extensions.js');
@@ -1786,6 +1864,9 @@ async function openAdminPanel() {
             }, 100);
         }
     });
+    template.find('.adminNav > button').filter(function () {
+        return String($(this).data('target-tab')) === initialTab;
+    }).first().trigger('click');
 // 管理员面板打开时立即初始化扩展功能
 if (typeof window.initializeAdminExtensions === 'function') {
     setTimeout(() => {
