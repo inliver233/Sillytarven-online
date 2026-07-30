@@ -1087,6 +1087,109 @@ async function loadUserStorageStatus(template) {
     }
 }
 
+// ===== 用户层邀请码发放系统 =====
+// 资格不足时只显示"未达到资格"，不透露门槛；列表与状态由后端 /api/user-invitations/my 驱动
+async function openMyInvitationCodes() {
+    const template = $(await renderTemplateAsync('myInvitationCodes'));
+
+    // 先弹出（loading 态），再异步填充数据
+    const popupPromise = callGenericPopup(template, POPUP_TYPE.TEXT, '', {
+        okButton: '关闭',
+        wide: true,
+        large: true,
+        allowVerticalScrolling: true,
+    });
+
+    await refreshMyInvitations(template);
+
+    template.find('.myInvitationGenerateButton').on('click', async function () {
+        const btn = $(this);
+        if (btn.hasClass('disabled')) return;
+        btn.addClass('disabled');
+        try {
+            const response = await fetch('/api/user-invitations/create', {
+                method: 'POST',
+                headers: getRequestHeaders(),
+            });
+            const data = await response.json().catch(() => ({}));
+            if (response.ok && data.success) {
+                toastr.success('邀请码生成成功');
+                await refreshMyInvitations(template);
+            } else {
+                toastr.warning(data.reason || data.error || '生成失败');
+            }
+        } catch (error) {
+            console.error('生成邀请码失败:', error);
+            toastr.error('生成失败，请稍后重试');
+        } finally {
+            btn.removeClass('disabled');
+        }
+    });
+
+    await popupPromise;
+}
+
+async function refreshMyInvitations(template) {
+    const statusBox = template.find('.myInvitationStatusBox');
+    const genBox = template.find('.myInvitationGenerateBox');
+    const listBox = template.find('.myInvitationCodesList');
+
+    statusBox.html('<span style="color: var(--st-text-muted, #64748b);">加载中...</span>');
+    genBox.hide();
+
+    try {
+        const response = await fetch('/api/user-invitations/my', { headers: getRequestHeaders() });
+        if (!response.ok) {
+            statusBox.html('<span style="color: #ef4444;">加载失败，请稍后重试</span>');
+            return;
+        }
+        const data = await response.json();
+
+        // 资格状态：未达资格不透露门槛
+        if (data.eligible) {
+            statusBox.html(
+                '<div style="padding: 12px 16px; border-radius: 10px; background: var(--st-primary-subtle, rgba(59,130,246,0.12)); border: 1px solid var(--st-border-highlight, rgba(59,130,246,0.35)); color: var(--st-text-main, #f8fafc);">' +
+                '<i class="fa-fw fa-solid fa-circle-check" style="color: var(--st-primary, #3b82f6); margin-right: 6px;"></i>' +
+                '您已获得邀请码发放资格</div>'
+            );
+            genBox.show();
+        } else {
+            statusBox.html(
+                '<div style="padding: 12px 16px; border-radius: 10px; background: rgba(255,255,255,0.04); border: 1px solid var(--st-border-subtle, rgba(255,255,255,0.07)); color: var(--st-text-secondary, #cbd5e1);">' +
+                '<i class="fa-fw fa-solid fa-circle-info" style="color: var(--st-text-muted, #64748b); margin-right: 6px;"></i>' +
+                '暂未达到邀请码发放资格</div>'
+            );
+            genBox.hide();
+        }
+
+        // 列表
+        if (!data.codes || data.codes.length === 0) {
+            listBox.html('<div style="text-align: center; color: var(--st-text-muted, #64748b); padding: 24px;">暂无邀请码记录</div>');
+        } else {
+            listBox.html(data.codes.map(renderMyCodeItem).join(''));
+        }
+    } catch (error) {
+        console.error('加载邀请码失败:', error);
+        statusBox.html('<span style="color: #ef4444;">加载失败，请稍后重试</span>');
+    }
+}
+
+function renderMyCodeItem(c) {
+    // 服务端数据转义防 XSS（code 为 hex 安全，usedBy 为用户句柄需转义）
+    const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+    const created = c.createdAt ? new Date(c.createdAt).toLocaleString() : '';
+    let statusHtml;
+    if (c.used) {
+        const usedAt = c.usedAt ? new Date(c.usedAt).toLocaleString() : '';
+        statusHtml = '<span style="color: #22c55e;">● 已使用</span>' +
+            (c.usedBy ? ` <span style="color: var(--st-text-secondary, #cbd5e1);">· ${esc(c.usedBy)}</span>` : '') +
+            (usedAt ? ` <span style="color: var(--st-text-muted, #64748b);">· ${usedAt}</span>` : '');
+    } else {
+        statusHtml = '<span style="color: var(--st-text-muted, #64748b);">○ 未使用</span>';
+    }
+    return `<div style="padding: 12px 14px; border-radius: 10px; background: rgba(255,255,255,0.03); border: 1px solid var(--st-border-subtle, rgba(255,255,255,0.07));">\n        <div style="font-family: 'Courier New', monospace; font-weight: 700; font-size: 1.05rem; color: var(--st-primary, #3b82f6); letter-spacing: 1px;">${esc(c.code)}</div>\n        <div style="font-size: 0.78rem; color: var(--st-text-muted, #64748b); margin-top: 4px;">创建于 ${created}</div>\n        <div style="font-size: 0.8rem; margin-top: 4px;">${statusHtml}</div>\n    </div>`;
+}
+
 async function openUserProfile() {
     await getCurrentUser();
 
@@ -1216,6 +1319,8 @@ async function openUserProfile() {
             toastr.error('续费失败，请稍后重试', '错误');
         }
     });
+
+    template.find('.userInvitationCodesButton').on('click', () => openMyInvitationCodes());
 
     template.find('.userBackupButton').on('click', function () {
         $(this).addClass('disabled');

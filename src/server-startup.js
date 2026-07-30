@@ -50,6 +50,7 @@ import { router as dataMaidRouter } from './endpoints/data-maid.js';
 import { router as backupsRouter } from './endpoints/backups.js';
 import { router as forumRouter } from './endpoints/forum.js';
 import { router as invitationCodesRouter } from './endpoints/invitation-codes.js';
+import { router as userInvitationsRouter } from './endpoints/user-invitations.js';
 import { router as systemLoadRouter } from './endpoints/system-load.js';
 import { router as publicCharactersRouter } from './endpoints/public-characters.js';
 import { router as announcementsRouter } from './endpoints/announcements.js';
@@ -196,6 +197,7 @@ export function setupPrivateEndpoints(app) {
     }
 
     app.use('/api/invitation-codes', invitationCodesRouter);
+    app.use('/api/user-invitations', userInvitationsRouter);
     app.use('/api/email-config', emailConfigRouter);
     app.use('/api/oauth-config', oauthConfigRouter);
     app.use('/api/system-load', systemLoadRouter);

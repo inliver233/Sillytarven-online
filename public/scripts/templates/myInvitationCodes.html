@@ -1,0 +1,23 @@
+<div class="flex-container flexFlowColumn flexNoGap" style="gap: 14px; min-width: 340px; max-width: 520px;">
+    <h3 class="margin0 flex-container alignItemsCenter" style="gap: 8px;">
+        <i class="fa-fw fa-solid fa-gift" style="color: var(--st-primary, #3b82f6);"></i>
+        <span>我的邀请码</span>
+    </h3>
+
+    <!-- 资格状态区（JS 填充，未达资格不透露门槛） -->
+    <div class="myInvitationStatusBox"></div>
+
+    <!-- 生成区（JS 按 eligible 控制 display） -->
+    <div class="myInvitationGenerateBox" style="display: none;">
+        <div class="myInvitationGenerateButton menu_button menu_button_icon" title="生成一个新的邀请码">
+            <i class="fa-fw fa-solid fa-plus"></i>
+            <span>生成邀请码</span>
+        </div>
+        <small style="color: var(--st-text-muted, #64748b); display: block; margin-top: 6px;">
+            邀请码为永久有效；上一个未使用前无法生成新的。
+        </small>
+    </div>
+
+    <!-- 列表区（JS 填充） -->
+    <div class="myInvitationCodesList flex-container flexFlowColumn flexNoGap"></div>
+</div>

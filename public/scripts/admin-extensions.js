@@ -8,6 +8,98 @@ const selectedInvitationCodes = new Set();
 let csrfToken = null;
 
 // 初始化管理员扩展功能
+// ===== 用户层邀请码发放系统（管理员端：规则配置 + 发放统计） =====
+function bindUserInvitationSystemEvents() {
+    loadUserInvitationConfig();
+    loadUserInvitationStats();
+    $('#userInvSaveConfig').off('click').on('click', saveUserInvitationConfig);
+    $('#userInvRefreshStats').off('click').on('click', loadUserInvitationStats);
+}
+
+async function loadUserInvitationConfig() {
+    try {
+        const response = await fetch('/api/user-invitations/config', { headers: getRequestHeaders() });
+        if (!response.ok) return;
+        const cfg = await response.json();
+        $('#userInvEnabled').prop('checked', !!cfg.enabled);
+        $('#userInvMinRegDays').val(cfg.minRegisteredDays);
+        $('#userInvMinOnlineHours').val(cfg.minOnlineHours);
+        $('#userInvQuota').val(cfg.quotaPerPeriod);
+        $('#userInvPeriodDays').val(cfg.periodDays);
+        $('#userInvMaxUnused').val(cfg.maxUnusedPending);
+        $('#userInvMaxTotal').val(cfg.maxTotalCodes);
+    } catch (e) {
+        console.error('加载用户邀请配置失败:', e);
+    }
+}
+
+async function saveUserInvitationConfig() {
+    const body = {
+        enabled: $('#userInvEnabled').prop('checked'),
+        minRegisteredDays: Number($('#userInvMinRegDays').val()),
+        minOnlineHours: Number($('#userInvMinOnlineHours').val()),
+        quotaPerPeriod: Number($('#userInvQuota').val()),
+        periodDays: Number($('#userInvPeriodDays').val()),
+        maxUnusedPending: Number($('#userInvMaxUnused').val()),
+        maxTotalCodes: Number($('#userInvMaxTotal').val()),
+    };
+    try {
+        const response = await fetch('/api/user-invitations/config', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify(body),
+        });
+        if (response.ok) {
+            toastr.success('用户邀请规则已保存');
+            await loadUserInvitationConfig();
+        } else {
+            toastr.error('保存失败');
+        }
+    } catch (e) {
+        console.error('保存用户邀请配置失败:', e);
+        toastr.error('保存失败，请稍后重试');
+    }
+}
+
+async function loadUserInvitationStats() {
+    const container = $('#userInvStatsContainer');
+    container.html('<div style="color: var(--st-text-muted, #64748b); padding: 14px; text-align: center;">加载中...</div>');
+    try {
+        const response = await fetch('/api/user-invitations/issuer-stats', { headers: getRequestHeaders() });
+        if (!response.ok) {
+            container.html('<div style="color:#ef4444;padding:14px;text-align:center;">加载失败</div>');
+            return;
+        }
+        const data = await response.json();
+        const stats = data.stats || [];
+        if (stats.length === 0) {
+            container.html('<div style="color: var(--st-text-muted, #64748b); padding: 14px; text-align: center;">暂无发放记录</div>');
+            return;
+        }
+        const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+        const rows = stats.map(s => {
+            const last = s.lastIssueAt ? new Date(s.lastIssueAt).toLocaleString() : '—';
+            const invited = s.invitedUsers && s.invitedUsers.length
+                ? s.invitedUsers.map(u => esc(u)).join(', ')
+                : '—';
+            return `<div style="padding: 10px 12px; border-radius: 8px; background: rgba(255,255,255,0.03); border: 1px solid var(--st-border-subtle, rgba(255,255,255,0.07)); font-size: 0.82rem;">
+                <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:6px;">
+                    <span style="font-weight:600;color:var(--st-text-main,#f8fafc);">${esc(s.handle)}</span>
+                    <span style="color:var(--st-text-muted,#64748b);">最后发放: ${last}</span>
+                </div>
+                <div style="margin-top:4px;color:var(--st-text-secondary,#cbd5e1);">
+                    累计 <b style="color:var(--st-primary,#3b82f6);">${s.totalIssued}</b> · 已用 <b style="color:#22c55e;">${s.totalUsed}</b> · 待用 ${s.unusedPending}
+                </div>
+                <div style="margin-top:4px;color:var(--st-text-muted,#64748b);">邀请了: ${invited}</div>
+            </div>`;
+        }).join('');
+        container.html(rows);
+    } catch (e) {
+        console.error('加载用户邀请统计失败:', e);
+        container.html('<div style="color:#ef4444;padding:14px;text-align:center;">加载失败</div>');
+    }
+}
+
 function initializeAdminExtensions() {
     const adminNav = document.querySelector('.adminNav');
     if (!adminNav || adminNav.dataset.extensionsInitialized === 'true') {
@@ -25,6 +117,9 @@ function initializeAdminExtensions() {
 
         // 绑定邀请码管理相关事件
         bindInvitationCodeEvents();
+
+        // 绑定用户邀请码发放系统事件
+        bindUserInvitationSystemEvents();
 
         // 绑定公告管理相关事件
         bindAnnouncementEvents();

@@ -356,6 +356,61 @@
         <div class="flex-container flexFlowColumn flexGap10">
             <h3 data-i18n="Invitation Code Management">邀请码管理</h3>
 
+            <!-- ===== 用户层邀请码发放系统（独立配置与统计） ===== -->
+            <div class="userInvSystemBlock" style="border: 1px solid var(--st-border-subtle, rgba(255,255,255,0.07)); border-radius: 12px; padding: 16px; margin-bottom: 8px; background: rgba(255,255,255,0.02);">
+                <h4 class="margin0 flex-container alignItemsCenter" style="gap: 8px; margin-bottom: 12px;">
+                    <i class="fa-fw fa-solid fa-users-gear" style="color: var(--st-primary, #3b82f6);"></i>
+                    <span>用户邀请码发放系统</span>
+                </h4>
+                <div class="flex-container alignItemsCenter" style="gap: 10px; margin-bottom: 12px; flex-wrap: wrap;">
+                    <label class="checkbox_label">
+                        <input type="checkbox" id="userInvEnabled">
+                        <span>启用用户发放系统</span>
+                    </label>
+                    <small style="color: var(--st-text-muted, #64748b);">关闭后用户无法生成新邀请码（已发的不受影响）</small>
+                </div>
+                <div class="flex-container" style="flex-wrap: wrap; gap: 10px; margin-bottom: 12px;">
+                    <div class="flex1" style="min-width: 130px;">
+                        <span style="display:block;font-size:0.78rem;color:var(--st-text-muted,#64748b);margin-bottom:2px;">注册门槛（天）</span>
+                        <input id="userInvMinRegDays" class="text_pole" type="number" min="0" step="1">
+                    </div>
+                    <div class="flex1" style="min-width: 130px;">
+                        <span style="display:block;font-size:0.78rem;color:var(--st-text-muted,#64748b);margin-bottom:2px;">在线门槛（小时）</span>
+                        <input id="userInvMinOnlineHours" class="text_pole" type="number" min="0" step="1">
+                    </div>
+                    <div class="flex1" style="min-width: 100px;">
+                        <span style="display:block;font-size:0.78rem;color:var(--st-text-muted,#64748b);margin-bottom:2px;">每周期数量</span>
+                        <input id="userInvQuota" class="text_pole" type="number" min="1" step="1">
+                    </div>
+                    <div class="flex1" style="min-width: 90px;">
+                        <span style="display:block;font-size:0.78rem;color:var(--st-text-muted,#64748b);margin-bottom:2px;">周期（天）</span>
+                        <input id="userInvPeriodDays" class="text_pole" type="number" min="1" step="1">
+                    </div>
+                    <div class="flex1" style="min-width: 110px;">
+                        <span style="display:block;font-size:0.78rem;color:var(--st-text-muted,#64748b);margin-bottom:2px;">未使用上限</span>
+                        <input id="userInvMaxUnused" class="text_pole" type="number" min="1" step="1">
+                    </div>
+                    <div class="flex1" style="min-width: 120px;">
+                        <span style="display:block;font-size:0.78rem;color:var(--st-text-muted,#64748b);margin-bottom:2px;">全局邀请码上限</span>
+                        <input id="userInvMaxTotal" class="text_pole" type="number" min="1" step="1">
+                    </div>
+                </div>
+                <div class="flex-container" style="gap: 10px; margin-bottom: 14px;">
+                    <button type="button" class="menu_button menu_button_icon" id="userInvSaveConfig">
+                        <i class="fa-fw fa-solid fa-floppy-disk"></i><span>保存规则</span>
+                    </button>
+                    <button type="button" class="menu_button menu_button_icon" id="userInvRefreshStats">
+                        <i class="fa-fw fa-solid fa-rotate"></i><span>刷新统计</span>
+                    </button>
+                </div>
+                <div class="flex-container alignItemsCenter" style="justify-content: space-between; margin-bottom: 6px;">
+                    <h5 class="margin0">发放者统计（谁邀请了谁）</h5>
+                </div>
+                <div id="userInvStatsContainer" class="flex-container flexFlowColumn" style="gap: 6px; max-height: 360px; overflow-y: auto;">
+                    <div style="color: var(--st-text-muted, #64748b); padding: 14px; text-align: center; font-size: 0.85rem;">点击「刷新统计」加载</div>
+                </div>
+            </div>
+
             <!-- 使用说明 -->
             <div class="usage-notice" style="background-color: #fff3cd; border: 1px solid #ffeaa7; border-radius: 5px; padding: 10px; margin-bottom: 15px;">
                 <h4 style="margin-top: 0; color: #856404;">
