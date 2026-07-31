@@ -388,8 +388,10 @@ app.use(multerMonkeyPatch);
 
 app.get('/version', async function (request, response) {
     const performanceTimer = beginEndpointPerformance(request, 'version');
-    performanceTimer.setCacheState('miss');
-    const data = await performanceTimer.measureAsync('git', () => getVersion());
+    const data = await getVersion({
+        onCacheState: state => performanceTimer.setCacheState(state),
+        onGitDuration: durationMs => performanceTimer.addDuration('git', durationMs),
+    });
     performanceTimer.startPhase('serialize');
     response.send(data);
 });

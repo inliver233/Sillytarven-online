@@ -191,6 +191,10 @@ performance:
     samplesPerOperation: 200
     # Per-user browser timing samples accepted per minute.
     clientSamplesPerMinute: 120
+  # Memoize the complete /version payload while package.json and Git HEAD/ref stay unchanged.
+  versionMemo:
+    enabled: true
+    ttlMs: 30000
 
 # CACHE BUSTER CONFIGURATION
 # IMPORTANT: Requires localhost or a domain with HTTPS, otherwise will not work!

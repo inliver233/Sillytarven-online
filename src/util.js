@@ -3,7 +3,6 @@ import fs from 'node:fs';
 import http2 from 'node:http2';
 import process from 'node:process';
 import { Readable } from 'node:stream';
-import { createRequire } from 'node:module';
 import { Buffer } from 'node:buffer';
 import { promises as dnsPromise } from 'node:dns';
 import os from 'node:os';
@@ -11,16 +10,15 @@ import crypto from 'node:crypto';
 import readline from 'node:readline';
 
 import yaml from 'yaml';
-import { sync as commandExistsSync } from 'command-exists';
 import _ from 'lodash';
 import yauzl from 'yauzl';
 import mime from 'mime-types';
-import { default as simpleGit } from 'simple-git';
 import chalk from 'chalk';
 import bytes from 'bytes';
 import { LOG_LEVELS, CHAT_COMPLETION_SOURCES, MEDIA_REQUEST_TYPE } from './constants.js';
 import { serverDirectory } from './server-directory.js';
 import { sync as writeFileAtomicSync } from 'write-file-atomic';
+import { VersionMemo } from './version.js';
 
 /**
  * Parsed config object.
@@ -130,39 +128,27 @@ export function getBasicAuthHeader(auth) {
 /**
  * Returns the version of the running instance. Get the version from the package.json file and the git revision.
  * Also returns the agent string for the Horde API.
+ * @param {object} [observers] Optional cache/Git timing observers
+ * @param {(state: 'hit'|'miss') => void} [observers.onCacheState] Cache state callback
+ * @param {(durationMs: number) => void} [observers.onGitDuration] Git timing callback
  * @returns {Promise<{agent: string, pkgVersion: string, gitRevision: string | null, gitBranch: string | null, commitDate: string | null, isLatest: boolean}>} Version info object
  */
-export async function getVersion() {
-    let pkgVersion = 'UNKNOWN';
-    let gitRevision = null;
-    let gitBranch = null;
-    let commitDate = null;
-    let isLatest = true;
+let versionMemo = null;
 
-    try {
-        const require = createRequire(import.meta.url);
-        const pkgJson = require(path.join(serverDirectory, './package.json'));
-        pkgVersion = pkgJson.version;
-        if (commandExistsSync('git')) {
-            const git = simpleGit({ baseDir: serverDirectory });
-            gitRevision = await git.revparse(['--short', 'HEAD']);
-            gitBranch = await git.revparse(['--abbrev-ref', 'HEAD']);
-            commitDate = await git.show(['-s', '--format=%ci', gitRevision]);
-
-            const trackingBranch = await git.revparse(['--abbrev-ref', '@{u}']);
-
-            // Might fail, but exception is caught. Just don't run anything relevant after in this block...
-            const localLatest = await git.revparse(['HEAD']);
-            const remoteLatest = await git.revparse([trackingBranch]);
-            isLatest = localLatest === remoteLatest;
-        }
+export async function getVersion(observers = {}) {
+    if (!versionMemo) {
+        versionMemo = new VersionMemo({
+            rootDirectory: serverDirectory,
+            enabled: getConfigValue('performance.versionMemo.enabled', true, 'boolean'),
+            ttlMs: getConfigValue('performance.versionMemo.ttlMs', 30_000, 'number'),
+        });
     }
-    catch {
-        // suppress exception
-    }
+    return await versionMemo.get(observers);
+}
 
-    const agent = `SillyTavern:${pkgVersion}:Cohee#1207`;
-    return { agent, pkgVersion, gitRevision, gitBranch, commitDate: commitDate?.trim() ?? null, isLatest };
+/** Clear the in-memory version memo. */
+export function clearVersionCache() {
+    versionMemo?.clear();
 }
 
 /**
