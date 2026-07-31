@@ -6,6 +6,7 @@ const ALLOWED_OPERATIONS = new Set([
     'ui-long-task',
     'chat-load-more-frame',
     'regex-chat-refresh',
+    'prompt-token-dry-run',
 ]);
 const recordedMilestones = new Set();
 const pendingSamples = [];

@@ -12,6 +12,9 @@ import { renderTemplateAsync } from './templates.js';
 import { Popup } from './popup.js';
 import { t } from './i18n.js';
 import { isMobile } from './RossAscends-mods.js';
+import { LatestTaskScheduler } from './util/latest-task-scheduler.js';
+import { commitPromptManagerResult } from './util/prompt-manager-result.js';
+import { recordPerformanceSample } from './performance-telemetry.js';
 
 function debouncePromise(func, delay) {
     let timeoutId;
@@ -30,6 +33,7 @@ function debouncePromise(func, delay) {
 
 const DEFAULT_DEPTH = 4;
 const DEFAULT_ORDER = 100;
+const PROMPT_TOKEN_DRY_RUN_DELAY_MS = 250;
 
 /**
  * @enum {number}
@@ -367,10 +371,16 @@ class PromptManager {
         // Token usage of last dry run
         this.tokenUsage = 0;
 
+        // Whether token counts are waiting for the latest background dry run
+        this.tokenUsagePending = false;
+
+        // Last counts committed by a completed dry run or live generation
+        this.stableTokenCounts = null;
+
         // Error state, contains error message.
         this.error = null;
 
-        /** Dry-run for generate, must return a promise  */
+        /** Dry-run for generate, must return a promise. */
         this.tryGenerate = async () => { };
 
         /** Called to persist the configuration, must return a promise */
@@ -414,6 +424,14 @@ class PromptManager {
 
         /** Character reset button click*/
         this.handleCharacterReset = () => { };
+
+        this.promptTokenScheduler = new LatestTaskScheduler({
+            delayMs: PROMPT_TOKEN_DRY_RUN_DELAY_MS,
+            run: details => this.#runPromptTokenDryRun(details),
+            commit: result => this.#commitPromptTokenDryRun(result),
+            onError: error => this.#handlePromptTokenDryRunError(error),
+            onDiscard: () => this.#restoreStableTokenCounts(),
+        });
 
         /** Debounced version of render */
         this.renderDebounced = debounce(this.render.bind(this), debounce_timeout.relaxed);
@@ -854,40 +872,111 @@ class PromptManager {
         document.getElementById(this.configuration.prefix + 'prompt_manager')?.closest('.scrollableInner')?.scrollTo(0, scrollPosition);
     }
 
+    #restoreStableTokenCounts() {
+        if (this.stableTokenCounts) {
+            this.tokenHandler.setCounts({ ...this.stableTokenCounts });
+        }
+    }
+
+    async #renderPromptManagerUi() {
+        this.profileStart('render');
+        const scrollPosition = this.#getScrollPosition();
+        await this.renderPromptManager();
+        await this.renderPromptManagerListItems();
+        this.makeDraggable();
+        this.#setScrollPosition(scrollPosition);
+        this.profileEnd('render');
+    }
+
+    async #runPromptTokenDryRun({ requestCount }) {
+        if (!power_user.prompt_manager_background_tokens || main_api !== 'openai') {
+            return null;
+        }
+
+        await waitUntilCondition(
+            () => !is_send_press && !is_group_generating,
+            60_000,
+            100,
+            { rejectOnTimeout: false },
+        );
+        if (is_send_press || is_group_generating || !power_user.prompt_manager_background_tokens || main_api !== 'openai') {
+            return null;
+        }
+
+        const startedAt = performance.now();
+        try {
+            return await this.tryGenerate({ deferCommit: true });
+        } finally {
+            recordPerformanceSample('prompt-token-dry-run', performance.now() - startedAt, {
+                requests: requestCount,
+                merged: Math.max(0, requestCount - 1),
+            });
+        }
+    }
+
+    async #commitPromptTokenDryRun(result) {
+        this.tokenUsagePending = false;
+        if (is_send_press || is_group_generating) {
+            this.#restoreStableTokenCounts();
+            return;
+        }
+        if (power_user.prompt_manager_background_tokens && main_api === 'openai' && result?.chatCompletion) {
+            commitPromptManagerResult(this, result);
+        }
+        if (main_api === 'openai') {
+            await this.#renderPromptManagerUi();
+        }
+    }
+
+    async #handlePromptTokenDryRunError(error) {
+        this.#restoreStableTokenCounts();
+        this.tokenUsagePending = false;
+        console.warn('Prompt token dry run failed:', error);
+        if (main_api === 'openai') {
+            await this.#renderPromptManagerUi();
+        }
+    }
+
     /**
      * Main rendering function
      *
      * @param afterTryGenerate - Whether a dry run should be attempted before rendering
      */
     render(afterTryGenerate = true) {
-        if (main_api !== 'openai') return;
+        if (main_api !== 'openai') {
+            this.promptTokenScheduler.cancel();
+            this.tokenUsagePending = false;
+            return;
+        }
 
-        if ('character' === this.configuration.promptOrder.strategy && null === this.activeCharacter) return;
+        if ('character' === this.configuration.promptOrder.strategy && null === this.activeCharacter) {
+            this.promptTokenScheduler.cancel();
+            this.tokenUsagePending = false;
+            return;
+        }
         this.error = null;
 
         waitUntilCondition(() => !is_send_press && !is_group_generating, 1024 * 1024, 100).then(async () => {
+            if (afterTryGenerate && power_user.prompt_manager_background_tokens) {
+                this.tokenUsagePending = true;
+                this.promptTokenScheduler.schedule();
+                await this.#renderPromptManagerUi();
+                return;
+            }
+
+            this.promptTokenScheduler.cancel();
+            this.tokenUsagePending = false;
             if (true === afterTryGenerate) {
+                await this.promptTokenScheduler.flush();
                 // Executed during dry-run for determining context composition
                 this.profileStart('filling context');
                 this.tryGenerate().finally(async () => {
                     this.profileEnd('filling context');
-                    this.profileStart('render');
-                    const scrollPosition = this.#getScrollPosition();
-                    await this.renderPromptManager();
-                    await this.renderPromptManagerListItems();
-                    this.makeDraggable();
-                    this.#setScrollPosition(scrollPosition);
-                    this.profileEnd('render');
+                    await this.#renderPromptManagerUi();
                 });
             } else {
                 // Executed during live communication
-                this.profileStart('render');
-                const scrollPosition = this.#getScrollPosition();
-                await this.renderPromptManager();
-                await this.renderPromptManagerListItems();
-                this.makeDraggable();
-                this.#setScrollPosition(scrollPosition);
-                this.profileEnd('render');
+                await this.#renderPromptManagerUi();
             }
         }).catch(() => {
             console.log('Timeout while waiting for send press to be false');
@@ -1574,6 +1663,8 @@ class PromptManager {
         this.setMessages(messages);
         this.populateTokenCounts(messages);
         this.overriddenPrompts = chatCompletion.getOverriddenPrompts();
+        this.stableTokenCounts = { ...this.tokenHandler.getCounts() };
+        this.tokenUsagePending = false;
     }
 
     /**
@@ -1611,7 +1702,7 @@ class PromptManager {
                 </div>
         ` : '';
 
-        const totalActiveTokens = this.tokenUsage;
+        const totalActiveTokens = this.tokenUsagePending ? '-' : this.tokenUsage;
 
         const headerHtml = await renderTemplateAsync('promptManagerHeader', { error: this.error, errorDiv, prefix: this.configuration.prefix, totalActiveTokens });
         promptManagerDiv.insertAdjacentHTML('beforeend', headerHtml);
@@ -1670,14 +1761,15 @@ class PromptManager {
             const enabledClass = listEntry.enabled ? '' : `${prefix}prompt_manager_prompt_disabled`;
             const draggableClass = `${prefix}prompt_manager_prompt_draggable`;
             const markerClass = prompt.marker ? `${prefix}prompt_manager_marker` : '';
-            const tokens = this.tokenHandler?.getCounts()[prompt.identifier] ?? 0;
+            const counts = this.stableTokenCounts ?? this.tokenHandler?.getCounts();
+            const tokens = this.tokenUsagePending ? null : counts?.[prompt.identifier] ?? 0;
 
             // Warn the user if the chat history goes below certain token thresholds.
             let warningClass = '';
             let warningTitle = '';
 
             const tokenBudget = this.serviceSettings.openai_max_context - this.serviceSettings.openai_max_tokens;
-            if (this.tokenUsage > tokenBudget * 0.8 &&
+            if (!this.tokenUsagePending && this.tokenUsage > tokenBudget * 0.8 &&
                 'chatHistory' === prompt.identifier) {
                 const warningThreshold = this.configuration.warningTokenThreshold;
                 const dangerThreshold = this.configuration.dangerTokenThreshold;

@@ -77,6 +77,7 @@ import { SlashCommandEnumValue } from './slash-commands/SlashCommandEnumValue.js
 import { callGenericPopup, Popup, POPUP_RESULT, POPUP_TYPE } from './popup.js';
 import { t } from './i18n.js';
 import { ToolManager } from './tool-calling.js';
+import { commitPromptManagerResult, createPromptManagerResult } from './util/prompt-manager-result.js';
 import { accountStorage } from './util/AccountStorage.js';
 import { COMETAPI_IGNORE_PATTERNS, IGNORE_SYMBOL, MEDIA_DISPLAY, MEDIA_TYPE } from './constants.js';
 
@@ -653,9 +654,9 @@ function setupChatCompletionPromptManager(openAiSettings) {
         return new Promise((resolve) => eventSource.once(event_types.SETTINGS_UPDATED, resolve));
     };
 
-    promptManager.tryGenerate = () => {
+    promptManager.tryGenerate = ({ deferCommit = false } = {}) => {
         if (characters[this_chid]) {
-            return Generate('normal', {}, true);
+            return Generate('normal', { deferPromptManagerUpdate: deferCommit }, true);
         } else {
             return Promise.resolve();
         }
@@ -1428,7 +1429,9 @@ async function preparePromptsForChatCompletion({ scenario, charPersonality, name
  * @param {object[]} content.messages - An array of messages to be used as chat history.
  * @param {string[]} content.messageExamples - An array of messages to be used as dialogue examples.
  * @param dryRun - Whether this is a live call or not.
- * @returns {Promise<(any[]|boolean)[]>} An array where the first element is the prepared chat and the second element is a boolean flag.
+ * @param {object} [options] Prompt Manager update options
+ * @param {boolean} [options.deferPromptManagerUpdate=false] Return Prompt Manager state for a versioned caller to commit
+ * @returns {Promise<any[]>} Prepared chat, token counts, and deferred Prompt Manager result
  */
 export async function prepareOpenAIMessages({
     name2,
@@ -1447,7 +1450,7 @@ export async function prepareOpenAIMessages({
     jailbreakPromptOverride,
     messages,
     messageExamples,
-}, dryRun) {
+}, dryRun, { deferPromptManagerUpdate = false } = {}) {
     // Without a character selected, there is no way to accurately calculate tokens
     if (!promptManager.activeCharacter && dryRun) return [null, false];
 
@@ -1456,6 +1459,8 @@ export async function prepareOpenAIMessages({
 
     const userSettings = promptManager.serviceSettings;
     chatCompletion.setTokenBudget(userSettings.openai_max_context, userSettings.openai_max_tokens);
+    let promptManagerError = null;
+    let promptManagerResult = null;
 
     try {
         // Merge markers and ordered user prompts with system prompts
@@ -1480,11 +1485,11 @@ export async function prepareOpenAIMessages({
         if (error instanceof TokenBudgetExceededError) {
             toastr.error(t`Mandatory prompts exceed the context size.`);
             chatCompletion.log('Mandatory prompts exceed the context size.');
-            promptManager.error = t`Not enough free tokens for mandatory prompts. Raise your token limit or disable custom prompts.`;
+            promptManagerError = t`Not enough free tokens for mandatory prompts. Raise your token limit or disable custom prompts.`;
         } else if (error instanceof InvalidCharacterNameError) {
             toastr.warning(t`An error occurred while counting tokens: Invalid character name`);
             chatCompletion.log('Invalid character name');
-            promptManager.error = t`The name of at least one character contained whitespaces or special characters. Please check your user and character name.`;
+            promptManagerError = t`The name of at least one character contained whitespaces or special characters. Please check your user and character name.`;
         } else {
             toastr.error(t`An unknown error occurred while counting tokens. Further information may be available in console.`);
             chatCompletion.log('----- Unexpected error while preparing prompts -----');
@@ -1493,8 +1498,11 @@ export async function prepareOpenAIMessages({
             chatCompletion.log('----------------------------------------------------');
         }
     } finally {
-        // Pass chat completion to prompt manager for inspection
-        promptManager.setChatCompletion(chatCompletion);
+        promptManagerResult = createPromptManagerResult(chatCompletion, promptManagerError);
+        // Live and unmanaged dry runs keep the existing immediate update behavior.
+        if (!dryRun || !deferPromptManagerUpdate) {
+            commitPromptManagerResult(promptManager, promptManagerResult);
+        }
 
         if (oai_settings.squash_system_messages && dryRun == false) {
             await chatCompletion.squashSystemMessages();
@@ -1511,7 +1519,7 @@ export async function prepareOpenAIMessages({
 
     openai_messages_count = chat.filter(x => !x?.tool_calls && ['user', 'assistant', 'tool'].includes(x?.role)).length || 0;
 
-    return [chat, promptManager.tokenHandler.counts];
+    return [chat, promptManager.tokenHandler.counts, promptManagerResult];
 }
 
 /**

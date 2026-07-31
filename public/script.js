@@ -4487,6 +4487,7 @@ function removeLastMessage() {
  * @property {string} [quietName] Name to use for the quiet prompt (defaults to "System:")
  * @property {number} [depth] Recursion depth for the generation. Used to prevent infinite loops in tool calls.
  * @property {JsonSchema} [jsonSchema] JSON schema to use for the structured generation. Usually requires a special instruction.
+ * @property {boolean} [deferPromptManagerUpdate] Return dry-run Prompt Manager state without committing it.
  */
 
 /**
@@ -4497,7 +4498,7 @@ function removeLastMessage() {
  * @param {boolean} dryRun Whether to actually generate a message or just assemble the prompt
  * @returns {Promise<any>} Returns a promise that resolves when the text is done generating.
  */
-export async function Generate(type, { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage, quietName, jsonSchema = null, depth = 0 } = {}, dryRun = false) {
+export async function Generate(type, { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage, quietName, jsonSchema = null, depth = 0, deferPromptManagerUpdate = false } = {}, dryRun = false) {
     console.log('Generate entered');
     setGenerationProgress(0);
     generation_started = new Date();
@@ -5462,6 +5463,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
     let thisPromptBits = [];
 
     let generate_data;
+    let promptManagerDryRunResult = null;
     switch (main_api) {
         case 'koboldhorde':
         case 'kobold':
@@ -5497,7 +5499,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
             break;
         }
         case 'openai': {
-            let [prompt, counts] = await prepareOpenAIMessages({
+            let [prompt, counts, promptManagerResult] = await prepareOpenAIMessages({
                 name2: name2,
                 charDescription: description,
                 charPersonality: personality,
@@ -5514,8 +5516,9 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
                 jailbreakPromptOverride: jailbreak,
                 messages: oaiMessages,
                 messageExamples: oaiMessageExamples,
-            }, dryRun);
+            }, dryRun, { deferPromptManagerUpdate });
             generate_data = { prompt: prompt };
+            promptManagerDryRunResult = promptManagerResult;
 
             // TODO: move these side-effects somewhere else, so this switch-case solely sets generate_data
             // counts will return false if the user has not enabled the token breakdown feature
@@ -5533,7 +5536,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
     await eventSource.emit(event_types.GENERATE_AFTER_DATA, generate_data, dryRun);
 
     if (dryRun) {
-        return Promise.resolve();
+        return deferPromptManagerUpdate ? promptManagerDryRunResult : Promise.resolve();
     }
 
     /**
