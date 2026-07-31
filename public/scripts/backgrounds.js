@@ -13,6 +13,35 @@ import { deleteMediaFromServer } from './chats.js';
 
 const BG_METADATA_KEY = 'custom_background';
 const LIST_METADATA_KEY = 'chat_backgrounds';
+const SUPPORTED_BACKGROUND_VIDEO_EXTENSIONS = new Set(['mp4', 'webm', 'mov', 'mkv', 'avi', 'm4v']);
+
+/**
+ * Detects supported background image bytes without decoding/re-encoding them.
+ * @param {Uint8Array} bytes File header
+ * @returns {{extension: string, mimeType: string}|null}
+ */
+function detectBackgroundImageFormat(bytes) {
+    const ascii = (start, end) => String.fromCharCode(...bytes.subarray(start, end));
+    if (bytes.length >= 8 && [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A].every((value, index) => bytes[index] === value)) {
+        return { extension: 'png', mimeType: 'image/png' };
+    }
+    if (bytes[0] === 0xFF && bytes[1] === 0xD8 && bytes[2] === 0xFF) {
+        return { extension: 'jpg', mimeType: 'image/jpeg' };
+    }
+    if (bytes.length >= 6 && ['GIF87a', 'GIF89a'].includes(ascii(0, 6))) {
+        return { extension: 'gif', mimeType: 'image/gif' };
+    }
+    if (bytes.length >= 12 && ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WEBP') {
+        return { extension: 'webp', mimeType: 'image/webp' };
+    }
+    if (bytes.length >= 2 && ascii(0, 2) === 'BM') {
+        return { extension: 'bmp', mimeType: 'image/bmp' };
+    }
+    if (bytes.length >= 12 && ascii(4, 8) === 'ftyp' && ['avif', 'avis'].includes(ascii(8, 12).toLowerCase())) {
+        return { extension: 'avif', mimeType: 'image/avif' };
+    }
+    return null;
+}
 
 // A single transparent PNG pixel used as a placeholder for errored backgrounds
 const PNG_PIXEL = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
@@ -275,7 +304,14 @@ async function onCopyToSystemBackgroundClick(e) {
         return;
     }
 
-    const bgFile = await fetch(bgNames.oldBg);
+    let bgFile;
+    try {
+        bgFile = await fetch(bgNames.oldBg);
+    } catch (error) {
+        console.error('Failed to fetch chat background for copying:', error);
+        toastr.warning(t`Failed to copy background`);
+        return;
+    }
 
     if (!bgFile.ok) {
         toastr.warning('Failed to copy background');
@@ -287,11 +323,16 @@ async function onCopyToSystemBackgroundClick(e) {
     const formData = new FormData();
     formData.set('avatar', file);
 
-    await uploadBackground(formData);
+    const uploadedBackground = await uploadBackground(formData);
+    if (!uploadedBackground) {
+        return;
+    }
 
     const list = chat_metadata[LIST_METADATA_KEY] || [];
     const index = list.indexOf(bgNames.oldBg);
-    list.splice(index, 1);
+    if (index >= 0) {
+        list.splice(index, 1);
+    }
     saveMetadataDebounced();
     renderChatBackgrounds();
 }
@@ -385,19 +426,58 @@ async function onRenameBackgroundClick(e) {
     }
 
     const data = { old_bg: bgNames.oldBg, new_bg: bgNames.newBg };
-    const response = await fetch('/api/backgrounds/rename', {
-        method: 'POST',
-        headers: getRequestHeaders(),
-        body: JSON.stringify(data),
-        cache: 'no-cache',
-    });
-
-    if (response.ok) {
-        await getBackgrounds();
-        highlightNewBackground(bgNames.newBg);
-    } else {
-        toastr.warning('Failed to rename background');
+    let response;
+    try {
+        response = await fetch('/api/backgrounds/rename', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify(data),
+            cache: 'no-cache',
+        });
+    } catch (error) {
+        console.error('Failed to rename background:', error);
+        toastr.warning(t`The browser could not reach the server. The background was not renamed.`);
+        return;
     }
+
+    if (!response.ok) {
+        toastr.warning(await getBackgroundResponseError(response, t`Failed to rename background`));
+        return;
+    }
+
+    const result = await response.json().catch(() => data);
+    const oldBackground = result.old_bg || bgNames.oldBg;
+    const newBackground = result.new_bg || bgNames.newBg;
+    const oldUrl = generateUrlParameter(oldBackground, false);
+    const newUrl = generateUrlParameter(newBackground, false);
+    const wasGlobalBackground = background_settings.name === oldBackground || background_settings.url === oldUrl;
+    const wasLockedBackground = chat_metadata[BG_METADATA_KEY] === oldUrl;
+
+    if (wasGlobalBackground) {
+        await setBackground(newBackground, newUrl);
+    }
+    if (wasLockedBackground) {
+        saveBackgroundMetadata(newUrl);
+        $('#bg1').css('background-image', newUrl);
+    }
+
+    try {
+        for (const cacheKey of [oldBackground, newBackground]) {
+            await THUMBNAIL_STORAGE.removeItem(cacheKey);
+            if (THUMBNAIL_BLOBS.has(cacheKey)) {
+                URL.revokeObjectURL(THUMBNAIL_BLOBS.get(cacheKey));
+                THUMBNAIL_BLOBS.delete(cacheKey);
+            }
+        }
+    } catch (error) {
+        console.warn('Failed to clear renamed background thumbnail cache:', error);
+    }
+
+    await getBackgrounds();
+    highlightNewBackground(newBackground);
+    highlightLockedBackground();
+    highlightSelectedBackground();
+    toastr.success(t`Background renamed`);
 }
 
 async function onDeleteBackgroundClick(e) {
@@ -428,11 +508,16 @@ async function onDeleteBackgroundClick(e) {
     if (confirm) {
         // If it's not custom, it's a built-in background. Delete it from the server
         if (!isCustom) {
-            await delBackground(bg);
+            const deleted = await delBackground(bg);
+            if (!deleted) {
+                return;
+            }
         } else {
             const list = chat_metadata[LIST_METADATA_KEY] || [];
             const index = list.indexOf(bg);
-            list.splice(index, 1);
+            if (index >= 0) {
+                list.splice(index, 1);
+            }
         }
 
         if (bg === background_settings.name || url === chat_metadata[BG_METADATA_KEY]) {
@@ -548,17 +633,26 @@ function renderChatBackgrounds(backgrounds) {
 }
 
 export async function getBackgrounds() {
-    const response = await fetch('/api/backgrounds/all', {
-        method: 'POST',
-        headers: getRequestHeaders(),
-        body: JSON.stringify({}),
-    });
-    if (response.ok) {
-        const { images, config } = await response.json();
-        Object.assign(THUMBNAIL_CONFIG, config);
+    try {
+        const response = await fetch('/api/backgrounds/all', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({}),
+        });
+        if (response.ok) {
+            const { images, config } = await response.json();
+            Object.assign(THUMBNAIL_CONFIG, config);
 
-        renderSystemBackgrounds(images);
-        highlightSelectedBackground();
+            renderSystemBackgrounds(images);
+            highlightSelectedBackground();
+            return true;
+        }
+
+        console.error('Failed to refresh backgrounds:', response.status, response.statusText);
+        return false;
+    } catch (error) {
+        console.error('Failed to refresh backgrounds:', error);
+        return false;
     }
 }
 
@@ -644,19 +738,36 @@ async function setBackground(bg, url) {
 }
 
 async function delBackground(bg) {
-    await fetch('/api/backgrounds/delete', {
-        method: 'POST',
-        headers: getRequestHeaders(),
-        body: JSON.stringify({
-            bg: bg,
-        }),
-    });
-
-    await THUMBNAIL_STORAGE.removeItem(bg);
-    if (THUMBNAIL_BLOBS.has(bg)) {
-        URL.revokeObjectURL(THUMBNAIL_BLOBS.get(bg));
-        THUMBNAIL_BLOBS.delete(bg);
+    let response;
+    try {
+        response = await fetch('/api/backgrounds/delete', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({
+                bg: bg,
+            }),
+        });
+    } catch (error) {
+        console.error('Failed to delete background:', error);
+        toastr.error(t`The browser could not reach the server. The background was not deleted.`);
+        return false;
     }
+
+    if (!response.ok) {
+        toastr.error(await getBackgroundResponseError(response, t`Failed to delete background`));
+        return false;
+    }
+
+    try {
+        await THUMBNAIL_STORAGE.removeItem(bg);
+        if (THUMBNAIL_BLOBS.has(bg)) {
+            URL.revokeObjectURL(THUMBNAIL_BLOBS.get(bg));
+            THUMBNAIL_BLOBS.delete(bg);
+        }
+    } catch (error) {
+        console.warn('Background was deleted, but its thumbnail cache could not be cleared:', error);
+    }
+    return true;
 }
 
 /**
@@ -674,13 +785,43 @@ async function onBackgroundUploadSelected(e) {
 
     for (const file of input.files) {
         if (file.size === 0) {
+            toastr.warning(t`The selected background file is empty.`);
+            continue;
+        }
+
+        const extension = file.name.split('.').pop()?.toLowerCase() || '';
+        let detectedFormat;
+        try {
+            const header = new Uint8Array(await file.slice(0, 32).arrayBuffer());
+            detectedFormat = detectBackgroundImageFormat(header);
+        } catch (error) {
+            console.error('Failed to inspect background file:', error);
+            toastr.error(t`The browser could not read the selected background: ` + file.name);
+            continue;
+        }
+        const isVideo = !detectedFormat && (file.type.startsWith('video/') || SUPPORTED_BACKGROUND_VIDEO_EXTENSIONS.has(extension));
+        let uploadFile = file;
+        if (detectedFormat) {
+            const normalizedExtension = ['jpeg', 'jfif'].includes(extension) ? 'jpg' : extension;
+            if (normalizedExtension !== detectedFormat.extension || file.type !== detectedFormat.mimeType) {
+                const baseName = file.name.replace(/\.[^/.]+$/, '') || 'background';
+                uploadFile = new File([file], `${baseName}.${detectedFormat.extension}`, {
+                    type: detectedFormat.mimeType,
+                    lastModified: file.lastModified,
+                });
+            }
+        } else if (!isVideo) {
+            toastr.error(t`The selected file is not a supported background image: ` + file.name);
             continue;
         }
 
         const formData = new FormData();
-        formData.append('avatar', file);
+        formData.append('avatar', uploadFile);
 
-        await convertFileIfVideo(formData);
+        const readyToUpload = await convertFileIfVideo(formData);
+        if (!readyToUpload) {
+            continue;
+        }
         switch (getActiveBackgroundTab()) {
             case BG_SOURCES.GLOBAL:
                 await uploadBackground(formData);
@@ -701,15 +842,17 @@ async function onBackgroundUploadSelected(e) {
 /**
  * Converts a video file to an animated webp format if the file is a video.
  * @param {FormData} formData
- * @returns {Promise<void>}
+ * @returns {Promise<boolean>} Whether the form contains an uploadable image
  */
 async function convertFileIfVideo(formData) {
     const file = formData.get('avatar');
     if (!(file instanceof File)) {
-        return;
+        return false;
     }
-    if (!file.type.startsWith('video/')) {
-        return;
+    const extension = file.name.split('.').pop()?.toLowerCase() || '';
+    const isVideo = file.type.startsWith('video/') || SUPPORTED_BACKGROUND_VIDEO_EXTENSIONS.has(extension);
+    if (!isVideo) {
+        return true;
     }
     if (typeof globalThis.convertVideoToAnimatedWebp !== 'function') {
         toastr.warning(t`Click here to install the Video Background Loader extension`, t`Video background uploads require a downloadable add-on`, {
@@ -717,7 +860,8 @@ async function convertFileIfVideo(formData) {
             extendedTimeOut: 0,
             onclick: () => openThirdPartyExtensionMenu('https://github.com/SillyTavern/Extension-VideoBackgroundLoader'),
         });
-        return;
+        formData.delete('avatar');
+        return false;
     }
 
     let toastMessage = jQuery();
@@ -725,27 +869,52 @@ async function convertFileIfVideo(formData) {
         toastMessage = toastr.info(t`Preparing video for upload. This may take several minutes.`, t`Please wait`, { timeOut: 0, extendedTimeOut: 0 });
         const sourceBuffer = await file.arrayBuffer();
         const convertedBuffer = await globalThis.convertVideoToAnimatedWebp({ buffer: new Uint8Array(sourceBuffer), name: file.name });
-        const convertedFileName = file.name.replace(/\.[^/.]+$/, '.webp');
-        const convertedFile = new File([new Uint8Array(convertedBuffer)], convertedFileName, { type: 'image/webp' });
+        const convertedBytes = new Uint8Array(convertedBuffer);
+        if (detectBackgroundImageFormat(convertedBytes)?.extension !== 'webp') {
+            throw new Error('The video converter did not return a valid WebP image.');
+        }
+        const convertedFileName = /\.[^/.]+$/.test(file.name) ? file.name.replace(/\.[^/.]+$/, '.webp') : `${file.name}.webp`;
+        const convertedFile = new File([convertedBytes], convertedFileName, { type: 'image/webp' });
         formData.set('avatar', convertedFile);
         toastMessage.remove();
+        return true;
     } catch (error) {
         formData.delete('avatar');
         toastMessage.remove();
         console.error('Error converting video to animated webp:', error);
         toastr.error(t`Error converting video to animated webp`);
+        return false;
     }
+}
+
+/**
+ * Extracts a safe user-facing message from a failed background response.
+ * @param {Response} response Fetch response
+ * @param {string} fallback Fallback message
+ * @returns {Promise<string>}
+ */
+async function getBackgroundResponseError(response, fallback) {
+    try {
+        const data = await response.json();
+        if (typeof data?.message === 'string' && data.message) {
+            return data.message;
+        }
+    } catch {
+        // Proxies may return non-JSON error pages.
+    }
+    return `${fallback} (${response.status || t`network error`})`;
 }
 
 /**
  * Uploads a background to the server
  * @param {FormData} formData
+ * @returns {Promise<string|null>} Saved background name, or null on failure
  */
 async function uploadBackground(formData) {
     try {
         if (!formData.has('avatar')) {
             console.log('No file provided. Background upload cancelled.');
-            return;
+            return null;
         }
 
         const response = await fetch('/api/backgrounds/upload', {
@@ -756,38 +925,42 @@ async function uploadBackground(formData) {
         });
 
         if (!response.ok) {
-            throw new Error('Failed to upload background');
+            throw new Error(await getBackgroundResponseError(response, t`Failed to upload background`));
         }
 
         const bg = await response.text();
-        setBackground(bg, generateUrlParameter(bg, false));
+        await setBackground(bg, generateUrlParameter(bg, false));
         await getBackgrounds();
         highlightNewBackground(bg);
+        toastr.success(t`Background uploaded`);
+        return bg;
     } catch (error) {
         console.error('Error uploading background:', error);
+        toastr.error(error.message || t`Failed to upload background`, t`Could not upload background`);
+        return null;
     }
 }
 
 /**
  * Upload a chat background using a FormData object.
  * @param {FormData} formData FormData containing the background file
- * @returns {Promise<void>}
+ * @returns {Promise<string|null>} Saved image path, or null on failure
  */
 async function uploadChatBackground(formData) {
     try {
         if (!getCurrentChatId()) {
             toastr.warning(t`Select a chat to upload a background for it`);
-            return;
+            return null;
         }
         if (!formData.has('avatar')) {
             console.log('No file provided. Chat background upload cancelled.');
-            return;
+            return null;
         }
 
         const file = formData.get('avatar');
         if (!(file instanceof File)) {
             console.error('Invalid file type for chat background upload');
-            return;
+            return null;
         }
 
         const imageDataUri = await getBase64Async(file);
@@ -798,6 +971,9 @@ async function uploadChatBackground(formData) {
             : characters[this_chid]?.name;
         const filename = `${characterName}_${humanizedDateTime()}`;
         const imagePath = await saveBase64AsFile(base64Data, characterName, filename, extension);
+        if (!imagePath) {
+            throw new Error(t`The server did not return a path for the uploaded background.`);
+        }
 
         const list = chat_metadata[LIST_METADATA_KEY] || [];
         list.push(imagePath);
@@ -807,8 +983,12 @@ async function uploadChatBackground(formData) {
         highlightNewBackground(imagePath);
         highlightLockedBackground();
         highlightSelectedBackground();
+        toastr.success(t`Chat background uploaded`);
+        return imagePath;
     } catch (error) {
         console.error('Error uploading chat background:', error);
+        toastr.error(error.message || t`Failed to upload chat background`, t`Could not upload background`);
+        return null;
     }
 }
 
@@ -816,10 +996,17 @@ async function uploadChatBackground(formData) {
  * @param {string} bg
  */
 function highlightNewBackground(bg) {
-    const newBg = $(`.bg_example[bgfile="${bg}"]`);
-    const scrollOffset = newBg.offset().top - newBg.parent().offset().top;
-    $('#Backgrounds').scrollTop(scrollOffset);
+    const newBg = $('.bg_example').filter(function () {
+        return $(this).attr('bgfile') === bg;
+    }).first();
+    if (newBg.length === 0) {
+        console.warn('Uploaded background was saved but is not present in the current gallery:', bg);
+        return false;
+    }
+
+    newBg.get(0)?.scrollIntoView?.({ block: 'nearest' });
     flashHighlight(newBg);
+    return true;
 }
 
 /**

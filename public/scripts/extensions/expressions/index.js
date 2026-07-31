@@ -616,9 +616,14 @@ function getSpriteFolderName(characterMessage = null, characterName = null) {
     let spriteFolderName = characterName ?? context.name2;
     const message = characterMessage ?? getLastCharacterMessage();
     const avatarFileName = getFolderNameByMessage(message);
+    const character = context.characters?.find(item => item.avatar?.replace(/\.[^/.]+$/, '') === avatarFileName);
+    const charXSpriteFolder = character?.data?.extensions?.sillytavern?.charx_sprite_folder;
     const expressionOverride = extension_settings.expressionOverrides.find(e => e.name == avatarFileName);
 
-    if (expressionOverride && expressionOverride.path) {
+    if (typeof charXSpriteFolder === 'string' && charXSpriteFolder) {
+        spriteFolderName = charXSpriteFolder;
+    }
+    if (expressionOverride?.path) {
         spriteFolderName = expressionOverride.path;
     }
 

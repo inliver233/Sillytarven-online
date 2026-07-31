@@ -2802,36 +2802,53 @@ export function setupScrollToTop({ scrollContainerId, buttonId, drawerId, visibi
  * @param {string} url URL or UUID of the content to import.
  * @param {Object} [options={}] Options object.
  * @param {string|null} [options.preserveFileName=null] Optional file name to use for the imported content.
- * @returns {Promise<void>} A promise that resolves when the import is complete.
+ * @returns {Promise<boolean>} Whether the requested content was imported successfully.
  */
 export async function importFromExternalUrl(url, { preserveFileName = null } = {}) {
     let request;
 
-    if (isValidUrl(url)) {
-        console.debug('Custom content import started for URL: ', url);
-        request = await fetch('/api/content/importURL', {
-            method: 'POST',
-            headers: getRequestHeaders(),
-            body: JSON.stringify({ url }),
-        });
-    } else {
-        console.debug('Custom content import started for Char UUID: ', url);
-        request = await fetch('/api/content/importUUID', {
-            method: 'POST',
-            headers: getRequestHeaders(),
-            body: JSON.stringify({ url }),
-        });
+    try {
+        if (isValidUrl(url)) {
+            console.debug('Custom content import started for URL: ', url);
+            request = await fetch('/api/content/importURL', {
+                method: 'POST',
+                headers: getRequestHeaders(),
+                body: JSON.stringify({ url }),
+            });
+        } else {
+            console.debug('Custom content import started for Char UUID: ', url);
+            request = await fetch('/api/content/importUUID', {
+                method: 'POST',
+                headers: getRequestHeaders(),
+                body: JSON.stringify({ url }),
+            });
+        }
+    } catch (error) {
+        toastr.error(t`The browser could not reach the server.`, t`Custom content import failed`);
+        console.error('Custom content import request failed', error);
+        return false;
     }
 
     if (!request.ok) {
         toastr.info(request.statusText, 'Custom content import failed');
         console.error('Custom content import failed', request.status, request.statusText);
-        return;
+        return false;
     }
 
     const data = await request.blob();
     const customContentType = request.headers.get('X-Custom-Content-Type');
-    let fileName = request.headers.get('Content-Disposition').split('filename=')[1].replace(/"/g, '');
+    const contentDisposition = request.headers.get('Content-Disposition') || '';
+    const extensionByMimeType = {
+        'image/png': 'png',
+        'application/json': 'json',
+        'application/yaml': 'yaml',
+        'application/x-yaml': 'yaml',
+        'text/yaml': 'yaml',
+        'application/zip': customContentType === 'character' ? 'charx' : 'zip',
+    };
+    const responseMimeType = String(data.type || '').split(';', 1)[0].toLowerCase();
+    const fallbackExtension = extensionByMimeType[responseMimeType] || 'bin';
+    let fileName = contentDisposition.split('filename=')[1]?.replace(/"/g, '') || `imported-content.${fallbackExtension}`;
     const file = new File([data], fileName, { type: data.type });
 
     const extraData = new Map();
@@ -2841,16 +2858,17 @@ export async function importFromExternalUrl(url, { preserveFileName = null } = {
     }
 
     switch (customContentType) {
-        case 'character':
-            await processDroppedFiles([file], extraData);
-            break;
+        case 'character': {
+            const imported = await processDroppedFiles([file], extraData);
+            return imported.length > 0;
+        }
         case 'lorebook':
             await importWorldInfo(file);
-            break;
+            return true;
         default:
             toastr.warning('Unknown content type');
             console.error('Unknown content type', customContentType);
-            break;
+            return false;
     }
 }
 

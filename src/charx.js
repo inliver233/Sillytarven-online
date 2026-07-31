@@ -3,8 +3,9 @@ import path from 'node:path';
 import _ from 'lodash';
 import sanitize from 'sanitize-filename';
 import { sync as writeFileAtomicSync } from 'write-file-atomic';
-import { extractFileFromZipBuffer, extractFilesFromZipBuffer, normalizeZipEntryPath, ensureDirectory } from './util.js';
+import { extractFileFromZipBuffer, extractFilesFromZipBuffer, normalizeZipEntryPath, ensureDirectory, clientRelativePath } from './util.js';
 import { DEFAULT_AVATAR_PATH } from './constants.js';
+import { detectImageFormat, normalizeImageFileName } from './media-validation.js';
 
 // 'embeded://' is intentional - RisuAI exports use this misspelling
 const CHARX_EMBEDDED_URI_PREFIXES = ['embeded://', 'embedded://', '__asset:'];
@@ -303,16 +304,22 @@ function deleteExistingByBaseName(dirPath, baseName) {
  * @param {Array} assets - Mapped assets from CharXParser
  * @param {Map<string, Buffer>} bufferMap - Extracted file buffers
  * @param {Object} directories - User directories object
- * @param {string} characterFolder - Character folder name (sanitized)
- * @returns {{sprites: number, backgrounds: number, misc: number}}
+ * @param {string|{characterFolder: string, assetFolder?: string, spriteFolder?: string}} characterOptions Character storage names
+ * @returns {{sprites: number, backgrounds: number, misc: number, rewrites: Array<{order: number, uri: string, ext: string}>}}
  */
-export function persistCharXAssets(assets, bufferMap, directories, characterFolder) {
-    /** @type {{sprites: number, backgrounds: number, misc: number}} */
-    const summary = { sprites: 0, backgrounds: 0, misc: 0 };
+export function persistCharXAssets(assets, bufferMap, directories, characterOptions) {
+    /** @type {{sprites: number, backgrounds: number, misc: number, rewrites: Array<{order: number, uri: string, ext: string}>}} */
+    const summary = { sprites: 0, backgrounds: 0, misc: 0, rewrites: [] };
     if (!Array.isArray(assets) || assets.length === 0) {
         return summary;
     }
 
+    const rawCharacterFolder = typeof characterOptions === 'string' ? characterOptions : characterOptions?.characterFolder;
+    const rawAssetFolder = typeof characterOptions === 'string' ? characterOptions : characterOptions?.assetFolder;
+    const rawSpriteFolder = typeof characterOptions === 'string' ? characterOptions : characterOptions?.spriteFolder;
+    const characterFolder = sanitize(String(rawCharacterFolder || 'Character')) || 'Character';
+    const assetFolder = sanitize(String(rawAssetFolder || characterFolder)) || characterFolder;
+    const spriteFolder = sanitize(String(rawSpriteFolder || characterFolder)) || characterFolder;
     let spritesPath = null;
     let miscPath = null;
 
@@ -320,7 +327,7 @@ export function persistCharXAssets(assets, bufferMap, directories, characterFold
         if (spritesPath) {
             return spritesPath;
         }
-        const candidate = path.join(directories.characters, characterFolder);
+        const candidate = path.join(directories.characters, spriteFolder);
         if (!ensureDirectory(candidate)) {
             return null;
         }
@@ -332,8 +339,8 @@ export function persistCharXAssets(assets, bufferMap, directories, characterFold
         if (miscPath) {
             return miscPath;
         }
-        // Use the image gallery path: user/images/{characterName}/
-        const candidate = path.join(directories.userImages, characterFolder);
+        // Misc assets are isolated by internal card filename, not display name.
+        const candidate = path.join(directories.userImages, assetFolder);
         if (!ensureDirectory(candidate)) {
             return null;
         }
@@ -351,6 +358,12 @@ export function persistCharXAssets(assets, bufferMap, directories, characterFold
             continue;
         }
 
+        const detectedFormat = detectImageFormat(buffer);
+        if (!detectedFormat) {
+            console.warn(`CharX: Asset ${asset.zipPath} is not a supported image, skipping.`);
+            continue;
+        }
+
         try {
             if (asset.storageCategory === 'sprite') {
                 const targetDir = ensureSpritesPath();
@@ -359,24 +372,27 @@ export function persistCharXAssets(assets, bufferMap, directories, characterFold
                 }
                 // Delete existing sprite with same base name (any extension) - matches sprites.js behavior
                 deleteExistingByBaseName(targetDir, asset.baseName);
-                const filePath = path.join(targetDir, `${asset.baseName}.${asset.ext || 'png'}`);
+                const filePath = path.join(targetDir, `${asset.baseName}.${detectedFormat.extension}`);
                 writeFileAtomicSync(filePath, buffer);
                 summary.sprites += 1;
+                summary.rewrites.push({ order: asset.order, uri: clientRelativePath(directories.root, filePath), ext: detectedFormat.extension });
                 continue;
             }
 
             if (asset.storageCategory === 'background') {
-                // Store in character-specific backgrounds folder: characters/{charName}/backgrounds/
-                const backgroundDir = path.join(directories.characters, characterFolder, 'backgrounds');
+                // Global backgrounds are immediately discoverable by the background gallery.
+                // Prefixing with the unique internal card name prevents equal display names
+                // from overwriting each other's embedded assets.
+                const backgroundDir = directories.backgrounds;
                 if (!ensureDirectory(backgroundDir)) {
                     continue;
                 }
-                // Delete existing background with same base name
-                deleteExistingByBaseName(backgroundDir, asset.baseName);
-                const fileName = `${asset.baseName}.${asset.ext || 'png'}`;
+                const fileName = normalizeImageFileName(`${assetFolder}_${asset.baseName}`, detectedFormat.extension);
+                deleteExistingByBaseName(backgroundDir, path.parse(fileName).name);
                 const filePath = path.join(backgroundDir, fileName);
                 writeFileAtomicSync(filePath, buffer);
                 summary.backgrounds += 1;
+                summary.rewrites.push({ order: asset.order, uri: clientRelativePath(directories.root, filePath), ext: detectedFormat.extension });
                 continue;
             }
 
@@ -386,9 +402,11 @@ export function persistCharXAssets(assets, bufferMap, directories, characterFold
                     continue;
                 }
                 // Overwrite existing misc asset with same name
-                const filePath = path.join(miscDir, `${asset.baseName}.${asset.ext || 'png'}`);
+                deleteExistingByBaseName(miscDir, asset.baseName);
+                const filePath = path.join(miscDir, `${asset.baseName}.${detectedFormat.extension}`);
                 writeFileAtomicSync(filePath, buffer);
                 summary.misc += 1;
+                summary.rewrites.push({ order: asset.order, uri: clientRelativePath(directories.root, filePath), ext: detectedFormat.extension });
             }
         } catch (error) {
             console.warn(`CharX: Failed to save asset "${asset.name}": ${error.message}`);
@@ -396,4 +414,31 @@ export function persistCharXAssets(assets, bufferMap, directories, characterFold
     }
 
     return summary;
+}
+
+/**
+ * Replaces embedded CharX URIs with paths that the client can fetch.
+ * Only successfully persisted assets are rewritten.
+ * @param {object} card Character card object
+ * @param {Array<{order: number, uri: string, ext?: string}>} rewrites Persisted asset locations
+ * @returns {object} The mutated card
+ */
+export function applyCharXAssetRewrites(card, rewrites) {
+    const assets = _.get(card, 'data.assets');
+    if (!Array.isArray(assets) || !Array.isArray(rewrites)) {
+        return card;
+    }
+
+    for (const rewrite of rewrites) {
+        const asset = assets[rewrite?.order];
+        if (!asset || typeof rewrite?.uri !== 'string') {
+            continue;
+        }
+        asset.uri = rewrite.uri;
+        if (rewrite.ext) {
+            asset.ext = rewrite.ext;
+        }
+    }
+
+    return card;
 }

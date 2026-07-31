@@ -16,16 +16,17 @@ import { AVATAR_WIDTH, AVATAR_HEIGHT, DEFAULT_AVATAR_PATH } from '../constants.j
 import { default as validateAvatarUrlMiddleware, getFileNameValidationFunction } from '../middleware/validateFileName.js';
 import { deepMerge, humanizedISO8601DateTime, tryParse, MemoryLimitedMap, getConfigValue, mutateJsonString, clientRelativePath, getUniqueName, sanitizeSafeCharacterReplacements } from '../util.js';
 import { TavernCardValidator } from '../validator/TavernCardValidator.js';
-import { parse, read, write } from '../character-card-parser.js';
+import { CharacterCardPngError, parse, read, write } from '../character-card-parser.js';
 import { readWorldInfoFile } from './worldinfo.js';
 import { invalidateThumbnail } from './thumbnails.js';
 import { importRisuSprites } from './sprites.js';
-import { getUserDirectories, getUserDirectoriesList } from '../users.js';
+import { getUserDirectoriesList } from '../users.js';
 import { getChatInfo } from './chats.js';
 import { ByafParser } from '../byaf.js';
-import { CharXParser, persistCharXAssets } from '../charx.js';
+import { applyCharXAssetRewrites, CharXParser, persistCharXAssets } from '../charx.js';
 import cacheBuster from '../middleware/cacheBuster.js';
 import { canConsumeStorage } from '../storage-quota.js';
+import { detectImageFormat } from '../media-validation.js';
 
 // With 100 MB limit it would take roughly 3000 characters to reach this limit
 const memoryCacheCapacity = getConfigValue('performance.memoryCacheCapacity', '100mb');
@@ -37,6 +38,122 @@ const useShallowCharacters = !!getConfigValue('performance.lazyLoadCharacters', 
 const useDiskCache = !!getConfigValue('performance.useDiskCache', true, 'boolean');
 const chatDirStatsCache = new Map();
 const CHARACTER_SIZE_OVERHEAD = 2048;
+
+class CharacterImportError extends Error {
+    /**
+     * @param {number} status HTTP status
+     * @param {string} code Stable client-facing error code
+     * @param {string} publicMessage Safe client-facing message
+     * @param {string} internalMessage Detailed server log message
+     * @param {unknown} [cause] Original error
+     */
+    constructor(status, code, publicMessage, internalMessage, cause) {
+        super(internalMessage, cause ? { cause } : undefined);
+        this.name = 'CharacterImportError';
+        this.status = status;
+        this.code = code;
+        this.publicMessage = publicMessage;
+    }
+
+    /**
+     * @param {string} internalMessage Detailed server log message
+     * @param {unknown} [cause] Original parser error
+     * @returns {CharacterImportError}
+     */
+    static invalid(internalMessage, cause) {
+        return new CharacterImportError(
+            400,
+            'invalid_character_card',
+            'The file does not contain a valid character card. Make sure it is a character PNG, JSON, YAML, CharX, or BYAF file rather than an ordinary image.',
+            internalMessage,
+            cause,
+        );
+    }
+
+    /**
+     * @param {string} format Requested import format
+     * @returns {CharacterImportError}
+     */
+    static unsupported(format) {
+        return new CharacterImportError(
+            415,
+            'unsupported_character_format',
+            'This character card format is not supported.',
+            `Unsupported character import format: ${format || '(empty)'}`,
+        );
+    }
+
+    /**
+     * @param {string} internalMessage Detailed server log message
+     * @returns {CharacterImportError}
+     */
+    static writeFailed(internalMessage) {
+        return new CharacterImportError(
+            500,
+            'character_write_failed',
+            'The character card was parsed, but the server could not save it.',
+            internalMessage,
+        );
+    }
+}
+
+/**
+ * Converts an unexpected import exception to a safe HTTP error.
+ * @param {unknown} error Import exception
+ * @returns {CharacterImportError}
+ */
+function normalizeCharacterImportError(error) {
+    if (error instanceof CharacterImportError) {
+        return error;
+    }
+    if (error instanceof CharacterCardPngError || error instanceof SyntaxError || error?.name === 'YAMLParseError') {
+        return CharacterImportError.invalid('Failed to parse character card data.', error);
+    }
+    if (['ENOSPC', 'EDQUOT'].includes(error?.code)) {
+        return new CharacterImportError(
+            507,
+            'storage_write_failed',
+            'The server does not have enough storage space to save this character card.',
+            'Character import failed because the filesystem has no available space.',
+            error,
+        );
+    }
+
+    return new CharacterImportError(
+        500,
+        'character_import_failed',
+        'The server could not import the character card. Please try again or contact the administrator.',
+        'Unexpected character import failure.',
+        error,
+    );
+}
+
+/**
+ * Removes an uploaded temporary file without masking the original request result.
+ * @param {string|null} uploadPath Temporary upload path
+ * @returns {Promise<void>}
+ */
+async function cleanupUploadedFile(uploadPath) {
+    if (!uploadPath) {
+        return;
+    }
+    try {
+        await fsPromises.rm(uploadPath, { force: true });
+    } catch (error) {
+        console.warn(`Failed to clean up uploaded character file: ${path.basename(uploadPath)}`, error);
+    }
+}
+
+/**
+ * Converts writeCharacterData's legacy boolean result into an import error.
+ * @param {boolean} result Character write result
+ * @param {string} source Import source label
+ */
+function assertCharacterImportSaved(result, source) {
+    if (!result) {
+        throw CharacterImportError.writeFailed(`Failed to save ${source} character card.`);
+    }
+}
 
 async function ensureCharacterStorageCapacity(request, response, additionalBytes) {
     const result = await canConsumeStorage(request.user.profile, request.user.directories, additionalBytes);
@@ -369,6 +486,9 @@ export async function applyAvatarCropResize(jimp, crop) {
  * @returns {Promise<Buffer>} Image buffer
  */
 async function parseImageBuffer(buffer, crop) {
+    if (crop == null && detectImageFormat(buffer)?.extension === 'png') {
+        return buffer;
+    }
     const image = await Jimp.fromBuffer(buffer);
     return await applyAvatarCropResize(image, crop);
 }
@@ -380,6 +500,11 @@ async function parseImageBuffer(buffer, crop) {
  * @returns {Promise<Buffer>} Image buffer
  */
 async function tryReadImage(imgPath, crop) {
+    const imageBuffer = fs.readFileSync(imgPath);
+    if (crop == null && detectImageFormat(imageBuffer)?.extension === 'png') {
+        return imageBuffer;
+    }
+
     try {
         const rawImg = await Jimp.read(imgPath);
         return await applyAvatarCropResize(rawImg, crop);
@@ -387,7 +512,7 @@ async function tryReadImage(imgPath, crop) {
     // If it's an unsupported type of image (APNG) - just read the file as buffer
     catch (error) {
         console.error(`Failed to read image: ${imgPath}`, error);
-        return fs.readFileSync(imgPath);
+        return imageBuffer;
     }
 }
 
@@ -826,10 +951,20 @@ function convertWorldInfoToCharacterBook(name, entries) {
  */
 async function importFromYaml(uploadPath, context, preservedFileName) {
     const fileText = fs.readFileSync(uploadPath, 'utf8');
-    fs.unlinkSync(uploadPath);
-    const yamlData = yaml.parse(fileText);
+    let yamlData;
+    try {
+        yamlData = yaml.parse(fileText);
+    } catch (error) {
+        throw CharacterImportError.invalid('Failed to parse YAML character card.', error);
+    }
+    if (!yamlData || typeof yamlData !== 'object' || typeof yamlData.name !== 'string') {
+        throw CharacterImportError.invalid('YAML character card is missing a valid name.');
+    }
     console.info('Importing from YAML');
     yamlData.name = sanitize(yamlData.name);
+    if (!yamlData.name) {
+        throw CharacterImportError.invalid('YAML character card name is empty after sanitization.');
+    }
     const fileName = preservedFileName || getPngName(yamlData.name, context.request.user.directories);
     let char = convertToV2({
         'name': yamlData.name,
@@ -847,7 +982,8 @@ async function importFromYaml(uploadPath, context, preservedFileName) {
         'tags': '',
     }, context.request.user.directories);
     const result = await writeCharacterData(DEFAULT_AVATAR_PATH, JSON.stringify(char), fileName, context.request);
-    return result ? fileName : '';
+    assertCharacterImportSaved(result, 'YAML');
+    return fileName;
 }
 
 /**
@@ -862,43 +998,78 @@ async function importFromCharX(uploadPath, { request }, preservedFileName) {
     const fileBuffer = fs.readFileSync(uploadPath);
     // Create a properly-sized ArrayBuffer (Node's buffer pool can cause oversized .buffer)
     const data = fileBuffer.buffer.slice(fileBuffer.byteOffset, fileBuffer.byteOffset + fileBuffer.byteLength);
-    fs.unlinkSync(uploadPath);
 
     const parser = new CharXParser(data);
-    const { card, avatar, auxiliaryAssets, extractedBuffers } = await parser.parse();
+    let parsed;
+    try {
+        parsed = await parser.parse();
+    } catch (error) {
+        throw CharacterImportError.invalid('Failed to parse CharX character card.', error);
+    }
+    const { card, avatar, auxiliaryAssets, extractedBuffers } = parsed;
 
     // Apply standard character transformations
     let processedCard = readFromV2(card);
     unsetPrivateFields(processedCard);
     processedCard['create_date'] = humanizedISO8601DateTime();
-    processedCard.name = sanitize(processedCard.name);
+    processedCard.name = sanitize(String(processedCard.name || ''));
+    if (!processedCard.name) {
+        throw CharacterImportError.invalid('CharX character card is missing a valid name.');
+    }
 
     const fileName = preservedFileName || getPngName(processedCard.name, request.user.directories);
-    // Use the actual character name for asset folders, not the unique filename
-    // ST's sprite system looks up by character name, not PNG filename
     const characterFolder = processedCard.name;
+    const hasSprites = auxiliaryAssets.some(asset => asset.storageCategory === 'sprite');
+    if (hasSprites) {
+        // New CharX imports use the unique internal card name for sprites. The
+        // client reads this marker while legacy cards keep their display-name folder.
+        _.set(processedCard, 'data.extensions.sillytavern.charx_sprite_folder', fileName);
+    }
+
+    // Persist the card first. Auxiliary assets must never be left behind when
+    // creating the character PNG itself fails.
+    const result = await writeCharacterData(avatar, JSON.stringify(processedCard), fileName, request);
+    assertCharacterImportSaved(result, 'CharX');
 
     if (auxiliaryAssets.length > 0) {
         try {
-            const summary = persistCharXAssets(auxiliaryAssets, extractedBuffers, request.user.directories, characterFolder);
+            const summary = persistCharXAssets(auxiliaryAssets, extractedBuffers, request.user.directories, {
+                characterFolder,
+                assetFolder: fileName,
+                spriteFolder: fileName,
+            });
+            request.characterImportBackgrounds = summary.backgrounds;
             if (summary.sprites || summary.backgrounds || summary.misc) {
                 console.log(`CharX: Imported ${summary.sprites} sprite(s), ${summary.backgrounds} background(s), ${summary.misc} misc asset(s) for ${characterFolder}`);
+            }
+
+            if (summary.rewrites.length > 0) {
+                applyCharXAssetRewrites(processedCard, summary.rewrites);
+                const savedCardPath = path.join(request.user.directories.characters, `${fileName}.png`);
+                const updated = await writeCharacterData(savedCardPath, JSON.stringify(processedCard), fileName, request);
+                if (!updated) {
+                    console.warn(`CharX: Imported assets for ${characterFolder}, but failed to update their card URIs.`);
+                }
             }
         } catch (error) {
             console.warn(`CharX: Failed to persist auxiliary assets for ${characterFolder}`, error);
         }
     }
 
-    const result = await writeCharacterData(avatar, JSON.stringify(processedCard), fileName, request);
-    return result ? fileName : '';
+    return fileName;
 }
 
 async function importFromByaf(uploadPath, { request }, preservedFileName) {
-    const data = (await fsPromises.readFile(uploadPath)).buffer;
-    await fsPromises.unlink(uploadPath);
+    const fileBuffer = await fsPromises.readFile(uploadPath);
+    const data = fileBuffer.buffer.slice(fileBuffer.byteOffset, fileBuffer.byteOffset + fileBuffer.byteLength);
     console.info('Importing from BYAF');
 
-    const byafData = await new ByafParser(data).parse();
+    let byafData;
+    try {
+        byafData = await new ByafParser(data).parse();
+    } catch (error) {
+        throw CharacterImportError.invalid('Failed to parse BYAF character card.', error);
+    }
     const card = readFromV2(byafData.card);
     const fileName = preservedFileName || getPngName(sanitize(byafData.character.displayName || card.name, { replacement: sanitizeSafeCharacterReplacements }), request.user.directories);
 
@@ -962,8 +1133,8 @@ async function importFromByaf(uploadPath, { request }, preservedFileName) {
     }
 
     const result = await writeCharacterData(byafData.images[0].image, JSON.stringify(card), fileName, request);
-
-    return result ? fileName : '';
+    assertCharacterImportSaved(result, 'BYAF');
+    return fileName;
 }
 
 /**
@@ -975,21 +1146,30 @@ async function importFromByaf(uploadPath, { request }, preservedFileName) {
  */
 async function importFromJson(uploadPath, { request }, preservedFileName) {
     const data = fs.readFileSync(uploadPath, 'utf8');
-    fs.unlinkSync(uploadPath);
-
     let jsonData = JSON.parse(data);
+    if (!jsonData || typeof jsonData !== 'object' || Array.isArray(jsonData)) {
+        throw CharacterImportError.invalid('JSON character card root must be an object.');
+    }
 
     if (jsonData.spec !== undefined) {
+        const characterName = jsonData.data?.name || jsonData.name;
+        if (typeof characterName !== 'string' || !characterName.trim()) {
+            throw CharacterImportError.invalid('JSON character card is missing a valid name.');
+        }
         console.info(`Importing from ${jsonData.spec} json`);
         importRisuSprites(request.user.directories, jsonData);
         unsetPrivateFields(jsonData);
         jsonData = readFromV2(jsonData);
         jsonData['create_date'] = humanizedISO8601DateTime();
-        const pngName = preservedFileName || getPngName(jsonData.data?.name || jsonData.name, request.user.directories);
+        const pngName = preservedFileName || getPngName(characterName, request.user.directories);
         const char = JSON.stringify(jsonData);
         const result = await writeCharacterData(DEFAULT_AVATAR_PATH, char, pngName, request);
-        return result ? pngName : '';
+        assertCharacterImportSaved(result, 'JSON');
+        return pngName;
     } else if (jsonData.name !== undefined) {
+        if (typeof jsonData.name !== 'string' || !jsonData.name.trim()) {
+            throw CharacterImportError.invalid('JSON character card is missing a valid name.');
+        }
         console.info('Importing from v1 json');
         jsonData.name = sanitize(jsonData.name);
         if (jsonData.creator_notes) {
@@ -1014,8 +1194,12 @@ async function importFromJson(uploadPath, { request }, preservedFileName) {
         char = convertToV2(char, request.user.directories);
         let charJSON = JSON.stringify(char);
         const result = await writeCharacterData(DEFAULT_AVATAR_PATH, charJSON, pngName, request);
-        return result ? pngName : '';
+        assertCharacterImportSaved(result, 'JSON');
+        return pngName;
     } else if (jsonData.char_name !== undefined) {//json Pygmalion notepad
+        if (typeof jsonData.char_name !== 'string' || !jsonData.char_name.trim()) {
+            throw CharacterImportError.invalid('JSON character card is missing a valid name.');
+        }
         console.info('Importing from gradio json');
         jsonData.char_name = sanitize(jsonData.char_name);
         if (jsonData.creator_notes) {
@@ -1040,10 +1224,11 @@ async function importFromJson(uploadPath, { request }, preservedFileName) {
         char = convertToV2(char, request.user.directories);
         const charJSON = JSON.stringify(char);
         const result = await writeCharacterData(DEFAULT_AVATAR_PATH, charJSON, pngName, request);
-        return result ? pngName : '';
+        assertCharacterImportSaved(result, 'JSON');
+        return pngName;
     }
 
-    return '';
+    throw CharacterImportError.invalid('JSON file does not match a supported character card schema.');
 }
 
 /**
@@ -1055,11 +1240,17 @@ async function importFromJson(uploadPath, { request }, preservedFileName) {
  */
 async function importFromPng(uploadPath, { request }, preservedFileName) {
     const imgData = await readCharacterData(uploadPath);
-    if (imgData === undefined) throw new Error('Failed to read character data');
+    if (imgData === undefined) throw CharacterImportError.invalid('PNG character metadata is empty.');
 
     let jsonData = JSON.parse(imgData);
+    if (!jsonData || typeof jsonData !== 'object' || Array.isArray(jsonData)) {
+        throw CharacterImportError.invalid('PNG character metadata root must be an object.');
+    }
 
-    jsonData.name = sanitize(jsonData.data?.name || jsonData.name);
+    jsonData.name = sanitize(String(jsonData.data?.name || jsonData.name || ''));
+    if (!jsonData.name) {
+        throw CharacterImportError.invalid('PNG character metadata is missing a valid name.');
+    }
     const pngName = preservedFileName || getPngName(jsonData.name, request.user.directories);
 
     if (jsonData.spec !== undefined) {
@@ -1070,8 +1261,8 @@ async function importFromPng(uploadPath, { request }, preservedFileName) {
         jsonData['create_date'] = humanizedISO8601DateTime();
         const char = JSON.stringify(jsonData);
         const result = await writeCharacterData(uploadPath, char, pngName, request);
-        fs.unlinkSync(uploadPath);
-        return result ? pngName : '';
+        assertCharacterImportSaved(result, 'PNG');
+        return pngName;
     } else if (jsonData.name !== undefined) {
         console.info('Found a v1 character file.');
 
@@ -1097,11 +1288,11 @@ async function importFromPng(uploadPath, { request }, preservedFileName) {
         char = convertToV2(char, request.user.directories);
         const charJSON = JSON.stringify(char);
         const result = await writeCharacterData(uploadPath, charJSON, pngName, request);
-        fs.unlinkSync(uploadPath);
-        return result ? pngName : '';
+        assertCharacterImportSaved(result, 'PNG');
+        return pngName;
     }
 
-    return '';
+    throw CharacterImportError.invalid('PNG metadata does not match a supported character card schema.');
 }
 
 export const router = express.Router();
@@ -1500,6 +1691,7 @@ router.post('/chats', validateAvatarUrlMiddleware, async function (request, resp
  * @returns {string} - The name for the uploaded PNG file
  */
 function getPngName(file, directories) {
+    file = sanitize(String(file || ''), { replacement: sanitizeSafeCharacterReplacements }) || 'Character';
     let i = 1;
     const baseName = file;
     while (fs.existsSync(path.join(directories.characters, `${file}.png`))) {
@@ -1515,28 +1707,42 @@ function getPngName(file, directories) {
  * @returns {string | undefined} - The preserved name if the request is valid, otherwise undefined
  */
 function getPreservedName(request) {
-    return typeof request.body.preserved_name === 'string' && request.body.preserved_name.length > 0
-        ? path.parse(request.body.preserved_name).name
-        : undefined;
+    if (typeof request.body?.preserved_name !== 'string' || request.body.preserved_name.length === 0) {
+        return undefined;
+    }
+    const baseName = path.parse(path.basename(request.body.preserved_name)).name;
+    return sanitize(baseName, { replacement: sanitizeSafeCharacterReplacements }) || undefined;
 }
 
 router.post('/import', async function (request, response) {
-    if (!request.body || !request.file) return response.sendStatus(400);
-
-    const uploadPath = path.join(request.file.destination, request.file.filename);
-    const format = request.body.file_type;
-    const preservedFileName = getPreservedName(request);
-
-    const formatImportFunctions = {
-        'yaml': importFromYaml,
-        'yml': importFromYaml,
-        'json': importFromJson,
-        'png': importFromPng,
-        'charx': importFromCharX,
-        'byaf': importFromByaf,
-    };
+    const uploadPath = request.file ? path.join(request.file.destination, request.file.filename) : null;
+    let format = '';
 
     try {
+        if (!request.body || !request.file || !uploadPath) {
+            throw new CharacterImportError(
+                400,
+                'missing_character_file',
+                'No character card file was uploaded.',
+                'Character import request did not contain a file.',
+            );
+        }
+
+        format = String(request.body.file_type || path.extname(request.file.originalname).slice(1)).toLowerCase();
+        const preservedFileName = getPreservedName(request);
+        const formatImportFunctions = {
+            'yaml': importFromYaml,
+            'yml': importFromYaml,
+            'json': importFromJson,
+            'png': importFromPng,
+            'charx': importFromCharX,
+            'byaf': importFromByaf,
+        };
+        const importFunction = formatImportFunctions[format];
+        if (!importFunction) {
+            throw CharacterImportError.unsupported(format);
+        }
+
         let estimateBytes = 0;
         try {
             const uploadStats = fs.statSync(uploadPath);
@@ -1551,31 +1757,37 @@ router.post('/import', async function (request, response) {
 
         const storageError = await ensureCharacterStorageCapacity(request, response, estimateBytes);
         if (storageError) {
-            fs.unlinkSync(uploadPath);
             return storageError;
-        }
-
-        const importFunction = formatImportFunctions[format];
-
-        if (!importFunction) {
-            throw new Error(`Unsupported format: ${format}`);
         }
 
         const fileName = await importFunction(uploadPath, { request, response }, preservedFileName);
 
         if (!fileName) {
-            console.warn('Failed to import character');
-            return response.sendStatus(400);
+            throw CharacterImportError.invalid('Character importer did not return a file name.');
         }
 
         if (preservedFileName) {
             invalidateThumbnail(request.user.directories, 'avatar', `${preservedFileName}.png`);
         }
 
-        response.send({ file_name: fileName });
+        return response.send({
+            file_name: fileName,
+            backgrounds_imported: Number(request.characterImportBackgrounds || 0),
+        });
     } catch (err) {
-        console.error(err);
-        response.send({ error: true });
+        const importError = normalizeCharacterImportError(err);
+        console.error('Character import failed', {
+            code: importError.code,
+            format,
+            file: request.file?.originalname ? path.basename(request.file.originalname) : undefined,
+            message: importError.message,
+        }, err);
+        return response.status(importError.status).json({
+            error: importError.code,
+            message: importError.publicMessage,
+        });
+    } finally {
+        await cleanupUploadedFile(uploadPath);
     }
 });
 

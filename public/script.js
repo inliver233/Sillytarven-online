@@ -811,7 +811,7 @@ export async function pingServer() {
 
 //MARK: firstLoadInit
 async function firstLoadInit() {
- // 设置全局fetch拦截器，处理用户过期
+    // 设置全局fetch拦截器，处理用户过期
     setupFetchInterceptor();
     updateLoaderProgress(10, '正在验证身份与安全 Token...');
     try {
@@ -10640,27 +10640,18 @@ export async function swipe_right(event = null, { source, repeated, message } = 
  * Imports supported files dropped into the app window.
  * @param {File[]} files Array of files to process
  * @param {Map<File, string>} [data] Extra data to pass to the import function
- * @returns {Promise<void>}
+ * @returns {Promise<string[]>} Successfully imported avatar file names
  */
 export async function processDroppedFiles(files, data = new Map()) {
-    const allowedMimeTypes = [
-        'application/json',
-        'image/png',
-        'application/yaml',
-        'application/x-yaml',
-        'text/yaml',
-        'text/x-yaml',
-    ];
-
-    const allowedExtensions = [
-        'charx',
-        'byaf',
-    ];
+    const allowedExtensions = ['json', 'png', 'yaml', 'yml', 'charx', 'byaf'];
 
     const avatarFileNames = [];
     for (const file of files) {
         const extension = file.name.split('.').pop().toLowerCase();
-        if (allowedMimeTypes.some(x => file.type.startsWith(x)) || allowedExtensions.includes(extension)) {
+        // Browser-provided MIME types are optional and frequently become empty or
+        // application/octet-stream after drag-and-drop. The server validates the
+        // actual card contents, so use the explicit extension allow-list here.
+        if (allowedExtensions.includes(extension)) {
             const preservedName = data instanceof Map && data.get(file);
             const avatarFileName = await importCharacter(file, { preserveFileName: preservedName });
             if (avatarFileName !== undefined) {
@@ -10675,6 +10666,8 @@ export async function processDroppedFiles(files, data = new Map()) {
         await importCharactersTags(avatarFileNames);
         selectImportedChar(avatarFileNames[avatarFileNames.length - 1]);
     }
+
+    return avatarFileNames;
 }
 
 /**
@@ -10709,7 +10702,7 @@ function selectImportedChar(charId) {
  * @param {object} [options] - Options
  * @param {string} [options.preserveFileName] Whether to preserve original file name
  * @param {Boolean} [options.importTags=false] Whether to import tags
- * @returns {Promise<string>}
+ * @returns {Promise<string|undefined>}
  */
 async function importCharacter(file, { preserveFileName = '', importTags = false } = {}) {
     if (is_group_generating || is_send_press) {
@@ -10740,14 +10733,21 @@ async function importCharacter(file, { preserveFileName = '', importTags = false
             cache: 'no-cache',
         });
 
-        if (!result.ok) {
-            throw new Error(`Failed to import character: ${result.statusText}`);
+        let data = {};
+        try {
+            const parsedResponse = await result.json();
+            if (parsedResponse && typeof parsedResponse === 'object') {
+                data = parsedResponse;
+            }
+        } catch {
+            // Reverse proxies and CSRF middleware may return HTML or plain text.
         }
 
-        const data = await result.json();
-
-        if (data.error) {
-            throw new Error(`Server returned an error: ${data.error}`);
+        if (!result.ok || data.error) {
+            const error = new Error(data.message || `Character import failed with HTTP ${result.status}`);
+            error.code = data.error;
+            error.status = result.status;
+            throw error;
         }
 
         if (data.file_name !== undefined) {
@@ -10769,11 +10769,52 @@ async function importCharacter(file, { preserveFileName = '', importTags = false
                 await importCharactersTags([avatarFileName]);
                 selectImportedChar(data.file_name);
             }
+            if (Number(data.backgrounds_imported) > 0) {
+                await getBackgrounds();
+            }
             return avatarFileName;
         }
+
+        const error = new Error('The server response did not include the imported character name.');
+        error.code = 'invalid_server_response';
+        throw error;
     } catch (error) {
         console.error('Error importing character', error);
-        toastr.error(t`The file is likely invalid or corrupted.`, t`Could not import character`);
+        let message;
+        switch (error.code) {
+            case 'invalid_character_card':
+                message = error.message || t`The file does not contain a valid character card.`;
+                break;
+            case 'unsupported_character_format':
+                message = t`This character card format is not supported.`;
+                break;
+            case 'storage_limit':
+            case 'storage_write_failed':
+                message = error.message || t`There is not enough storage space to import this character.`;
+                break;
+            case 'character_write_failed':
+                message = t`The card was parsed, but the server could not save it.`;
+                break;
+            case 'invalid_server_response':
+                message = t`The server returned an invalid response. Please try again.`;
+                break;
+            default:
+                if (error.name === 'AbortError') {
+                    message = t`The import was cancelled before it completed.`;
+                } else if ([401, 403, 419].includes(error.status)) {
+                    message = t`The import request was rejected. Refresh the page and sign in again, then retry.`;
+                } else if (error.status === 413) {
+                    message = t`The character card is too large for the server to accept.`;
+                } else if ([502, 503, 504].includes(error.status)) {
+                    message = t`The server is temporarily unavailable. Please try again later.`;
+                } else if (error instanceof TypeError) {
+                    message = t`The browser could not reach the server. Check your connection and try again.`;
+                } else {
+                    message = error.message || t`The server could not import this character card.`;
+                }
+                break;
+        }
+        toastr.error(message, t`Could not import character`);
     }
 }
 
@@ -12589,12 +12630,19 @@ jQuery(async function () {
                             }
 
                             try {
+                                const replacementAvatar = characters[this_chid].avatar;
                                 const data = new Map();
-                                data.set(file, characters[this_chid].avatar);
-                                await processDroppedFiles([file], data);
+                                data.set(file, replacementAvatar);
+                                const imported = await processDroppedFiles([file], data);
+                                if (!imported.includes(replacementAvatar)) {
+                                    return;
+                                }
                                 await postReplace();
-                            } catch {
+                            } catch (error) {
+                                console.error('Failed to replace the character card', error);
                                 toastr.error('Failed to replace the character card.', 'Something went wrong');
+                            } finally {
+                                e.target.value = '';
                             }
                         }
                         $('#character_replace_file').off('change').on('change', uploadReplacementCard).trigger('click');
@@ -12609,8 +12657,10 @@ jQuery(async function () {
                             break;
                         }
                         onlineUrl = inputUrl;
-                        await importFromExternalUrl(onlineUrl, { preserveFileName: characters[this_chid].avatar });
-                        await postReplace();
+                        const replaced = await importFromExternalUrl(onlineUrl, { preserveFileName: characters[this_chid].avatar });
+                        if (replaced) {
+                            await postReplace();
+                        }
                         break;
                     }
                 }

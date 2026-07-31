@@ -1,0 +1,36 @@
+{
+  "iteration": 1,
+  "date": "2026-07-31",
+  "hypotheses": [
+    {
+      "id": "H1",
+      "description": "无效 ccv3 元数据遮蔽有效 chara 元数据，导致正常 PNG 卡被判损坏",
+      "testable_condition": "构造同时包含无效 ccv3 和有效 chara 的 PNG，解析应回退到 chara",
+      "status": "fixed_and_verified"
+    },
+    {
+      "id": "H2",
+      "description": "前端将所有 HTTP、代理、CSRF、容量和解析错误统一误报为文件损坏",
+      "testable_condition": "对不同状态码和 JSON 错误码验证提示分类",
+      "status": "fixed_and_verified"
+    },
+    {
+      "id": "H3",
+      "description": "浏览器 MIME 为空或为 octet-stream 时拖放和替换会拒绝合法 PNG/JSON/YAML",
+      "testable_condition": "扩展名合法且 MIME 为空的文件应进入导入流程",
+      "status": "fixed_and_verified"
+    },
+    {
+      "id": "H4",
+      "description": "视频、重命名和复制流程在失败后继续执行，造成孤立文件或陈旧状态",
+      "testable_condition": "转换/上传失败必须阻止后续状态修改；重命名成功必须替换所有活动 URL",
+      "status": "fixed_and_verified"
+    },
+    {
+      "id": "H5",
+      "description": "CharX 背景被保存到不可发现目录且角色保存失败时遗留资产",
+      "testable_condition": "背景应写入可枚举目录，角色首次写入成功前不得持久化辅助资产",
+      "status": "fixed_and_verified"
+    }
+  ]
+}

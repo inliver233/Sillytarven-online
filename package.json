@@ -127,6 +127,7 @@
         "postinstall": "node post-install.js",
         "test:optimizations": "node --test tests/optimization.node.test.mjs",
         "test:user-invitations": "node --test tests/user-invitations.node.test.mjs",
+        "test:imports": "node --test tests/character-card-parser.node.test.mjs tests/background-media.node.test.mjs tests/charx-assets.node.test.mjs tests/character-import-route.node.test.mjs tests/background-route.node.test.mjs",
         "lint": "eslint \"src/**/*.js\" \"public/**/*.js\" ./*.js",
         "lint:fix": "eslint \"src/**/*.js\" \"public/**/*.js\" ./*.js --fix",
         "plugins:update": "node plugins update",
