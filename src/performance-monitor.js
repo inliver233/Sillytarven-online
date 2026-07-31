@@ -1,6 +1,15 @@
+import { Buffer } from 'node:buffer';
 import { performance } from 'node:perf_hooks';
 
 import { getConfigValue } from './util.js';
+import {
+    CLIENT_PERFORMANCE_COUNTERS,
+    CLIENT_PERFORMANCE_OPERATIONS,
+    MAX_CLIENT_PERFORMANCE_BATCH,
+    MAX_CLIENT_PERFORMANCE_COUNTER_BYTES,
+    MAX_CLIENT_PERFORMANCE_COUNTER_NAME_LENGTH,
+    MAX_CLIENT_PERFORMANCE_COUNTERS,
+} from '../public/scripts/performance-contract.js';
 
 const REQUEST_STARTED_AT = Symbol('performanceRequestStartedAt');
 const REQUEST_TIMER = Symbol('performanceRequestTimer');
@@ -16,14 +25,7 @@ const DEFAULT_SERVER_OPERATIONS = [
     'group-chat-save-tail',
     'version',
 ];
-const DEFAULT_CLIENT_OPERATIONS = [
-    'startup-first-ui',
-    'startup-settings-ready',
-    'startup-characters-ready',
-    'startup-chat-input-ready',
-    'ui-long-task',
-    'chat-load-more-frame',
-];
+const DEFAULT_CLIENT_OPERATIONS = CLIENT_PERFORMANCE_OPERATIONS;
 
 function toFiniteNumber(value, fallback = 0) {
     const number = Number(value);
@@ -79,6 +81,41 @@ function sanitizeNumberRecord(record, maximum = Number.MAX_SAFE_INTEGER) {
     return sanitized;
 }
 
+function sanitizeClientCounters(operation, counters, contract) {
+    const rawCounters = counters ?? {};
+    if (!rawCounters || typeof rawCounters !== 'object' || Array.isArray(rawCounters)) {
+        return null;
+    }
+    let serialized;
+    try {
+        serialized = JSON.stringify(rawCounters);
+    } catch {
+        return null;
+    }
+    if (Buffer.byteLength(serialized, 'utf8') > MAX_CLIENT_PERFORMANCE_COUNTER_BYTES) {
+        return null;
+    }
+
+    const entries = Object.entries(rawCounters);
+    if (entries.length > MAX_CLIENT_PERFORMANCE_COUNTERS) {
+        return null;
+    }
+    const allowedNames = contract.get(operation) ?? new Set();
+    const sanitized = {};
+    for (const [name, value] of entries) {
+        if (name.length > MAX_CLIENT_PERFORMANCE_COUNTER_NAME_LENGTH
+            || !METRIC_NAME.test(name)
+            || !allowedNames.has(name)
+            || typeof value !== 'number'
+            || !Number.isFinite(value)
+            || value < 0) {
+            return null;
+        }
+        sanitized[name] = Math.min(Number.MAX_SAFE_INTEGER, value);
+    }
+    return sanitized;
+}
+
 function aggregateSamples(operation, samples) {
     const duration = summarizeValues(samples.map(sample => sample.durationMs));
     const requestBytes = summarizeValues(samples.map(sample => sample.requestBytes));
@@ -123,23 +160,33 @@ export class PerformanceMonitor {
      * @param {object} [options] Monitor options
      * @param {boolean} [options.enabled] Whether samples are recorded
      * @param {number} [options.capacity] Maximum samples retained per operation
+     * @param {number} [options.capacityBytes] Maximum serialized bytes retained per operation
      * @param {number} [options.clientSamplesPerMinute] Per-user client sample limit
      * @param {string[]} [options.serverOperations] Allowed server operation names
      * @param {string[]} [options.clientOperations] Allowed client operation names
+     * @param {Record<string, string[]>} [options.clientCounterNames] Allowed counters per client operation
      */
     constructor({
         enabled = true,
         capacity = 200,
+        capacityBytes = 256 * 1024,
         clientSamplesPerMinute = 120,
         serverOperations = DEFAULT_SERVER_OPERATIONS,
         clientOperations = DEFAULT_CLIENT_OPERATIONS,
+        clientCounterNames = CLIENT_PERFORMANCE_COUNTERS,
     } = {}) {
         this.enabled = Boolean(enabled);
         this.capacity = Math.floor(clampNumber(capacity, 10, 2000));
+        this.capacityBytes = Math.floor(clampNumber(capacityBytes, 256, 4 * 1024 * 1024));
         this.clientSamplesPerMinute = Math.floor(clampNumber(clientSamplesPerMinute, 10, 2000));
         this.serverOperations = new Set(serverOperations.filter(name => METRIC_NAME.test(name)));
         this.clientOperations = new Set(clientOperations.filter(name => METRIC_NAME.test(name)));
+        this.clientCounterNames = new Map(Object.entries(clientCounterNames).map(([operation, names]) => [
+            operation,
+            new Set(Array.isArray(names) ? names.filter(name => METRIC_NAME.test(name)) : []),
+        ]));
         this.samples = new Map();
+        this.sampleBytes = new Map();
         this.clientRateLimits = new Map();
         this.startedAt = Date.now();
     }
@@ -174,9 +221,10 @@ export class PerformanceMonitor {
      * @returns {{accepted: number, rejected: number, rateLimited: boolean}}
      */
     recordClientBatch(rateLimitKey, rawSamples) {
-        const samples = Array.isArray(rawSamples) ? rawSamples.slice(0, 20) : [];
+        const rawCount = Array.isArray(rawSamples) ? rawSamples.length : 0;
+        const samples = Array.isArray(rawSamples) ? rawSamples.slice(0, MAX_CLIENT_PERFORMANCE_BATCH) : [];
         if (!this.enabled) {
-            return { accepted: 0, rejected: samples.length, rateLimited: false };
+            return { accepted: 0, rejected: rawCount, rateLimited: false };
         }
 
         const now = Date.now();
@@ -198,6 +246,10 @@ export class PerformanceMonitor {
             if (!this.clientOperations.has(operation) || !Number.isFinite(durationMs) || durationMs < 0) {
                 continue;
             }
+            const counters = sanitizeClientCounters(operation, sample?.counters, this.clientCounterNames);
+            if (counters === null) {
+                continue;
+            }
             const didRecord = this.#record(operation, {
                 source: 'client',
                 durationMs: clampNumber(durationMs, 0, 10 * 60 * 1000),
@@ -205,7 +257,7 @@ export class PerformanceMonitor {
                 requestBytes: 0,
                 responseBytes: 0,
                 phases: {},
-                counters: sanitizeNumberRecord(sample?.counters),
+                counters,
                 cacheState: null,
             });
             accepted += Number(didRecord);
@@ -213,8 +265,8 @@ export class PerformanceMonitor {
 
         return {
             accepted,
-            rejected: samples.length - accepted,
-            rateLimited: samples.length > available,
+            rejected: rawCount - accepted,
+            rateLimited: rawCount > available,
         };
     }
 
@@ -229,6 +281,7 @@ export class PerformanceMonitor {
         return {
             enabled: this.enabled,
             capacity: this.capacity,
+            capacityBytes: this.capacityBytes,
             startedAt: this.startedAt,
             generatedAt: Date.now(),
             operations,
@@ -238,17 +291,27 @@ export class PerformanceMonitor {
     /** Clear retained samples and rate-limit windows. */
     clear() {
         this.samples.clear();
+        this.sampleBytes.clear();
         this.clientRateLimits.clear();
         this.startedAt = Date.now();
     }
 
     #record(operation, sample) {
         const bucket = this.samples.get(operation) ?? [];
-        bucket.push({ ...sample, recordedAt: Date.now() });
-        if (bucket.length > this.capacity) {
-            bucket.splice(0, bucket.length - this.capacity);
+        const recorded = { ...sample, recordedAt: Date.now() };
+        const recordedBytes = Buffer.byteLength(JSON.stringify(recorded), 'utf8');
+        if (recordedBytes > this.capacityBytes) {
+            return false;
+        }
+        let bucketBytes = this.sampleBytes.get(operation) ?? 0;
+        bucket.push(recorded);
+        bucketBytes += recordedBytes;
+        while (bucket.length > this.capacity || bucketBytes > this.capacityBytes) {
+            const removed = bucket.shift();
+            bucketBytes -= Buffer.byteLength(JSON.stringify(removed), 'utf8');
         }
         this.samples.set(operation, bucket);
+        this.sampleBytes.set(operation, bucketBytes);
         return true;
     }
 
@@ -379,9 +442,10 @@ class EndpointPerformanceTimer {
 
 const enabled = getConfigValue('performance.telemetry.enabled', true, 'boolean');
 const capacity = getConfigValue('performance.telemetry.samplesPerOperation', 200, 'number');
+const capacityBytes = getConfigValue('performance.telemetry.bytesPerOperation', 256 * 1024, 'number');
 const clientSamplesPerMinute = getConfigValue('performance.telemetry.clientSamplesPerMinute', 120, 'number');
 
-export const performanceMonitor = new PerformanceMonitor({ enabled, capacity, clientSamplesPerMinute });
+export const performanceMonitor = new PerformanceMonitor({ enabled, capacity, capacityBytes, clientSamplesPerMinute });
 
 /**
  * Capture a request start time before body parsing and authentication work.

@@ -86,11 +86,12 @@ test('client telemetry is whitelisted, sanitized, batched, and rate limited', ()
         clientSamplesPerMinute: 10,
         serverOperations: [],
         clientOperations: ['safe-client'],
+        clientCounterNames: { 'safe-client': ['count'] },
     });
     const samples = Array.from({ length: 12 }, (_, index) => ({
         operation: index === 0 ? 'unknown-client' : 'safe-client',
         durationMs: index + 0.5,
-        counters: { count: 1, text: 'not numeric', '../path': 5 },
+        counters: { count: 1 },
         message: 'private content',
     }));
 
@@ -101,6 +102,42 @@ test('client telemetry is whitelisted, sanitized, batched, and rate limited', ()
     assert.equal(summary.operations[0].count, 9);
     assert.equal(summary.operations[0].counters.count, 9);
     assert.doesNotMatch(JSON.stringify(summary), /private content|trusted-user-key|\.\.\/path/);
+});
+
+test('client telemetry enforces operation counters and byte-bounded buckets', () => {
+    const monitor = new PerformanceMonitor({
+        capacity: 100,
+        capacityBytes: 600,
+        clientSamplesPerMinute: 100,
+        serverOperations: [],
+        clientOperations: ['safe-client'],
+        clientCounterNames: { 'safe-client': ['count'] },
+    });
+    const result = monitor.recordClientBatch('user', [
+        { operation: 'safe-client', durationMs: 1, counters: { count: 1 } },
+        { operation: 'safe-client', durationMs: 2, counters: { unexpected: 1 } },
+        { operation: 'safe-client', durationMs: 3, counters: Object.fromEntries(Array.from({ length: 20 }, (_, index) => [`key-${index}`, index])) },
+        { operation: 'safe-client', durationMs: 4, counters: { count: 'x'.repeat(10_000) } },
+    ]);
+    assert.deepEqual(result, { accepted: 1, rejected: 3, rateLimited: false });
+
+    for (let index = 0; index < 20; index++) {
+        monitor.recordClientBatch('user', [{ operation: 'safe-client', durationMs: index, counters: { count: index } }]);
+    }
+    const summary = monitor.getSummary();
+    assert.ok(summary.operations[0].count < 21);
+    assert.ok(summary.operations[0].count > 0);
+    assert.equal(summary.capacityBytes, 600);
+});
+
+test('default browser operation contract includes every frontend producer', () => {
+    const monitor = new PerformanceMonitor();
+    const result = monitor.recordClientBatch('user', [
+        { operation: 'regex-chat-refresh', durationMs: 1, counters: { requests: 1, merged: 0 } },
+        { operation: 'prompt-token-dry-run', durationMs: 2, counters: { requests: 1, merged: 0 } },
+        { operation: 'settings-save-serialize', durationMs: 3, counters: { characters: 100, noop: 0 } },
+    ]);
+    assert.deepEqual(result, { accepted: 3, rejected: 0, rateLimited: false });
 });
 
 test('endpoint timer measures phases and response callback emits bounded Server-Timing', async () => {
@@ -145,7 +182,6 @@ test('performance summary and clearing are administrator-only', async () => {
     performanceMonitor.clear();
     performanceMonitor.recordServerSample('version', { durationMs: 1, statusCode: 200 });
     const app = express();
-    app.use(express.json());
     app.use((request, _response, next) => {
         request.user = { profile: { handle: 'test-user', admin: request.get('x-test-admin') === 'yes' } };
         next();
@@ -160,6 +196,15 @@ test('performance summary and clearing are administrator-only', async () => {
         const address = server.address();
         assert.ok(address && typeof address !== 'string');
         const baseUrl = `http://127.0.0.1:${address.port}/api/performance`;
+        const oversizedClientBody = JSON.stringify({ samples: [{ operation: 'ui-long-task', durationMs: 1, padding: 'x'.repeat(70 * 1024) }] });
+        const oversizedClientResponse = await fetch(`${baseUrl}/client`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: oversizedClientBody,
+        });
+        assert.equal(oversizedClientResponse.status, 413);
+        assert.equal((await oversizedClientResponse.json()).error, 'telemetry_body_too_large');
+
         assert.equal((await fetch(`${baseUrl}/summary`)).status, 403);
 
         const summaryResponse = await fetch(`${baseUrl}/summary`, { headers: { 'x-test-admin': 'yes' } });

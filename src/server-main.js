@@ -107,7 +107,14 @@ app.use(compression());
 app.use(responseTime(finalizeRequestPerformance));
 app.use(performanceRequestStartMiddleware);
 
-app.use(bodyParser.json({ limit: '500mb' }));
+const globalJsonParser = bodyParser.json({ limit: '500mb' });
+app.use((request, response, next) => {
+    if (request.path === '/api/performance/client') {
+        next();
+        return;
+    }
+    globalJsonParser(request, response, next);
+});
 app.use(bodyParser.urlencoded({ extended: true, limit: '500mb' }));
 
 // CORS Settings //

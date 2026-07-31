@@ -849,7 +849,6 @@ export async function pingServer() {
 
 //MARK: firstLoadInit
 async function firstLoadInit() {
-    initializePerformanceTelemetry(() => getRequestHeaders());
     // 设置全局fetch拦截器，处理用户过期
     setupFetchInterceptor();
     updateLoaderProgress(10, '正在验证身份与安全 Token...');
@@ -8320,6 +8319,7 @@ export async function getSettings() {
     }
 
     const data = await response.json();
+    initializePerformanceTelemetry(() => getRequestHeaders(), Boolean(data.telemetry_enabled));
     chatPagingState.enabled = Boolean(data.chat_paging_enabled);
     if (data.result != 'file not find' && data.settings) {
         settings = JSON.parse(data.settings);

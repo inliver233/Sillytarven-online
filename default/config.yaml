@@ -202,6 +202,8 @@ performance:
     enabled: true
     # Maximum retained samples for each operation. Oldest samples are evicted first.
     samplesPerOperation: 200
+    # Maximum retained serialized sample bytes for each operation.
+    bytesPerOperation: 262144
     # Per-user browser timing samples accepted per minute.
     clientSamplesPerMinute: 120
   # Versioned range/tail-save protocol. Disabled by default for existing deployments until clients reload with revision support.
