@@ -5,6 +5,7 @@ import { getMessageTimeStamp } from './RossAscends-mods.js';
 import { getSlashCommandsHelp } from './slash-commands.js';
 import { SlashCommandBrowser } from './slash-commands/SlashCommandBrowser.js';
 import { MacroBrowser, getMacrosHelp } from './macros/MacroBrowser.js';
+import { renderSystemMessageTemplates } from './system-message-templates.js';
 import { renderTemplateAsync } from './templates.js';
 
 /** @type {Record<string, ChatMessage>} */
@@ -40,11 +41,12 @@ export async function initSystemMessages() {
         is_system: true,
         extra: { swipeable: false },
     };
+    const templates = await renderSystemMessageTemplates(renderTemplateAsync, displayVersion);
     /** @type {Record<string, ChatMessage>} */
     const result = {
         /** @type {ChatMessage} */
         help: lodash.merge(structuredClone(defaultMessage), {
-            mes: await renderTemplateAsync('help'),
+            mes: templates.help,
         }),
         /** @type {ChatMessage} */
         slash_commands: lodash.merge(structuredClone(defaultMessage), {
@@ -52,11 +54,11 @@ export async function initSystemMessages() {
         }),
         /** @type {ChatMessage} */
         hotkeys: lodash.merge(structuredClone(defaultMessage), {
-            mes: await renderTemplateAsync('hotkeys'),
+            mes: templates.hotkeys,
         }),
         /** @type {ChatMessage} */
         formatting: lodash.merge(structuredClone(defaultMessage), {
-            mes: await renderTemplateAsync('formatting'),
+            mes: templates.formatting,
         }),
         /** @type {ChatMessage} */
         macros: lodash.merge(structuredClone(defaultMessage), {
@@ -64,7 +66,7 @@ export async function initSystemMessages() {
         }),
         /** @type {ChatMessage} */
         welcome: lodash.merge(structuredClone(defaultMessage), {
-            mes: await renderTemplateAsync('welcome', { displayVersion }),
+            mes: templates.welcome,
             extra: {
                 uses_system_ui: true,
             },
@@ -79,7 +81,7 @@ export async function initSystemMessages() {
         }),
         /** @type {ChatMessage} */
         welcome_prompt: lodash.merge(structuredClone(defaultMessage), {
-            mes: await renderTemplateAsync('welcomePrompt'),
+            mes: templates.welcomePrompt,
             extra: {
                 uses_system_ui: true,
                 isSmallSys: true,
@@ -87,7 +89,7 @@ export async function initSystemMessages() {
         }),
         /** @type {ChatMessage} */
         assistant_note: lodash.merge(structuredClone(defaultMessage), {
-            mes: await renderTemplateAsync('assistantNote'),
+            mes: templates.assistantNote,
             extra: {
                 uses_system_ui: true,
                 isSmallSys: true,
