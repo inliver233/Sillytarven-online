@@ -18,6 +18,7 @@ test('browser telemetry records whitelisted startup marks and ignores invalid sa
     assert.doesNotThrow(() => recordPerformanceSample('ui-long-task', Number.NaN));
     assert.doesNotThrow(() => recordPerformanceSample('regex-chat-refresh', 12, { requests: 3, merged: 2 }));
     assert.doesNotThrow(() => recordPerformanceSample('prompt-token-dry-run', 25, { requests: 4, merged: 3 }));
+    assert.doesNotThrow(() => recordPerformanceSample('settings-save-serialize', 1, { characters: 30_000, noop: 1 }));
     recordStartupMilestone('settings-ready');
     recordStartupMilestone('settings-ready');
     recordStartupMilestone('not-allowed');

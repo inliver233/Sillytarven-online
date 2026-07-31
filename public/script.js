@@ -280,6 +280,7 @@ import { getSystemMessageByType, initSystemMessages, SAFETY_CHAT, sendSystemMess
 import { event_types, eventSource } from './scripts/events.js';
 import { initAccessibility } from './scripts/a11y.js';
 import { processItemsWithFrameBudget } from './scripts/util/frame-budget.js';
+import { SettingsSaveTracker } from './scripts/util/settings-save-tracker.js';
 import { applyStreamFadeIn, StreamRenderBuffer } from './scripts/util/stream-fadein.js';
 import { initDomHandlers } from './scripts/dom-handlers.js';
 import { SimpleMutex } from './scripts/util/SimpleMutex.js';
@@ -490,6 +491,8 @@ export const DEFAULT_SAVE_EDIT_TIMEOUT = debounce_timeout.relaxed;
 /** @type {debounce_timeout} The debounce timeout used for printing. debounce_timeout.quick: 100 ms */
 export const DEFAULT_PRINT_TIMEOUT = debounce_timeout.quick;
 
+const settingsSaveTracker = new SettingsSaveTracker();
+let settingsSaveRequestsInFlight = 0;
 export const saveSettingsDebounced = debounce((loopCounter = 0) => saveSettings(loopCounter), DEFAULT_SAVE_EDIT_TIMEOUT);
 export const saveCharacterDebounced = debounce(() => $('#create_button').trigger('click'), DEFAULT_SAVE_EDIT_TIMEOUT);
 
@@ -8264,6 +8267,7 @@ async function fetchSettingsWithRetry() {
 //MARK: getSettings()
 ///////////////////////////////////////////
 export async function getSettings() {
+    settingsSaveTracker.clear();
     let response;
     try {
         response = await fetchSettingsWithRetry();
@@ -8429,17 +8433,39 @@ export async function saveSettings(loopCounter = 0) {
     };
 
     try {
-        const result = await fetch('/api/settings/save', {
-            method: 'POST',
-            headers: getRequestHeaders(),
-            body: JSON.stringify(payload),
-            cache: 'no-cache',
+        const serializeStartedAt = performance.now();
+        const serializedPayload = JSON.stringify(payload);
+        const isUnchanged = settingsSaveRequestsInFlight === 0
+            && settingsSaveTracker.isUnchanged(serializedPayload, power_user.settings_save_noop);
+        recordPerformanceSample('settings-save-serialize', performance.now() - serializeStartedAt, {
+            characters: serializedPayload.length,
+            noop: Number(isUnchanged),
         });
+
+        if (isUnchanged) {
+            settings = payload;
+            await eventSource.emit(event_types.SETTINGS_UPDATED);
+            return;
+        }
+
+        settingsSaveRequestsInFlight++;
+        let result;
+        try {
+            result = await fetch('/api/settings/save', {
+                method: 'POST',
+                headers: getRequestHeaders(),
+                body: serializedPayload,
+                cache: 'no-cache',
+            });
+        } finally {
+            settingsSaveRequestsInFlight--;
+        }
 
         if (!result.ok) {
             throw new Error(`Failed to save settings: ${result.statusText}`);
         }
 
+        settingsSaveTracker.commit(serializedPayload);
         settings = payload;
         await eventSource.emit(event_types.SETTINGS_UPDATED);
     } catch (error) {
