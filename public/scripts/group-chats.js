@@ -80,6 +80,7 @@ import {
     chatElement,
     ensureMessageMediaIsArray,
     fetchChatRange,
+    clearCachedChatPage,
     getCachedChatPage,
     getChatPagingPageSize,
     getChatPagingState,
@@ -324,6 +325,7 @@ export async function getGroupChat(groupId, reload = false) {
                     isGroup: true,
                     chatId,
                     messageOffset: page.messageOffset,
+                    revision: page.revision,
                 });
                 usedPaging = true;
                 if (!cached) {
@@ -335,6 +337,7 @@ export async function getGroupChat(groupId, reload = false) {
                         cursor: page.cursor,
                         messageOffset: page.messageOffset,
                         hasMore: page.hasMore,
+                        revision: page.revision,
                     });
                 }
             }
@@ -755,6 +758,12 @@ async function saveGroupChat(groupId, shouldSaveGroup, force = false) {
             toastr.error(errorData.message || '存储空间不足，无法保存群聊记录。请删除内容或使用激活码扩容。', '存储空间不足');
             return false;
         }
+        if (response.status === 409 && errorData?.error === 'revision_conflict') {
+            clearCachedChatPage({ isGroup: true, chatId });
+            toastr.error(t`Chat changed in another tab. Reloading to prevent data loss.`, t`Chat changed`);
+            window.location.reload();
+            return false;
+        }
         const isIntegrityError = errorData?.error === 'integrity' && !force;
         if (!isIntegrityError) {
             toastr.error(t`Check the server connection and reload the page to prevent data loss.`, t`Group Chat could not be saved`);
@@ -782,6 +791,12 @@ async function saveGroupChat(groupId, shouldSaveGroup, force = false) {
     }
 
     if (saveRequest.tail) {
+        const responseData = await response.json();
+        if (typeof responseData?.revision !== 'string') {
+            toastr.error(t`Check the server connection and reload the page to prevent data loss.`, t`Group Chat could not be saved`);
+            return false;
+        }
+        setChatPagingState({ revision: responseData.revision });
         const pagingState = getChatPagingState();
         setCachedChatPage({
             isGroup: true,
@@ -791,6 +806,7 @@ async function saveGroupChat(groupId, shouldSaveGroup, force = false) {
             cursor: pagingState.cursor,
             messageOffset: pagingState.messageOffset,
             hasMore: pagingState.hasMore,
+            revision: pagingState.revision,
         });
     }
 

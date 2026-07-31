@@ -191,6 +191,9 @@ performance:
     samplesPerOperation: 200
     # Per-user browser timing samples accepted per minute.
     clientSamplesPerMinute: 120
+  # Versioned range/tail-save protocol. Disabled by default for existing deployments until clients reload with revision support.
+  chatPaging:
+    enabled: false
   # Memoize the complete /version payload while package.json and Git HEAD/ref stay unchanged.
   versionMemo:
     enabled: true

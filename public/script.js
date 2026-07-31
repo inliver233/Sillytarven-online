@@ -302,6 +302,7 @@ import { addChatBackupsBrowser } from './scripts/chat-backups.js';
  * @property {number|null} cursor
  * @property {number|null} messageOffset
  * @property {boolean} hasMore
+ * @property {string|null} revision
  * @property {number} updatedAt
  *
  * @typedef {Object} ChatPageCacheParams
@@ -312,6 +313,7 @@ import { addChatBackupsBrowser } from './scripts/chat-backups.js';
  * @property {number|null} [cursor]
  * @property {number|null} [messageOffset]
  * @property {boolean} [hasMore]
+ * @property {string|null} [revision]
  *
  * @typedef {Object} SaveChatTailOptions
  * @property {string} fileName
@@ -419,7 +421,7 @@ export let swipeState = SWIPE_STATE.NONE;
 const CHAT_PAGE_SIZE_DEFAULT = 20;
 const CHAT_PAGING_MAX_RENDER = isMobile() ? 200 : 400;
 const CHAT_LOAD_MORE_FRAME_BUDGET_MS = 8;
-const CHAT_PAGING_ENABLED = true;
+const CHAT_PAGING_ENABLED = false;
 const CHAT_CACHE_TTL_MS = 20_000;
 const CHAT_CACHE_MAX_ENTRIES = 50;
 const chatPagingState = {
@@ -431,6 +433,7 @@ const chatPagingState = {
     isGroup: false,
     chatId: null,
     messageOffset: null,
+    revision: null,
     loading: false,
 };
 const chatPageCache = new Map();
@@ -602,6 +605,7 @@ export function resetChatPagingState({ isGroup = false, chatId = null } = {}) {
     chatPagingState.isGroup = isGroup;
     chatPagingState.chatId = chatId;
     chatPagingState.messageOffset = null;
+    chatPagingState.revision = null;
     chatPagingState.loading = false;
 }
 
@@ -634,10 +638,17 @@ export function getCachedChatPage({ isGroup = false, chatId = null } = {}) {
     return cached;
 }
 
+export function clearCachedChatPage({ isGroup = false, chatId = null } = {}) {
+    const key = getChatCacheKey({ isGroup, chatId });
+    if (key) {
+        chatPageCache.delete(key);
+    }
+}
+
 /**
  * @param {ChatPageCacheParams} [options]
  */
-export function setCachedChatPage({ isGroup = false, chatId = null, messages, header, cursor, messageOffset, hasMore } = {}) {
+export function setCachedChatPage({ isGroup = false, chatId = null, messages, header, cursor, messageOffset, hasMore, revision } = {}) {
     const key = getChatCacheKey({ isGroup, chatId });
     if (!key) return;
     chatPageCache.delete(key);
@@ -647,6 +658,7 @@ export function setCachedChatPage({ isGroup = false, chatId = null, messages, he
         cursor: Number.isFinite(cursor) ? cursor : null,
         messageOffset: Number.isFinite(messageOffset) ? Math.max(0, messageOffset) : null,
         hasMore: Boolean(hasMore),
+        revision: typeof revision === 'string' ? revision : null,
         updatedAt: Date.now(),
     });
     while (chatPageCache.size > CHAT_CACHE_MAX_ENTRIES) {
@@ -1683,6 +1695,13 @@ async function loadMoreChatMessages(messagesToLoad = null) {
             return;
         }
 
+        if (chatPagingState.revision && data.revision !== chatPagingState.revision) {
+            clearCachedChatPage({ isGroup: chatPagingState.isGroup, chatId: requestedChatId });
+            toastr.error(t`Chat changed in another tab. Reloading to prevent data loss.`, t`Chat changed`);
+            window.location.reload();
+            return;
+        }
+
         const newMessages = data.messages;
         const offset = newMessages.length;
         chat.unshift(...newMessages);
@@ -1710,6 +1729,7 @@ async function loadMoreChatMessages(messagesToLoad = null) {
                 ? Math.max(0, chatPagingState.messageOffset - newMessages.length)
                 : null;
         chatPagingState.hasMore = Boolean(data.hasMore);
+        chatPagingState.revision = typeof data.revision === 'string' ? data.revision : chatPagingState.revision;
 
         chatElement.find('.mes').removeClass('last_mes');
         chatElement.find('.mes').last().addClass('last_mes');
@@ -1729,6 +1749,7 @@ async function loadMoreChatMessages(messagesToLoad = null) {
             cursor: chatPagingState.cursor,
             messageOffset: chatPagingState.messageOffset,
             hasMore: chatPagingState.hasMore,
+            revision: chatPagingState.revision,
         });
 
         await eventSource.emit(event_types.MORE_MESSAGES_LOADED);
@@ -7593,11 +7614,17 @@ async function saveChatTail(options = {}) {
             header,
             messages,
             before: Number.isFinite(chatPagingState.cursor) ? chatPagingState.cursor : 0,
+            expectedRevision: typeof chatPagingState.revision === 'string' ? chatPagingState.revision : null,
             force: force,
         }),
     });
 
     if (result.ok) {
+        const responseData = await result.json();
+        if (typeof responseData?.revision !== 'string') {
+            throw new Error('Chat tail save response did not include a revision.');
+        }
+        chatPagingState.revision = responseData.revision;
         if (chatPagingState.active) {
             setCachedChatPage({
                 isGroup: false,
@@ -7605,12 +7632,24 @@ async function saveChatTail(options = {}) {
                 header,
                 cursor: chatPagingState.cursor,
                 hasMore: chatPagingState.hasMore,
+                revision: chatPagingState.revision,
             });
         }
         return;
     }
 
-    const errorData = await result.json();
+    let errorData = null;
+    try {
+        errorData = await result.json();
+    } catch {
+        // The HTTP status still determines the failure path.
+    }
+    if (result.status === 409 && errorData?.error === 'revision_conflict') {
+        clearCachedChatPage({ isGroup: false });
+        toastr.error(t`Chat changed in another tab. Reloading to prevent data loss.`, t`Chat changed`);
+        window.location.reload();
+        return;
+    }
     if (errorData?.error === 'storage_limit') {
         toastr.error(errorData.message || '存储空间不足，无法保存聊天记录。请删除内容或使用激活码扩容。', '存储空间不足');
         return;
@@ -7925,6 +7964,7 @@ export async function getChat() {
                 chat_metadata = cached.header?.chat_metadata ?? {};
                 chatPagingState.cursor = Number.isFinite(cached.cursor) ? cached.cursor : null;
                 chatPagingState.hasMore = Boolean(cached.hasMore);
+                chatPagingState.revision = typeof cached.revision === 'string' ? cached.revision : null;
                 chatPagingState.active = true;
                 usedPaging = true;
                 chat.forEach(ensureMessageMediaIsArray);
@@ -7951,6 +7991,7 @@ export async function getChat() {
                 chat_metadata = paged.header?.chat_metadata ?? {};
                 chatPagingState.cursor = Number.isFinite(paged.cursor) ? paged.cursor : null;
                 chatPagingState.hasMore = Boolean(paged.hasMore);
+                chatPagingState.revision = typeof paged.revision === 'string' ? paged.revision : null;
                 chatPagingState.active = true;
                 usedPaging = true;
                 chat.forEach(ensureMessageMediaIsArray);
@@ -7960,6 +8001,7 @@ export async function getChat() {
                     header: paged.header,
                     cursor: chatPagingState.cursor,
                     hasMore: chatPagingState.hasMore,
+                    revision: chatPagingState.revision,
                 });
             }
         }
@@ -8277,6 +8319,7 @@ export async function getSettings() {
     }
 
     const data = await response.json();
+    chatPagingState.enabled = Boolean(data.chat_paging_enabled);
     if (data.result != 'file not find' && data.settings) {
         settings = JSON.parse(data.settings);
         if (settings.username !== undefined && settings.username !== '') {

@@ -15,6 +15,7 @@ import { invalidateSettingsCache, registerSettingsCache, SettingsCache } from '.
 const ENABLE_EXTENSIONS = !!getConfigValue('extensions.enabled', true, 'boolean');
 const ENABLE_EXTENSIONS_AUTO_UPDATE = !!getConfigValue('extensions.autoUpdate', true, 'boolean');
 const ENABLE_ACCOUNTS = !!getConfigValue('enableUserAccounts', false, 'boolean');
+const ENABLE_CHAT_PAGING = !!getConfigValue('performance.chatPaging.enabled', false, 'boolean');
 const settingsCache = new SettingsCache({
     enabled: getConfigValue('performance.settingsCache.enabled', true, 'boolean'),
     ioConcurrency: getConfigValue('performance.settingsCache.ioConcurrency', 8, 'number'),
@@ -172,6 +173,7 @@ router.post('/get', async (request, response) => {
                 enable_extensions: ENABLE_EXTENSIONS,
                 enable_extensions_auto_update: ENABLE_EXTENSIONS_AUTO_UPDATE,
                 enable_accounts: ENABLE_ACCOUNTS,
+                chat_paging_enabled: ENABLE_CHAT_PAGING,
             },
         }));
         performanceTimer.increment(`settings-cache-${result.state}`);

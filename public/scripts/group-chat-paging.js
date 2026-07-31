@@ -1,7 +1,7 @@
 /**
  * Normalize the additive group range response without accepting malformed partial data.
  * @param {object} data Raw response body
- * @returns {{header: object|null, messages: object[], cursor: number|null, hasMore: boolean, messageOffset: number|null}|null}
+ * @returns {{header: object|null, messages: object[], cursor: number|null, hasMore: boolean, messageOffset: number|null, revision: string|null}|null}
  */
 export function normalizeGroupChatPage(data) {
     if (!data || !Array.isArray(data.messages)) {
@@ -14,6 +14,7 @@ export function normalizeGroupChatPage(data) {
         cursor: Number.isFinite(data.cursor) ? data.cursor : null,
         hasMore: Boolean(data.hasMore),
         messageOffset: Number.isFinite(data.messageOffset) ? Math.max(0, data.messageOffset) : null,
+        revision: typeof data.revision === 'string' ? data.revision : null,
     };
 }
 
@@ -62,6 +63,7 @@ export function createGroupChatSaveRequest({ chatId, header, messages, pagingSta
                 header,
                 messages,
                 before: Number.isFinite(pagingState.cursor) ? pagingState.cursor : 0,
+                expectedRevision: typeof pagingState.revision === 'string' ? pagingState.revision : null,
                 force,
             },
             tail: true,
