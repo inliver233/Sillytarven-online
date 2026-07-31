@@ -62,6 +62,7 @@ import { router as scheduledTasksRouter } from './endpoints/scheduled-tasks.js';
 import { router as userStorageRouter } from './endpoints/user-storage.js';
 import { router as performanceRouter } from './endpoints/performance.js';
 import { getConfigValue } from './util.js';
+import { settingsCacheInvalidationMiddleware } from './settings-cache.js';
 
 /**
  * @typedef {object} ServerStartupResult
@@ -147,6 +148,7 @@ export function redirectDeprecatedEndpoints(app) {
  * @param {import('express').Express} app The Express app to use
  */
 export function setupPrivateEndpoints(app) {
+    app.use(settingsCacheInvalidationMiddleware);
     app.use('/', userDataRouter);
     app.use('/api/users', usersPrivateRouter);
     app.use('/api/users', usersAdminRouter);

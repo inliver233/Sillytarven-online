@@ -10,10 +10,20 @@ import { getConfigValue, generateTimestamp, removeOldBackups } from '../util.js'
 import { getAllUserHandles, getUserDirectories } from '../users.js';
 import { getFileNameValidationFunction } from '../middleware/validateFileName.js';
 import { beginEndpointPerformance } from '../performance-monitor.js';
+import { invalidateSettingsCache, registerSettingsCache, SettingsCache } from '../settings-cache.js';
 
 const ENABLE_EXTENSIONS = !!getConfigValue('extensions.enabled', true, 'boolean');
 const ENABLE_EXTENSIONS_AUTO_UPDATE = !!getConfigValue('extensions.autoUpdate', true, 'boolean');
 const ENABLE_ACCOUNTS = !!getConfigValue('enableUserAccounts', false, 'boolean');
+const settingsCache = new SettingsCache({
+    enabled: getConfigValue('performance.settingsCache.enabled', true, 'boolean'),
+    ioConcurrency: getConfigValue('performance.settingsCache.ioConcurrency', 8, 'number'),
+    ttlMs: getConfigValue('performance.settingsCache.ttlMs', 30_000, 'number'),
+    signatureTtlMs: getConfigValue('performance.settingsCache.signatureTtlMs', 5_000, 'number'),
+    maxEntries: getConfigValue('performance.settingsCache.maxEntries', 100, 'number'),
+    maxBytes: getConfigValue('performance.settingsCache.maxBytes', 100 * 1024 * 1024, 'number'),
+});
+registerSettingsCache(settingsCache);
 
 // 10 minutes
 const AUTOSAVE_INTERVAL = 10 * 60 * 1000;
@@ -42,83 +52,12 @@ function triggerAutoSave(handle) {
 }
 
 /**
- * Reads and parses files from a directory.
- * @param {string} directoryPath Path to the directory
- * @param {string} fileExtension File extension
- * @returns {Array} Parsed files
- */
-function readAndParseFromDirectory(directoryPath, fileExtension = '.json', performanceTimer = null) {
-    const files = (performanceTimer?.measureSync('directory-read', () => fs.readdirSync(directoryPath)) ?? fs.readdirSync(directoryPath))
-        .filter(x => path.parse(x).ext == fileExtension)
-        .sort();
-
-    const parsedFiles = [];
-
-    files.forEach(item => {
-        try {
-            const file = performanceTimer?.measureSync('file-read', () => fs.readFileSync(path.join(directoryPath, item), 'utf-8'))
-                ?? fs.readFileSync(path.join(directoryPath, item), 'utf-8');
-            performanceTimer?.increment('files-read');
-            performanceTimer?.increment('read-bytes', Buffer.byteLength(file, 'utf8'));
-            parsedFiles.push(fileExtension == '.json'
-                ? (performanceTimer?.measureSync('json-parse', () => JSON.parse(file)) ?? JSON.parse(file))
-                : file);
-        }
-        catch {
-            performanceTimer?.increment('invalid-files');
-        }
-    });
-
-    return parsedFiles;
-}
-
-/**
- * Gets a sort function for sorting strings.
- * @param {*} _
- * @returns {(a: string, b: string) => number} Sort function
- */
-function sortByName(_) {
-    return (a, b) => a.localeCompare(b);
-}
-
-/**
  * Gets backup file prefix for user settings.
  * @param {string} handle User handle
  * @returns {string} File prefix
  */
 export function getSettingsBackupFilePrefix(handle) {
     return `settings_${handle}_`;
-}
-
-function readPresetsFromDirectory(directoryPath, options = {}, performanceTimer = null) {
-    const {
-        sortFunction,
-        removeFileExtension = false,
-        fileExtension = '.json',
-    } = options;
-
-    const files = (performanceTimer?.measureSync('directory-read', () => fs.readdirSync(directoryPath)) ?? fs.readdirSync(directoryPath))
-        .sort(sortFunction)
-        .filter(x => path.parse(x).ext == fileExtension);
-    const fileContents = [];
-    const fileNames = [];
-
-    files.forEach(item => {
-        try {
-            const file = performanceTimer?.measureSync('file-read', () => fs.readFileSync(path.join(directoryPath, item), 'utf8'))
-                ?? fs.readFileSync(path.join(directoryPath, item), 'utf8');
-            performanceTimer?.measureSync('json-parse', () => JSON.parse(file)) ?? JSON.parse(file);
-            performanceTimer?.increment('files-read');
-            performanceTimer?.increment('read-bytes', Buffer.byteLength(file, 'utf8'));
-            fileContents.push(file);
-            fileNames.push(removeFileExtension ? item.replace(/\.[^/.]+$/, '') : item);
-        } catch {
-            performanceTimer?.increment('invalid-files');
-            console.warn(`${item} is not a valid JSON`);
-        }
-    });
-
-    return { fileContents, fileNames };
 }
 
 async function backupSettings() {
@@ -213,6 +152,7 @@ router.post('/save', function (request, response) {
     try {
         const pathToSettings = path.join(request.user.directories.root, SETTINGS_FILE);
         writeFileAtomicSync(pathToSettings, JSON.stringify(request.body, null, 4), 'utf8');
+        invalidateSettingsCache(request.user.profile.handle);
         triggerAutoSave(request.user.profile.handle);
         response.send({ result: 'ok' });
     } catch (err) {
@@ -222,83 +162,34 @@ router.post('/save', function (request, response) {
 });
 
 // Wintermute's code
-router.post('/get', (request, response) => {
+router.post('/get', async (request, response) => {
     const performanceTimer = beginEndpointPerformance(request, 'settings-get');
-    performanceTimer.setCacheState('bypass');
-    performanceTimer.setCounter('directories', 13);
-    let settings;
     try {
-        const pathToSettings = path.join(request.user.directories.root, SETTINGS_FILE);
-        settings = performanceTimer.measureSync('file-read', () => fs.readFileSync(pathToSettings, 'utf8'));
-        performanceTimer.increment('files-read');
-        performanceTimer.increment('read-bytes', Buffer.byteLength(settings, 'utf8'));
-    } catch (e) {
+        const result = await performanceTimer.measureAsync('load', () => settingsCache.get({
+            userKey: request.user.profile.handle,
+            directories: request.user.directories,
+            runtimeConfig: {
+                enable_extensions: ENABLE_EXTENSIONS,
+                enable_extensions_auto_update: ENABLE_EXTENSIONS_AUTO_UPDATE,
+                enable_accounts: ENABLE_ACCOUNTS,
+            },
+        }));
+        performanceTimer.increment(`settings-cache-${result.state}`);
+        performanceTimer.setCacheState(result.state === 'miss' ? 'miss' : 'hit');
+        if (result.state === 'miss') {
+            performanceTimer.addDuration('file-read', result.metrics.readMs);
+            performanceTimer.addDuration('json-parse', result.metrics.parseMs);
+            performanceTimer.setCounter('directories', result.metrics.directories);
+            performanceTimer.setCounter('files-read', result.metrics.filesRead);
+            performanceTimer.setCounter('invalid-files', result.metrics.invalidFiles);
+            performanceTimer.setCounter('read-bytes', result.metrics.readBytes);
+        }
+        performanceTimer.startPhase('serialize');
+        return response.send(result.payload);
+    } catch (error) {
+        console.error('Failed to build settings payload:', error);
         return response.sendStatus(500);
     }
-
-    // NovelAI Settings
-    const { fileContents: novelai_settings, fileNames: novelai_setting_names }
-        = readPresetsFromDirectory(request.user.directories.novelAI_Settings, {
-            sortFunction: sortByName(request.user.directories.novelAI_Settings),
-            removeFileExtension: true,
-        }, performanceTimer);
-
-    // OpenAI Settings
-    const { fileContents: openai_settings, fileNames: openai_setting_names }
-        = readPresetsFromDirectory(request.user.directories.openAI_Settings, {
-            sortFunction: sortByName(request.user.directories.openAI_Settings), removeFileExtension: true,
-        }, performanceTimer);
-
-    // TextGenerationWebUI Settings
-    const { fileContents: textgenerationwebui_presets, fileNames: textgenerationwebui_preset_names }
-        = readPresetsFromDirectory(request.user.directories.textGen_Settings, {
-            sortFunction: sortByName(request.user.directories.textGen_Settings), removeFileExtension: true,
-        }, performanceTimer);
-
-    //Kobold
-    const { fileContents: koboldai_settings, fileNames: koboldai_setting_names }
-        = readPresetsFromDirectory(request.user.directories.koboldAI_Settings, {
-            sortFunction: sortByName(request.user.directories.koboldAI_Settings), removeFileExtension: true,
-        }, performanceTimer);
-
-    const worldFiles = performanceTimer
-        .measureSync('directory-read', () => fs.readdirSync(request.user.directories.worlds))
-        .filter(file => path.extname(file).toLowerCase() === '.json')
-        .sort((a, b) => a.localeCompare(b));
-    const world_names = worldFiles.map(item => path.parse(item).name);
-
-    const themes = readAndParseFromDirectory(request.user.directories.themes, '.json', performanceTimer);
-    const movingUIPresets = readAndParseFromDirectory(request.user.directories.movingUI, '.json', performanceTimer);
-    const quickReplyPresets = readAndParseFromDirectory(request.user.directories.quickreplies, '.json', performanceTimer);
-
-    const instruct = readAndParseFromDirectory(request.user.directories.instruct, '.json', performanceTimer);
-    const context = readAndParseFromDirectory(request.user.directories.context, '.json', performanceTimer);
-    const sysprompt = readAndParseFromDirectory(request.user.directories.sysprompt, '.json', performanceTimer);
-    const reasoning = readAndParseFromDirectory(request.user.directories.reasoning, '.json', performanceTimer);
-
-    performanceTimer.startPhase('serialize');
-    response.send({
-        settings,
-        koboldai_settings,
-        koboldai_setting_names,
-        world_names,
-        novelai_settings,
-        novelai_setting_names,
-        openai_settings,
-        openai_setting_names,
-        textgenerationwebui_presets,
-        textgenerationwebui_preset_names,
-        themes,
-        movingUIPresets,
-        quickReplyPresets,
-        instruct,
-        context,
-        sysprompt,
-        reasoning,
-        enable_extensions: ENABLE_EXTENSIONS,
-        enable_extensions_auto_update: ENABLE_EXTENSIONS_AUTO_UPDATE,
-        enable_accounts: ENABLE_ACCOUNTS,
-    });
 });
 
 router.post('/get-snapshots', async (request, response) => {

@@ -12,7 +12,7 @@ import {
     invalidateCharacterListCache,
     registerCharacterListCache,
 } from '../src/character-list-cache.js';
-import { mapWithConcurrency } from '../src/concurrency.js';
+import { createConcurrencyLimiter, mapWithConcurrency } from '../src/concurrency.js';
 
 const delay = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
 
@@ -44,6 +44,24 @@ test('mapWithConcurrency preserves order and never exceeds its worker bound', as
         if (value === 2) throw new Error('mapper failed');
         return value;
     }), /mapper failed/);
+});
+
+test('shared concurrency limiter bounds unrelated tasks and continues after rejection', async () => {
+    const runLimited = createConcurrencyLimiter(3);
+    let active = 0;
+    let maximum = 0;
+    const tasks = Array.from({ length: 30 }, (_, index) => runLimited(async () => {
+        active++;
+        maximum = Math.max(maximum, active);
+        await delay(2);
+        active--;
+        if (index === 5) throw new Error('expected failure');
+        return index;
+    }));
+    const settled = await Promise.allSettled(tasks);
+    assert.equal(settled.filter(result => result.status === 'fulfilled').length, 29);
+    assert.equal(settled.filter(result => result.status === 'rejected').length, 1);
+    assert.ok(maximum <= 3);
 });
 
 test('bounded cache applies TTL, LRU, byte limits, invalidation, and single-flight', async () => {

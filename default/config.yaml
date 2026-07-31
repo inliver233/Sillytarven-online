@@ -204,6 +204,14 @@ performance:
     signatureTtlMs: 5000
     maxEntries: 100
     maxBytes: 104857600
+  # Asynchronously build and retain complete per-user /api/settings/get payloads.
+  settingsCache:
+    enabled: true
+    ioConcurrency: 8
+    ttlMs: 30000
+    signatureTtlMs: 5000
+    maxEntries: 100
+    maxBytes: 104857600
 
 # CACHE BUSTER CONFIGURATION
 # IMPORTANT: Requires localhost or a domain with HTTPS, otherwise will not work!

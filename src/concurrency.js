@@ -26,3 +26,33 @@ export async function mapWithConcurrency(items, limit, mapper) {
     await Promise.all(workers);
     return results;
 }
+
+/**
+ * Create a shared FIFO limiter for unrelated asynchronous I/O tasks.
+ * @param {number} limit Maximum active tasks
+ * @returns {<T>(task: () => Promise<T>|T) => Promise<T>} Limited task runner
+ */
+export function createConcurrencyLimiter(limit) {
+    const concurrency = Math.max(1, Math.floor(Number(limit) || 1));
+    let active = 0;
+    const queue = [];
+
+    const drain = () => {
+        while (active < concurrency && queue.length) {
+            const record = queue.shift();
+            active++;
+            Promise.resolve()
+                .then(record.task)
+                .then(record.resolve, record.reject)
+                .finally(() => {
+                    active--;
+                    drain();
+                });
+        }
+    };
+
+    return task => new Promise((resolve, reject) => {
+        queue.push({ task, resolve, reject });
+        drain();
+    });
+}

@@ -3,6 +3,7 @@ import express from 'express';
 import { performanceMonitor } from '../performance-monitor.js';
 import { requireAdminMiddleware } from '../users.js';
 import { clearCharacterListCache, getCharacterListCacheStatus } from '../character-list-cache.js';
+import { clearSettingsCache, getSettingsCacheStatus } from '../settings-cache.js';
 
 export const router = express.Router();
 
@@ -24,6 +25,7 @@ router.get('/summary', requireAdminMiddleware, (_, response) => {
         ...performanceMonitor.getSummary(),
         caches: {
             characterLists: getCharacterListCacheStatus(),
+            settings: getSettingsCacheStatus(),
         },
     });
 });
@@ -35,5 +37,10 @@ router.post('/clear', requireAdminMiddleware, (_, response) => {
 
 router.post('/cache/characters/clear', requireAdminMiddleware, (_, response) => {
     clearCharacterListCache();
+    return response.send({ ok: true });
+});
+
+router.post('/cache/settings/clear', requireAdminMiddleware, (_, response) => {
+    clearSettingsCache();
     return response.send({ ok: true });
 });

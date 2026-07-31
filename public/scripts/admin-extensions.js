@@ -942,7 +942,11 @@ function renderPerformanceMetrics() {
     const characterCacheText = characterCache
         ? `；角色列表缓存：${Number(characterCache.entries) || 0} 项 / ${formatPerformanceBytes(characterCache.totalBytes)}`
         : '';
-    status.textContent = `状态：${currentPerformanceData.enabled ? '已启用' : '已关闭'}；每项容量：${currentPerformanceData.capacity}${characterCacheText}；更新时间：${generatedAt}`;
+    const settingsCache = currentPerformanceData.caches?.settings;
+    const settingsCacheText = settingsCache
+        ? `；设置缓存：${Number(settingsCache.entries) || 0} 项 / ${formatPerformanceBytes(settingsCache.totalBytes)}`
+        : '';
+    status.textContent = `状态：${currentPerformanceData.enabled ? '已启用' : '已关闭'}；每项容量：${currentPerformanceData.capacity}${characterCacheText}${settingsCacheText}；更新时间：${generatedAt}`;
     if (!operations.length) {
         rows.innerHTML = '<tr><td colspan="5" style="padding:16px;text-align:center;">暂无样本</td></tr>';
         return;
