@@ -280,7 +280,7 @@ import { getSystemMessageByType, initSystemMessages, SAFETY_CHAT, sendSystemMess
 import { event_types, eventSource } from './scripts/events.js';
 import { initAccessibility } from './scripts/a11y.js';
 import { processItemsWithFrameBudget } from './scripts/util/frame-budget.js';
-import { SettingsSaveTracker } from './scripts/util/settings-save-tracker.js';
+import { requireSettingsSaveSuccess, SettingsSaveQueue, SettingsSaveTracker } from './scripts/util/settings-save-tracker.js';
 import { applyStreamFadeIn, StreamRenderBuffer } from './scripts/util/stream-fadein.js';
 import { initDomHandlers } from './scripts/dom-handlers.js';
 import { SimpleMutex } from './scripts/util/SimpleMutex.js';
@@ -495,6 +495,7 @@ export const DEFAULT_SAVE_EDIT_TIMEOUT = debounce_timeout.relaxed;
 export const DEFAULT_PRINT_TIMEOUT = debounce_timeout.quick;
 
 const settingsSaveTracker = new SettingsSaveTracker();
+const settingsSaveQueue = new SettingsSaveQueue();
 let settingsSaveRequestsInFlight = 0;
 export const saveSettingsDebounced = debounce((loopCounter = 0) => saveSettings(loopCounter), DEFAULT_SAVE_EDIT_TIMEOUT);
 export const saveCharacterDebounced = debounce(() => $('#create_button').trigger('click'), DEFAULT_SAVE_EDIT_TIMEOUT);
@@ -8492,23 +8493,21 @@ export async function saveSettings(loopCounter = 0) {
         }
 
         settingsSaveRequestsInFlight++;
-        let result;
         try {
-            result = await fetch('/api/settings/save', {
-                method: 'POST',
-                headers: getRequestHeaders(),
-                body: serializedPayload,
-                cache: 'no-cache',
+            await settingsSaveQueue.enqueue(async () => {
+                const response = await fetch('/api/settings/save', {
+                    method: 'POST',
+                    headers: getRequestHeaders(),
+                    body: serializedPayload,
+                    cache: 'no-cache',
+                });
+                await requireSettingsSaveSuccess(response);
+                settingsSaveTracker.commit(serializedPayload);
             });
         } finally {
             settingsSaveRequestsInFlight--;
         }
 
-        if (!result.ok) {
-            throw new Error(`Failed to save settings: ${result.statusText}`);
-        }
-
-        settingsSaveTracker.commit(serializedPayload);
         settings = payload;
         await eventSource.emit(event_types.SETTINGS_UPDATED);
     } catch (error) {

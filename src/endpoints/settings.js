@@ -3,7 +3,6 @@ import path from 'node:path';
 
 import express from 'express';
 import _ from 'lodash';
-import { sync as writeFileAtomicSync } from 'write-file-atomic';
 
 import { SETTINGS_FILE } from '../constants.js';
 import { getConfigValue, generateTimestamp, removeOldBackups } from '../util.js';
@@ -11,6 +10,7 @@ import { getAllUserHandles, getUserDirectories } from '../users.js';
 import { getFileNameValidationFunction } from '../middleware/validateFileName.js';
 import { beginEndpointPerformance } from '../performance-monitor.js';
 import { invalidateSettingsCache, registerSettingsCache, SettingsCache } from '../settings-cache.js';
+import { createSettingsSaveHandler } from '../settings-save.js';
 
 const ENABLE_EXTENSIONS = !!getConfigValue('extensions.enabled', true, 'boolean');
 const ENABLE_EXTENSIONS_AUTO_UPDATE = !!getConfigValue('extensions.autoUpdate', true, 'boolean');
@@ -149,18 +149,12 @@ function getLatestBackup(handle) {
 
 export const router = express.Router();
 
-router.post('/save', function (request, response) {
-    try {
-        const pathToSettings = path.join(request.user.directories.root, SETTINGS_FILE);
-        writeFileAtomicSync(pathToSettings, JSON.stringify(request.body, null, 4), 'utf8');
+router.post('/save', createSettingsSaveHandler({
+    onSuccess: (request) => {
         invalidateSettingsCache(request.user.profile.handle);
         triggerAutoSave(request.user.profile.handle);
-        response.send({ result: 'ok' });
-    } catch (err) {
-        console.error(err);
-        response.send(err);
-    }
-});
+    },
+}));
 
 // Wintermute's code
 router.post('/get', async (request, response) => {
