@@ -135,6 +135,19 @@ logging:
   enableAccessLog: true
   # Minimum log level to display in the terminal (DEBUG = 0, INFO = 1, WARN = 2, ERROR = 3)
   minLogLevel: 1
+# -- UPLOAD AND ARCHIVE RESOURCE LIMITS --
+uploads:
+  maxFileBytes: 524288000
+  maxFieldBytes: 524288000
+  backgrounds:
+    maxFileBytes: 67108864
+    maxPixels: 100000000
+imports:
+  archive:
+    maxEntries: 1024
+    maxEntryBytes: 134217728
+    maxTotalBytes: 268435456
+    maxCompressionRatio: 200
 # -- RATE LIMITING CONFIGURATION --
 rateLimiting:
   # Use Express's trusted client IP. Forwarding headers are accepted only from

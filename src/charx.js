@@ -3,7 +3,8 @@ import path from 'node:path';
 import _ from 'lodash';
 import sanitize from 'sanitize-filename';
 import { sync as writeFileAtomicSync } from 'write-file-atomic';
-import { extractFileFromZipBuffer, extractFilesFromZipBuffer, normalizeZipEntryPath, ensureDirectory, clientRelativePath } from './util.js';
+import { normalizeZipEntryPath, ensureDirectory, clientRelativePath } from './util.js';
+import { extractZipArchive } from './bounded-zip.js';
 import { DEFAULT_AVATAR_PATH } from './constants.js';
 import { detectImageFormat, normalizeImageFileName } from './media-validation.js';
 
@@ -51,13 +52,16 @@ function findZipStart(buffer) {
 
 export class CharXParser {
     #data;
+    #archiveOptions;
 
     /**
      * @param {ArrayBuffer|Buffer} data
+     * @param {object} [archiveOptions] ZIP resource limits
      */
-    constructor(data) {
+    constructor(data, archiveOptions = {}) {
         // Handle SFX (self-extracting) ZIP archives by finding the actual ZIP start
         this.#data = findZipStart(Buffer.isBuffer(data) ? data : Buffer.from(data));
+        this.#archiveOptions = archiveOptions;
     }
 
     /**
@@ -66,7 +70,11 @@ export class CharXParser {
      */
     async parse() {
         console.info('Importing from CharX');
-        const cardBuffer = await extractFileFromZipBuffer(this.#data, 'card.json');
+        const archiveFiles = await extractZipArchive(this.#data, this.#archiveOptions);
+        const cardEntry = [...archiveFiles.entries()].find(([fileName]) => (
+            fileName.endsWith('card.json') && !fileName.startsWith('__MACOSX/')
+        ));
+        const cardBuffer = cardEntry?.[1];
 
         if (!cardBuffer) {
             throw new Error('Failed to extract card.json from CharX file');
@@ -93,10 +101,9 @@ export class CharXParser {
             }
         }
 
-        let extractedBuffers = new Map();
-        if (archivePaths.size > 0) {
-            extractedBuffers = await extractFilesFromZipBuffer(this.#data, [...archivePaths]);
-        }
+        const extractedBuffers = new Map(
+            [...archiveFiles].filter(([fileName]) => archivePaths.has(fileName)),
+        );
 
         /** @type {string|Buffer} */
         let avatar = DEFAULT_AVATAR_PATH;
@@ -280,25 +287,6 @@ export class CharXParser {
 }
 
 /**
- * Delete existing file with same base name (any extension) before overwriting.
- * Matches ST's sprite upload behavior in sprites.js.
- * @param {string} dirPath - Directory path
- * @param {string} baseName - Base filename without extension
- */
-function deleteExistingByBaseName(dirPath, baseName) {
-    try {
-        const files = fs.readdirSync(dirPath, { withFileTypes: true }).filter(f => f.isFile()).map(f => f.name);
-        for (const file of files) {
-            if (path.parse(file).name === baseName) {
-                fs.unlinkSync(path.join(dirPath, file));
-            }
-        }
-    } catch {
-        // Directory doesn't exist yet or other error, that's fine
-    }
-}
-
-/**
  * Persist extracted CharX assets to appropriate ST directories.
  * Note: Uses sync writes consistent with ST's existing file handling.
  * @param {Array} assets - Mapped assets from CharXParser
@@ -308,10 +296,67 @@ function deleteExistingByBaseName(dirPath, baseName) {
  * @returns {{sprites: number, backgrounds: number, misc: number, rewrites: Array<{order: number, uri: string, ext: string}>}}
  */
 export function persistCharXAssets(assets, bufferMap, directories, characterOptions) {
-    /** @type {{sprites: number, backgrounds: number, misc: number, rewrites: Array<{order: number, uri: string, ext: string}>}} */
+    const plan = planCharXAssets(assets, bufferMap, directories, characterOptions);
+    const targetPaths = new Set([
+        ...plan.writes.map(item => item.filePath),
+        ...plan.removals,
+    ]);
+    const snapshots = new Map();
+    for (const targetPath of targetPaths) {
+        snapshots.set(targetPath, fs.existsSync(targetPath) ? fs.readFileSync(targetPath) : null);
+    }
+
+    try {
+        for (const write of plan.writes) {
+            if (!ensureDirectory(path.dirname(write.filePath))) {
+                throw new Error(`Failed to create CharX asset directory: ${path.dirname(write.filePath)}`);
+            }
+            writeFileAtomicSync(write.filePath, write.buffer);
+        }
+        for (const removal of plan.removals) {
+            fs.rmSync(removal, { force: true });
+        }
+        return plan.summary;
+    } catch (error) {
+        for (const [targetPath, snapshot] of snapshots) {
+            if (snapshot === null) {
+                fs.rmSync(targetPath, { force: true });
+            } else {
+                ensureDirectory(path.dirname(targetPath));
+                writeFileAtomicSync(targetPath, snapshot);
+            }
+        }
+        throw error;
+    }
+}
+
+function findExistingByBaseName(dirPath, baseName) {
+    try {
+        return fs.readdirSync(dirPath, { withFileTypes: true })
+            .filter(entry => entry.isFile() && path.parse(entry.name).name === baseName)
+            .map(entry => path.join(dirPath, entry.name));
+    } catch (error) {
+        if (error?.code === 'ENOENT') {
+            return [];
+        }
+        throw error;
+    }
+}
+
+/**
+ * Builds the complete CharX asset write plan without modifying disk.
+ * @param {Array} assets Mapped assets from CharXParser
+ * @param {Map<string, Buffer>} bufferMap Extracted archive buffers
+ * @param {Object} directories User directories
+ * @param {string|{characterFolder: string, assetFolder?: string, spriteFolder?: string}} characterOptions Character storage names
+ * @returns {{summary: {sprites: number, backgrounds: number, misc: number, rewrites: Array<{order: number, uri: string, ext: string}>}, writes: Array<{filePath: string, buffer: Buffer}>, removals: string[]}}
+ */
+export function planCharXAssets(assets, bufferMap, directories, characterOptions) {
     const summary = { sprites: 0, backgrounds: 0, misc: 0, rewrites: [] };
+    const writes = [];
+    const removals = new Set();
     if (!Array.isArray(assets) || assets.length === 0) {
-        return summary;
+        return { summary, writes, removals: [] };
     }
 
     const rawCharacterFolder = typeof characterOptions === 'string' ? characterOptions : characterOptions?.characterFolder;
@@ -320,100 +365,48 @@ export function persistCharXAssets(assets, bufferMap, directories, characterOpti
     const characterFolder = sanitize(String(rawCharacterFolder || 'Character')) || 'Character';
     const assetFolder = sanitize(String(rawAssetFolder || characterFolder)) || characterFolder;
     const spriteFolder = sanitize(String(rawSpriteFolder || characterFolder)) || characterFolder;
-    let spritesPath = null;
-    let miscPath = null;
-
-    const ensureSpritesPath = () => {
-        if (spritesPath) {
-            return spritesPath;
-        }
-        const candidate = path.join(directories.characters, spriteFolder);
-        if (!ensureDirectory(candidate)) {
-            return null;
-        }
-        spritesPath = candidate;
-        return spritesPath;
-    };
-
-    const ensureMiscPath = () => {
-        if (miscPath) {
-            return miscPath;
-        }
-        // Misc assets are isolated by internal card filename, not display name.
-        const candidate = path.join(directories.userImages, assetFolder);
-        if (!ensureDirectory(candidate)) {
-            return null;
-        }
-        miscPath = candidate;
-        return miscPath;
-    };
 
     for (const asset of assets) {
-        if (!asset?.zipPath) {
-            continue;
-        }
-        const buffer = bufferMap.get(asset.zipPath);
+        const buffer = asset?.zipPath ? bufferMap.get(asset.zipPath) : null;
         if (!buffer) {
-            console.warn(`CharX: Asset ${asset.zipPath} missing or unsupported, skipping.`);
+            console.warn(`CharX: Asset ${asset?.zipPath || '(unknown)'} missing or unsupported, skipping.`);
             continue;
         }
-
         const detectedFormat = detectImageFormat(buffer);
         if (!detectedFormat) {
             console.warn(`CharX: Asset ${asset.zipPath} is not a supported image, skipping.`);
             continue;
         }
 
-        try {
-            if (asset.storageCategory === 'sprite') {
-                const targetDir = ensureSpritesPath();
-                if (!targetDir) {
-                    continue;
-                }
-                // Delete existing sprite with same base name (any extension) - matches sprites.js behavior
-                deleteExistingByBaseName(targetDir, asset.baseName);
-                const filePath = path.join(targetDir, `${asset.baseName}.${detectedFormat.extension}`);
-                writeFileAtomicSync(filePath, buffer);
-                summary.sprites += 1;
-                summary.rewrites.push({ order: asset.order, uri: clientRelativePath(directories.root, filePath), ext: detectedFormat.extension });
-                continue;
-            }
-
-            if (asset.storageCategory === 'background') {
-                // Global backgrounds are immediately discoverable by the background gallery.
-                // Prefixing with the unique internal card name prevents equal display names
-                // from overwriting each other's embedded assets.
-                const backgroundDir = directories.backgrounds;
-                if (!ensureDirectory(backgroundDir)) {
-                    continue;
-                }
-                const fileName = normalizeImageFileName(`${assetFolder}_${asset.baseName}`, detectedFormat.extension);
-                deleteExistingByBaseName(backgroundDir, path.parse(fileName).name);
-                const filePath = path.join(backgroundDir, fileName);
-                writeFileAtomicSync(filePath, buffer);
-                summary.backgrounds += 1;
-                summary.rewrites.push({ order: asset.order, uri: clientRelativePath(directories.root, filePath), ext: detectedFormat.extension });
-                continue;
-            }
-
-            if (asset.storageCategory === 'misc') {
-                const miscDir = ensureMiscPath();
-                if (!miscDir) {
-                    continue;
-                }
-                // Overwrite existing misc asset with same name
-                deleteExistingByBaseName(miscDir, asset.baseName);
-                const filePath = path.join(miscDir, `${asset.baseName}.${detectedFormat.extension}`);
-                writeFileAtomicSync(filePath, buffer);
-                summary.misc += 1;
-                summary.rewrites.push({ order: asset.order, uri: clientRelativePath(directories.root, filePath), ext: detectedFormat.extension });
-            }
-        } catch (error) {
-            console.warn(`CharX: Failed to save asset "${asset.name}": ${error.message}`);
+        let filePath;
+        if (asset.storageCategory === 'sprite') {
+            filePath = path.join(directories.characters, spriteFolder, `${asset.baseName}.${detectedFormat.extension}`);
+            summary.sprites += 1;
+        } else if (asset.storageCategory === 'background') {
+            const fileName = normalizeImageFileName(`${assetFolder}_${asset.baseName}`, detectedFormat.extension);
+            filePath = path.join(directories.backgrounds, fileName);
+            summary.backgrounds += 1;
+        } else if (asset.storageCategory === 'misc') {
+            filePath = path.join(directories.userImages, assetFolder, `${asset.baseName}.${detectedFormat.extension}`);
+            summary.misc += 1;
+        } else {
+            continue;
         }
+
+        for (const existingPath of findExistingByBaseName(path.dirname(filePath), path.parse(filePath).name)) {
+            if (path.resolve(existingPath) !== path.resolve(filePath)) {
+                removals.add(existingPath);
+            }
+        }
+        writes.push({ filePath, buffer });
+        summary.rewrites.push({
+            order: asset.order,
+            uri: clientRelativePath(directories.root, filePath),
+            ext: detectedFormat.extension,
+        });
     }
 
-    return summary;
+    return { summary, writes, removals: [...removals] };
 }
 
 /**

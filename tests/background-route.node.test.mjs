@@ -59,6 +59,33 @@ test('background routes validate bytes, normalize extensions, rename safely, and
         assert.equal(fs.existsSync(path.join(backgrounds, 'wrong.png')), true);
         await waitForEmptyDirectory(uploads);
 
+        const collisionForm = new FormData();
+        collisionForm.append('avatar', new Blob([basePng], { type: 'image/png' }), 'wrong.jpeg');
+        const collisionResponse = await fetch(`${baseUrl}/api/backgrounds/upload`, { method: 'POST', body: collisionForm });
+        assert.equal(collisionResponse.status, 409);
+        assert.equal((await collisionResponse.json()).error, 'background_exists');
+        assert.deepEqual(fs.readFileSync(path.join(backgrounds, 'wrong.png')), basePng);
+        await waitForEmptyDirectory(uploads);
+
+        const truncatedForm = new FormData();
+        truncatedForm.append('avatar', new Blob([basePng.subarray(0, 24)], { type: 'image/png' }), 'truncated.png');
+        const truncatedResponse = await fetch(`${baseUrl}/api/backgrounds/upload`, { method: 'POST', body: truncatedForm });
+        assert.equal(truncatedResponse.status, 415);
+        assert.equal((await truncatedResponse.json()).error, 'invalid_background_file');
+        assert.equal(fs.existsSync(path.join(backgrounds, 'truncated.png')), false);
+        await waitForEmptyDirectory(uploads);
+
+        const oversizedPng = Buffer.from(basePng);
+        oversizedPng.writeUInt32BE(50_000, 16);
+        oversizedPng.writeUInt32BE(50_000, 20);
+        const oversizedForm = new FormData();
+        oversizedForm.append('avatar', new Blob([oversizedPng], { type: 'image/png' }), 'oversized.png');
+        const oversizedResponse = await fetch(`${baseUrl}/api/backgrounds/upload`, { method: 'POST', body: oversizedForm });
+        assert.equal(oversizedResponse.status, 413);
+        assert.equal((await oversizedResponse.json()).error, 'background_pixel_limit_exceeded');
+        assert.equal(fs.existsSync(path.join(backgrounds, 'oversized.png')), false);
+        await waitForEmptyDirectory(uploads);
+
         const videoForm = new FormData();
         videoForm.append('avatar', new Blob([Buffer.from('00000018667479706d703432', 'hex')], { type: 'video/mp4' }), 'video.mp4');
         const videoResponse = await fetch(`${baseUrl}/api/backgrounds/upload`, { method: 'POST', body: videoForm });

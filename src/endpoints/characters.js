@@ -23,12 +23,15 @@ import { importRisuSprites } from './sprites.js';
 import { getUserDirectoriesList } from '../users.js';
 import { getChatInfo } from './chats.js';
 import { ByafParser } from '../byaf.js';
-import { applyCharXAssetRewrites, CharXParser, persistCharXAssets } from '../charx.js';
+import { applyCharXAssetRewrites, CharXParser, planCharXAssets } from '../charx.js';
 import cacheBuster from '../middleware/cacheBuster.js';
 import { canConsumeStorage } from '../storage-quota.js';
 import { beginEndpointPerformance } from '../performance-monitor.js';
 import { detectImageFormat } from '../media-validation.js';
 import { CharacterListCache, invalidateCharacterListCache, registerCharacterListCache } from '../character-list-cache.js';
+import { ArchiveReadError } from '../bounded-zip.js';
+import { FileTransaction } from '../file-transaction.js';
+import { KeyedMutex } from '../keyed-mutex.js';
 
 // With 100 MB limit it would take roughly 3000 characters to reach this limit
 const memoryCacheCapacity = getConfigValue('performance.memoryCacheCapacity', '100mb');
@@ -48,6 +51,7 @@ const characterListCache = new CharacterListCache({
 });
 registerCharacterListCache(characterListCache);
 const chatDirStatsCache = new Map();
+const characterImportMutex = new KeyedMutex();
 const CHARACTER_SIZE_OVERHEAD = 2048;
 
 class CharacterImportError extends Error {
@@ -106,6 +110,17 @@ class CharacterImportError extends Error {
             internalMessage,
         );
     }
+
+    static storageLimit(result) {
+        const error = new CharacterImportError(
+            507,
+            'storage_limit',
+            'There is not enough storage space to import this character card.',
+            'Character import exceeds the user storage quota.',
+        );
+        error.storage = result;
+        return error;
+    }
 }
 
 /**
@@ -116,6 +131,26 @@ class CharacterImportError extends Error {
 function normalizeCharacterImportError(error) {
     if (error instanceof CharacterImportError) {
         return error;
+    }
+    if (error instanceof ArchiveReadError) {
+        return new CharacterImportError(
+            error.status,
+            error.code,
+            error.status === 413
+                ? 'The character archive exceeds the configured extraction limits.'
+                : 'The uploaded character archive is invalid.',
+            error.message,
+            error,
+        );
+    }
+    if (error instanceof CharacterCardPngError && ['metadata_limit_exceeded', 'metadata_chunk_limit_exceeded'].includes(error.code)) {
+        return new CharacterImportError(
+            413,
+            'character_metadata_too_large',
+            'The PNG character metadata exceeds the configured limit.',
+            error.message,
+            error,
+        );
     }
     if (error instanceof CharacterCardPngError || error instanceof SyntaxError || error?.name === 'YAMLParseError') {
         return CharacterImportError.invalid('Failed to parse character card data.', error);
@@ -169,7 +204,7 @@ function assertCharacterImportSaved(result, source) {
 async function ensureCharacterStorageCapacity(request, response, additionalBytes) {
     const result = await canConsumeStorage(request.user.profile, request.user.directories, additionalBytes);
     if (!result.allowed) {
-        return response.status(403).json({
+        return response.status(507).json({
             error: 'storage_limit',
             message: '存储空间不足，无法保存角色卡，请删除角色或使用激活码扩容。',
             usedBytes: result.usedBytes,
@@ -406,43 +441,39 @@ async function readCharacterData(inputFile, inputFormat = 'png', cacheObserver =
  * @param {Crop|undefined} crop - Crop parameters
  * @returns {Promise<boolean>} - True if the operation was successful
  */
+async function buildCharacterPng(inputFile, data, crop = undefined) {
+    let inputImage;
+    try {
+        inputImage = Buffer.isBuffer(inputFile)
+            ? await parseImageBuffer(inputFile, crop)
+            : await tryReadImage(inputFile, crop);
+    } catch (error) {
+        const message = Buffer.isBuffer(inputFile) ? 'Failed to read image buffer.' : `Failed to read image: ${inputFile}.`;
+        console.warn(message, 'Using a fallback image.', error);
+        inputImage = await fs.promises.readFile(DEFAULT_AVATAR_PATH);
+    }
+    return write(inputImage, data);
+}
+
+function invalidateCharacterDataCache(inputFile, request) {
+    for (const key of memoryCache.keys()) {
+        if (Buffer.isBuffer(inputFile)) {
+            break;
+        }
+        if (key.startsWith(inputFile)) {
+            memoryCache.delete(key);
+            break;
+        }
+    }
+    if (useDiskCache && !Buffer.isBuffer(inputFile)) {
+        diskCache.syncQueue.add(request.user.profile.handle);
+    }
+}
+
 async function writeCharacterData(inputFile, data, outputFile, request, crop = undefined) {
     try {
-        // Reset the cache
-        for (const key of memoryCache.keys()) {
-            if (Buffer.isBuffer(inputFile)) {
-                break;
-            }
-            if (key.startsWith(inputFile)) {
-                memoryCache.delete(key);
-                break;
-            }
-        }
-        if (useDiskCache && !Buffer.isBuffer(inputFile)) {
-            diskCache.syncQueue.add(request.user.profile.handle);
-        }
-        /**
-         * Read the image, resize, and save it as a PNG into the buffer.
-         * @returns {Promise<Buffer>} Image buffer
-         */
-        async function getInputImage() {
-            try {
-                if (Buffer.isBuffer(inputFile)) {
-                    return await parseImageBuffer(inputFile, crop);
-                }
-
-                return await tryReadImage(inputFile, crop);
-            } catch (error) {
-                const message = Buffer.isBuffer(inputFile) ? 'Failed to read image buffer.' : `Failed to read image: ${inputFile}.`;
-                console.warn(message, 'Using a fallback image.', error);
-                return await fs.promises.readFile(DEFAULT_AVATAR_PATH);
-            }
-        }
-
-        const inputImage = await getInputImage();
-
-        // Get the chunks
-        const outputImage = write(inputImage, data);
+        invalidateCharacterDataCache(inputFile, request);
+        const outputImage = await buildCharacterPng(inputFile, data, crop);
         const outputImagePath = path.join(request.user.directories.characters, `${outputFile}.png`);
 
         writeFileAtomicSync(outputImagePath, outputImage);
@@ -507,6 +538,26 @@ async function parseImageBuffer(buffer, crop) {
     }
     const image = await Jimp.fromBuffer(buffer);
     return await applyAvatarCropResize(image, crop);
+}
+
+function getCharacterArchiveLimits() {
+    return {
+        maxEntries: getConfigValue('imports.archive.maxEntries', 1024, 'number'),
+        maxEntryBytes: getConfigValue('imports.archive.maxEntryBytes', 128 * 1024 * 1024, 'number'),
+        maxTotalBytes: getConfigValue('imports.archive.maxTotalBytes', 256 * 1024 * 1024, 'number'),
+        maxCompressionRatio: getConfigValue('imports.archive.maxCompressionRatio', 200, 'number'),
+    };
+}
+
+async function commitCharacterImportTransaction(transaction, request) {
+    const additionalBytes = await transaction.getAdditionalBytes();
+    const storageCheck = request.characterImportStorageCheck ?? canConsumeStorage;
+    const quota = await storageCheck(request.user.profile, request.user.directories, additionalBytes);
+    if (!quota.allowed) {
+        throw CharacterImportError.storageLimit(quota);
+    }
+    await transaction.commit();
+    invalidateCharacterListCache(request.user.profile.handle);
 }
 
 /**
@@ -1016,11 +1067,14 @@ async function importFromCharX(uploadPath, { request }, preservedFileName) {
     // Create a properly-sized ArrayBuffer (Node's buffer pool can cause oversized .buffer)
     const data = fileBuffer.buffer.slice(fileBuffer.byteOffset, fileBuffer.byteOffset + fileBuffer.byteLength);
 
-    const parser = new CharXParser(data);
+    const parser = new CharXParser(data, getCharacterArchiveLimits());
     let parsed;
     try {
         parsed = await parser.parse();
     } catch (error) {
+        if (error instanceof ArchiveReadError) {
+            throw error;
+        }
         throw CharacterImportError.invalid('Failed to parse CharX character card.', error);
     }
     const { card, avatar, auxiliaryAssets, extractedBuffers } = parsed;
@@ -1043,34 +1097,33 @@ async function importFromCharX(uploadPath, { request }, preservedFileName) {
         _.set(processedCard, 'data.extensions.sillytavern.charx_sprite_folder', fileName);
     }
 
-    // Persist the card first. Auxiliary assets must never be left behind when
-    // creating the character PNG itself fails.
-    const result = await writeCharacterData(avatar, JSON.stringify(processedCard), fileName, request);
-    assertCharacterImportSaved(result, 'CharX');
+    const assetPlan = planCharXAssets(auxiliaryAssets, extractedBuffers, request.user.directories, {
+        characterFolder,
+        assetFolder: fileName,
+        spriteFolder: fileName,
+    });
+    applyCharXAssetRewrites(processedCard, assetPlan.summary.rewrites);
 
-    if (auxiliaryAssets.length > 0) {
-        try {
-            const summary = persistCharXAssets(auxiliaryAssets, extractedBuffers, request.user.directories, {
-                characterFolder,
-                assetFolder: fileName,
-                spriteFolder: fileName,
-            });
-            request.characterImportBackgrounds = summary.backgrounds;
-            if (summary.sprites || summary.backgrounds || summary.misc) {
-                console.log(`CharX: Imported ${summary.sprites} sprite(s), ${summary.backgrounds} background(s), ${summary.misc} misc asset(s) for ${characterFolder}`);
-            }
-
-            if (summary.rewrites.length > 0) {
-                applyCharXAssetRewrites(processedCard, summary.rewrites);
-                const savedCardPath = path.join(request.user.directories.characters, `${fileName}.png`);
-                const updated = await writeCharacterData(savedCardPath, JSON.stringify(processedCard), fileName, request);
-                if (!updated) {
-                    console.warn(`CharX: Imported assets for ${characterFolder}, but failed to update their card URIs.`);
-                }
-            }
-        } catch (error) {
-            console.warn(`CharX: Failed to persist auxiliary assets for ${characterFolder}`, error);
+    const transaction = new FileTransaction(request.user.directories.root, request.characterImportTransactionOptions);
+    const savedCardPath = path.join(request.user.directories.characters, `${fileName}.png`);
+    try {
+        for (const writePlan of assetPlan.writes) {
+            await transaction.stageFile(writePlan.filePath, writePlan.buffer);
         }
+        for (const removal of assetPlan.removals) {
+            transaction.removeFile(removal);
+        }
+        const characterPng = await buildCharacterPng(avatar, JSON.stringify(processedCard));
+        await transaction.stageFile(savedCardPath, characterPng);
+        await commitCharacterImportTransaction(transaction, request);
+    } finally {
+        await transaction.dispose();
+    }
+
+    request.characterImportBackgrounds = assetPlan.summary.backgrounds;
+    invalidateCharacterDataCache(savedCardPath, request);
+    if (assetPlan.summary.sprites || assetPlan.summary.backgrounds || assetPlan.summary.misc) {
+        console.log(`CharX: Imported ${assetPlan.summary.sprites} sprite(s), ${assetPlan.summary.backgrounds} background(s), ${assetPlan.summary.misc} misc asset(s) for ${characterFolder}`);
     }
 
     return fileName;
@@ -1083,74 +1136,85 @@ async function importFromByaf(uploadPath, { request }, preservedFileName) {
 
     let byafData;
     try {
-        byafData = await new ByafParser(data).parse();
+        byafData = await new ByafParser(data, getCharacterArchiveLimits()).parse();
     } catch (error) {
+        if (error instanceof ArchiveReadError) {
+            throw error;
+        }
         throw CharacterImportError.invalid('Failed to parse BYAF character card.', error);
     }
     const card = readFromV2(byafData.card);
     const fileName = preservedFileName || getPngName(sanitize(byafData.character.displayName || card.name, { replacement: sanitizeSafeCharacterReplacements }), request.user.directories);
+    const transaction = new FileTransaction(request.user.directories.root, request.characterImportTransactionOptions);
+    const savedCardPath = path.join(request.user.directories.characters, `${fileName}.png`);
 
-    // Don't import chats and images if the character is being replaced or updated, instead of newly imported.
-    if (!preservedFileName) {
-        /**
-         * @param {Partial<ByafScenario>} scenario
-        */
-        const createChatAsCurrentPersona = (scenario) => {
-            const chatName = sanitize(`${scenario.title || card.name} - ${humanizedISO8601DateTime()} imported.jsonl`, { replacement: sanitizeSafeCharacterReplacements });
-            const filePath = path.join(request.user.directories.chats, path.basename(fileName), chatName);
-            const dir = path.dirname(filePath);
-            if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-            writeFileAtomicSync(filePath, ByafParser.getChatFromScenario(scenario, request.body.user_name, card.name, byafData.chatBackgrounds), 'utf8');
-            console.log(`Created ${chatName} chat from BYAF import`);
-            return chatName;
-        };
+    try {
+        // Don't import chats and images if the character is being replaced or updated.
+        if (!preservedFileName) {
+            const reservedPaths = new Set();
+            const reserveUniquePath = (directory, baseName, extension) => {
+                const uniqueName = getUniqueName(baseName, name => {
+                    const candidate = path.join(directory, `${name}${extension}`);
+                    return fs.existsSync(candidate) || reservedPaths.has(path.resolve(candidate));
+                });
+                const candidate = path.join(directory, `${uniqueName}${extension}`);
+                reservedPaths.add(path.resolve(candidate));
+                return candidate;
+            };
 
-        // Upload backgrounds
-        for (const bg of byafData.chatBackgrounds) {
-            const extension = path.extname(bg.paths?.[0]) || '.png';
-            const baseName = `${path.basename(fileName)}_bg`;
-            const filePath = path.join(request.user.directories.userImages, fileName);
-            if (!fs.existsSync(filePath)) fs.mkdirSync(filePath, { recursive: true });
-            const file = getUniqueName(baseName, (name) => fs.existsSync(path.join(filePath, `${name}${extension}`)));
-            if (Buffer.isBuffer(bg.data)) {
-                const newFile = `${file}${extension}`;
-                writeFileAtomicSync(path.join(filePath, newFile), bg.data);
-                bg.name = clientRelativePath(request.user.directories.root, path.join(filePath, newFile)); // Update background name to the new file
-                console.log(`Created ${newFile} background from BYAF import`);
+            for (const bg of byafData.chatBackgrounds) {
+                if (!Buffer.isBuffer(bg.data)) {
+                    continue;
+                }
+                const format = detectImageFormat(bg.data);
+                if (!format) {
+                    throw CharacterImportError.invalid('BYAF archive contains an invalid background image.');
+                }
+                const directory = path.join(request.user.directories.userImages, fileName);
+                const targetPath = reserveUniquePath(directory, `${path.basename(fileName)}_bg`, `.${format.extension}`);
+                await transaction.stageFile(targetPath, bg.data);
+                bg.name = clientRelativePath(request.user.directories.root, targetPath);
             }
-        }
 
-        const chats = [];
-        // Create chats for each scenario
-        if (Array.isArray(byafData.scenarios)) {
-            for (const scenario of byafData.scenarios) {
-                chats.push(createChatAsCurrentPersona(scenario));
+            const chats = [];
+            if (Array.isArray(byafData.scenarios)) {
+                for (const scenario of byafData.scenarios) {
+                    const rawBaseName = sanitize(`${scenario.title || card.name} - ${humanizedISO8601DateTime()} imported`, { replacement: sanitizeSafeCharacterReplacements }) || 'Imported chat';
+                    const chatPath = reserveUniquePath(path.join(request.user.directories.chats, path.basename(fileName)), rawBaseName, '.jsonl');
+                    await transaction.stageFile(
+                        chatPath,
+                        ByafParser.getChatFromScenario(scenario, request.body.user_name, card.name, byafData.chatBackgrounds),
+                    );
+                    chats.push(path.basename(chatPath));
+                }
             }
-        }
+            if (chats.length > 0) {
+                card.chat = path.basename(chats[0], path.extname(chats[0]));
+            }
 
-        // Update the default chat if there are any so we open to an existing chat instead of creating a new one and opening that.
-        if (chats.length > 0) {
-            card.chat = path.basename(chats[0], path.extname(chats[0]));
-        }
-
-        // Save alternate icons for the character.
-        for (const icon of byafData.images.slice(1)) {
-            // BYAF does not support character expressions, so using the same structure will not result in conflicts,
-            // even if the expression system did not tolerate additional icons that are not mapped to expressions.
-            // This will not yet allow changing icons within the UI but at least the icons will be available for manual selection, rather than being lost.
             const altImagesFolder = path.join(request.user.directories.characters, sanitize(card.name));
-            if (!fs.existsSync(altImagesFolder)) fs.mkdirSync(altImagesFolder, { recursive: true });
-            const extension = path.extname(icon.filename) || '.png';
-            const file = getUniqueName(`${sanitize(icon.label, { replacement: sanitizeSafeCharacterReplacements }) || 'alt'}`, (name) => fs.existsSync(path.join(altImagesFolder, `${name}${extension}`)));
-            if (Buffer.isBuffer(icon.image)) {
-                writeFileAtomicSync(path.join(altImagesFolder, `${file}${extension}`), icon.image);
-                console.log(`Created ${file}${extension} alternate icon from BYAF import`);
+            for (const icon of byafData.images.slice(1)) {
+                if (!Buffer.isBuffer(icon.image)) {
+                    continue;
+                }
+                const format = detectImageFormat(icon.image);
+                if (!format) {
+                    throw CharacterImportError.invalid('BYAF archive contains an invalid alternate character image.');
+                }
+                const baseName = sanitize(icon.label, { replacement: sanitizeSafeCharacterReplacements }) || 'alt';
+                const targetPath = reserveUniquePath(altImagesFolder, baseName, `.${format.extension}`);
+                await transaction.stageFile(targetPath, icon.image);
             }
         }
+
+        const characterPng = await buildCharacterPng(byafData.images[0].image, JSON.stringify(card));
+        await transaction.stageFile(savedCardPath, characterPng);
+        await commitCharacterImportTransaction(transaction, request);
+    } finally {
+        await transaction.dispose();
     }
 
-    const result = await writeCharacterData(byafData.images[0].image, JSON.stringify(card), fileName, request);
-    assertCharacterImportSaved(result, 'BYAF');
+    invalidateCharacterDataCache(savedCardPath, request);
     return fileName;
 }
 
@@ -1779,36 +1843,40 @@ router.post('/import', async function (request, response) {
             throw CharacterImportError.unsupported(format);
         }
 
-        let estimateBytes = 0;
-        try {
-            const uploadStats = fs.statSync(uploadPath);
-            estimateBytes = uploadStats.size + CHARACTER_SIZE_OVERHEAD;
-            if (['json', 'yaml', 'yml'].includes(format)) {
-                const defaultAvatarSize = fs.statSync(DEFAULT_AVATAR_PATH).size;
-                estimateBytes += defaultAvatarSize;
+        return await characterImportMutex.runExclusive(request.user.profile.handle, async () => {
+            let estimateBytes = 0;
+            try {
+                const uploadStats = fs.statSync(uploadPath);
+                estimateBytes = uploadStats.size + CHARACTER_SIZE_OVERHEAD;
+                if (['json', 'yaml', 'yml'].includes(format)) {
+                    const defaultAvatarSize = fs.statSync(DEFAULT_AVATAR_PATH).size;
+                    estimateBytes += defaultAvatarSize;
+                }
+            } catch (error) {
+                console.warn('Failed to estimate import size:', error);
             }
-        } catch (error) {
-            console.warn('Failed to estimate import size:', error);
-        }
 
-        const storageError = await ensureCharacterStorageCapacity(request, response, estimateBytes);
-        if (storageError) {
-            return storageError;
-        }
+            if (!['charx', 'byaf'].includes(format)) {
+                const storageError = await ensureCharacterStorageCapacity(request, response, estimateBytes);
+                if (storageError) {
+                    return storageError;
+                }
+            }
 
-        const fileName = await importFunction(uploadPath, { request, response }, preservedFileName);
+            const fileName = await importFunction(uploadPath, { request, response }, preservedFileName);
 
-        if (!fileName) {
-            throw CharacterImportError.invalid('Character importer did not return a file name.');
-        }
+            if (!fileName) {
+                throw CharacterImportError.invalid('Character importer did not return a file name.');
+            }
 
-        if (preservedFileName) {
-            invalidateThumbnail(request.user.directories, 'avatar', `${preservedFileName}.png`);
-        }
+            if (preservedFileName) {
+                invalidateThumbnail(request.user.directories, 'avatar', `${preservedFileName}.png`);
+            }
 
-        return response.send({
-            file_name: fileName,
-            backgrounds_imported: Number(request.characterImportBackgrounds || 0),
+            return response.send({
+                file_name: fileName,
+                backgrounds_imported: Number(request.characterImportBackgrounds || 0),
+            });
         });
     } catch (err) {
         const importError = normalizeCharacterImportError(err);
@@ -1821,6 +1889,11 @@ router.post('/import', async function (request, response) {
         return response.status(importError.status).json({
             error: importError.code,
             message: importError.publicMessage,
+            ...(importError.storage ? {
+                usedBytes: importError.storage.usedBytes,
+                limitBytes: importError.storage.limitBytes,
+                remainingBytes: importError.storage.remainingBytes,
+            } : {}),
         });
     } finally {
         await cleanupUploadedFile(uploadPath);

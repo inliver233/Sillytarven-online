@@ -10,7 +10,6 @@ import { csrfSync } from 'csrf-sync';
 import express from 'express';
 import compression from 'compression';
 import cookieSession from 'cookie-session';
-import multer from 'multer';
 import responseTime from 'response-time';
 import helmet from 'helmet';
 import bodyParser from 'body-parser';
@@ -31,7 +30,6 @@ import {
     migrateUserData,
     requireLoginMiddleware,
     setUserDataMiddleware,
-    shouldRedirectToLogin,
     cleanUploads,
     getSessionCookieAge,
     verifySecuritySettings,
@@ -43,6 +41,7 @@ import basicAuthMiddleware from './middleware/basicAuth.js';
 import getWhitelistMiddleware from './middleware/whitelist.js';
 import accessLoggerMiddleware, { getAccessLogPath, migrateAccessLog } from './middleware/accessLogWriter.js';
 import multerMonkeyPatch from './middleware/multerMonkeyPatch.js';
+import { createUploadMiddleware } from './upload-middleware.js';
 import initRequestProxy from './request-proxy.js';
 import cacheBuster from './middleware/cacheBuster.js';
 import corsProxyMiddleware from './middleware/corsProxy.js';
@@ -383,7 +382,7 @@ app.post('/api/ping', (request, response) => {
 
 // File uploads
 const uploadsPath = path.join(cliArgs.dataRoot, UPLOADS_DIRECTORY);
-app.use(multer({ dest: uploadsPath, limits: { fieldSize: 500 * 1024 * 1024 } }).single('avatar'));
+app.use(createUploadMiddleware(uploadsPath));
 app.use(multerMonkeyPatch);
 
 app.get('/version', async function (request, response) {

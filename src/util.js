@@ -11,11 +11,11 @@ import readline from 'node:readline';
 
 import yaml from 'yaml';
 import _ from 'lodash';
-import yauzl from 'yauzl';
 import mime from 'mime-types';
 import chalk from 'chalk';
 import bytes from 'bytes';
 import { LOG_LEVELS, CHAT_COMPLETION_SOURCES, MEDIA_REQUEST_TYPE } from './constants.js';
+import { extractZipArchive, normalizeArchiveEntryPath } from './bounded-zip.js';
 import { serverDirectory } from './server-directory.js';
 import { sync as writeFileAtomicSync } from 'write-file-atomic';
 import { VersionMemo } from './version.js';
@@ -191,57 +191,11 @@ export function formatBytes(numBytes) {
  * @returns {Promise<Buffer|null>} Buffer containing the extracted file. Null if the file was not found.
  */
 export async function extractFileFromZipBuffer(archiveBuffer, fileExtension) {
-    return await new Promise((resolve) => {
-        try {
-            yauzl.fromBuffer(Buffer.from(archiveBuffer), { lazyEntries: true }, (err, zipfile) => {
-                if (err) {
-                    console.warn(`Error opening ZIP file: ${err.message}`);
-                    return resolve(null);
-                }
-
-                zipfile.readEntry();
-
-                zipfile.on('entry', (entry) => {
-                    if (entry.fileName.endsWith(fileExtension) && !entry.fileName.startsWith('__MACOSX')) {
-                        zipfile.openReadStream(entry, (err, readStream) => {
-                            if (err) {
-                                console.warn(`Error opening read stream: ${err.message}`);
-                                return zipfile.readEntry();
-                            } else {
-                                const chunks = [];
-                                readStream.on('data', (chunk) => {
-                                    chunks.push(chunk);
-                                });
-
-                                readStream.on('end', () => {
-                                    const buffer = Buffer.concat(chunks);
-                                    resolve(buffer);
-                                    zipfile.readEntry(); // Continue to the next entry
-                                });
-
-                                readStream.on('error', (err) => {
-                                    console.warn(`Error reading stream: ${err.message}`);
-                                    zipfile.readEntry();
-                                });
-                            }
-                        });
-                    } else {
-                        zipfile.readEntry();
-                    }
-                });
-
-                zipfile.on('error', (err) => {
-                    console.warn('ZIP processing error', err);
-                    resolve(null);
-                });
-
-                zipfile.on('end', () => resolve(null));
-            });
-        } catch (error) {
-            console.warn('Failed to process ZIP buffer', error);
-            resolve(null);
-        }
-    });
+    const files = await extractZipArchive(archiveBuffer);
+    const match = [...files.entries()].find(([fileName]) => (
+        fileName.endsWith(fileExtension) && !fileName.startsWith('__MACOSX/')
+    ));
+    return match?.[1] ?? null;
 }
 /**
  * Normalizes a ZIP entry path for safe extraction.
@@ -249,28 +203,7 @@ export async function extractFileFromZipBuffer(archiveBuffer, fileExtension) {
  * @returns {string|null} Normalized path or null if invalid
  */
 export function normalizeZipEntryPath(entryName) {
-    if (typeof entryName !== 'string') {
-        return null;
-    }
-
-    let normalized = entryName.replace(/\\/g, '/').trim();
-
-    if (!normalized) {
-        return null;
-    }
-
-    normalized = normalized.replace(/^\.\/+/g, '');
-    normalized = path.posix.normalize(normalized);
-
-    if (!normalized || normalized === '.' || normalized.startsWith('..')) {
-        return null;
-    }
-
-    if (normalized.startsWith('/')) {
-        normalized = normalized.slice(1);
-    }
-
-    return normalized;
+    return normalizeArchiveEntryPath(entryName);
 }
 
 /**
@@ -280,13 +213,13 @@ export function normalizeZipEntryPath(entryName) {
  * @returns {Promise<Map<string, Buffer>>} Map of normalized paths to their extracted buffers
  */
 export async function extractFilesFromZipBuffer(archiveBuffer, fileNames) {
-    const targets = new Map();
+    const targets = new Set();
 
     if (Array.isArray(fileNames)) {
         for (const fileName of fileNames) {
             const normalized = normalizeZipEntryPath(fileName);
-            if (normalized && !targets.has(normalized)) {
-                targets.set(normalized, true);
+            if (normalized) {
+                targets.add(normalized);
             }
         }
     }
@@ -295,80 +228,8 @@ export async function extractFilesFromZipBuffer(archiveBuffer, fileNames) {
         return new Map();
     }
 
-    return await new Promise((resolve) => {
-        const results = new Map();
-
-        try {
-            yauzl.fromBuffer(Buffer.from(archiveBuffer), { lazyEntries: true }, (err, zipfile) => {
-                if (err) {
-                    console.warn(`Error opening ZIP file: ${err.message}`);
-                    return resolve(results);
-                }
-
-                let finished = false;
-                const finalize = () => {
-                    if (finished) {
-                        return;
-                    }
-                    finished = true;
-                    resolve(results);
-                };
-
-                zipfile.readEntry();
-
-                zipfile.on('entry', (entry) => {
-                    const normalizedEntry = normalizeZipEntryPath(entry.fileName);
-                    if (!normalizedEntry || !targets.has(normalizedEntry)) {
-                        return zipfile.readEntry();
-                    }
-
-                    zipfile.openReadStream(entry, (streamErr, readStream) => {
-                        if (streamErr) {
-                            console.warn(`Error opening read stream: ${streamErr.message}`);
-                            return zipfile.readEntry();
-                        }
-
-                        const chunks = [];
-                        readStream.on('data', (chunk) => {
-                            chunks.push(chunk);
-                        });
-
-                        readStream.on('end', () => {
-                            results.set(normalizedEntry, Buffer.concat(chunks));
-                            targets.delete(normalizedEntry);
-
-                            if (targets.size === 0) {
-                                finalize();
-                            } else {
-                                zipfile.readEntry();
-                            }
-                        });
-
-                        readStream.on('error', (streamError) => {
-                            console.warn(`Error reading stream: ${streamError.message}`);
-                            zipfile.readEntry();
-                        });
-                    });
-                });
-
-                zipfile.on('error', (zipError) => {
-                    console.warn('ZIP processing error', zipError);
-                    finalize();
-                });
-
-                zipfile.on('close', () => {
-                    finalize();
-                });
-
-                zipfile.on('end', () => {
-                    finalize();
-                });
-            });
-        } catch (error) {
-            console.warn('Failed to process ZIP buffer', error);
-            resolve(results);
-        }
-    });
+    const archiveFiles = await extractZipArchive(archiveBuffer);
+    return new Map([...archiveFiles].filter(([fileName]) => targets.has(fileName)));
 }
 
 /**
@@ -397,53 +258,14 @@ export function ensureDirectory(dirPath) {
  * @returns {Promise<[string, Buffer][]>} Array of image buffers
  */
 export async function getImageBuffers(zipFilePath) {
-    return new Promise((resolve, reject) => {
-        // Check if the zip file exists
-        if (!fs.existsSync(zipFilePath)) {
-            reject(new Error('File not found'));
-            return;
-        }
-
-        const imageBuffers = [];
-
-        yauzl.open(zipFilePath, { lazyEntries: true }, (err, zipfile) => {
-            if (err) {
-                reject(err);
-            } else {
-                zipfile.readEntry();
-                zipfile.on('entry', (entry) => {
-                    const mimeType = mime.lookup(entry.fileName);
-                    if (mimeType && mimeType.startsWith('image/') && !entry.fileName.startsWith('__MACOSX')) {
-                        zipfile.openReadStream(entry, (err, readStream) => {
-                            if (err) {
-                                reject(err);
-                            } else {
-                                const chunks = [];
-                                readStream.on('data', (chunk) => {
-                                    chunks.push(chunk);
-                                });
-
-                                readStream.on('end', () => {
-                                    imageBuffers.push([path.parse(entry.fileName).base, Buffer.concat(chunks)]);
-                                    zipfile.readEntry(); // Continue to the next entry
-                                });
-                            }
-                        });
-                    } else {
-                        zipfile.readEntry(); // Continue to the next entry
-                    }
-                });
-
-                zipfile.on('end', () => {
-                    resolve(imageBuffers);
-                });
-
-                zipfile.on('error', (err) => {
-                    reject(err);
-                });
-            }
-        });
-    });
+    const archiveBuffer = await fs.promises.readFile(zipFilePath);
+    const files = await extractZipArchive(archiveBuffer);
+    return [...files.entries()]
+        .filter(([fileName]) => {
+            const mimeType = mime.lookup(fileName);
+            return mimeType && mimeType.startsWith('image/') && !fileName.startsWith('__MACOSX/');
+        })
+        .map(([fileName, buffer]) => [path.parse(fileName).base, buffer]);
 }
 
 /**
