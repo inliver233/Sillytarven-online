@@ -90,7 +90,7 @@
             {{#each displayCharacters}}
             <div class="welcomeCharacterCard" data-chid="{{this.index}}" data-avatar="{{this.avatar}}" title="{{this.name}}">
                 <div class="welcomeCharacterAvatar">
-                    <!-- 所有图片都通过缓存延迟加载 -->
+                    <!-- 所有图片都通过浏览器私有 HTTP 缓存延迟加载 -->
                     <img data-src="{{this.avatarUrl}}" alt="{{this.name}}" class="characterImage lazy-load" src="/img/default-expressions/neutral.png" onerror="this.onerror=null; this.src='/img/default-expressions/neutral.png';">
                     <div class="imagePlaceholder">
                         <i class="fa-solid fa-image"></i>

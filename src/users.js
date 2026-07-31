@@ -1096,6 +1096,7 @@ function createRouteHandler(directoryFn) {
                 return res.sendStatus(404);
             }
 
+            res.vary('Cookie');
             return res.sendFile(filePath, { root: directory, headers: { 'Cache-Control': PRIVATE_CACHE_CONTROL } });
         } catch (error) {
             return res.sendStatus(500);
