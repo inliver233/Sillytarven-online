@@ -279,6 +279,7 @@ import { clearItemizedPrompts, deleteItemizedPrompts, findItemizedPromptSet, ini
 import { getSystemMessageByType, initSystemMessages, SAFETY_CHAT, sendSystemMessage, system_message_types, system_messages } from './scripts/system-messages.js';
 import { event_types, eventSource } from './scripts/events.js';
 import { initAccessibility } from './scripts/a11y.js';
+import { processItemsWithFrameBudget } from './scripts/util/frame-budget.js';
 import { applyStreamFadeIn, StreamRenderBuffer } from './scripts/util/stream-fadein.js';
 import { initDomHandlers } from './scripts/dom-handlers.js';
 import { SimpleMutex } from './scripts/util/SimpleMutex.js';
@@ -416,6 +417,7 @@ export let chat = [];
 export let swipeState = SWIPE_STATE.NONE;
 const CHAT_PAGE_SIZE_DEFAULT = 20;
 const CHAT_PAGING_MAX_RENDER = isMobile() ? 200 : 400;
+const CHAT_LOAD_MORE_FRAME_BUDGET_MS = 8;
 const CHAT_PAGING_ENABLED = true;
 const CHAT_CACHE_TTL_MS = 20_000;
 const CHAT_CACHE_MAX_ENTRIES = 50;
@@ -432,6 +434,7 @@ const chatPagingState = {
 };
 const chatPageCache = new Map();
 let chatPagingLoadGeneration = 0;
+let chatHistoryInsertionToken = null;
 let chatSaveTimeout;
 let importFlashTimeout;
 export let isChatSaving = false;
@@ -589,6 +592,7 @@ export function setChatPagingState(nextState = {}) {
 
 export function resetChatPagingState({ isGroup = false, chatId = null } = {}) {
     chatPagingLoadGeneration++;
+    chatHistoryInsertionToken = null;
     chatPagingState.active = false;
     chatPagingState.cursor = null;
     chatPagingState.hasMore = false;
@@ -1598,6 +1602,52 @@ function shiftDisplayedMessageIds(offset) {
     });
 }
 
+async function insertChatMessagesWithFrameBudget(messages, insertMessage, {
+    preserveViewport = false,
+    shouldContinue = () => true,
+} = {}) {
+    const chatScrollElement = chatElement[0];
+    const canPreserveViewport = preserveViewport && chatScrollElement instanceof HTMLElement;
+    const previousOverflowAnchor = canPreserveViewport ? chatScrollElement.style.overflowAnchor : null;
+
+    if (canPreserveViewport) {
+        chatScrollElement.style.overflowAnchor = 'none';
+    }
+
+    try {
+        return await processItemsWithFrameBudget(messages, insertMessage, {
+            frameBudgetMs: CHAT_LOAD_MORE_FRAME_BUDGET_MS,
+            shouldContinue,
+            beforeFrame: canPreserveViewport
+                ? () => chatScrollElement.scrollHeight
+                : undefined,
+            afterFrame: canPreserveViewport
+                ? (previousHeight) => {
+                    const heightDelta = chatScrollElement.scrollHeight - previousHeight;
+                    if (heightDelta) {
+                        chatScrollElement.scrollTop += heightDelta;
+                    }
+                }
+                : undefined,
+        });
+    } finally {
+        if (canPreserveViewport) {
+            chatScrollElement.style.overflowAnchor = previousOverflowAnchor;
+        }
+    }
+}
+
+function recordChatLoadMoreFrames(result) {
+    if (!result.inserted) {
+        return;
+    }
+    recordPerformanceSample('chat-load-more-frame', result.maxFrameDurationMs, {
+        frames: result.frames,
+        messages: result.inserted,
+        yields: Math.max(0, result.frames - 1),
+    });
+}
+
 async function loadMoreChatMessages(messagesToLoad = null) {
     if (!chatPagingState.active || !chatPagingState.hasMore || chatPagingState.loading) {
         return;
@@ -1611,8 +1661,6 @@ async function loadMoreChatMessages(messagesToLoad = null) {
     const loadGeneration = ++chatPagingLoadGeneration;
     const requestedChatId = chatPagingState.isGroup ? chatPagingState.chatId : getCurrentChatId();
     chatPagingState.loading = true;
-    const prevHeight = chatElement.prop('scrollHeight');
-    const isButtonInView = isElementInViewport($('#show_more_messages')[0]);
 
     try {
         const data = await fetchChatRange({
@@ -1638,11 +1686,19 @@ async function loadMoreChatMessages(messagesToLoad = null) {
         shiftDisplayedMessageIds(offset);
 
         const insertBeforeId = offset;
-        const insertionStartedAt = performance.now();
-        for (let i = 0; i < newMessages.length; i++) {
-            addOneMessage(newMessages[i], { insertBefore: insertBeforeId, scroll: false, forceId: i, showSwipes: false });
+        const isButtonInView = isElementInViewport($('#show_more_messages')[0]);
+        const insertionResult = await insertChatMessagesWithFrameBudget(
+            newMessages,
+            (message, index) => addOneMessage(message, { insertBefore: insertBeforeId, scroll: false, forceId: index, showSwipes: false }),
+            {
+                preserveViewport: isButtonInView,
+                shouldContinue: () => loadGeneration === chatPagingLoadGeneration && getCurrentChatId() === requestedChatId,
+            },
+        );
+        recordChatLoadMoreFrames(insertionResult);
+        if (!insertionResult.completed) {
+            return;
         }
-        recordPerformanceSample('chat-load-more-frame', performance.now() - insertionStartedAt, { messages: newMessages.length });
 
         chatPagingState.cursor = Number.isFinite(data.cursor) ? data.cursor : chatPagingState.cursor;
         chatPagingState.messageOffset = Number.isFinite(data.messageOffset)
@@ -1658,11 +1714,6 @@ async function loadMoreChatMessages(messagesToLoad = null) {
 
         if (!chatPagingState.hasMore) {
             $('#show_more_messages').remove();
-        }
-
-        if (isButtonInView) {
-            const newHeight = chatElement.prop('scrollHeight');
-            chatElement.scrollTop(newHeight - prevHeight);
         }
 
         setCachedChatPage({
@@ -1686,52 +1737,76 @@ async function loadMoreChatMessages(messagesToLoad = null) {
 }
 
 export async function showMoreMessages(messagesToLoad = null) {
-    const displayedCount = chatElement.children('.mes').length;
-    if (chatPagingState.active) {
-        if (displayedCount < chat.length) {
-            // Reveal locally cached messages first.
-        } else {
-            await loadMoreChatMessages(messagesToLoad);
+    if (chatHistoryInsertionToken || chatPagingState.loading) {
+        return;
+    }
+    const insertionToken = {};
+    chatHistoryInsertionToken = insertionToken;
+
+    try {
+        const displayedCount = chatElement.children('.mes').length;
+        if (chatPagingState.active) {
+            if (displayedCount < chat.length) {
+                // Reveal locally cached messages first.
+            } else {
+                await loadMoreChatMessages(messagesToLoad);
+                return;
+            }
+        }
+
+        const firstDisplayedMesId = chatElement.children('.mes').first().attr('mesid');
+        let messageId = Number(firstDisplayedMesId);
+        let count = messagesToLoad || power_user.chat_truncation || Number.MAX_SAFE_INTEGER;
+
+        // If there are no messages displayed, or the message somehow has no mesid, we default to one higher than last message id,
+        // so the first "new" message being shown will be the last available message
+        if (isNaN(messageId)) {
+            messageId = getLastMessageId() + 1;
+        }
+
+        console.debug('Inserting messages before', messageId, 'count', count, 'chat length', chat.length);
+        const isButtonInView = isElementInViewport($('#show_more_messages')[0]);
+        const messageIds = [];
+        while (messageId > 0 && count > 0) {
+            messageId--;
+            count--;
+            messageIds.push(messageId);
+        }
+
+        const insertionGeneration = chatPagingLoadGeneration;
+        const requestedChatId = getCurrentChatId();
+        const insertionResult = await insertChatMessagesWithFrameBudget(
+            messageIds,
+            (newMessageId) => addOneMessage(chat[newMessageId], {
+                insertBefore: newMessageId + 1 >= chat.length ? null : newMessageId + 1,
+                scroll: false,
+                forceId: newMessageId,
+            }),
+            {
+                preserveViewport: isButtonInView,
+                shouldContinue: () => insertionGeneration === chatPagingLoadGeneration && getCurrentChatId() === requestedChatId,
+            },
+        );
+        recordChatLoadMoreFrames(insertionResult);
+        if (!insertionResult.completed) {
             return;
         }
+
+        if (messageId == 0) {
+            $('#show_more_messages').remove();
+        }
+
+        applyStylePins();
+        // Preserve the pre-existing ability for event listeners to request another local batch.
+        if (chatHistoryInsertionToken === insertionToken) {
+            chatHistoryInsertionToken = null;
+        }
+        await eventSource.emit(event_types.MORE_MESSAGES_LOADED);
+    } finally {
+        if (chatHistoryInsertionToken === insertionToken) {
+            chatHistoryInsertionToken = null;
+        }
     }
-
-    const firstDisplayedMesId = chatElement.children('.mes').first().attr('mesid');
-    let messageId = Number(firstDisplayedMesId);
-    let count = messagesToLoad || power_user.chat_truncation || Number.MAX_SAFE_INTEGER;
-
-    // If there are no messages displayed, or the message somehow has no mesid, we default to one higher than last message id,
-    // so the first "new" message being shown will be the last available message
-    if (isNaN(messageId)) {
-        messageId = getLastMessageId() + 1;
-    }
-
-    console.debug('Inserting messages before', messageId, 'count', count, 'chat length', chat.length);
-    const prevHeight = chatElement.prop('scrollHeight');
-    const isButtonInView = isElementInViewport($('#show_more_messages')[0]);
-    const insertionStartedAt = performance.now();
-    let insertedMessages = 0;
-
-    while (messageId > 0 && count > 0) {
-        let newMessageId = messageId - 1;
-        addOneMessage(chat[newMessageId], { insertBefore: messageId >= chat.length ? null : messageId, scroll: false, forceId: newMessageId });
-        count--;
-        messageId--;
-        insertedMessages++;
-    }
-    recordPerformanceSample('chat-load-more-frame', performance.now() - insertionStartedAt, { messages: insertedMessages });
-
-    if (messageId == 0) {
-        $('#show_more_messages').remove();
-    }
-
-    if (isButtonInView) {
-        const newHeight = chatElement.prop('scrollHeight');
-        chatElement.scrollTop(newHeight - prevHeight);
-    }
-
-    applyStylePins();
-    await eventSource.emit(event_types.MORE_MESSAGES_LOADED);
 }
 
 export async function printMessages() {
