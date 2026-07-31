@@ -195,6 +195,15 @@ performance:
   versionMemo:
     enabled: true
     ttlMs: 30000
+  # Complete, never-placeholder character list cache. Existing card parsers remain authoritative.
+  characterListCache:
+    enabled: true
+    concurrency: 6
+    ttlMs: 30000
+    # Full PNG name/size/mtime rescan interval for detecting out-of-process edits.
+    signatureTtlMs: 5000
+    maxEntries: 100
+    maxBytes: 104857600
 
 # CACHE BUSTER CONFIGURATION
 # IMPORTANT: Requires localhost or a domain with HTTPS, otherwise will not work!

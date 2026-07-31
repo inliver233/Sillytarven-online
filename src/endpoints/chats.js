@@ -23,6 +23,7 @@ import {
 } from '../util.js';
 import { canConsumeStorage } from '../storage-quota.js';
 import { beginEndpointPerformance } from '../performance-monitor.js';
+import { invalidateCharacterListCache } from '../character-list-cache.js';
 
 const isBackupEnabled = !!getConfigValue('backups.chat.enabled', true, 'boolean');
 const maxTotalChatBackups = Number(getConfigValue('backups.chat.maxTotalBackups', -1, 'number'));
@@ -1351,6 +1352,19 @@ export async function getChatInfo(pathToFile, additionalData = {}, isGroup = fal
 }
 
 export const router = express.Router();
+
+const CHARACTER_LIST_INVALIDATION_PATHS = new Set(['/save', '/save-tail', '/rename', '/delete', '/import']);
+router.use((request, response, next) => {
+    if (request.method === 'POST' && CHARACTER_LIST_INVALIDATION_PATHS.has(request.path)) {
+        response.once('finish', () => {
+            const handle = request.user?.profile?.handle;
+            if (response.statusCode < 400 && handle) {
+                invalidateCharacterListCache(handle);
+            }
+        });
+    }
+    next();
+});
 
 router.post('/save', validateAvatarUrlMiddleware, async function (request, response) {
     try {

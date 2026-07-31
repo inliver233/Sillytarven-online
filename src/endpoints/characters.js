@@ -28,6 +28,7 @@ import cacheBuster from '../middleware/cacheBuster.js';
 import { canConsumeStorage } from '../storage-quota.js';
 import { beginEndpointPerformance } from '../performance-monitor.js';
 import { detectImageFormat } from '../media-validation.js';
+import { CharacterListCache, invalidateCharacterListCache, registerCharacterListCache } from '../character-list-cache.js';
 
 // With 100 MB limit it would take roughly 3000 characters to reach this limit
 const memoryCacheCapacity = getConfigValue('performance.memoryCacheCapacity', '100mb');
@@ -37,6 +38,15 @@ const isAndroid = process.platform === 'android';
 // Use shallow character data for the character list
 const useShallowCharacters = !!getConfigValue('performance.lazyLoadCharacters', false, 'boolean');
 const useDiskCache = !!getConfigValue('performance.useDiskCache', true, 'boolean');
+const characterListCache = new CharacterListCache({
+    enabled: getConfigValue('performance.characterListCache.enabled', true, 'boolean'),
+    concurrency: getConfigValue('performance.characterListCache.concurrency', 6, 'number'),
+    ttlMs: getConfigValue('performance.characterListCache.ttlMs', 30_000, 'number'),
+    signatureTtlMs: getConfigValue('performance.characterListCache.signatureTtlMs', 5_000, 'number'),
+    maxEntries: getConfigValue('performance.characterListCache.maxEntries', 100, 'number'),
+    maxBytes: getConfigValue('performance.characterListCache.maxBytes', 100 * 1024 * 1024, 'number'),
+});
+registerCharacterListCache(characterListCache);
 const chatDirStatsCache = new Map();
 const CHARACTER_SIZE_OVERHEAD = 2048;
 
@@ -436,6 +446,7 @@ async function writeCharacterData(inputFile, data, outputFile, request, crop = u
         const outputImagePath = path.join(request.user.directories.characters, `${outputFile}.png`);
 
         writeFileAtomicSync(outputImagePath, outputImage);
+        invalidateCharacterListCache(request.user.profile.handle);
         return true;
     } catch (err) {
         console.error(err);
@@ -1380,6 +1391,7 @@ router.post('/rename', validateAvatarUrlMiddleware, async function (request, res
 
         // Remove the old character file
         fs.unlinkSync(oldAvatarPath);
+        invalidateCharacterListCache(request.user.profile.handle);
 
         // Return new avatar name to ST
         return response.send({ avatar: newAvatarName });
@@ -1585,6 +1597,7 @@ router.post('/delete', validateAvatarUrlMiddleware, async function (request, res
     }
 
     fs.unlinkSync(avatarPath);
+    invalidateCharacterListCache(request.user.profile.handle);
     invalidateThumbnail(request.user.directories, 'avatar', request.body.avatar_url);
     let dir_name = (request.body.avatar_url.replace('.png', ''));
 
@@ -1622,29 +1635,26 @@ router.post('/delete', validateAvatarUrlMiddleware, async function (request, res
 router.post('/all', async function (request, response) {
     const performanceTimer = beginEndpointPerformance(request, 'characters-all');
     try {
-        const files = performanceTimer.measureSync('directory-read', () => fs.readdirSync(request.user.directories.characters));
-        const pngFiles = files.filter(file => file.endsWith('.png'));
-        performanceTimer.setCounter('files', pngFiles.length);
-        performanceTimer.setCounter('concurrency', pngFiles.length);
-        let maximumCharacterMs = 0;
-        const processingPromises = pngFiles.map(async file => {
-            const startedAt = performance.now();
-            const character = await processCharacter(file, request.user.directories, {
+        const result = await performanceTimer.measureAsync('list', () => characterListCache.get({
+            userKey: request.user.profile.handle,
+            directory: request.user.directories.characters,
+            shallow: useShallowCharacters,
+            loadCharacter: file => processCharacter(file, request.user.directories, {
                 shallow: useShallowCharacters,
                 cacheObserver: state => performanceTimer.increment(`cache-${state}`),
-            });
-            maximumCharacterMs = Math.max(maximumCharacterMs, performance.now() - startedAt);
-            if (!character.name) {
-                performanceTimer.increment('failures');
-            }
-            return character;
-        });
-        const data = (await performanceTimer.measureAsync('process', () => Promise.all(processingPromises))).filter(c => c.name);
-        performanceTimer.setCounter('returned', data.length);
-        performanceTimer.setCounter('max-character-ms', maximumCharacterMs);
-        performanceTimer.setCacheState(performanceTimer.counters['cache-miss'] ? 'miss' : 'hit');
+            }),
+        }));
+        performanceTimer.setCounter('files', result.fileCount);
+        performanceTimer.setCounter('concurrency', result.concurrency);
+        performanceTimer.increment(`list-cache-${result.state}`);
+        if (result.state === 'miss') {
+            performanceTimer.setCounter('failures', result.failures);
+            performanceTimer.setCounter('max-character-ms', result.maxCharacterMs);
+        }
+        performanceTimer.setCounter('returned', result.characters.length);
+        performanceTimer.setCacheState(result.state === 'miss' ? 'miss' : 'hit');
         performanceTimer.startPhase('serialize');
-        return response.send(data);
+        return response.send(result.characters);
     } catch (err) {
         console.error(err);
         const isRangeError = err instanceof RangeError;
@@ -1859,6 +1869,7 @@ router.post('/duplicate', validateAvatarUrlMiddleware, async function (request, 
         }
 
         fs.copyFileSync(filename, newFilename);
+        invalidateCharacterListCache(request.user.profile.handle);
         console.info(`${filename} was copied to ${newFilename}`);
         response.send({ path: path.parse(newFilename).base });
     }

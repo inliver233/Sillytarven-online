@@ -165,7 +165,16 @@ test('performance summary and clearing are administrator-only', async () => {
         const summaryResponse = await fetch(`${baseUrl}/summary`, { headers: { 'x-test-admin': 'yes' } });
         assert.equal(summaryResponse.status, 200);
         assert.match(summaryResponse.headers.get('cache-control') || '', /private, no-store/);
-        assert.equal((await summaryResponse.json()).operations.length, 1);
+        const summary = await summaryResponse.json();
+        assert.equal(summary.operations.length, 1);
+        assert.deepEqual(summary.caches.characterLists, { entries: 0, inflight: 0, totalBytes: 0, signatures: 0 });
+
+        const cacheClearResponse = await fetch(`${baseUrl}/cache/characters/clear`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'x-test-admin': 'yes' },
+            body: '{}',
+        });
+        assert.equal(cacheClearResponse.status, 200);
 
         const clearResponse = await fetch(`${baseUrl}/clear`, {
             method: 'POST',
