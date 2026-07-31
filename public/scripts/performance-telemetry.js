@@ -5,6 +5,7 @@ const ALLOWED_OPERATIONS = new Set([
     'startup-chat-input-ready',
     'ui-long-task',
     'chat-load-more-frame',
+    'regex-chat-refresh',
 ]);
 const recordedMilestones = new Set();
 const pendingSamples = [];

@@ -11290,6 +11290,10 @@ function doDrawerOpenClick() {
     doNavbarIconClick.call(drawerToggle);
 }
 
+function notifyDrawerStateChanged(drawer, open) {
+    drawer.trigger('drawer-toggle', [{ open }]);
+}
+
 /**
  * Event handler to open or close a navbar drawer when a navbar icon is clicked.
  * Handles click events on .drawer-toggle elements.
@@ -11308,13 +11312,16 @@ export async function doNavbarIconClick() {
             $(iconEl).toggleClass('closedIcon openIcon');
         }
         for (const el of $openDrawers) {
-            $(el).toggleClass('closedDrawer openDrawer');
+            const openDrawer = $(el);
+            openDrawer.toggleClass('closedDrawer openDrawer');
+            notifyDrawerStateChanged(openDrawer, false);
         }
         if ($openDrawers.length && animation_duration) {
             await delay(animation_duration);
         }
         icon.toggleClass('openIcon closedIcon');
         drawer.toggleClass('openDrawer closedDrawer');
+        notifyDrawerStateChanged(drawer, true);
 
         if (targetDrawerID === 'right-nav-panel') {
             favsToHotswap();
@@ -11331,6 +11338,7 @@ export async function doNavbarIconClick() {
     } else if (drawerWasOpenAlready) {
         icon.toggleClass('closedIcon openIcon');
         drawer.toggleClass('closedDrawer openDrawer');
+        notifyDrawerStateChanged(drawer, false);
     }
 }
 
@@ -12528,6 +12536,7 @@ jQuery(async function () {
                 // Toggle icon and drawer classes
                 $('.openIcon').not('.drawerPinnedOpen').toggleClass('closedIcon openIcon');
                 $openDrawers.toggleClass('closedDrawer openDrawer');
+                $openDrawers.each((_, drawer) => notifyDrawerStateChanged($(drawer), false));
             }
         }
     });

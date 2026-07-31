@@ -12,11 +12,34 @@ import { allowPresetScripts, allowScopedScripts, disallowPresetScripts, disallow
 import { t } from '../../i18n.js';
 import { accountStorage } from '../../util/AccountStorage.js';
 import { getPresetManager } from '../../preset-manager.js';
+import { recordPerformanceSample } from '../../performance-telemetry.js';
+import { RegexRefreshCoordinator } from './refresh-coordinator.js';
 
 // Re-exports for legacy extensions
 export { getRegexScripts };
 
 const sanitizeFileName = name => name.replace(/[\s.<>:"/\\|?*\x00-\x1F\x7F]/g, '_').toLowerCase();
+
+const regexRefreshCoordinator = new RegexRefreshCoordinator(async ({ requestCount }) => {
+    const startedAt = performance.now();
+    try {
+        await reloadCurrentChat();
+    } finally {
+        recordPerformanceSample('regex-chat-refresh', performance.now() - startedAt, {
+            requests: requestCount,
+            merged: Math.max(0, requestCount - 1),
+        });
+    }
+});
+
+function updateRegexRefreshDeferral(settingsHtml) {
+    const regexDrawer = settingsHtml.find('.inline-drawer').first();
+    const regexDrawerOpen = regexDrawer.find('>.inline-drawer-header .inline-drawer-icon').hasClass('up');
+    const extensionsDrawerOpen = $('#rm_extensions_block').hasClass('openDrawer');
+    void regexRefreshCoordinator.setPanelOpen(regexDrawerOpen && extensionsDrawerOpen).catch(error => {
+        console.error('Failed to refresh chat after closing regex settings:', error);
+    });
+}
 
 /**
  * @typedef {import('../../char-data.js').RegexScriptData} RegexScript
@@ -389,7 +412,7 @@ class RegexPresetManager {
         // Render the changes to the UI
         await loadRegexScripts();
         // Apply the changes to the current chat
-        await reloadCurrentChat();
+        await regexRefreshCoordinator.requestRefresh();
     }
 
     /**
@@ -557,7 +580,7 @@ async function saveRegexScript(regexScript, existingScriptIndex, scriptType, sav
         // Reload the current chat to undo previous markdown
         const currentChatId = getCurrentChatId();
         if (currentChatId) {
-            await reloadCurrentChat();
+            await regexRefreshCoordinator.requestRefresh();
         }
     }
 
@@ -597,6 +620,7 @@ async function deleteRegexScript(id, scriptType, saveSettings = true) {
         if (saveSettings) {
             saveSettingsDebounced();
             await loadRegexScripts();
+            await regexRefreshCoordinator.requestRefresh();
         }
     }
 }
@@ -708,7 +732,6 @@ async function loadRegexScripts() {
                 return;
             }
             await deleteRegexScript(script.id, scriptType);
-            await reloadCurrentChat();
         });
         scriptHtml.find('.regex_bulk_checkbox').on('change', function () {
             setMoveButtonsVisibility();
@@ -1274,6 +1297,7 @@ async function onRegexDebuggerOpenClick() {
 
         saveSettingsDebounced();
         await loadRegexScripts();
+        await regexRefreshCoordinator.requestRefresh();
         toastr.success(t`Regex script order saved!`);
 
         const currentPopupContent = $('div:has(> #regex_debugger_rules)');
@@ -1525,6 +1549,7 @@ async function onRegexImportObjectChange(regexScript, scriptType) {
 
         saveSettingsDebounced();
         await loadRegexScripts();
+        await regexRefreshCoordinator.requestRefresh();
         toastr.success(t`Regex script "${regexScript.scriptName}" imported.`);
     } catch (error) {
         console.log(error);
@@ -1728,6 +1753,9 @@ jQuery(async () => {
 
     const settingsHtml = $(await renderExtensionTemplateAsync('regex', 'dropdown'));
     $('#regex_container').append(settingsHtml);
+    settingsHtml.find('.inline-drawer').first().on('inline-drawer-toggle', () => updateRegexRefreshDeferral(settingsHtml));
+    $('#rm_extensions_block').on('drawer-toggle.regexRefresh', () => updateRegexRefreshDeferral(settingsHtml));
+    updateRegexRefreshDeferral(settingsHtml);
     $('#open_regex_editor').on('click', function () {
         onRegexEditorOpenClick(false, SCRIPT_TYPES.GLOBAL);
     });
@@ -1820,7 +1848,7 @@ jQuery(async () => {
         // Reload the current chat to undo previous markdown
         const currentChatId = getCurrentChatId();
         if (currentChatId) {
-            await reloadCurrentChat();
+            await regexRefreshCoordinator.requestRefresh();
         }
     }
 
@@ -1844,7 +1872,7 @@ jQuery(async () => {
         // Reload the current chat to undo previous markdown
         const currentChatId = getCurrentChatId();
         if (currentChatId) {
-            await reloadCurrentChat();
+            await regexRefreshCoordinator.requestRefresh();
         }
     }
 
@@ -1895,7 +1923,7 @@ jQuery(async () => {
         }
         saveSettingsDebounced();
         await loadRegexScripts();
-        await reloadCurrentChat();
+        await regexRefreshCoordinator.requestRefresh();
     });
 
     $('#bulk_export_regex').on('click', async function () {
@@ -1947,13 +1975,13 @@ jQuery(async () => {
                 saveSettingsDebounced();
 
                 console.debug(`Regex scripts in ${selector} reordered`);
-                await reloadCurrentChat();
+                await regexRefreshCoordinator.requestRefresh();
                 await loadRegexScripts();
             },
         });
     }
 
-    $('#regex_scoped_toggle').on('input', function () {
+    $('#regex_scoped_toggle').on('input', async function () {
         if (this_chid === undefined) {
             toastr.error(t`No character selected.`);
             return;
@@ -1974,10 +2002,10 @@ jQuery(async () => {
         }
 
         saveSettingsDebounced();
-        reloadCurrentChat();
+        await regexRefreshCoordinator.requestRefresh();
     });
 
-    $('#regex_preset_toggle').on('input', function () {
+    $('#regex_preset_toggle').on('input', async function () {
         const isEnable = !!$(this).prop('checked');
         const name = getCurrentPresetName();
 
@@ -1988,7 +2016,7 @@ jQuery(async () => {
         }
 
         saveSettingsDebounced();
-        reloadCurrentChat();
+        await regexRefreshCoordinator.requestRefresh();
     });
 
     await loadRegexScripts();
