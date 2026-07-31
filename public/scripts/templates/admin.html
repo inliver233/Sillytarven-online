@@ -9,6 +9,9 @@
         <button type="button" class="systemLoadButton menu_button menu_button_icon" data-target-tab="systemLoadBlock">
             <h4 data-i18n="System Load">系统负载</h4>
         </button>
+        <button type="button" class="performanceMetricsButton menu_button menu_button_icon" data-target-tab="performanceMetricsBlock">
+            <h4>性能指标</h4>
+        </button>
         <button type="button" class="invitationCodesButton menu_button menu_button_icon" data-target-tab="invitationCodesBlock">
             <h4 data-i18n="Invitation Codes">邀请码管理</h4>
         </button>
@@ -349,6 +352,39 @@
                 <button type="button" class="menu_button menu_button_icon warning" id="clearSystemStats">
                     <i class="fa-fw fa-solid fa-trash"></i>
                     <span data-i18n="Clear Stats">清除统计</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 有界、无内容的性能聚合；详情接口仅管理员可访问 -->
+    <div class="navTab performanceMetricsBlock" style="display: none;">
+        <div class="flex-container flexFlowColumn flexGap10">
+            <h3>性能指标</h3>
+            <p class="notes">仅汇总耗时、状态、字节和计数；不记录聊天、设置、API Key、角色文本或用户身份。每项只保留有界样本。</p>
+            <div id="performanceMetricsStatus" class="notes">尚未加载。</div>
+            <div style="overflow-x:auto; border:1px solid var(--SmartThemeBorderColor); border-radius:8px;">
+                <table class="wide100p" style="border-collapse:collapse; min-width:820px;">
+                    <thead>
+                        <tr>
+                            <th style="padding:8px;text-align:left;">操作</th>
+                            <th style="padding:8px;text-align:right;">样本 / 错误</th>
+                            <th style="padding:8px;text-align:right;">耗时 p50 / p95 / max</th>
+                            <th style="padding:8px;text-align:right;">响应字节 p50 / p95</th>
+                            <th style="padding:8px;text-align:left;">缓存 / 阶段</th>
+                        </tr>
+                    </thead>
+                    <tbody id="performanceMetricsRows">
+                        <tr><td colspan="5" style="padding:16px;text-align:center;">暂无样本</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            <div class="flex-container justifyCenter flexGap10">
+                <button type="button" class="menu_button menu_button_icon" id="refreshPerformanceMetrics">
+                    <i class="fa-fw fa-solid fa-refresh"></i><span>刷新数据</span>
+                </button>
+                <button type="button" class="menu_button menu_button_icon warning" id="clearPerformanceMetrics">
+                    <i class="fa-fw fa-solid fa-trash"></i><span>清除样本</span>
                 </button>
             </div>
         </div>

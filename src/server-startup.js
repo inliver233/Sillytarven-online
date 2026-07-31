@@ -60,6 +60,7 @@ import { router as oauthConfigRouter } from './endpoints/oauth-config.js';
 import { router as defaultConfigRouter } from './endpoints/default-config.js';
 import { router as scheduledTasksRouter } from './endpoints/scheduled-tasks.js';
 import { router as userStorageRouter } from './endpoints/user-storage.js';
+import { router as performanceRouter } from './endpoints/performance.js';
 import { getConfigValue } from './util.js';
 
 /**
@@ -174,6 +175,7 @@ export function setupPrivateEndpoints(app) {
     app.use('/api/sprites', spritesRouter);
     app.use('/api/content', contentManagerRouter);
     app.use('/api/settings', settingsRouter);
+    app.use('/api/performance', performanceRouter);
     app.use('/api/sd', stableDiffusionRouter);
     app.use('/api/horde', hordeRouter);
     app.use('/api/vector', vectorsRouter);

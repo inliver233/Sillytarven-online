@@ -246,6 +246,7 @@ import {
 } from './scripts/personas.js';
 import { getBackgrounds, initBackgrounds, loadBackgroundSettings, background_settings } from './scripts/backgrounds.js';
 import { hideLoader, showLoader, updateLoaderProgress } from './scripts/loader.js';
+import { initializePerformanceTelemetry, recordPerformanceSample, recordStartupMilestone } from './scripts/performance-telemetry.js';
 import { BulkEditOverlay } from './scripts/BulkEditOverlay.js';
 import { initTextGenModels } from './scripts/textgen-models.js';
 import { appendFileContent, hasPendingFileAttachment, populateFileAttachment, decodeStyleTags, encodeStyleTags, isExternalMediaAllowed, preserveNeutralChat, restoreNeutralChat, formatCreatorNotes, initChatUtilities, addDOMPurifyHooks } from './scripts/chats.js';
@@ -811,6 +812,7 @@ export async function pingServer() {
 
 //MARK: firstLoadInit
 async function firstLoadInit() {
+    initializePerformanceTelemetry(() => getRequestHeaders());
     // 设置全局fetch拦截器，处理用户过期
     setupFetchInterceptor();
     updateLoaderProgress(10, '正在验证身份与安全 Token...');
@@ -860,6 +862,7 @@ async function firstLoadInit() {
     updateLoaderProgress(80, '正在同步角色卡与用户数据...');
     await getUserAvatars(true, user_avatar);
     await getCharacters();
+    recordStartupMilestone('characters-ready');
     await getBackgrounds();
     await initTokenizers();
     initBackgrounds();
@@ -887,8 +890,10 @@ async function firstLoadInit() {
     doDailyExtensionUpdatesCheck();
     updateLoaderProgress(95, '正在构建界面面板与欢迎屏...');
     await hideLoader();
+    recordStartupMilestone('first-ui');
     await fixViewport();
     await eventSource.emit(event_types.APP_READY);
+    recordStartupMilestone('chat-input-ready');
 }
 
 async function fixViewport() {
@@ -1605,9 +1610,11 @@ async function loadMoreChatMessages(messagesToLoad = null) {
         shiftDisplayedMessageIds(offset);
 
         const insertBeforeId = offset;
+        const insertionStartedAt = performance.now();
         for (let i = 0; i < newMessages.length; i++) {
             addOneMessage(newMessages[i], { insertBefore: insertBeforeId, scroll: false, forceId: i, showSwipes: false });
         }
+        recordPerformanceSample('chat-load-more-frame', performance.now() - insertionStartedAt, { messages: newMessages.length });
 
         chatPagingState.cursor = Number.isFinite(data.cursor) ? data.cursor : chatPagingState.cursor;
         chatPagingState.hasMore = Boolean(data.hasMore);
@@ -1663,13 +1670,17 @@ export async function showMoreMessages(messagesToLoad = null) {
     console.debug('Inserting messages before', messageId, 'count', count, 'chat length', chat.length);
     const prevHeight = chatElement.prop('scrollHeight');
     const isButtonInView = isElementInViewport($('#show_more_messages')[0]);
+    const insertionStartedAt = performance.now();
+    let insertedMessages = 0;
 
     while (messageId > 0 && count > 0) {
         let newMessageId = messageId - 1;
         addOneMessage(chat[newMessageId], { insertBefore: messageId >= chat.length ? null : messageId, scroll: false, forceId: newMessageId });
         count--;
         messageId--;
+        insertedMessages++;
     }
+    recordPerformanceSample('chat-load-more-frame', performance.now() - insertionStartedAt, { messages: insertedMessages });
 
     if (messageId == 0) {
         $('#show_more_messages').remove();
@@ -8251,6 +8262,7 @@ export async function getSettings() {
     await validateDisabledSamplers();
     settingsReady = true;
     await eventSource.emit(event_types.SETTINGS_LOADED);
+    recordStartupMilestone('settings-ready');
 }
 
 //MARK: saveSettings()

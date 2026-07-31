@@ -26,6 +26,7 @@ import { ByafParser } from '../byaf.js';
 import { applyCharXAssetRewrites, CharXParser, persistCharXAssets } from '../charx.js';
 import cacheBuster from '../middleware/cacheBuster.js';
 import { canConsumeStorage } from '../storage-quota.js';
+import { beginEndpointPerformance } from '../performance-monitor.js';
 import { detectImageFormat } from '../media-validation.js';
 
 // With 100 MB limit it would take roughly 3000 characters to reach this limit
@@ -350,11 +351,13 @@ function getCacheKey(inputFile) {
  * Reads the character card from the specified image file.
  * @param {string} inputFile - Path to the image file
  * @param {string} inputFormat - 'png'
+ * @param {((state: string) => void)|null} cacheObserver Cache state observer
  * @returns {Promise<string | undefined>} - Character card data
  */
-async function readCharacterData(inputFile, inputFormat = 'png') {
+async function readCharacterData(inputFile, inputFormat = 'png', cacheObserver = null) {
     const cacheKey = getCacheKey(inputFile);
     if (memoryCache.has(cacheKey)) {
+        cacheObserver?.('memory-hit');
         return memoryCache.get(cacheKey);
     }
     if (useDiskCache) {
@@ -362,6 +365,7 @@ async function readCharacterData(inputFile, inputFormat = 'png') {
             const cache = await diskCache.instance();
             const cachedData = await cache.getItem(cacheKey);
             if (cachedData) {
+                cacheObserver?.('disk-hit');
                 return cachedData;
             }
         } catch (error) {
@@ -369,6 +373,7 @@ async function readCharacterData(inputFile, inputFormat = 'png') {
         }
     }
 
+    cacheObserver?.('miss');
     const result = await parse(inputFile, inputFormat);
     !isAndroid && memoryCache.set(cacheKey, result);
     if (useDiskCache) {
@@ -614,12 +619,13 @@ const toShallow = (character) => {
  * @param  {import('../users.js').UserDirectoryList} directories User directories
  * @param  {object} options Options for the character processing
  * @param  {boolean} options.shallow If true, only return the core character's metadata
+ * @param  {((state: string) => void)|null} [options.cacheObserver] Cache state observer
  * @return {Promise<object>}     A Promise that resolves when the character processing is done.
  */
-const processCharacter = async (item, directories, { shallow }) => {
+const processCharacter = async (item, directories, { shallow, cacheObserver = null }) => {
     try {
         const imgFile = path.join(directories.characters, item);
-        const imgData = await readCharacterData(imgFile);
+        const imgData = await readCharacterData(imgFile, 'png', cacheObserver);
         if (imgData === undefined) throw new Error('Failed to read character file');
 
         let jsonObject = getCharaCardV2(JSON.parse(imgData), directories, false);
@@ -1614,15 +1620,35 @@ router.post('/delete', validateAvatarUrlMiddleware, async function (request, res
  * @return {void}
  */
 router.post('/all', async function (request, response) {
+    const performanceTimer = beginEndpointPerformance(request, 'characters-all');
     try {
-        const files = fs.readdirSync(request.user.directories.characters);
+        const files = performanceTimer.measureSync('directory-read', () => fs.readdirSync(request.user.directories.characters));
         const pngFiles = files.filter(file => file.endsWith('.png'));
-        const processingPromises = pngFiles.map(file => processCharacter(file, request.user.directories, { shallow: useShallowCharacters }));
-        const data = (await Promise.all(processingPromises)).filter(c => c.name);
+        performanceTimer.setCounter('files', pngFiles.length);
+        performanceTimer.setCounter('concurrency', pngFiles.length);
+        let maximumCharacterMs = 0;
+        const processingPromises = pngFiles.map(async file => {
+            const startedAt = performance.now();
+            const character = await processCharacter(file, request.user.directories, {
+                shallow: useShallowCharacters,
+                cacheObserver: state => performanceTimer.increment(`cache-${state}`),
+            });
+            maximumCharacterMs = Math.max(maximumCharacterMs, performance.now() - startedAt);
+            if (!character.name) {
+                performanceTimer.increment('failures');
+            }
+            return character;
+        });
+        const data = (await performanceTimer.measureAsync('process', () => Promise.all(processingPromises))).filter(c => c.name);
+        performanceTimer.setCounter('returned', data.length);
+        performanceTimer.setCounter('max-character-ms', maximumCharacterMs);
+        performanceTimer.setCacheState(performanceTimer.counters['cache-miss'] ? 'miss' : 'hit');
+        performanceTimer.startPhase('serialize');
         return response.send(data);
     } catch (err) {
         console.error(err);
         const isRangeError = err instanceof RangeError;
+        performanceTimer.startPhase('serialize');
         response.status(500).send({ overflow: isRangeError, error: true });
     }
 });

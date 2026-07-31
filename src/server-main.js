@@ -73,6 +73,7 @@ import { diskCache } from './endpoints/characters.js';
 import { migrateFlatSecrets } from './endpoints/secrets.js';
 import { migrateGroupChatsMetadataFormat } from './endpoints/groups.js';
 import { initializeUserInvitationSystem } from './user-invitations.js';
+import { beginEndpointPerformance, finalizeRequestPerformance, performanceRequestStartMiddleware } from './performance-monitor.js';
 
 // Work around a node v20.0.0, v20.1.0, and v20.2.0 bug. The issue was fixed in v20.3.0.
 // https://github.com/nodejs/node/issues/47822#issuecomment-1564708870
@@ -104,7 +105,8 @@ app.use(helmet({
     contentSecurityPolicy: false,
 }));
 app.use(compression());
-app.use(responseTime());
+app.use(responseTime(finalizeRequestPerformance));
+app.use(performanceRequestStartMiddleware);
 
 app.use(bodyParser.json({ limit: '500mb' }));
 app.use(bodyParser.urlencoded({ extended: true, limit: '500mb' }));
@@ -384,8 +386,11 @@ const uploadsPath = path.join(cliArgs.dataRoot, UPLOADS_DIRECTORY);
 app.use(multer({ dest: uploadsPath, limits: { fieldSize: 500 * 1024 * 1024 } }).single('avatar'));
 app.use(multerMonkeyPatch);
 
-app.get('/version', async function (_, response) {
-    const data = await getVersion();
+app.get('/version', async function (request, response) {
+    const performanceTimer = beginEndpointPerformance(request, 'version');
+    performanceTimer.setCacheState('miss');
+    const data = await performanceTimer.measureAsync('git', () => getVersion());
+    performanceTimer.startPhase('serialize');
     response.send(data);
 });
 

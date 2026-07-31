@@ -3,6 +3,7 @@
 let systemLoadInterval;
 let systemLoadAutoPaused = false;
 let currentSystemData = null;
+let currentPerformanceData = null;
 let currentInvitationCodes = [];
 const selectedInvitationCodes = new Set();
 let csrfToken = null;
@@ -171,6 +172,9 @@ function initializeAdminExtensions() {
         // 绑定系统负载相关事件
         bindSystemLoadEvents();
 
+        // 绑定性能指标事件
+        bindPerformanceMetricsEvents();
+
         // 绑定邀请码管理相关事件
         bindInvitationCodeEvents();
 
@@ -205,6 +209,11 @@ function checkAndLoadCurrentTab() {
             console.log('System load tab is visible, loading data...');
             loadSystemLoadData();
             startSystemLoadAutoRefresh();
+        }
+
+        const performanceMetricsBlock = document.querySelector('.performanceMetricsBlock');
+        if (performanceMetricsBlock && isElementVisible(performanceMetricsBlock)) {
+            loadPerformanceMetrics();
         }
 
         // 检查邀请码管理选项卡是否显示
@@ -263,6 +272,11 @@ function bindTabEvents() {
         systemLoadButton.addEventListener('click', function() {
             showSystemLoadTab();
         });
+    }
+
+    const performanceMetricsButton = document.querySelector('.performanceMetricsButton');
+    if (performanceMetricsButton) {
+        performanceMetricsButton.addEventListener('click', showPerformanceMetricsTab);
     }
 
     // 邀请码管理选项卡
@@ -339,6 +353,15 @@ function showSystemLoadTab() {
         loadSystemLoadData();
         // 启动自动刷新
         startSystemLoadAutoRefresh();
+    }
+}
+
+function showPerformanceMetricsTab() {
+    hideAllTabs();
+    const block = document.querySelector('.performanceMetricsBlock');
+    if (block) {
+        block.style.display = 'block';
+        loadPerformanceMetrics();
     }
 }
 
@@ -465,6 +488,7 @@ function disposeAdminExtensions() {
     stopSystemLoadAutoRefresh();
     document.removeEventListener('visibilitychange', handleAdminVisibilityChange);
     currentSystemData = null;
+    currentPerformanceData = null;
 }
 
 // 加载系统负载数据
@@ -887,6 +911,91 @@ async function clearSystemStats() {
     } catch (error) {
         console.error('Error clearing system stats:', error);
         alert('清除统计数据失败');
+    }
+}
+
+function bindPerformanceMetricsEvents() {
+    document.getElementById('refreshPerformanceMetrics')?.addEventListener('click', loadPerformanceMetrics);
+    document.getElementById('clearPerformanceMetrics')?.addEventListener('click', clearPerformanceMetrics);
+}
+
+function formatPerformanceDuration(summary) {
+    if (!summary || !summary.count) return '—';
+    return `${Number(summary.p50).toFixed(1)} / ${Number(summary.p95).toFixed(1)} / ${Number(summary.max).toFixed(1)} ms`;
+}
+
+function formatPerformanceBytes(value) {
+    const bytes = Number(value) || 0;
+    if (bytes < 1024) return `${Math.round(bytes)} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+function renderPerformanceMetrics() {
+    const rows = document.getElementById('performanceMetricsRows');
+    const status = document.getElementById('performanceMetricsStatus');
+    if (!rows || !status || !currentPerformanceData) return;
+
+    const operations = Array.isArray(currentPerformanceData.operations) ? currentPerformanceData.operations : [];
+    const generatedAt = new Date(currentPerformanceData.generatedAt || Date.now()).toLocaleString();
+    status.textContent = `状态：${currentPerformanceData.enabled ? '已启用' : '已关闭'}；每项容量：${currentPerformanceData.capacity}；更新时间：${generatedAt}`;
+    if (!operations.length) {
+        rows.innerHTML = '<tr><td colspan="5" style="padding:16px;text-align:center;">暂无样本</td></tr>';
+        return;
+    }
+
+    rows.innerHTML = operations.map(operation => {
+        const phaseText = Object.entries(operation.phases || {})
+            .map(([name, value]) => `${escapeHtml(name)} p95 ${Number(value?.p95 || 0).toFixed(1)} ms`)
+            .join('；') || '无阶段样本';
+        const cacheText = Object.entries(operation.cacheStates || {})
+            .map(([name, count]) => `${escapeHtml(name)} ${Number(count) || 0}`)
+            .join(' / ') || '—';
+        const counterText = Object.entries(operation.counters || {})
+            .map(([name, count]) => `${escapeHtml(name)}=${Number(count) || 0}`)
+            .join('；') || '无计数';
+        const responseBytes = operation.responseBytes?.count
+            ? `${formatPerformanceBytes(operation.responseBytes.p50)} / ${formatPerformanceBytes(operation.responseBytes.p95)}`
+            : '—';
+        return `<tr style="border-top:1px solid var(--SmartThemeBorderColor);">
+            <td style="padding:8px;"><code>${escapeHtml(operation.operation)}</code><div class="notes">${escapeHtml(operation.source)}</div></td>
+            <td style="padding:8px;text-align:right;">${Number(operation.count) || 0} / ${Number(operation.errors) || 0}</td>
+            <td style="padding:8px;text-align:right;white-space:nowrap;">${formatPerformanceDuration(operation.duration)}</td>
+            <td style="padding:8px;text-align:right;white-space:nowrap;">${responseBytes}</td>
+            <td style="padding:8px;"><div>${cacheText}</div><div class="notes">${phaseText}</div><div class="notes">${counterText}</div></td>
+        </tr>`;
+    }).join('');
+}
+
+async function loadPerformanceMetrics() {
+    const status = document.getElementById('performanceMetricsStatus');
+    if (status) status.textContent = '正在加载性能指标…';
+    try {
+        const response = await fetch('/api/performance/summary', {
+            headers: getRequestHeaders(),
+            cache: 'no-store',
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        currentPerformanceData = await response.json();
+        renderPerformanceMetrics();
+    } catch (error) {
+        console.error('Error loading performance metrics:', error);
+        if (status) status.textContent = '性能指标加载失败。';
+    }
+}
+
+async function clearPerformanceMetrics() {
+    if (!confirm('确定清除当前有界性能样本吗？')) return;
+    try {
+        const response = await fetch('/api/performance/clear', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        await loadPerformanceMetrics();
+    } catch (error) {
+        console.error('Error clearing performance metrics:', error);
+        alert('清除性能指标失败');
     }
 }
 
