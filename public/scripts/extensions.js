@@ -10,6 +10,7 @@ import { isAdmin } from './user.js';
 import { addLocaleData, getCurrentLocale, t } from './i18n.js';
 import { debounce_timeout } from './constants.js';
 import { accountStorage } from './util/AccountStorage.js';
+import { preloadExtensionResources } from './util/extension-resource-preload.js';
 import { SimpleMutex } from './util/SimpleMutex.js';
 
 export {
@@ -65,6 +66,7 @@ const defaultUrl = 'http://localhost:5100';
 let requiresReload = false;
 let stateChanged = false;
 let saveMetadataTimeout = null;
+let extensionResourcePreloadEnabled = false;
 
 export function cancelDebouncedMetadataSave() {
     if (saveMetadataTimeout) {
@@ -1294,6 +1296,9 @@ export async function loadExtensionSettings(settings, versionChanged, enableAuto
     if (settings.extension_settings) {
         Object.assign(extension_settings, settings.extension_settings);
     }
+    if (Object.hasOwn(settings.power_user ?? {}, 'extension_resource_preload')) {
+        extensionResourcePreloadEnabled = settings.power_user.extension_resource_preload === true;
+    }
 
     $('#extensions_url').val(extension_settings.apiUrl);
     $('#extensions_api_key').val(extension_settings.apiKey);
@@ -1311,7 +1316,25 @@ export async function loadExtensionSettings(settings, versionChanged, enableAuto
         await autoUpdateExtensions(false);
     }
 
-    await activateExtensions();
+    let resourcePreloads = null;
+    if (extensionResourcePreloadEnabled) {
+        try {
+            resourcePreloads = preloadExtensionResources(manifests, {
+                excludedExtensions: new Set([
+                    ...extension_settings.disabledExtensions,
+                    ...activeExtensions,
+                ]),
+            });
+        } catch (error) {
+            console.warn('Could not preload extension resources. Continuing with normal activation.', error);
+        }
+    }
+
+    try {
+        await activateExtensions();
+    } finally {
+        resourcePreloads?.dispose();
+    }
     if (extension_settings.autoConnect && extension_settings.apiUrl) {
         connectToApi(extension_settings.apiUrl);
     }
