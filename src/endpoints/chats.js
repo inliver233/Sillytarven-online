@@ -24,6 +24,7 @@ import {
 import { canConsumeStorage } from '../storage-quota.js';
 import { beginEndpointPerformance } from '../performance-monitor.js';
 import { invalidateCharacterListCache } from '../character-list-cache.js';
+import { RecentChatsCache, registerRecentChatsCache } from '../recent-chats-cache.js';
 
 const isBackupEnabled = !!getConfigValue('backups.chat.enabled', true, 'boolean');
 const maxTotalChatBackups = Number(getConfigValue('backups.chat.maxTotalBackups', -1, 'number'));
@@ -33,6 +34,14 @@ const chatInfoCacheLimit = Number(getConfigValue('performance.chatInfoCacheLimit
 const chatChunkingEnabled = !!getConfigValue('performance.chatChunkingEnabled', true, 'boolean');
 const chatChunkSizeConfigured = Number(getConfigValue('performance.chatChunkSize', 300, 'number'));
 const chatTailCompareLimit = Number(getConfigValue('performance.chatTailCompareLimit', 200, 'number'));
+const recentChatsCache = new RecentChatsCache({
+    enabled: getConfigValue('performance.recentChatsCache.enabled', true, 'boolean'),
+    ttlMs: getConfigValue('performance.recentChatsCache.ttlMs', 15_000, 'number'),
+    signatureTtlMs: getConfigValue('performance.recentChatsCache.signatureTtlMs', 2_000, 'number'),
+    maxEntries: getConfigValue('performance.recentChatsCache.maxEntries', 300, 'number'),
+    maxBytes: getConfigValue('performance.recentChatsCache.maxBytes', 50 * 1024 * 1024, 'number'),
+});
+registerRecentChatsCache(recentChatsCache);
 
 export const CHAT_BACKUPS_PREFIX = 'chat_';
 const chatInfoCache = new Map();
@@ -2655,98 +2664,107 @@ router.post('/search', validateAvatarUrlMiddleware, async function (request, res
 router.post('/recent', async function (request, response) {
     const performanceTimer = beginEndpointPerformance(request, 'chats-recent');
     try {
-        /** @type {{pngFile?: string, groupId?: string, filePath: string, mtime: number}[]} */
-        const allChatFiles = [];
+        const max = parseInt(request.body.max ?? Number.MAX_SAFE_INTEGER);
+        const withMetadata = Boolean(request.body.metadata);
+        const result = await performanceTimer.measureAsync('recent-cache', () => recentChatsCache.get({
+            userKey: request.user.profile.handle,
+            directories: request.user.directories,
+            max,
+            metadata: withMetadata,
+            load: async () => {
+                /** @type {{pngFile?: string, groupId?: string, filePath: string, mtime: number}[]} */
+                const allChatFiles = [];
 
-        const getCharacterChatFiles = async () => {
-            const pngDirents = await fs.promises.readdir(request.user.directories.characters, { withFileTypes: true });
-            const pngFiles = pngDirents.filter(e => e.isFile() && path.extname(e.name) === '.png').map(e => e.name);
+                const getCharacterChatFiles = async () => {
+                    const pngDirents = await fs.promises.readdir(request.user.directories.characters, { withFileTypes: true });
+                    const pngFiles = pngDirents.filter(e => e.isFile() && path.extname(e.name) === '.png').map(e => e.name);
 
-            for (const pngFile of pngFiles) {
-                const chatsDirectory = pngFile.replace('.png', '');
-                const pathToChats = path.join(request.user.directories.chats, chatsDirectory);
-                if (!fs.existsSync(pathToChats)) {
-                    continue;
-                }
-                const pathStats = await fs.promises.stat(pathToChats);
-                performanceTimer.increment('stat-calls');
-                if (pathStats.isDirectory()) {
-                    const chatFiles = await fs.promises.readdir(pathToChats);
-                    const jsonlFiles = chatFiles.filter(file => path.extname(file) === '.jsonl');
-
-                    for (const file of jsonlFiles) {
-                        const filePath = path.join(pathToChats, file);
-                        const stats = await fs.promises.stat(filePath);
+                    for (const pngFile of pngFiles) {
+                        const chatsDirectory = pngFile.replace('.png', '');
+                        const pathToChats = path.join(request.user.directories.chats, chatsDirectory);
+                        if (!fs.existsSync(pathToChats)) {
+                            continue;
+                        }
+                        const pathStats = await fs.promises.stat(pathToChats);
                         performanceTimer.increment('stat-calls');
-                        allChatFiles.push({ pngFile, filePath, mtime: stats.mtimeMs });
-                    }
-                }
-            }
-        };
+                        if (pathStats.isDirectory()) {
+                            const chatFiles = await fs.promises.readdir(pathToChats);
+                            const jsonlFiles = chatFiles.filter(file => path.extname(file) === '.jsonl');
 
-        const getGroupChatFiles = async () => {
-            const groupDirents = await fs.promises.readdir(request.user.directories.groups, { withFileTypes: true });
-            const groups = groupDirents.filter(e => e.isFile() && path.extname(e.name) === '.json').map(e => e.name);
-
-            for (const group of groups) {
-                try {
-                    const groupPath = path.join(request.user.directories.groups, group);
-                    const groupContents = await fs.promises.readFile(groupPath, 'utf8');
-                    const groupData = JSON.parse(groupContents);
-
-                    if (Array.isArray(groupData.chats)) {
-                        for (const chat of groupData.chats) {
-                            const filePath = path.join(request.user.directories.groupChats, `${chat}.jsonl`);
-                            if (!fs.existsSync(filePath)) {
-                                continue;
+                            for (const file of jsonlFiles) {
+                                const filePath = path.join(pathToChats, file);
+                                const stats = await fs.promises.stat(filePath);
+                                performanceTimer.increment('stat-calls');
+                                allChatFiles.push({ pngFile, filePath, mtime: stats.mtimeMs });
                             }
-                            const stats = await fs.promises.stat(filePath);
-                            performanceTimer.increment('stat-calls');
-                            allChatFiles.push({ groupId: groupData.id, filePath, mtime: stats.mtimeMs });
                         }
                     }
-                } catch (error) {
-                    // Skip group files that can't be read or parsed
-                    continue;
-                }
-            }
-        };
+                };
 
-        const getRootChatFiles = async () => {
-            const dirents = await fs.promises.readdir(request.user.directories.chats, { withFileTypes: true });
-            const chatFiles = dirents.filter(e => e.isFile() && path.extname(e.name) === '.jsonl').map(e => e.name);
+                const getGroupChatFiles = async () => {
+                    const groupDirents = await fs.promises.readdir(request.user.directories.groups, { withFileTypes: true });
+                    const groups = groupDirents.filter(e => e.isFile() && path.extname(e.name) === '.json').map(e => e.name);
 
-            for (const file of chatFiles) {
-                const filePath = path.join(request.user.directories.chats, file);
-                const stats = await fs.promises.stat(filePath);
-                performanceTimer.increment('stat-calls');
-                allChatFiles.push({ filePath, mtime: stats.mtimeMs });
-            }
-        };
+                    for (const group of groups) {
+                        try {
+                            const groupPath = path.join(request.user.directories.groups, group);
+                            const groupContents = await fs.promises.readFile(groupPath, 'utf8');
+                            const groupData = JSON.parse(groupContents);
 
-        await performanceTimer.measureAsync('scan', () => Promise.allSettled([getCharacterChatFiles(), getGroupChatFiles(), getRootChatFiles()]));
+                            if (Array.isArray(groupData.chats)) {
+                                for (const chat of groupData.chats) {
+                                    const filePath = path.join(request.user.directories.groupChats, `${chat}.jsonl`);
+                                    if (!fs.existsSync(filePath)) {
+                                        continue;
+                                    }
+                                    const stats = await fs.promises.stat(filePath);
+                                    performanceTimer.increment('stat-calls');
+                                    allChatFiles.push({ groupId: groupData.id, filePath, mtime: stats.mtimeMs });
+                                }
+                            }
+                        } catch (error) {
+                            // Skip group files that can't be read or parsed
+                            continue;
+                        }
+                    }
+                };
 
-        const max = parseInt(request.body.max ?? Number.MAX_SAFE_INTEGER);
-        const recentChats = allChatFiles.sort((a, b) => b.mtime - a.mtime).slice(0, max);
-        performanceTimer.setCounter('candidates', allChatFiles.length);
-        performanceTimer.setCounter('top', recentChats.length);
-        const jsonFilesPromise = recentChats.map((file) => {
-            const withMetadata = Boolean(request.body.metadata);
-            const observeCache = state => performanceTimer.increment(`chat-info-${state}`);
-            return file.groupId
-                ? getChatInfo(file.filePath, { group: file.groupId }, true, withMetadata, observeCache)
-                : getChatInfo(file.filePath, { avatar: file.pngFile }, false, withMetadata, observeCache);
-        });
+                const getRootChatFiles = async () => {
+                    const dirents = await fs.promises.readdir(request.user.directories.chats, { withFileTypes: true });
+                    const chatFiles = dirents.filter(e => e.isFile() && path.extname(e.name) === '.jsonl').map(e => e.name);
 
-        const chatData = (await performanceTimer.measureAsync('chat-info', () => Promise.allSettled(jsonFilesPromise)))
-            .filter(x => x.status === 'fulfilled')
-            .map(x => x.value);
-        const validFiles = chatData.filter(i => i.file_name);
-        performanceTimer.setCounter('returned', validFiles.length);
-        performanceTimer.setCacheState(performanceTimer.counters['chat-info-miss'] ? 'miss' : 'hit');
+                    for (const file of chatFiles) {
+                        const filePath = path.join(request.user.directories.chats, file);
+                        const stats = await fs.promises.stat(filePath);
+                        performanceTimer.increment('stat-calls');
+                        allChatFiles.push({ filePath, mtime: stats.mtimeMs });
+                    }
+                };
+
+                await performanceTimer.measureAsync('scan', () => Promise.allSettled([getCharacterChatFiles(), getGroupChatFiles(), getRootChatFiles()]));
+
+                const recentChats = allChatFiles.sort((a, b) => b.mtime - a.mtime).slice(0, max);
+                performanceTimer.setCounter('candidates', allChatFiles.length);
+                performanceTimer.setCounter('top', recentChats.length);
+                const jsonFilesPromise = recentChats.map((file) => {
+                    const observeCache = state => performanceTimer.increment(`chat-info-${state}`);
+                    return file.groupId
+                        ? getChatInfo(file.filePath, { group: file.groupId }, true, withMetadata, observeCache)
+                        : getChatInfo(file.filePath, { avatar: file.pngFile }, false, withMetadata, observeCache);
+                });
+
+                const chatData = (await performanceTimer.measureAsync('chat-info', () => Promise.allSettled(jsonFilesPromise)))
+                    .filter(x => x.status === 'fulfilled')
+                    .map(x => x.value);
+                return chatData.filter(i => i.file_name);
+            },
+        }));
+        performanceTimer.increment(`recent-cache-${result.state}`);
+        performanceTimer.setCounter('returned', result.value.length);
+        performanceTimer.setCacheState(result.state === 'miss' ? 'miss' : 'hit');
 
         performanceTimer.startPhase('serialize');
-        return response.send(validFiles);
+        return response.send(result.value);
     } catch (error) {
         console.error(error);
         performanceTimer.startPhase('serialize');

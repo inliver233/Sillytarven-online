@@ -946,7 +946,11 @@ function renderPerformanceMetrics() {
     const settingsCacheText = settingsCache
         ? `；设置缓存：${Number(settingsCache.entries) || 0} 项 / ${formatPerformanceBytes(settingsCache.totalBytes)}`
         : '';
-    status.textContent = `状态：${currentPerformanceData.enabled ? '已启用' : '已关闭'}；每项容量：${currentPerformanceData.capacity}${characterCacheText}${settingsCacheText}；更新时间：${generatedAt}`;
+    const recentChatsCache = currentPerformanceData.caches?.recentChats;
+    const recentChatsCacheText = recentChatsCache
+        ? `；最近聊天缓存：${Number(recentChatsCache.entries) || 0} 项 / ${formatPerformanceBytes(recentChatsCache.totalBytes)}`
+        : '';
+    status.textContent = `状态：${currentPerformanceData.enabled ? '已启用' : '已关闭'}；每项容量：${currentPerformanceData.capacity}${characterCacheText}${settingsCacheText}${recentChatsCacheText}；更新时间：${generatedAt}`;
     if (!operations.length) {
         rows.innerHTML = '<tr><td colspan="5" style="padding:16px;text-align:center;">暂无样本</td></tr>';
         return;

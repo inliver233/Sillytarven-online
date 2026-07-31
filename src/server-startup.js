@@ -63,6 +63,7 @@ import { router as userStorageRouter } from './endpoints/user-storage.js';
 import { router as performanceRouter } from './endpoints/performance.js';
 import { getConfigValue } from './util.js';
 import { settingsCacheInvalidationMiddleware } from './settings-cache.js';
+import { recentChatsCacheInvalidationMiddleware } from './recent-chats-cache.js';
 
 /**
  * @typedef {object} ServerStartupResult
@@ -149,6 +150,7 @@ export function redirectDeprecatedEndpoints(app) {
  */
 export function setupPrivateEndpoints(app) {
     app.use(settingsCacheInvalidationMiddleware);
+    app.use(recentChatsCacheInvalidationMiddleware);
     app.use('/', userDataRouter);
     app.use('/api/users', usersPrivateRouter);
     app.use('/api/users', usersAdminRouter);

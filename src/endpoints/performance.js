@@ -4,6 +4,7 @@ import { performanceMonitor } from '../performance-monitor.js';
 import { requireAdminMiddleware } from '../users.js';
 import { clearCharacterListCache, getCharacterListCacheStatus } from '../character-list-cache.js';
 import { clearSettingsCache, getSettingsCacheStatus } from '../settings-cache.js';
+import { clearRecentChatsCache, getRecentChatsCacheStatus } from '../recent-chats-cache.js';
 
 export const router = express.Router();
 
@@ -26,6 +27,7 @@ router.get('/summary', requireAdminMiddleware, (_, response) => {
         caches: {
             characterLists: getCharacterListCacheStatus(),
             settings: getSettingsCacheStatus(),
+            recentChats: getRecentChatsCacheStatus(),
         },
     });
 });
@@ -42,5 +44,10 @@ router.post('/cache/characters/clear', requireAdminMiddleware, (_, response) => 
 
 router.post('/cache/settings/clear', requireAdminMiddleware, (_, response) => {
     clearSettingsCache();
+    return response.send({ ok: true });
+});
+
+router.post('/cache/recent-chats/clear', requireAdminMiddleware, (_, response) => {
+    clearRecentChatsCache();
     return response.send({ ok: true });
 });

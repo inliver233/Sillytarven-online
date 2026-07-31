@@ -212,6 +212,14 @@ performance:
     signatureTtlMs: 5000
     maxEntries: 100
     maxBytes: 104857600
+  # Cache complete /api/chats/recent responses; successful mutations invalidate every user variant.
+  recentChatsCache:
+    enabled: true
+    ttlMs: 15000
+    # Root directory checks catch common out-of-process changes; TTL bounds nested-file staleness.
+    signatureTtlMs: 2000
+    maxEntries: 300
+    maxBytes: 52428800
 
 # CACHE BUSTER CONFIGURATION
 # IMPORTANT: Requires localhost or a domain with HTTPS, otherwise will not work!
