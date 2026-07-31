@@ -65,7 +65,6 @@ import {
     activateSendButtons,
     eventSource,
     event_types,
-    getCurrentChatId,
     setCharacterSettingsOverrides,
     system_avatar,
     isChatSaving,
@@ -80,6 +79,14 @@ import {
     unshallowCharacter,
     chatElement,
     ensureMessageMediaIsArray,
+    fetchChatRange,
+    getCachedChatPage,
+    getChatPagingPageSize,
+    getChatPagingState,
+    isChatPagingEnabled,
+    resetChatPagingState,
+    setCachedChatPage,
+    setChatPagingState,
 } from '../script.js';
 import { printTagList, createTagMapFromList, applyTagsOnCharacterSelect, tag_map, applyTagsOnGroupSelect } from './tags.js';
 import { FILTER_TYPES, FilterHelper } from './filters.js';
@@ -87,6 +94,12 @@ import { isExternalMediaAllowed } from './chats.js';
 import { POPUP_TYPE, Popup, callGenericPopup } from './popup.js';
 import { t } from './i18n.js';
 import { accountStorage } from './util/AccountStorage.js';
+import {
+    createGroupChatSaveRequest,
+    getFullGroupMessageIndex,
+    normalizeGroupChatPage,
+    splitGroupChatFile,
+} from './group-chat-paging.js';
 
 export {
     selected_group,
@@ -118,6 +131,8 @@ let group_generation_id = null;
 let fav_grp_checked = false;
 let openGroupId = null;
 let newGroupMembers = [];
+let groupChatLoadController = null;
+let groupChatLoadGeneration = 0;
 
 export const group_activation_strategy = {
     NATURAL: 0,
@@ -190,13 +205,15 @@ async function regenerateGroup() {
 /**
  * Loads group chat messages from the server.
  * @param {string} chatId Chat ID
- * @returns {Promise<ChatFile>} Array of chat messages
+ * @param {{signal?: AbortSignal}} [options] Request options
+ * @returns {Promise<ChatFile|null>} Array of chat messages, or null on request failure
  */
-async function loadGroupChat(chatId) {
+async function loadGroupChat(chatId, { signal } = {}) {
     const response = await fetch('/api/chats/group/get', {
         method: 'POST',
         headers: getRequestHeaders(),
         body: JSON.stringify({ id: chatId }),
+        signal,
     });
 
     if (response.ok) {
@@ -207,7 +224,7 @@ async function loadGroupChat(chatId) {
         return data;
     }
 
-    return [];
+    return null;
 }
 
 /**
@@ -259,64 +276,138 @@ export async function getGroupChat(groupId, reload = false) {
         return;
     }
 
-    // Run validation before any loading
-    await validateGroup(group);
-    await unshallowGroupMembers(groupId);
+    groupChatLoadController?.abort();
+    const controller = new AbortController();
+    groupChatLoadController = controller;
+    const loadGeneration = ++groupChatLoadGeneration;
+    const chatId = group.chat_id;
+    const isStale = () => loadGeneration !== groupChatLoadGeneration || group.chat_id !== chatId;
+    resetChatPagingState({ isGroup: true, chatId });
 
-    const chat_id = group.chat_id;
-    const data = await loadGroupChat(chat_id);
-    const metadata = data?.[0]?.chat_metadata ?? {};
-    const freshChat = !metadata.tainted && (!Array.isArray(data) || !data.length);
+    try {
+        // Run validation before any loading
+        await validateGroup(group);
+        if (isStale()) return;
+        await unshallowGroupMembers(groupId);
+        if (isStale()) return;
 
-    // Remove chat file header if present
-    if (Array.isArray(data) && data.length && Object.hasOwn(data[0], 'chat_metadata')) {
-        data.shift();
-    }
+        let header = null;
+        let data = [];
+        let usedPaging = false;
 
-    // Add integrity slug if missing
-    if (!metadata['integrity']) {
-        metadata['integrity'] = uuidv4();
-    }
-
-    await loadItemizedPrompts(getCurrentChatId());
-
-    if (group && Array.isArray(group.members) && freshChat) {
-        chat.splice(0, chat.length);
-        chatElement.find('.mes').remove();
-        for (let member of group.members) {
-            const character = characters.find(x => x.avatar === member || x.name === member);
-            if (!character) {
-                continue;
+        if (isChatPagingEnabled()) {
+            const cached = getCachedChatPage({ isGroup: true, chatId });
+            let page = cached ? normalizeGroupChatPage(cached) : null;
+            if (!page) {
+                try {
+                    const response = await fetchChatRange({
+                        isGroup: true,
+                        chatId,
+                        limit: getChatPagingPageSize(),
+                        signal: controller.signal,
+                    });
+                    page = normalizeGroupChatPage(response);
+                } catch (error) {
+                    if (error?.name === 'AbortError') return;
+                    console.warn('Group range request failed; using the compatibility loader.', error);
+                }
             }
 
-            const mes = await getFirstCharacterMessage(character);
-
-            // No first message
-            if (!(mes?.mes)) {
-                continue;
+            if (isStale()) return;
+            if (page) {
+                header = page.header;
+                data = page.messages;
+                setChatPagingState({
+                    active: true,
+                    cursor: page.cursor,
+                    hasMore: page.hasMore,
+                    isGroup: true,
+                    chatId,
+                    messageOffset: page.messageOffset,
+                });
+                usedPaging = true;
+                if (!cached) {
+                    setCachedChatPage({
+                        isGroup: true,
+                        chatId,
+                        messages: data,
+                        header,
+                        cursor: page.cursor,
+                        messageOffset: page.messageOffset,
+                        hasMore: page.hasMore,
+                    });
+                }
             }
-
-            chat.push(mes);
-            await eventSource.emit(event_types.MESSAGE_RECEIVED, (chat.length - 1), 'first_message');
-            addOneMessage(mes);
-            await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, (chat.length - 1), 'first_message');
         }
-        await saveGroupChat(groupId, false);
-    } else if (Array.isArray(data) && data.length) {
-        chat.splice(0, chat.length, ...data);
-        chat.forEach(ensureMessageMediaIsArray);
-        chatElement.find('.mes').remove();
-        await printMessages();
+
+        if (!usedPaging) {
+            const fullChat = await loadGroupChat(chatId, { signal: controller.signal });
+            if (isStale() || !fullChat) return;
+            const full = splitGroupChatFile(fullChat);
+            header = full.header;
+            data = full.messages;
+            resetChatPagingState({ isGroup: true, chatId });
+        }
+
+        const metadata = header?.chat_metadata ?? {};
+        const freshChat = !metadata.tainted && !header && data.length === 0;
+
+        // Add integrity slug if missing
+        if (!metadata['integrity']) {
+            metadata['integrity'] = uuidv4();
+        }
+
+        await loadItemizedPrompts(chatId);
+        if (isStale()) return;
+
+        if (Array.isArray(group.members) && freshChat) {
+            chat.splice(0, chat.length);
+            chatElement.find('.mes').remove();
+            for (const member of group.members) {
+                const character = characters.find(x => x.avatar === member || x.name === member);
+                if (!character) {
+                    continue;
+                }
+
+                const mes = await getFirstCharacterMessage(character);
+                if (isStale()) return;
+
+                // No first message
+                if (!(mes?.mes)) {
+                    continue;
+                }
+
+                chat.push(mes);
+                await eventSource.emit(event_types.MESSAGE_RECEIVED, (chat.length - 1), 'first_message');
+                addOneMessage(mes);
+                await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, (chat.length - 1), 'first_message');
+            }
+            updateChatMetadata(metadata, true);
+            await saveGroupChat(groupId, false);
+        } else {
+            chat.splice(0, chat.length, ...data);
+            chat.forEach(ensureMessageMediaIsArray);
+            chatElement.find('.mes').remove();
+            await printMessages();
+            updateChatMetadata(metadata, true);
+        }
+
+        if (isStale()) return;
+        if (reload) {
+            select_group_chats(groupId, true);
+        }
+
+        await eventSource.emit(event_types.CHAT_CHANGED, chatId);
+        if (freshChat) await eventSource.emit(event_types.GROUP_CHAT_CREATED);
+    } catch (error) {
+        if (error?.name !== 'AbortError') {
+            console.error('Could not load group chat', error);
+        }
+    } finally {
+        if (groupChatLoadController === controller) {
+            groupChatLoadController = null;
+        }
     }
-
-    updateChatMetadata(metadata, true);
-
-    if (reload) {
-        select_group_chats(groupId, true);
-    }
-
-    await eventSource.emit(event_types.CHAT_CHANGED, getCurrentChatId());
-    if (freshChat) await eventSource.emit(event_types.GROUP_CHAT_CREATED);
 }
 
 /**
@@ -610,6 +701,10 @@ async function getFirstCharacterMessage(character) {
 }
 
 function resetSelectedGroup() {
+    groupChatLoadGeneration++;
+    groupChatLoadController?.abort();
+    groupChatLoadController = null;
+    resetChatPagingState({ isGroup: false });
     selected_group = null;
     is_group_generating = false;
 }
@@ -619,13 +714,13 @@ function resetSelectedGroup() {
  * @param {string} groupId Group ID
  * @param {boolean} shouldSaveGroup Whether to save the group after saving the chat
  * @param {boolean} force Force the saving on integrity error
- * @returns {Promise<void>} A promise that resolves when the group chat has been saved.
+ * @returns {Promise<boolean>} Whether the group chat was saved.
  */
 async function saveGroupChat(groupId, shouldSaveGroup, force = false) {
     const group = groups.find(x => x.id == groupId);
     if (!group) {
         console.warn('Group not found', groupId);
-        return;
+        return false;
     }
     const chatId = group.chat_id;
     group['date_last_chat'] = Date.now();
@@ -635,23 +730,36 @@ async function saveGroupChat(groupId, shouldSaveGroup, force = false) {
         user_name: 'unused',
         character_name: 'unused',
     };
-    const response = await fetch('/api/chats/group/save', {
+    const messages = chat.slice();
+    const saveRequest = createGroupChatSaveRequest({
+        chatId,
+        header: chatHeader,
+        messages,
+        pagingState: getChatPagingState(),
+        force,
+    });
+    const response = await fetch(saveRequest.url, {
         method: 'POST',
         headers: getRequestHeaders(),
-        body: JSON.stringify({ id: chatId, chat: [chatHeader, ...chat], force: force }),
+        body: JSON.stringify(saveRequest.body),
     });
 
     if (!response.ok) {
-        const errorData = await response.json();
+        let errorData = null;
+        try {
+            errorData = await response.json();
+        } catch (error) {
+            console.warn('Failed to parse group chat save error:', error);
+        }
         if (errorData?.error === 'storage_limit') {
             toastr.error(errorData.message || '存储空间不足，无法保存群聊记录。请删除内容或使用激活码扩容。', '存储空间不足');
-            return;
+            return false;
         }
         const isIntegrityError = errorData?.error === 'integrity' && !force;
         if (!isIntegrityError) {
             toastr.error(t`Check the server connection and reload the page to prevent data loss.`, t`Group Chat could not be saved`);
             console.error('Group chat could not be saved', response);
-            return;
+            return false;
         }
 
         const popupResult = await Popup.show.input(
@@ -667,15 +775,29 @@ async function saveGroupChat(groupId, shouldSaveGroup, force = false) {
         if (!forceSaveConfirmed) {
             console.warn('Chat integrity check failed, and user did not confirm the overwrite. Reloading the page.');
             window.location.reload();
-            return;
+            return false;
         }
 
-        await saveGroupChat(groupId, shouldSaveGroup, true);
+        return await saveGroupChat(groupId, shouldSaveGroup, true);
+    }
+
+    if (saveRequest.tail) {
+        const pagingState = getChatPagingState();
+        setCachedChatPage({
+            isGroup: true,
+            chatId,
+            messages,
+            header: chatHeader,
+            cursor: pagingState.cursor,
+            messageOffset: pagingState.messageOffset,
+            hasMore: pagingState.hasMore,
+        });
     }
 
     if (shouldSaveGroup) {
         await editGroup(groupId, false, false);
     }
+    return true;
 }
 
 /**
@@ -1348,7 +1470,7 @@ async function deleteGroup(id) {
 
     if (response.ok) {
         await clearChat();
-        selected_group = null;
+        resetSelectedGroup();
         delete tag_map[id];
         resetChatState();
         await printMessages();
@@ -2334,16 +2456,14 @@ export async function importGroupChat(formData, { refresh = true } = {}) {
  * @param {string} name Name of the chat to save
  * @param {ChatMetadata?} metadata New metadata to save with the chat
  * @param {number|undefined} mesId Optional message ID to trim the chat up to
- * @returns {Promise<void>} Promise that resolves when the group chat is saved
+ * @returns {Promise<boolean>} Whether the bookmark chat was saved
  */
 export async function saveGroupBookmarkChat(groupId, name, metadata, mesId) {
     const group = groups.find(x => x.id === groupId);
 
     if (!group) {
-        return;
+        return false;
     }
-
-    group.chats.push(name);
 
     /** @type {ChatHeader} */
     const chatHeader = {
@@ -2353,11 +2473,32 @@ export async function saveGroupBookmarkChat(groupId, name, metadata, mesId) {
     };
 
     /** @type {ChatMessage[]} */
-    const trimmedChat = (mesId !== undefined && mesId >= 0 && mesId < chat.length)
-        ? chat.slice(0, Number(mesId) + 1)
-        : chat;
+    let sourceChat = chat.slice();
+    let targetMessageId = mesId;
+    const pagingState = getChatPagingState();
+    const isPagedCurrentChat = pagingState.active
+        && pagingState.isGroup
+        && pagingState.chatId === group.chat_id;
+    if (isPagedCurrentChat) {
+        // Explicit compatibility operation: commit the local suffix, then load the full source once.
+        if (!await saveGroupChat(groupId, false)) {
+            return false;
+        }
+        const fullChat = await loadGroupChat(group.chat_id);
+        if (!fullChat) {
+            toastr.error(t`Check the server connection and reload the page to prevent data loss.`, t`Group chat could not be loaded`);
+            return false;
+        }
+        const full = splitGroupChatFile(fullChat);
+        if (mesId !== undefined && mesId >= 0 && mesId < chat.length) {
+            targetMessageId = getFullGroupMessageIndex(mesId, pagingState.messageOffset, full.messages, chat);
+        }
+        sourceChat = full.messages;
+    }
 
-    await editGroup(groupId, true, false);
+    const trimmedChat = (targetMessageId !== undefined && targetMessageId >= 0 && targetMessageId < sourceChat.length)
+        ? sourceChat.slice(0, Number(targetMessageId) + 1)
+        : sourceChat;
 
     const response = await fetch('/api/chats/group/save', {
         method: 'POST',
@@ -2370,14 +2511,19 @@ export async function saveGroupBookmarkChat(groupId, name, metadata, mesId) {
             const errorData = await response.json();
             if (errorData?.error === 'storage_limit') {
                 toastr.error(errorData.message || '存储空间不足，无法保存群聊记录。请删除内容或使用激活码扩容。', '存储空间不足');
-                return;
+                return false;
             }
         } catch (error) {
             console.warn('Failed to parse group chat save error:', error);
         }
         toastr.error(t`Check the server connection and reload the page to prevent data loss.`, t`Group chat could not be saved`);
         console.error('Group chat could not be saved', response);
+        return false;
     }
+
+    group.chats.push(name);
+    await editGroup(groupId, true, false);
+    return true;
 }
 
 function onSendTextareaInput() {

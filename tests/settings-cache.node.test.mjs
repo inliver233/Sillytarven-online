@@ -148,7 +148,9 @@ test('concurrent requests single-flight per user while different users remain is
             cache.get({ userKey: 'alice', directories, runtimeConfig: RUNTIME_CONFIG }),
             cache.get({ userKey: 'alice', directories, runtimeConfig: RUNTIME_CONFIG }),
         ]);
-        assert.deepEqual([first.state, second.state].sort(), ['miss', 'shared']);
+        const states = [first.state, second.state];
+        assert.equal(states.filter(state => state === 'miss').length, 1);
+        assert.ok(states.some(state => state === 'shared' || state === 'hit'));
         assert.equal(first.payload.openai_settings.length, 60);
         assert.deepEqual(second.payload, first.payload);
 

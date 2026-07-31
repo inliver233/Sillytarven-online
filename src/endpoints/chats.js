@@ -120,6 +120,7 @@ function backupChat(directory, name, chat) {
  * @type {Map<string, import('lodash').DebouncedFunc<function(string, string, string): void>>}
  */
 const backupFunctions = new Map();
+const disabledBackupFunction = () => {};
 
 /**
  * Gets a backup function for a user.
@@ -127,6 +128,9 @@ const backupFunctions = new Map();
  * @returns {function(string, string, string): void} Backup function
  */
 function getBackupFunction(handle) {
+    if (!isBackupEnabled) {
+        return disabledBackupFunction;
+    }
     if (!backupFunctions.has(handle)) {
         backupFunctions.set(handle, _.throttle(backupChat, throttleInterval, { leading: true, trailing: true }));
     }
@@ -1109,37 +1113,33 @@ async function readJsonlTailChunked(filePath, limit, beforeOffset = null) {
 
     const startIndex = Math.max(0, endIndex - limit);
     const lines = [];
-    let remainingEnd = endIndex;
     let readBytes = 0;
     let chunksRead = 0;
+    const shardRanges = [];
+    let offset = 0;
+    for (const shard of index.shards) {
+        const count = Math.max(0, Number(shard?.count) || 0);
+        shardRanges.push({ shard, start: offset, end: offset + count });
+        offset += count;
+    }
 
-    for (let i = index.shards.length - 1; i >= 0 && lines.length < limit; i--) {
-        const shard = index.shards[i];
-        const shardCount = Number(shard?.count) || 0;
-        if (shardCount <= 0) {
+    for (let i = shardRanges.length - 1; i >= 0 && lines.length < limit; i--) {
+        const range = shardRanges[i];
+        if (range.end <= startIndex) {
+            break;
+        }
+        if (range.start >= endIndex || range.end <= range.start) {
             continue;
         }
-        const shardStart = Math.max(0, remainingEnd - shardCount);
-        const shardEnd = remainingEnd;
 
-        if (shardEnd <= startIndex) {
-            remainingEnd = shardStart;
-            continue;
-        }
-
-        const readStart = Math.max(shardStart, startIndex);
-        const readEnd = shardEnd;
-        const localStart = readStart - shardStart;
-        const localEnd = readEnd - shardStart;
-
-        const shardPath = path.join(getChatChunkDir(filePath), shard.file);
+        const localStart = Math.max(startIndex, range.start) - range.start;
+        const localEnd = Math.min(endIndex, range.end) - range.start;
+        const shardPath = path.join(getChatChunkDir(filePath), range.shard.file);
         const shardLines = await readShardLines(shardPath);
-        readBytes += Number(shard.size) || Buffer.byteLength(shardLines.join('\n'), 'utf8');
+        readBytes += Number(range.shard.size) || Buffer.byteLength(shardLines.join('\n'), 'utf8');
         chunksRead++;
         const slice = shardLines.slice(localStart, localEnd);
         lines.unshift(...slice);
-
-        remainingEnd = shardStart;
     }
 
     const cursor = startIndex;
@@ -1156,6 +1156,44 @@ function parseChatLines(lines) {
         messages.push(jsonData);
     }
     return messages;
+}
+
+function isGroupChatHeader(value) {
+    return Boolean(
+        value
+        && typeof value === 'object'
+        && !Array.isArray(value)
+        && !Object.hasOwn(value, 'name')
+        && (Object.hasOwn(value, 'chat_metadata') || (value.user_name && value.character_name)),
+    );
+}
+
+function splitGroupChatData(chatData) {
+    const items = Array.isArray(chatData) ? chatData : [];
+    const header = isGroupChatHeader(items[0]) ? items[0] : null;
+    return { header, messages: header ? items.slice(1) : items.slice() };
+}
+
+async function readGroupChatHeaderInfo(filePath) {
+    const storedHeader = await readChatHeader(filePath);
+    if (!isChunkedChat(filePath)) {
+        return { header: isGroupChatHeader(storedHeader) ? storedHeader : null, embeddedHeaderCount: 0 };
+    }
+
+    const firstLines = await readChunkedChatLinesRange(filePath, 0, 1);
+    const embeddedHeader = firstLines.length ? tryParse(firstLines[0]) : null;
+    const embeddedHeaderCount = isGroupChatHeader(embeddedHeader) ? 1 : 0;
+    return {
+        header: isGroupChatHeader(storedHeader) ? storedHeader : embeddedHeaderCount ? embeddedHeader : null,
+        embeddedHeaderCount,
+    };
+}
+
+async function checkGroupChatIntegrity(filePath, integritySlug) {
+    if (!fs.existsSync(filePath)) return true;
+    const { header } = await readGroupChatHeaderInfo(filePath);
+    const storedSlug = header?.chat_metadata?.integrity;
+    return !storedSlug || storedSlug === integritySlug;
 }
 
 function needsLeadingNewline(filePath) {
@@ -1301,7 +1339,8 @@ export async function getChatInfo(pathToFile, additionalData = {}, isGroup = fal
         }
 
         let chatMetadata = null;
-        const header = /** @type {any} */ (await readChatHeader(pathToFile));
+        const groupHeaderInfo = isGroup && chunked ? await readGroupChatHeaderInfo(pathToFile) : null;
+        const header = /** @type {any} */ (groupHeaderInfo?.header ?? await readChatHeader(pathToFile));
         if (header && _.isObject(header.chat_metadata)) {
             chatMetadata = header.chat_metadata;
             if (withMetadata) {
@@ -1324,7 +1363,7 @@ export async function getChatInfo(pathToFile, additionalData = {}, isGroup = fal
                 }
                 const indexCount = Number(chunkedIndex.message_count);
                 if (Number.isFinite(indexCount)) {
-                    messageCount = indexCount;
+                    messageCount = Math.max(0, indexCount - Number(groupHeaderInfo?.embeddedHeaderCount || 0));
                 }
                 if (chunkedIndex.last_message) {
                     lastMessage = chunkedIndex.last_message;
@@ -2182,8 +2221,12 @@ router.post('/group/get', async (request, response) => {
             await convertLegacyChatToChunks(pathToFile);
         }
         if (chatChunkingEnabled && isChunkedChat(pathToFile)) {
-            const messages = await readChunkedChatMessages(pathToFile);
-            return response.send(messages);
+            const [headerInfo, storedMessages] = await Promise.all([
+                readGroupChatHeaderInfo(pathToFile),
+                readChunkedChatMessages(pathToFile),
+            ]);
+            const messages = headerInfo.embeddedHeaderCount ? storedMessages.slice(1) : storedMessages;
+            return response.send(headerInfo.header ? [headerInfo.header, ...messages] : messages);
         }
 
         const data = fs.readFileSync(pathToFile, 'utf8');
@@ -2191,7 +2234,10 @@ router.post('/group/get', async (request, response) => {
 
         // Iterate through the array of strings and parse each line as JSON
         const jsonData = lines.map(line => tryParse(line)).filter(x => x);
-        return response.send(jsonData);
+        const split = splitGroupChatData(jsonData);
+        const storedHeader = await readChatHeader(pathToFile);
+        const header = isGroupChatHeader(storedHeader) ? storedHeader : split.header;
+        return response.send(header ? [header, ...split.messages] : split.messages);
     } else {
         return response.send([]);
     }
@@ -2210,7 +2256,7 @@ router.post('/group/get-range', async (request, response) => {
 
         if (!fs.existsSync(filePath)) {
             performanceTimer.startPhase('serialize');
-            return response.send({ messages: [], cursor: 0, hasMore: false });
+            return response.send({ header: null, messages: [], cursor: 0, messageOffset: 0, total: 0, hasMore: false });
         }
 
         const limit = Math.max(1, Math.min(Number(request.body.limit ?? 20), 200));
@@ -2221,20 +2267,42 @@ router.post('/group/get-range', async (request, response) => {
         if (chatChunkingEnabled && !isChunkedChat(filePath)) {
             await convertLegacyChatToChunks(filePath);
         }
-        const tail = await performanceTimer.measureAsync('read', () => readJsonlTail(filePath, limit, beforeOffset));
+        const chunked = isChunkedChat(filePath);
+        const { headerInfo, tail, headerEndOffset, index } = await performanceTimer.measureAsync('read', async () => {
+            const [headerInfo, tail, headerEndOffset, index] = await Promise.all([
+                readGroupChatHeaderInfo(filePath),
+                readJsonlTail(filePath, limit, beforeOffset),
+                chunked ? Promise.resolve(0) : getHeaderEndOffset(filePath),
+                chunked ? ensureChatIndex(filePath) : Promise.resolve(null),
+            ]);
+            return { headerInfo, tail, headerEndOffset, index };
+        });
         const messages = parseChatLines(tail.lines);
-        const cursor = tail.cursor;
-        const hasMore = isChunkedChat(filePath) ? cursor > 0 : cursor > 0;
+        const headerBoundary = chunked ? headerInfo.embeddedHeaderCount : headerEndOffset;
+        let cursor = tail.cursor;
+        if (!messages.length) {
+            cursor = headerBoundary;
+        }
+        const hasMore = cursor > headerBoundary;
+        const indexedTotal = Number(index?.message_count);
+        const total = Number.isFinite(indexedTotal)
+            ? Math.max(0, indexedTotal - headerInfo.embeddedHeaderCount)
+            : Number.isFinite(Number(headerInfo.header?.chat_metadata?.message_count))
+                ? Math.max(0, Number(headerInfo.header.chat_metadata.message_count))
+                : null;
+        const messageOffset = chunked
+            ? Math.max(0, cursor - headerInfo.embeddedHeaderCount)
+            : (beforeOffset === null && Number.isFinite(total) ? Math.max(0, total - messages.length) : null);
         performanceTimer.setCounter('messages', messages.length);
         performanceTimer.setCounter('read-bytes', tail.readBytes);
         performanceTimer.setCounter('chunks', tail.chunksRead);
         performanceTimer.setCounter('next-cursor', cursor);
         performanceTimer.startPhase('serialize');
-        return response.send({ messages, cursor, hasMore });
+        return response.send({ header: headerInfo.header, messages, cursor, messageOffset, total, hasMore });
     } catch (error) {
         console.error(error);
         performanceTimer.startPhase('serialize');
-        return response.status(500).send({ messages: [], cursor: 0, hasMore: false });
+        return response.status(500).send({ header: null, messages: [], cursor: 0, messageOffset: 0, total: 0, hasMore: false });
     }
 });
 
@@ -2248,6 +2316,10 @@ router.post('/group/delete', (request, response) => {
 
     if (fs.existsSync(pathToFile)) {
         fs.unlinkSync(pathToFile);
+        const metadataPath = getChatMetadataPath(pathToFile);
+        if (fs.existsSync(metadataPath)) {
+            fs.unlinkSync(metadataPath);
+        }
         const indexPath = getChatIndexPath(pathToFile);
         if (fs.existsSync(indexPath)) {
             fs.unlinkSync(indexPath);
@@ -2267,59 +2339,83 @@ router.post('/group/delete', (request, response) => {
 });
 
 router.post('/group/save', async (request, response) => {
-    if (!request.body || !request.body.id) {
-        return response.sendStatus(400);
-    }
-
-    const id = request.body.id;
-    const pathToFile = path.join(request.user.directories.groupChats, `${id}.jsonl`);
-
-    if (!fs.existsSync(request.user.directories.groupChats)) {
-        fs.mkdirSync(request.user.directories.groupChats);
-    }
-
-    let chat_data = request.body.chat;
-    let jsonlData = chat_data.map((item) => JSON.stringify(item)).join('\n');
-    let additionalBytes = 0;
-    if (chatChunkingEnabled) {
-        const newSize = Buffer.byteLength(jsonlData, 'utf8');
-        const oldSize = fs.existsSync(pathToFile) ? getChatTotalBytes(pathToFile) : 0;
-        additionalBytes = Math.max(0, newSize - oldSize);
-    } else {
-        const newSize = Buffer.byteLength(jsonlData, 'utf8');
-        const oldSize = fs.existsSync(pathToFile) ? fs.statSync(pathToFile).size : 0;
-        additionalBytes = Math.max(0, newSize - oldSize);
-    }
-    const storageError = await ensureChatStorageCapacity(request, response, additionalBytes);
-    if (storageError) {
-        return storageError;
-    }
-    if (chatChunkingEnabled) {
-        await writeChunkedChat(pathToFile, null, chat_data);
-    } else {
-        writeFileAtomicSync(pathToFile, jsonlData, 'utf8');
-    }
     try {
-        const stats = fs.statSync(pathToFile);
-        const index = chatChunkingEnabled ? readChatIndex(pathToFile) : null;
-        const totalBytes = Number(index?.total_bytes);
-        const fileSizeInKB = Number.isFinite(totalBytes)
-            ? `${(totalBytes / 1024).toFixed(2)}kb`
-            : `${(stats.size / 1024).toFixed(2)}kb`;
-        const lastMessage = chat_data?.[chat_data.length - 1] || {};
-        setCachedChatInfo(pathToFile, stats, {
-            file_id: path.parse(pathToFile).name,
-            file_name: path.parse(pathToFile).base,
-            file_size: fileSizeInKB,
-            chat_items: Math.max(chat_data?.length || 0, 0),
-            mes: typeof lastMessage.mes === 'string' ? lastMessage.mes : '[The message is empty]',
-            last_mes: parseSendDate(lastMessage.send_date, stats.mtimeMs),
-        }, false);
+        if (!request.body || !request.body.id || !Array.isArray(request.body.chat)) {
+            return response.sendStatus(400);
+        }
+
+        const id = request.body.id;
+        const pathToFile = path.join(request.user.directories.groupChats, `${id}.jsonl`);
+        const split = splitGroupChatData(request.body.chat);
+        const header = split.header ?? {
+            chat_metadata: {},
+            user_name: 'unused',
+            character_name: 'unused',
+        };
+        const messages = split.messages;
+        updateChatHeaderMetadata(header, messages.length, messages[messages.length - 1]);
+        const jsonlData = [header, ...messages].map((item) => JSON.stringify(item)).join('\n');
+
+        if (!fs.existsSync(request.user.directories.groupChats)) {
+            fs.mkdirSync(request.user.directories.groupChats, { recursive: true });
+        }
+
+        let additionalBytes = 0;
+        if (chatChunkingEnabled) {
+            const messagesPayload = messages.map((item) => JSON.stringify(item)).join('\n');
+            const newSize = Buffer.byteLength(messagesPayload, 'utf8');
+            const oldSize = fs.existsSync(pathToFile) ? getChatTotalBytes(pathToFile) : 0;
+            additionalBytes = Math.max(0, newSize - oldSize);
+        } else {
+            const newSize = Buffer.byteLength(jsonlData, 'utf8');
+            const oldSize = fs.existsSync(pathToFile) ? fs.statSync(pathToFile).size : 0;
+            additionalBytes = Math.max(0, newSize - oldSize);
+        }
+        const storageError = await ensureChatStorageCapacity(request, response, additionalBytes);
+        if (storageError) {
+            return storageError;
+        }
+
+        if (checkIntegrity && !request.body.force) {
+            const integritySlug = header?.chat_metadata?.integrity;
+            if (integritySlug && !await checkGroupChatIntegrity(pathToFile, integritySlug)) {
+                console.error(`Group chat integrity check failed for ${pathToFile}`);
+                return response.status(400).send({ error: 'integrity' });
+            }
+        }
+
+        if (chatChunkingEnabled) {
+            await writeChunkedChat(pathToFile, header, messages);
+        } else {
+            writeFileAtomicSync(pathToFile, jsonlData, 'utf8');
+            writeChatHeader(pathToFile, header);
+        }
+        try {
+            const stats = fs.statSync(pathToFile);
+            const index = chatChunkingEnabled ? readChatIndex(pathToFile) : null;
+            const totalBytes = Number(index?.total_bytes);
+            const fileSizeInKB = Number.isFinite(totalBytes)
+                ? `${(totalBytes / 1024).toFixed(2)}kb`
+                : `${(stats.size / 1024).toFixed(2)}kb`;
+            const lastMessage = messages[messages.length - 1] || {};
+            setCachedChatInfo(pathToFile, stats, {
+                file_id: path.parse(pathToFile).name,
+                file_name: path.parse(pathToFile).base,
+                file_size: fileSizeInKB,
+                chat_items: messages.length,
+                mes: typeof lastMessage.mes === 'string' ? lastMessage.mes : '[The message is empty]',
+                last_mes: parseSendDate(lastMessage.send_date, stats.mtimeMs),
+                chat_metadata: header.chat_metadata,
+            }, true);
+        } catch (error) {
+            console.warn('Failed to update group chat cache after save:', error);
+        }
+        getBackupFunction(request.user.profile.handle)(request.user.directories.backups, String(id), jsonlData);
+        return response.send({ ok: true });
     } catch (error) {
-        console.warn('Failed to update group chat cache after save:', error);
+        console.error(error);
+        return response.status(500).send({ error: 'group_chat_save_failed' });
     }
-    getBackupFunction(request.user.profile.handle)(request.user.directories.backups, String(id), jsonlData);
-    return response.send({ ok: true });
 });
 
 router.post('/group/save-tail', async (request, response) => {
@@ -2330,13 +2426,16 @@ router.post('/group/save-tail', async (request, response) => {
         stopWriteTimer();
         performanceTimer.startPhase('serialize');
     };
-    if (!request.body || !request.body.id) {
+    if (!request.body || !request.body.id || !Array.isArray(request.body.messages)) {
         prepareResponse();
         return response.sendStatus(400);
     }
 
     const id = request.body.id;
     const filePath = path.join(request.user.directories.groupChats, `${id}.jsonl`);
+    const header = request.body.header && typeof request.body.header === 'object'
+        ? /** @type {any} */ (request.body.header)
+        : null;
     const messages = Array.isArray(request.body.messages) ? request.body.messages : [];
     let beforeOffset = Number.isFinite(request.body.before) ? request.body.before : Number(request.body.before ?? 0);
     if (!Number.isFinite(beforeOffset)) {
@@ -2348,6 +2447,7 @@ router.post('/group/save-tail', async (request, response) => {
     performanceTimer.setCounter('chunks', chatChunkingEnabled && messages.length ? Math.ceil(messages.length / getChatChunkSize()) : Number(messages.length > 0));
     let additionalBytes = 0;
     let payloadBytes = 0;
+    let embeddedHeaderCount = 0;
     if (chatChunkingEnabled) {
         const payload = messages.map((item) => JSON.stringify(item)).join('\n');
         const newSize = Buffer.byteLength(payload, 'utf8');
@@ -2359,7 +2459,13 @@ router.post('/group/save-tail', async (request, response) => {
             additionalBytes = Math.max(0, newSize);
         }
     } else if (!fs.existsSync(filePath) || beforeOffset <= 0) {
-        const jsonlData = messages.map((item) => JSON.stringify(item)).join('\n');
+        const headerToWrite = header ?? {
+            chat_metadata: {},
+            user_name: 'unused',
+            character_name: 'unused',
+        };
+        updateChatHeaderMetadata(headerToWrite, messages.length, messages[messages.length - 1]);
+        const jsonlData = [headerToWrite, ...messages].map((item) => JSON.stringify(item)).join('\n');
         const newSize = Buffer.byteLength(jsonlData, 'utf8');
         payloadBytes = newSize;
         const oldSize = fs.existsSync(filePath) ? fs.statSync(filePath).size : 0;
@@ -2380,16 +2486,34 @@ router.post('/group/save-tail', async (request, response) => {
 
     const storageError = await ensureChatStorageCapacity(request, response, additionalBytes);
     if (storageError) {
+        prepareResponse();
         return storageError;
     }
 
+    if (checkIntegrity && !request.body.force) {
+        const integritySlug = header?.chat_metadata?.integrity;
+        if (integritySlug && !await checkGroupChatIntegrity(filePath, integritySlug)) {
+            console.error(`Group chat integrity check failed for ${filePath}`);
+            prepareResponse();
+            return response.status(400).send({ error: 'integrity' });
+        }
+    }
+
     if (!fs.existsSync(request.user.directories.groupChats)) {
-        fs.mkdirSync(request.user.directories.groupChats);
+        fs.mkdirSync(request.user.directories.groupChats, { recursive: true });
     }
 
     if (chatChunkingEnabled) {
         if (!fs.existsSync(filePath) || beforeOffset <= 0) {
-            await writeChunkedChat(filePath, null, messages);
+            const headerToWrite = header ?? {
+                chat_metadata: {},
+                user_name: 'unused',
+                character_name: 'unused',
+            };
+            updateChatHeaderMetadata(headerToWrite, messages.length, messages[messages.length - 1]);
+            await writeChunkedChat(filePath, headerToWrite, messages);
+            const jsonlData = [headerToWrite, ...messages].map((item) => JSON.stringify(item)).join('\n');
+            getBackupFunction(request.user.profile.handle)(request.user.directories.backups, String(id), jsonlData);
             prepareResponse();
             return response.send({ ok: true });
         }
@@ -2398,6 +2522,8 @@ router.post('/group/save-tail', async (request, response) => {
             await convertLegacyChatToChunks(filePath);
         }
 
+        const headerInfo = await readGroupChatHeaderInfo(filePath);
+        embeddedHeaderCount = headerInfo.embeddedHeaderCount;
         const index = await ensureChatIndex(filePath);
         const totalMessages = Number(index?.message_count) || 0;
         const beforeIndex = Math.max(0, Math.min(beforeOffset, totalMessages));
@@ -2424,14 +2550,27 @@ router.post('/group/save-tail', async (request, response) => {
             const newMessages = messages.slice(existingTailCount);
             updatedIndex = await appendChunkedMessages(filePath, updatedIndex, newMessages);
         }
-        if (fs.existsSync(filePath)) {
+        if (header) {
+            const logicalMessageCount = Math.max(0, Number(updatedIndex?.message_count ?? messages.length) - headerInfo.embeddedHeaderCount);
+            updateChatHeaderMetadata(header, logicalMessageCount, messages[messages.length - 1]);
+            writeFileAtomicSync(filePath, JSON.stringify(header), 'utf8');
+            writeChatHeader(filePath, header);
+        } else if (fs.existsSync(filePath)) {
             const now = new Date();
             fs.utimesSync(filePath, now, now);
         }
     } else {
         if (!fs.existsSync(filePath) || beforeOffset <= 0) {
-            const jsonlData = messages.map((item) => JSON.stringify(item)).join('\n');
+            const headerToWrite = header ?? {
+                chat_metadata: {},
+                user_name: 'unused',
+                character_name: 'unused',
+            };
+            updateChatHeaderMetadata(headerToWrite, messages.length, messages[messages.length - 1]);
+            const jsonlData = [headerToWrite, ...messages].map((item) => JSON.stringify(item)).join('\n');
             writeFileAtomicSync(filePath, jsonlData, 'utf8');
+            writeChatHeader(filePath, headerToWrite);
+            getBackupFunction(request.user.profile.handle)(request.user.directories.backups, String(id), jsonlData);
             prepareResponse();
             return response.send({ ok: true });
         }
@@ -2445,6 +2584,10 @@ router.post('/group/save-tail', async (request, response) => {
             }
             fs.appendFileSync(filePath, payload, 'utf8');
         }
+
+        if (header) {
+            writeChatHeader(filePath, header);
+        }
     }
 
     try {
@@ -2455,7 +2598,9 @@ router.post('/group/save-tail', async (request, response) => {
             ? `${(totalBytes / 1024).toFixed(2)}kb`
             : `${(stats.size / 1024).toFixed(2)}kb`;
         const lastMessage = messages?.[messages.length - 1] || {};
-        const chatItems = Number.isFinite(index?.message_count) ? Number(index.message_count) : Math.max(messages?.length || 0, 0);
+        const chatItems = Number.isFinite(index?.message_count)
+            ? Math.max(0, Number(index.message_count) - embeddedHeaderCount)
+            : Math.max(messages?.length || 0, 0);
         setCachedChatInfo(filePath, stats, {
             file_id: path.parse(filePath).name,
             file_name: path.parse(filePath).base,
@@ -2463,7 +2608,8 @@ router.post('/group/save-tail', async (request, response) => {
             chat_items: chatItems,
             mes: typeof lastMessage.mes === 'string' ? lastMessage.mes : '[The message is empty]',
             last_mes: parseSendDate(lastMessage.send_date, stats.mtimeMs),
-        }, false);
+            chat_metadata: header?.chat_metadata,
+        }, Boolean(header?.chat_metadata));
     } catch (error) {
         console.warn('Failed to update group chat cache after tail save:', error);
     }

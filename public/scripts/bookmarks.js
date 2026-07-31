@@ -175,7 +175,9 @@ export async function createBranch(mesId) {
     let name = `Branch #${mesId} - ${humanizedDateTime()}`;
 
     if (selected_group) {
-        await saveGroupBookmarkChat(selected_group, name, newMetadata, mesId);
+        if (!await saveGroupBookmarkChat(selected_group, name, newMetadata, mesId)) {
+            return;
+        }
     } else {
         await saveChat({ chatName: name, withMetadata: newMetadata, mesId });
     }
@@ -231,7 +233,9 @@ export async function createNewBookmark(mesId, { forceName = null } = {}) {
     await saveItemizedPrompts(name);
 
     if (selected_group) {
-        await saveGroupBookmarkChat(selected_group, name, newMetadata, mesId);
+        if (!await saveGroupBookmarkChat(selected_group, name, newMetadata, mesId)) {
+            return null;
+        }
     } else {
         await saveChat({ chatName: name, withMetadata: newMetadata, mesId });
     }
