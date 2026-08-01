@@ -107,12 +107,6 @@ async function sendRecoveryPart2(handle, code, newPassword) {
     await performLogin(handle, newPassword);
 }
 
-// 存储当前登录尝试的用户信息（用于续费）
-let currentLoginAttempt = {
-    handle: '',
-    password: ''
-};
-
 // 登录中状态标志，防止重复登录
 let isLoggingIn = false;
 
@@ -140,10 +134,6 @@ async function performLogin(handle, password) {
         password: password || '',
     };
 
-    // 保存登录信息（用于续费）
-    currentLoginAttempt.handle = handle;
-    currentLoginAttempt.password = password || '';
-
     try {
         const response = await fetch('/api/users/login', {
             method: 'POST',
@@ -156,13 +146,6 @@ async function performLogin(handle, password) {
 
         if (!response.ok) {
             const errorData = await response.json();
-
-            // 如果账户过期，显示续费窗口
-            if (errorData.expired) {
-                showRenewalBlock(errorData.purchaseLink);
-                isLoggingIn = false;
-                return;
-            }
 
             let errorMessage = errorData.error || 'An error occurred';
             isLoggingIn = false;
@@ -361,21 +344,6 @@ function configureDiscreetLogin() {
     document.getElementById('shadow_popup').style.opacity = '';
     $('#cancelRecovery').on('click', onCancelRecoveryClick);
     $('#registerButton').on('click', onRegisterClick);
-    $('#cancelRenewal').on('click', onCancelRenewalClick);
-    $('#submitRenewal').on('click', onSubmitRenewalClick);
-
-    // 检查是否有账户过期提示
-    const accountExpired = sessionStorage.getItem('accountExpired');
-    const expiredPurchaseLink = sessionStorage.getItem('expiredPurchaseLink');
-    if (accountExpired === 'true') {
-        // 清除sessionStorage
-        sessionStorage.removeItem('accountExpired');
-        sessionStorage.removeItem('expiredMessage');
-        sessionStorage.removeItem('expiredPurchaseLink');
-
-        // 直接显示续费窗口
-        showRenewalBlock(expiredPurchaseLink);
-    }
 
     // 加载并显示登录页面公告
     await loadLoginAnnouncements();
@@ -387,105 +355,12 @@ function configureDiscreetLogin() {
 
             if ($('#passwordRecoveryBlock').is(':visible')) {
                 $('#sendRecovery').trigger('click');
-            } else if ($('#renewalBlock').is(':visible')) {
-                $('#submitRenewal').trigger('click');
             } else if ($('#passwordEntryBlock').is(':visible') || $('#handleEntryBlock').is(':visible')) {
                 $('#loginButton').trigger('click');
             }
         }
     });
 })();
-
-/**
- * 显示续费窗口
- * @param {string} purchaseLink 购买链接
- */
-function showRenewalBlock(purchaseLink) {
-    // 隐藏所有其他块
-    $('#userListBlock').hide();
-    $('#passwordRecoveryBlock').hide();
-    $('#errorMessage').hide();
-
-    // 显示续费块
-    $('#renewalBlock').show();
-
-    // 显示购买链接（如果有）
-    if (purchaseLink) {
-        $('#renewalPurchaseLink').show();
-        $('#renewalPurchaseLinkUrl').text(purchaseLink).attr('href', purchaseLink);
-    } else {
-        $('#renewalPurchaseLink').hide();
-    }
-
-    // 清空输入框
-    $('#renewalCode').val('');
-
-    // 焦点到输入框
-    setTimeout(() => {
-        $('#renewalCode').focus();
-    }, 200);
-}
-
-/**
- * 取消续费，返回登录界面
- */
-function onCancelRenewalClick() {
-    $('#renewalBlock').hide();
-    $('#userListBlock').show();
-    $('#errorMessage').hide();
-}
-
-/**
- * 提交续费请求
- */
-async function onSubmitRenewalClick() {
-    const renewalCode = String($('#renewalCode').val() || '').trim();
-
-    if (!renewalCode) {
-        displayError('请输入续费码');
-        return;
-    }
-
-    if (!currentLoginAttempt.handle || !currentLoginAttempt.password) {
-        displayError('登录信息丢失，请重新登录');
-        onCancelRenewalClick();
-        return;
-    }
-
-    try {
-        const response = await fetch('/api/users/renew-expired', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'X-CSRF-Token': csrfToken,
-            },
-            body: JSON.stringify({
-                handle: currentLoginAttempt.handle,
-                password: currentLoginAttempt.password,
-                invitationCode: renewalCode
-            }),
-        });
-
-        if (!response.ok) {
-            const errorData = await response.json();
-            displayError(errorData.error || '续费失败');
-            return;
-        }
-
-        const data = await response.json();
-
-        if (data.success) {
-            displayError('续费成功！正在登录...', true);
-            // 续费成功后自动登录
-            setTimeout(async () => {
-                await performLogin(currentLoginAttempt.handle, currentLoginAttempt.password);
-            }, 1000);
-        }
-    } catch (error) {
-        console.error('Error renewing account:', error);
-        displayError('续费失败：' + String(error));
-    }
-}
 
 /**
  * 显示错误或成功消息
@@ -732,7 +607,6 @@ function showOAuthInvitationPrompt() {
     // 隐藏其他块
     $('#userListBlock').hide();
     $('#passwordRecoveryBlock').hide();
-    $('#renewalBlock').hide();
 
     // 创建邀请码输入界面
     const invitationBlock = $(`

@@ -11,7 +11,8 @@ import {
     getUserDirectories,
     getAllUserHandles,
     ensurePublicDirectoriesExist,
-    toAvatarKey
+    makeUserAccountPermanent,
+    toAvatarKey,
 } from '../users.js';
 import {
     validateInvitationCode,
@@ -890,6 +891,7 @@ export async function handleOAuthLogin(request, response, provider, userData, in
                 oauthProvider: provider,  // 标记为第三方登录用户
                 oauthUserId: userId,
                 avatar: typeof avatar === 'string' ? avatar : null,
+                expiresAt: null,
             };
 
             await storage.setItem(toKey(selectedHandle), user);
@@ -917,9 +919,7 @@ export async function handleOAuthLogin(request, response, provider, userData, in
             if (!user.enabled) {
                 return response.redirect(`/login?error=${encodeURIComponent('该账号已被禁用')}`);
             }
-            if (user.expiresAt && user.expiresAt <= Date.now()) {
-                return response.redirect(`/login?error=${encodeURIComponent('该账号已过期，请联系管理员续期')}`);
-            }
+            await makeUserAccountPermanent(user);
 
             // 只更新已经由同一 OAuth 身份绑定的账号，不改变密码等原有数据。
             if (typeof avatar === 'string' && avatar) {
@@ -1024,21 +1024,12 @@ router.post('/verify-invitation', async (request, response) => {
             oauthProvider: pendingUser.provider,  // 标记为第三方登录用户
             oauthUserId: pendingUser.userId,
             avatar: pendingUser.avatar || null,
+            expiresAt: null,
         };
 
         if (USER_STORAGE_ENABLED) {
             const limitMiB = Number(USER_STORAGE_DEFAULT_LIMIT_MIB) || 0;
             user.storageLimitMiB = Math.max(0, limitMiB);
-        }
-
-        // 如果邀请码有用户过期时间，设置用户过期时间
-        let userExpiresAt = null;
-        if (validation.invitation && validation.invitation.durationDays) {
-            // 计算用户到期时间
-            const now = Date.now();
-            const expiresAt = now + (validation.invitation.durationDays * 24 * 60 * 60 * 1000);
-            userExpiresAt = expiresAt;
-            user.expiresAt = expiresAt;
         }
 
         await storage.setItem(toKey(pendingUser.handle), user);
@@ -1050,7 +1041,7 @@ router.post('/verify-invitation', async (request, response) => {
         }
 
         // 使用邀请码。若并发请求已先消费该邀请码，必须回滚刚创建的 OAuth 用户。
-        const invitationUse = await useInvitationCode(invitationCode, pendingUser.handle, userExpiresAt, { required: true });
+        const invitationUse = await useInvitationCode(invitationCode, pendingUser.handle, null, { required: true });
         if (!invitationUse.success) {
             await storage.removeItem(toKey(pendingUser.handle));
             if (pendingUser.avatar) {

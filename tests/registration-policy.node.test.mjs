@@ -28,6 +28,7 @@ let server;
 let systemMonitor;
 let handleOAuthLogin;
 let invitationCodes;
+let migrateUsersToPermanentAccounts;
 const sharedSession = {};
 
 async function clearStorage() {
@@ -98,23 +99,28 @@ before(async () => {
         expiredInterval: 0,
     });
 
-    const [usersPublic, oauth, invitationModule, monitorModule] = await Promise.all([
+    const [usersPublic, usersAdmin, oauth, invitationModule, monitorModule, usersModule] = await Promise.all([
         import('../src/endpoints/users-public.js'),
+        import('../src/endpoints/users-admin.js'),
         import('../src/endpoints/oauth.js'),
         import('../src/invitation-codes.js'),
         import('../src/system-monitor.js'),
+        import('../src/users.js'),
     ]);
     handleOAuthLogin = oauth.handleOAuthLogin;
     invitationCodes = invitationModule;
     systemMonitor = monitorModule.default;
+    migrateUsersToPermanentAccounts = usersModule.migrateUsersToPermanentAccounts;
 
     const app = express();
     app.use(express.json());
     app.use((request, _response, next) => {
         request.session = sharedSession;
+        request.user = { profile: { admin: true, handle: 'admin' } };
         next();
     });
     app.use('/api/users', usersPublic.router);
+    app.use('/api/users', usersAdmin.router);
     app.use('/api/oauth', oauth.router);
     server = await new Promise((resolve, reject) => {
         const listener = app.listen(0, '127.0.0.1', () => resolve(listener));
@@ -185,6 +191,25 @@ test('invitation storage stays enabled for any method-specific requirement', () 
     assert.equal(isInvitationCodeSystemEnabled(noRequirements, false), false);
     assert.equal(isInvitationCodeSystemEnabled(oneRequirement, false), true);
     assert.equal(isInvitationCodeSystemEnabled(noRequirements, true), true);
+});
+
+test('legacy time-limited accounts migrate to permanent access', async () => {
+    await storage.setItem('user:legacy-timed-user', {
+        handle: 'legacy-timed-user',
+        name: 'Legacy Timed User',
+        enabled: true,
+        expiresAt: Date.now() - 1000,
+    });
+    await storage.setItem('user:already-permanent-user', {
+        handle: 'already-permanent-user',
+        name: 'Already Permanent User',
+        enabled: true,
+        expiresAt: null,
+    });
+
+    assert.equal(await migrateUsersToPermanentAccounts(), 1);
+    assert.equal((await storage.getItem('user:legacy-timed-user')).expiresAt, null);
+    assert.equal((await storage.getItem('user:already-permanent-user')).expiresAt, null);
 });
 
 test('Discord guild membership uses joined_at and reports remaining days', () => {
@@ -405,10 +430,73 @@ test('disabled OAuth registration rejects new identities but still logs in bound
     assert.equal(loginSession.authenticated, true);
 });
 
+test('password and OAuth registrations always create permanent accounts', async () => {
+    process.env.SILLYTAVERN_REGISTRATION_PASSWORD_ENABLED = 'true';
+    process.env.SILLYTAVERN_REGISTRATION_PASSWORD_REQUIREINVITATIONCODE = 'true';
+
+    try {
+        const passwordInvitation = await invitationCodes.createInvitationCode('admin', '1day');
+        assert.equal(passwordInvitation.durationType, 'permanent');
+        assert.equal(passwordInvitation.durationDays, null);
+
+        const passwordResponse = await fetch(`${baseUrl}/api/users/register`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+                handle: 'permanent-password-user',
+                name: 'Permanent Password User',
+                password: 'password123',
+                confirmPassword: 'password123',
+                invitationCode: passwordInvitation.code,
+            }),
+        });
+        assert.equal(passwordResponse.status, 200);
+        assert.equal((await storage.getItem('user:permanent-password-user')).expiresAt, null);
+        assert.equal((await storage.getItem(`invitation:${passwordInvitation.code}`)).userExpiresAt, null);
+
+        const oauthResponse = createRedirectResponse();
+        await handleOAuthLogin(
+            { session: {} },
+            oauthResponse,
+            'linuxdo',
+            { id: 99, username: 'permanent-linuxdo-user' },
+            'register',
+        );
+        assert.equal(oauthResponse.location, '/');
+        assert.equal((await storage.getItem('user:permanent-linuxdo-user')).expiresAt, null);
+    } finally {
+        delete process.env.SILLYTAVERN_REGISTRATION_PASSWORD_ENABLED;
+        delete process.env.SILLYTAVERN_REGISTRATION_PASSWORD_REQUIREINVITATIONCODE;
+    }
+});
+
+test('admin avatar endpoint redirects OAuth HTTPS avatars', async () => {
+    const avatarUrl = 'https://cdn.discordapp.com/avatars/123/avatar.png';
+    await storage.setItem('user:oauth-avatar-user', {
+        handle: 'oauth-avatar-user',
+        name: 'OAuth Avatar User',
+        enabled: true,
+    });
+    await storage.setItem('avatar:oauth-avatar-user', avatarUrl);
+
+    const response = await fetch(`${baseUrl}/api/users/admin-avatar/oauth-avatar-user`, {
+        redirect: 'manual',
+    });
+    assert.equal(response.status, 302);
+    assert.equal(response.headers.get('location'), avatarUrl);
+});
+
 test('a method-specific invitation requirement works while the legacy global switch is off', async () => {
     assert.equal(invitationCodes.isInvitationCodesEnabled(), true);
     assert.deepEqual(await invitationCodes.validateInvitationCode('', { required: false }), { valid: true });
-    const invitation = await invitationCodes.createInvitationCode('admin', 'permanent');
+    const invitation = await invitationCodes.createInvitationCode('admin', '1day');
+    assert.equal(invitation.durationType, 'permanent');
+    assert.equal(invitation.durationDays, null);
+
+    // Simulate a code created by an older release with a finite account duration.
+    invitation.durationType = '1day';
+    invitation.durationDays = 1;
+    await storage.setItem(`invitation:${invitation.code}`, invitation);
 
     const oauthSession = {};
     const oauthResponse = createRedirectResponse();
@@ -437,6 +525,10 @@ test('a method-specific invitation requirement works while the legacy global swi
     });
     assert.equal(completionResponse.status, 200);
     assert.equal((await completionResponse.json()).handle, 'discord-new-user');
-    assert.equal((await storage.getItem('user:discord-new-user')).oauthProvider, 'discord');
-    assert.equal((await storage.getItem(`invitation:${invitation.code}`)).used, true);
+    const registeredUser = await storage.getItem('user:discord-new-user');
+    const usedInvitation = await storage.getItem(`invitation:${invitation.code}`);
+    assert.equal(registeredUser.oauthProvider, 'discord');
+    assert.equal(registeredUser.expiresAt, null);
+    assert.equal(usedInvitation.used, true);
+    assert.equal(usedInvitation.userExpiresAt, null);
 });

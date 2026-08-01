@@ -19,9 +19,9 @@ const invitationUseLocks = new Set();
  * @property {boolean} used - 是否已使用
  * @property {string | null} usedBy - 使用者用户句柄（如果已使用）
  * @property {number | null} usedAt - 使用时间戳（如果已使用）
- * @property {string} durationType - 有效期类型：'1day'|'1week'|'1month'|'1quarter'|'6months'|'1year'|'permanent'
- * @property {number | null} durationDays - 有效期天数（如果是永久则为null）
- * @property {number | null} userExpiresAt - 使用该邀请码的用户到期时间（使用后设置）
+ * @property {string} durationType - 新邀请码固定为 'permanent'；其他值仅用于读取旧数据
+ * @property {number | null} durationDays - 新邀请码固定为 null
+ * @property {number | null} userExpiresAt - 新账号固定为 null；非空值仅用于读取旧数据
  * @property {'admin' | 'user'} [issuanceSource] - 发放来源（旧数据缺失时视为 admin）
  */
 
@@ -43,27 +43,9 @@ function generateInvitationCode() {
 }
 
 /**
- * 根据有效期类型获取天数
- * @param {string} durationType 有效期类型
- * @returns {number | null} 天数（永久返回null）
- */
-function getDurationDays(durationType) {
-    const durationMap = {
-        '1day': 1,
-        '1week': 7,
-        '1month': 30,
-        '1quarter': 90,
-        '6months': 180,
-        '1year': 365,
-        'permanent': null,
-    };
-    return durationMap[durationType] ?? null;
-}
-
-/**
  * 创建邀请码
  * @param {string} createdBy 创建者用户句柄
- * @param {string} durationType 有效期类型：'1day'|'1week'|'1month'|'1quarter'|'6months'|'1year'|'permanent'
+ * @param {string} durationType 旧客户端兼容参数；新邀请码始终为永久类型
  * @param {{issuanceSource?: 'admin' | 'user'}} [options] 发放来源
  * @returns {Promise<InvitationCode>} 创建的邀请码对象
  */
@@ -74,7 +56,9 @@ export async function createInvitationCode(createdBy, durationType = 'permanent'
 
     const code = generateInvitationCode();
     const now = Date.now();
-    const durationDays = getDurationDays(durationType);
+    // Duration values from older clients are accepted for API compatibility,
+    // but invitation codes now always create permanent accounts.
+    const normalizedDurationType = durationType === 'permanent' ? durationType : 'permanent';
     const normalizedSource = issuanceSource === USER_INVITATION_SOURCE
         ? USER_INVITATION_SOURCE
         : ADMIN_INVITATION_SOURCE;
@@ -86,14 +70,14 @@ export async function createInvitationCode(createdBy, durationType = 'permanent'
         used: false,
         usedBy: null,
         usedAt: null,
-        durationType: durationType || 'permanent',
-        durationDays,
+        durationType: normalizedDurationType,
+        durationDays: null,
         userExpiresAt: null,  // 使用后会设置为用户的到期时间
         issuanceSource: normalizedSource,
     };
 
     await storage.setItem(toInvitationKey(code), invitation);
-    console.log(`Invitation code created: ${code} by ${createdBy}, duration: ${durationType}, source: ${normalizedSource}`);
+    console.log(`Invitation code created: ${code} by ${createdBy}, duration: permanent, source: ${normalizedSource}`);
 
     return invitation;
 }

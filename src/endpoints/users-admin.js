@@ -205,6 +205,18 @@ router.get('/admin-avatar/:handle', requireAdminMiddleware, async (request, resp
             return response.redirect(302, avatar);
         }
 
+        if (typeof avatar === 'string') {
+            try {
+                const avatarUrl = new URL(avatar);
+                if (avatarUrl.protocol === 'https:') {
+                    response.setHeader('Cache-Control', 'private, max-age=300');
+                    return response.redirect(302, avatarUrl.href);
+                }
+            } catch {
+                // Invalid stored avatar URLs use the client-side fallback.
+            }
+        }
+
         return response.sendStatus(404);
     } catch (error) {
         console.error('Admin avatar failed:', error);

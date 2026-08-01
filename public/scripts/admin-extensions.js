@@ -1018,12 +1018,6 @@ let codeSearchTerm = '';
 
 // 邀请码管理相关功能
 function bindInvitationCodeEvents() {
-    // 购买链接表单
-    bindPurchaseLinkForm();
-
-    // 加载购买链接
-    loadPurchaseLink();
-
     // 创建模式切换
     bindCreationModeToggle();
 
@@ -1089,75 +1083,6 @@ function bindInvitationCodeEvents() {
 
     // 批量操作按钮
     bindBatchOperationEvents();
-}
-
-// 绑定购买链接表单
-function bindPurchaseLinkForm() {
-    const purchaseLinkForm = document.querySelector('.purchaseLinkForm');
-    if (purchaseLinkForm) {
-        const newForm = purchaseLinkForm.cloneNode(true);
-        purchaseLinkForm.parentNode.replaceChild(newForm, purchaseLinkForm);
-
-        newForm.addEventListener('submit', async function(e) {
-            e.preventDefault();
-            await savePurchaseLink();
-        });
-    }
-}
-
-// 加载购买链接
-async function loadPurchaseLink() {
-    try {
-        const response = await fetch('/api/invitation-codes/purchase-link', {
-            method: 'GET',
-            headers: getRequestHeaders()
-        });
-
-        if (response.ok) {
-            const data = await response.json();
-            const input = document.getElementById('purchaseLinkInput');
-            if (input) {
-                input.value = data.purchaseLink || '';
-            }
-        }
-    } catch (error) {
-        console.error('Error loading purchase link:', error);
-    }
-}
-
-// 保存购买链接
-async function savePurchaseLink() {
-    const input = document.getElementById('purchaseLinkInput');
-    const statusDiv = document.querySelector('.purchaseLinkStatus');
-
-    if (!input || !statusDiv) return;
-
-    const purchaseLink = input.value.trim();
-
-    try {
-        const response = await fetch('/api/invitation-codes/purchase-link', {
-            method: 'POST',
-            headers: getRequestHeaders(),
-            body: JSON.stringify({ purchaseLink })
-        });
-
-        if (!response.ok) {
-            throw new Error('保存失败');
-        }
-
-        statusDiv.textContent = '✓ 购买链接已保存';
-        statusDiv.style.color = 'green';
-        statusDiv.style.display = 'block';
-
-        setTimeout(() => {
-            statusDiv.style.display = 'none';
-        }, 3000);
-    } catch (error) {
-        console.error('Error saving purchase link:', error);
-        statusDiv.textContent = '✗ 保存失败：' + error.message;
-        statusDiv.style.color = 'red';
-        statusDiv.style.display = 'block';
-    }
 }
 
 // 绑定创建模式切换
@@ -1524,7 +1449,7 @@ async function createInvitationCode() {
         return;
     }
 
-    const durationType = form.querySelector('select[name="durationType"]').value;
+    const durationType = form.querySelector('[name="durationType"]').value;
 
     const requestData = {
         durationType: durationType || 'permanent'
@@ -1615,7 +1540,7 @@ async function createBatchInvitationCodes() {
     }
 
     const count = parseInt(form.querySelector('input[name="batchCount"]').value);
-    const durationType = form.querySelector('select[name="batchDurationType"]').value;
+    const durationType = form.querySelector('[name="batchDurationType"]').value;
 
     if (!count || count < 1 || count > 100) {
         alert('数量必须在1-100之间');

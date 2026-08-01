@@ -472,24 +472,6 @@
                 </p>
             </div>
 
-            <!-- 购买链接设置 -->
-            <div class="purchaseLinkSection">
-                <h4>续费码购买链接设置</h4>
-                <p style="opacity: 0.7; font-size: 0.9em; margin-bottom: 10px;">
-                    设置用户可以购买续费码的链接地址，用户在账户过期或续费时会看到此链接。
-                </p>
-                <form class="flex-container flexGap10 alignItemsCenter purchaseLinkForm" action="javascript:void(0);">
-                    <div class="flex1">
-                        <input name="purchaseLink" class="text_pole wide100p" type="url" placeholder="例如：https://your-shop.com/buy-code" id="purchaseLinkInput">
-                    </div>
-                    <button type="submit" class="menu_button menu_button_icon">
-                        <i class="fa-fw fa-solid fa-save"></i>
-                        <span>保存购买链接</span>
-                    </button>
-                </form>
-                <div class="purchaseLinkStatus" style="margin-top: 5px; font-size: 0.9em; display: none;"></div>
-            </div>
-
             <!-- 创建邀请码 -->
             <div class="createInvitationSection" style="margin-top: 20px;">
                 <h4>创建邀请码</h4>
@@ -498,16 +480,9 @@
                 <div class="creation-mode" id="singleCreationMode">
                     <form class="flex-container flexGap10 alignItemsCenter createInvitationForm" action="javascript:void(0);">
                         <div class="flex-container flexNoGap">
-                            <span>有效期类型:</span>
-                            <select name="durationType" class="text_pole">
-                                <option value="1day">1天</option>
-                                <option value="1week">1周</option>
-                                <option value="1month" selected>1个月</option>
-                                <option value="1quarter">1季度</option>
-                                <option value="6months">半年</option>
-                                <option value="1year">1年</option>
-                                <option value="permanent">永久</option>
-                            </select>
+                            <span>账户类型:</span>
+                            <input type="hidden" name="durationType" value="permanent">
+                            <strong>永久账户</strong>
                         </div>
                         <button type="submit" class="menu_button menu_button_icon">
                             <i class="fa-fw fa-solid fa-plus"></i>
@@ -524,16 +499,9 @@
                             <input name="batchCount" class="text_pole" type="number" placeholder="批量创建数量" min="1" max="100" value="10">
                         </div>
                         <div class="flex-container flexNoGap">
-                            <span>有效期类型:</span>
-                            <select name="batchDurationType" class="text_pole">
-                                <option value="1day">1天</option>
-                                <option value="1week">1周</option>
-                                <option value="1month" selected>1个月</option>
-                                <option value="1quarter">1季度</option>
-                                <option value="6months">半年</option>
-                                <option value="1year">1年</option>
-                                <option value="permanent">永久</option>
-                            </select>
+                            <span>账户类型:</span>
+                            <input type="hidden" name="batchDurationType" value="permanent">
+                            <strong>永久账户</strong>
                         </div>
                         <button type="submit" class="menu_button menu_button_icon">
                             <i class="fa-fw fa-solid fa-layer-group"></i>

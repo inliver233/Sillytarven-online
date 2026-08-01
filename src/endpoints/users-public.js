@@ -5,8 +5,8 @@ import express from 'express';
 import { RateLimiterMemory, RateLimiterRes } from 'rate-limiter-flexible';
 import { getIpFromRequest, getRealIpFromHeader } from '../express-common.js';
 import { color, Cache, getConfigValue } from '../util.js';
-import { KEY_PREFIX, getUserAvatar, toKey, getPasswordHash, getPasswordSalt, getAllUserHandles, getUserDirectories, ensurePublicDirectoriesExist, normalizeHandle } from '../users.js';
-import { validateInvitationCode, useInvitationCode, getPurchaseLink } from '../invitation-codes.js';
+import { KEY_PREFIX, getUserAvatar, toKey, getPasswordHash, getPasswordSalt, getAllUserHandles, getUserDirectories, ensurePublicDirectoriesExist, makeUserAccountPermanent, normalizeHandle } from '../users.js';
+import { validateInvitationCode, useInvitationCode } from '../invitation-codes.js';
 import { isUserIssuedInvitation } from '../user-invitation-policy.js';
 import { checkForNewContent, CONTENT_TYPES } from './content-manager.js';
 import { applyDefaultTemplateToUser } from '../default-template.js';
@@ -136,15 +136,7 @@ router.post('/login', async (request, response) => {
             return response.status(403).json({ error: '用户已被禁用' });
         }
 
-        if (user.expiresAt && user.expiresAt < Date.now()) {
-            console.warn('Login failed: User', user.handle, 'subscription expired');
-            const purchaseLink = await getPurchaseLink();
-            return response.status(403).json({
-                error: '您的账户已到期，请续费后再使用',
-                expired: true,
-                purchaseLink: purchaseLink || '',
-            });
-        }
+        await makeUserAccountPermanent(user);
 
         if (user.oauthProvider && !user.password && !user.salt) {
             const providerNames = {
@@ -556,16 +548,8 @@ router.post('/register', async (request, response) => {
             const salt = getPasswordSalt();
             const hashedPassword = getPasswordHash(password, salt);
 
-        // 计算用户过期时间。复用前面的验证结果，避免注册过程中重复读取邀请码状态。
-        let userExpiresAt = null;
-        if (passwordRegistration.requireInvitationCode && invitationValidation.invitation) {
-            const invitation = invitationValidation.invitation;
-            if (invitation.durationDays !== null && invitation.durationDays > 0) {
-                userExpiresAt = Date.now() + (invitation.durationDays * 24 * 60 * 60 * 1000);
-            }
-            // durationDays为null表示永久，userExpiresAt保持null
-        }
-        // 如果邀请码功能关闭，则 userExpiresAt 保持为 null（永久账户）
+        // 邀请码只控制注册资格，所有新账号均为永久账户。
+        const userExpiresAt = null;
 
         const newUser = {
             handle: normalizedHandle,
@@ -707,13 +691,8 @@ router.post('/renew', async (request, response) => {
             return response.status(400).json({ error: '用户邀请码仅可用于新用户注册' });
         }
 
-        // 计算新的过期时间
-        let newExpiresAt = null;
-        if (invitation.durationDays !== null && invitation.durationDays > 0) {
-            const baseTime = user.expiresAt && user.expiresAt > Date.now() ? user.expiresAt : Date.now();
-            newExpiresAt = baseTime + (invitation.durationDays * 24 * 60 * 60 * 1000);
-        }
-        // durationDays为null表示永久，newExpiresAt保持null
+        // 兼容旧客户端：续费操作统一将账号升级为永久账户。
+        const newExpiresAt = null;
 
         user.expiresAt = newExpiresAt;
         await storage.setItem(toKey(userHandle), user);
@@ -721,11 +700,11 @@ router.post('/renew', async (request, response) => {
         // 标记邀请码为已使用，并记录用户到期时间
         await useInvitationCode(invitationCode, userHandle, newExpiresAt);
 
-        console.info('User renewed successfully:', userHandle, 'new expires:', newExpiresAt ? new Date(newExpiresAt).toLocaleString() : '永久');
+        console.info('User upgraded to permanent access:', userHandle);
         return response.json({
             success: true,
             expiresAt: newExpiresAt,
-            message: newExpiresAt ? '续费成功，到期时间：' + new Date(newExpiresAt).toLocaleString() : '续费成功，您的账户已升级为永久账户',
+            message: '您的账户已升级为永久账户',
         });
     } catch (error) {
         console.error('Renew failed:', error);
@@ -782,13 +761,8 @@ router.post('/renew-expired', async (request, response) => {
             return response.status(400).json({ error: '用户邀请码仅可用于新用户注册' });
         }
 
-        // 计算新的过期时间
-        let newExpiresAt = null;
-        if (invitation.durationDays !== null && invitation.durationDays > 0) {
-            const baseTime = user.expiresAt && user.expiresAt > Date.now() ? user.expiresAt : Date.now();
-            newExpiresAt = baseTime + (invitation.durationDays * 24 * 60 * 60 * 1000);
-        }
-        // durationDays为null表示永久，newExpiresAt保持null
+        // 兼容旧客户端：续费操作统一将账号升级为永久账户。
+        const newExpiresAt = null;
 
         user.expiresAt = newExpiresAt;
         await storage.setItem(toKey(normalizedHandle), user);
@@ -796,11 +770,11 @@ router.post('/renew-expired', async (request, response) => {
         // 标记邀请码为已使用，并记录用户到期时间
         await useInvitationCode(invitationCode, normalizedHandle, newExpiresAt);
 
-        console.info('User renewed successfully (expired account):', normalizedHandle, 'new expires:', newExpiresAt ? new Date(newExpiresAt).toLocaleString() : '永久');
+        console.info('User upgraded to permanent access:', normalizedHandle);
         return response.json({
             success: true,
             expiresAt: newExpiresAt,
-            message: newExpiresAt ? '续费成功，到期时间：' + new Date(newExpiresAt).toLocaleString() : '续费成功，您的账户已升级为永久账户',
+            message: '您的账户已升级为永久账户',
         });
     } catch (error) {
         console.error('Renew-expired failed:', error);

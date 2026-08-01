@@ -56,7 +56,7 @@ const STORAGE_KEYS = {
  * @property {string} salt - Salt used for hashing the password
  * @property {boolean} enabled - Whether the user is enabled
  * @property {boolean} admin - Whether the user is an admin (can manage other users)
- * @property {number | null} [expiresAt] - The timestamp when the user subscription expires (null for permanent users)
+ * @property {number | null} [expiresAt] - Legacy expiration timestamp; active records are normalized to null
  * @property {string} [email] - The user's email address (optional)
  * @property {string} [oauthProvider] - OAuth provider (github/discord/linuxdo) for third-party login users
  * @property {string} [oauthUserId] - OAuth user ID from the provider
@@ -75,7 +75,7 @@ const STORAGE_KEYS = {
  * @property {boolean} [enabled] - Whether the user is enabled
  * @property {number} [created] - The timestamp when the user was created
  * @property {number} [storageSize] - The total size of the user's data in bytes
- * @property {number | null} [expiresAt] - The timestamp when the user subscription expires (null for permanent users)
+ * @property {number | null} [expiresAt] - Legacy expiration timestamp; active records are normalized to null
  * @property {string} [email] - The user's email address (optional)
  * @property {string} [oauthProvider] - The OAuth provider used for authentication (github, discord, linuxdo)
  * @property {number} [storageLimitMiB] - User storage limit in MiB (when enabled)
@@ -560,6 +560,43 @@ export function toAvatarKey(handle) {
 }
 
 /**
+ * Makes one user account permanent.
+ * @param {User} user User record
+ * @returns {Promise<boolean>} Whether the record was updated
+ */
+export async function makeUserAccountPermanent(user) {
+    if (!user || user.expiresAt === null || user.expiresAt === undefined) {
+        return false;
+    }
+
+    user.expiresAt = null;
+    await storage.setItem(toKey(user.handle), user);
+    return true;
+}
+
+/**
+ * Converts every legacy time-limited account to permanent access.
+ * @returns {Promise<number>} Number of migrated accounts
+ */
+export async function migrateUsersToPermanentAccounts() {
+    const handles = await getAllUserHandles();
+    let migratedCount = 0;
+
+    for (const handle of handles) {
+        const user = await storage.getItem(toKey(handle));
+        if (await makeUserAccountPermanent(user)) {
+            migratedCount++;
+        }
+    }
+
+    if (migratedCount > 0) {
+        console.info(`Migrated ${migratedCount} user account(s) to permanent access.`);
+    }
+
+    return migratedCount;
+}
+
+/**
  * Initializes the user storage.
  * @param {string} dataRoot The root directory for user data
  * @returns {Promise<void>}
@@ -578,6 +615,8 @@ export async function initUserStorage(dataRoot) {
     if (keys.length === 0) {
         await storage.setItem(toKey(DEFAULT_USER.handle), DEFAULT_USER);
     }
+
+    await migrateUsersToPermanentAccounts();
 }
 
 /**
@@ -962,35 +1001,7 @@ export async function setUserDataMiddleware(request, response, next) {
         return next();
     }
 
-    // 检查用户是否过期
-    if (user.expiresAt && user.expiresAt < Date.now()) {
-        console.log('User account expired:', handle);
-
-        // 获取购买链接
-        let purchaseLink = '';
-        try {
-            const { getPurchaseLink } = await import('./invitation-codes.js');
-            purchaseLink = await getPurchaseLink();
-        } catch (error) {
-            console.error('Error getting purchase link for expired user:', error);
-        }
-
-        // 清除整个会话，避免残留的 userId 继续把首页导向应用页。
-        request.session = null;
-
-        // 返回特定的过期错误
-        const errorResponse = {
-            error: '用户账户已过期',
-            expired: true,
-            message: '您的账户已过期，请重新登录并续费',
-        };
-
-        if (purchaseLink) {
-            errorResponse.purchaseLink = purchaseLink;
-        }
-
-        return response.status(401).json(errorResponse);
-    }
+    await makeUserAccountPermanent(user);
 
     const storageLimitsEnabled = getConfigValue('userStorage.enabled', false, 'boolean');
     if (storageLimitsEnabled && !Number.isFinite(user.storageLimitMiB)) {
