@@ -22,12 +22,14 @@ function createDisposer(links) {
  * @param {Record<string, object>} manifests Extension manifests keyed by extension name
  * @param {object} [options] Preload options
  * @param {string[]|Set<string>} [options.excludedExtensions] Extensions that must not be preloaded
+ * @param {string[]|Set<string>} [options.eligibleExtensions] Extensions that passed activation eligibility
  * @param {number} [options.maxPreloads] Maximum number of resource hints to add
  * @param {Document} [options.documentRef] Document used to create resource hints
  * @returns {{count: number, dispose: () => void}} Preload count and idempotent cleanup callback
  */
 export function preloadExtensionResources(manifests, {
     excludedExtensions = [],
+    eligibleExtensions = null,
     maxPreloads = DEFAULT_MAX_PRELOADS,
     documentRef = globalThis.document,
 } = {}) {
@@ -36,6 +38,9 @@ export function preloadExtensionResources(manifests, {
     }
     if (!Array.isArray(excludedExtensions) && !(excludedExtensions instanceof Set)) {
         throw new TypeError('Excluded extensions must be an array or Set.');
+    }
+    if (eligibleExtensions !== null && !Array.isArray(eligibleExtensions) && !(eligibleExtensions instanceof Set)) {
+        throw new TypeError('Eligible extensions must be an array or Set.');
     }
 
     const requestedLimit = Number(maxPreloads);
@@ -47,16 +52,25 @@ export function preloadExtensionResources(manifests, {
     }
 
     const excluded = new Set(excludedExtensions);
+    const eligible = eligibleExtensions === null ? null : new Set(eligibleExtensions);
     const limit = Math.floor(requestedLimit);
     const links = [];
     const dispose = createDisposer(links);
 
     try {
-        for (const [name, manifest] of Object.entries(manifests)) {
+        const entries = Object.entries(manifests).sort(([leftName, left], [rightName, right]) => {
+            const order = parseInt(left?.loading_order) - parseInt(right?.loading_order);
+            return order || String(left?.display_name || leftName).localeCompare(String(right?.display_name || rightName));
+        });
+        for (const [name, manifest] of entries) {
             if (links.length >= limit) {
                 break;
             }
-            if (excluded.has(name) || !manifest || typeof manifest !== 'object' || Array.isArray(manifest)) {
+            if (excluded.has(name)
+                || (eligible && !eligible.has(name))
+                || !manifest
+                || typeof manifest !== 'object'
+                || Array.isArray(manifest)) {
                 continue;
             }
 

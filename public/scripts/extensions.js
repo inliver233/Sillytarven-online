@@ -4,14 +4,16 @@ import { eventSource, event_types, saveSettings, saveSettingsDebounced, getReque
 import { showLoader } from './loader.js';
 import { POPUP_RESULT, POPUP_TYPE, Popup, callGenericPopup } from './popup.js';
 import { renderTemplate, renderTemplateAsync } from './templates.js';
-import { delay, isSubsetOf, sanitizeSelector, setValueByPath, versionCompare } from './utils.js';
+import { delay, sanitizeSelector, setValueByPath } from './utils.js';
 import { getContext } from './st-context.js';
 import { isAdmin } from './user.js';
 import { addLocaleData, getCurrentLocale, t } from './i18n.js';
 import { debounce_timeout } from './constants.js';
 import { accountStorage } from './util/AccountStorage.js';
 import { preloadExtensionResources } from './util/extension-resource-preload.js';
+import { getExtensionActivationPlan } from './util/extension-eligibility.js';
 import { SimpleMutex } from './util/SimpleMutex.js';
+import { power_user } from './power-user.js';
 
 export {
     getContext,
@@ -66,7 +68,6 @@ const defaultUrl = 'http://localhost:5100';
 let requiresReload = false;
 let stateChanged = false;
 let saveMetadataTimeout = null;
-let extensionResourcePreloadEnabled = false;
 
 export function cancelDebouncedMetadataSave() {
     if (saveMetadataTimeout) {
@@ -372,64 +373,44 @@ async function getManifests(names) {
 async function activateExtensions() {
     extensionLoadErrors.clear();
     const clientVersion = CLIENT_VERSION.split(':')[1];
-    const extensions = Object.entries(manifests).sort((a, b) => sortManifestsByOrder(a[1], b[1]));
-    const extensionNames = extensions.map(x => x[0]);
+    const extensions = getExtensionActivationPlan(manifests, {
+        clientVersion,
+        modules,
+        disabledExtensions: extension_settings.disabledExtensions,
+        activeExtensions,
+    });
     const promises = [];
 
-    for (let entry of extensions) {
-        const name = entry[0];
-        const manifest = entry[1];
-        const extrasRequirements = manifest.requires;
-        const extensionDependencies = manifest.dependencies;
-        const minClientVersion = manifest.minimum_client_version;
-        const displayName = manifest.display_name || name;
+    for (const entry of extensions) {
+        const {
+            name,
+            manifest,
+            displayName,
+            minClientVersion,
+            hasInvalidRequirements,
+            hasInvalidDependencies,
+            missingModules,
+            missingDependencies,
+            disabledDependencies,
+            meetsClientMinimumVersion,
+            meetsModuleRequirements,
+            meetsExtensionDeps,
+            isDisabled,
+            isActive,
+            eligible,
+        } = entry;
 
-        if (activeExtensions.has(name)) {
+        if (isActive) {
             continue;
         }
-        // Client version requirement: pass if 'minimum_client_version' is undefined or null.
-        let meetsClientMinimumVersion = true;
-        if (minClientVersion !== undefined) {
-            meetsClientMinimumVersion = versionCompare(clientVersion, minClientVersion);
+        if (hasInvalidRequirements) {
+            console.warn(`Extension ${name}: manifest.json 'requires' field is not an array. Loading allowed, but any intended requirements were not verified to exist.`);
+        }
+        if (hasInvalidDependencies) {
+            console.warn(`Extension ${name}: manifest.json 'dependencies' field is not an array. Loading allowed, but any intended requirements were not verified to exist.`);
         }
 
-        // Module requirements: pass if 'requires' is undefined, null, or not an array; check subset if it's an array
-        let meetsModuleRequirements = true;
-        let missingModules = [];
-        if (extrasRequirements !== undefined) {
-            if (Array.isArray(extrasRequirements)) {
-                meetsModuleRequirements = isSubsetOf(modules, extrasRequirements);
-                missingModules = extrasRequirements.filter(req => !modules.includes(req));
-            } else {
-                console.warn(`Extension ${name}: manifest.json 'requires' field is not an array. Loading allowed, but any intended requirements were not verified to exist.`);
-            }
-        }
-
-        // Extension dependencies: pass if 'dependencies' is undefined or not an array; check subset and disabled status if it's an array
-        let meetsExtensionDeps = true;
-        let missingDependencies = [];
-        let disabledDependencies = [];
-        if (extensionDependencies !== undefined) {
-            if (Array.isArray(extensionDependencies)) {
-                // Check if all dependencies exist
-                meetsExtensionDeps = isSubsetOf(extensionNames, extensionDependencies);
-                missingDependencies = extensionDependencies.filter(dep => !extensionNames.includes(dep));
-                // Check for disabled dependencies
-                if (meetsExtensionDeps) {
-                    disabledDependencies = extensionDependencies.filter(dep => extension_settings.disabledExtensions.includes(dep));
-                    if (disabledDependencies.length > 0) {
-                        // Fail if any dependencies are disabled
-                        meetsExtensionDeps = false;
-                    }
-                }
-            } else {
-                console.warn(`Extension ${name}: manifest.json 'dependencies' field is not an array. Loading allowed, but any intended requirements were not verified to exist.`);
-            }
-        }
-
-        const isDisabled = extension_settings.disabledExtensions.includes(name);
-
-        if (meetsModuleRequirements && meetsExtensionDeps && meetsClientMinimumVersion && !isDisabled) {
+        if (eligible) {
             try {
                 console.debug('Activating extension', name);
                 const promise = addExtensionLocale(name, manifest).finally(() =>
@@ -1296,10 +1277,6 @@ export async function loadExtensionSettings(settings, versionChanged, enableAuto
     if (settings.extension_settings) {
         Object.assign(extension_settings, settings.extension_settings);
     }
-    if (Object.hasOwn(settings.power_user ?? {}, 'extension_resource_preload')) {
-        extensionResourcePreloadEnabled = settings.power_user.extension_resource_preload === true;
-    }
-
     $('#extensions_url').val(extension_settings.apiUrl);
     $('#extensions_api_key').val(extension_settings.apiKey);
     $('#extensions_autoconnect').prop('checked', extension_settings.autoConnect);
@@ -1317,13 +1294,17 @@ export async function loadExtensionSettings(settings, versionChanged, enableAuto
     }
 
     let resourcePreloads = null;
-    if (extensionResourcePreloadEnabled) {
+    if (power_user.extension_resource_preload === true) {
         try {
+            const clientVersion = CLIENT_VERSION.split(':')[1];
+            const eligibleExtensions = new Set(getExtensionActivationPlan(manifests, {
+                clientVersion,
+                modules,
+                disabledExtensions: extension_settings.disabledExtensions,
+                activeExtensions,
+            }).filter(entry => entry.eligible).map(entry => entry.name));
             resourcePreloads = preloadExtensionResources(manifests, {
-                excludedExtensions: new Set([
-                    ...extension_settings.disabledExtensions,
-                    ...activeExtensions,
-                ]),
+                eligibleExtensions,
             });
         } catch (error) {
             console.warn('Could not preload extension resources. Continuing with normal activation.', error);
