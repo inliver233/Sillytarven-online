@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html>
+<html lang="zh-CN">
 
 <head>
     <base href="/">
@@ -8,227 +8,47 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="mobile-web-app-capable" content="yes">
     <meta name="darkreader-lock">
-    <meta name="robots" content="noindex, nofollow" />
-    <style>
-        /* Put critical CSS here. The rest should go in stylesheets. */
-        body {
-            background-color: rgb(36, 36, 37);
-            font-family: 'Noto Sans', sans-serif;
-            color: #ffffff;
-            margin: 0;
-            padding: 0;
-        }
-        .welcome-container {
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 20px;
-        }
-        .hero-section {
-            text-align: center;
-            padding: 60px 20px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            border-radius: 15px;
-            margin-bottom: 40px;
-        }
-        .hero-section h1 {
-            font-size: 3rem;
-            margin-bottom: 20px;
-            color: #ffffff;
-        }
-        .hero-section p {
-            font-size: 1.2rem;
-            margin-bottom: 30px;
-            opacity: 0.9;
-        }
-        .cta-buttons {
-            display: flex;
-            gap: 20px;
-            justify-content: center;
-            flex-wrap: wrap;
-        }
-        .cta-button {
-            padding: 15px 30px;
-            border: none;
-            border-radius: 8px;
-            font-size: 1.1rem;
-            cursor: pointer;
-            text-decoration: none;
-            display: inline-block;
-            transition: all 0.3s ease;
-        }
-        .cta-primary {
-            background-color: #4CAF50;
-            color: white;
-        }
-        .cta-primary:hover {
-            background-color: #45a049;
-            transform: translateY(-2px);
-        }
-        .cta-secondary {
-            background-color: transparent;
-            color: white;
-            border: 2px solid white;
-        }
-        .cta-secondary:hover {
-            background-color: white;
-            color: #667eea;
-            transform: translateY(-2px);
-        }
-        .cta-tertiary {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-        }
-        .cta-tertiary:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
-        }
-        .features-section {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-            gap: 30px;
-            margin-bottom: 40px;
-        }
-        .feature-card {
-            background: rgba(255, 255, 255, 0.1);
-            padding: 30px;
-            border-radius: 10px;
-            backdrop-filter: blur(10px);
-            border: 1px solid rgba(255, 255, 255, 0.2);
-        }
-        .feature-card h3 {
-            color: #4CAF50;
-            margin-bottom: 15px;
-            font-size: 1.5rem;
-        }
-        .feature-card p {
-            line-height: 1.6;
-            opacity: 0.9;
-        }
-        .footer {
-            text-align: center;
-            padding: 40px 20px;
-            border-top: 1px solid rgba(255, 255, 255, 0.1);
-            margin-top: 40px;
-        }
-        .footer p {
-            opacity: 0.7;
-        }
-        /* 移动端优化样式 */
-        body.welcome-page {
-            overflow-y: auto;
-            -webkit-overflow-scrolling: touch;
-            position: static;
-            touch-action: pan-y;
-        }
-
-        @media (max-width: 768px) {
-            .hero-section {
-                padding: 40px 15px;
-            }
-            .hero-section h1 {
-                font-size: 2rem;
-            }
-            .hero-section p {
-                font-size: 1.1rem;
-            }
-            .cta-buttons {
-                flex-direction: column;
-                align-items: center;
-                gap: 15px;
-            }
-            .cta-button {
-                width: 100%;
-                max-width: 300px;
-                padding: 12px 25px;
-            }
-            .welcome-container {
-                padding: 15px;
-            }
-            .features-section {
-                grid-template-columns: 1fr;
-                gap: 20px;
-            }
-            .feature-card {
-                padding: 20px;
-            }
-        }
-
-        @media (max-width: 480px) {
-            .hero-section h1 {
-                font-size: 1.8rem;
-            }
-            .hero-section p {
-                font-size: 1rem;
-            }
-            .hero-section {
-                padding: 30px 10px;
-            }
-            .welcome-container {
-                padding: 10px;
-            }
-        }
-    </style>
-    <link rel="preload" as="style" href="style.css">
-    <link rel="apple-touch-icon" sizes="57x57" href="img/apple-icon-57x57.png" />
-    <link rel="apple-touch-icon" sizes="72x72" href="img/apple-icon-72x72.png" />
-    <link rel="apple-touch-icon" sizes="114x114" href="img/apple-icon-114x114.png" />
-    <link rel="apple-touch-icon" sizes="144x144" href="img/apple-icon-144x144.png" />
+    <meta name="robots" content="noindex, nofollow">
+    <meta name="theme-color" content="#090d16">
+    <link rel="apple-touch-icon" sizes="57x57" href="img/apple-icon-57x57.png">
+    <link rel="apple-touch-icon" sizes="72x72" href="img/apple-icon-72x72.png">
+    <link rel="apple-touch-icon" sizes="114x114" href="img/apple-icon-114x114.png">
+    <link rel="apple-touch-icon" sizes="144x144" href="img/apple-icon-144x144.png">
     <link rel="icon" href="favicon.ico" type="image/x-icon">
-    <link rel="stylesheet" type="text/css" href="style.css">
-    <link rel="stylesheet" type="text/css" href="css/st-tailwind.css">
     <link rel="manifest" crossorigin="use-credentials" href="manifest.json">
     <link href="webfonts/NotoSans/stylesheet.css" rel="stylesheet">
-    <link href="webfonts/NotoSansMono/stylesheet.css" rel="stylesheet">
     <link href="css/fontawesome.min.css" rel="stylesheet">
     <link href="css/solid.min.css" rel="stylesheet">
+    <link href="css/loader.css" rel="stylesheet">
+    <link href="css/welcome-page.css" rel="stylesheet">
     <title>SillyTavern - 欢迎</title>
 </head>
 
 <body class="welcome-page">
-    <div class="welcome-container">
-        <div class="hero-section">
-            <h1>欢迎来到 SillyTavern</h1>
-            <p>强大的AI聊天前端，支持多种大语言模型，为您提供最佳的AI对话体验</p>
-            <div class="cta-buttons">
-                <a href="/login" class="cta-button cta-primary">立即登录</a>
-                <a href="/register" class="cta-button cta-secondary" id="registrationLink">注册账户</a>
-                <a href="/public-characters" class="cta-button cta-tertiary" id="publicCharactersLink">浏览角色卡</a>
-                <a href="/forum" class="cta-button cta-tertiary" id="forumLink">交流平台</a>
-            </div>
-        </div>
+    <main class="welcome-screen" aria-label="SillyTavern 账户入口">
+        <div class="st-loader-aura st-aura-1"></div>
+        <div class="st-loader-aura st-aura-2"></div>
+        <div class="st-loader-aura st-aura-3"></div>
 
-        <div class="features-section">
-            <div class="feature-card">
-                <h3><i class="fa-solid fa-robot"></i> 多模型支持</h3>
-                <p>支持KoboldAI、OpenAI、Claude、NovelAI等多种大语言模型，让您可以根据需要选择最适合的AI助手。</p>
+        <section class="st-loader-card welcome-card">
+            <div class="st-loader-logo-wrapper">
+                <div class="st-loader-logo-glow"></div>
+                <img src="img/logo.png" alt="SillyTavern" class="st-loader-logo" onerror="this.style.display='none'; document.getElementById('welcomeFallbackIcon').style.display='block';">
+                <i id="welcomeFallbackIcon" class="fa-solid fa-wine-glass-empty" aria-hidden="true"></i>
             </div>
-            <div class="feature-card">
-                <h3><i class="fa-solid fa-image"></i> 图像生成</h3>
-                <p>集成Automatic1111和ComfyUI API，支持AI图像生成，为您的对话增添视觉元素。</p>
-            </div>
-            <div class="feature-card">
-                <h3><i class="fa-solid fa-volume-up"></i> 语音合成</h3>
-                <p>内置TTS功能，支持多种语音模型，让AI角色拥有真实的声音。</p>
-            </div>
-            <div class="feature-card">
-                <h3><i class="fa-solid fa-book"></i> 世界信息</h3>
-                <p>强大的世界信息管理系统，帮助AI记住重要的背景信息和角色设定。</p>
-            </div>
-            <div class="feature-card">
-                <h3><i class="fa-solid fa-palette"></i> 自定义界面</h3>
-                <p>丰富的主题和界面定制选项，让您打造个性化的使用体验。</p>
-            </div>
-            <div class="feature-card">
-                <h3><i class="fa-solid fa-plug"></i> 扩展系统</h3>
-                <p>支持第三方扩展，无限扩展功能，满足各种高级需求。</p>
-            </div>
-        </div>
 
-        <div class="footer">
-            <p>SillyTavern 是一个开源项目，由热情的AI爱好者社区开发维护</p>
-            <p>基于 <a href="https://github.com/SillyTavern/SillyTavern" target="_blank" style="color: #4CAF50;">GitHub</a> 开源</p>
-        </div>
-    </div>
+            <nav class="welcome-actions" aria-label="账户操作">
+                <a href="/login" class="welcome-action welcome-action-primary">
+                    <i class="fa-solid fa-right-to-bracket" aria-hidden="true"></i>
+                    <span>登录</span>
+                </a>
+                <a href="/register" class="welcome-action welcome-action-secondary" id="registrationLink">
+                    <i class="fa-solid fa-user-plus" aria-hidden="true"></i>
+                    <span>注册</span>
+                </a>
+            </nav>
+        </section>
+    </main>
 
     <script src="scripts/public-pages-config.js"></script>
 </body>

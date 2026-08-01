@@ -1,0 +1,387 @@
+:root {
+    color-scheme: dark;
+}
+
+html,
+body.login {
+    min-height: 100%;
+    margin: 0;
+    background: #090d16;
+}
+
+body.login {
+    color: #f8fafc;
+    font-family: 'Noto Sans', sans-serif;
+}
+
+.auth-background {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    overflow: hidden;
+    background: #090d16;
+    pointer-events: none;
+}
+
+body.login #shadow_popup {
+    position: relative;
+    z-index: 1;
+    top: auto;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    min-height: 100vh;
+    min-height: 100dvh;
+    height: auto;
+    padding: 32px 20px;
+    overflow: auto;
+    box-sizing: border-box;
+    background: transparent;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+}
+
+body.login #dialogue_popup {
+    position: relative;
+    top: auto;
+    left: auto;
+    right: auto;
+    transform: none;
+    margin: auto;
+    max-height: none;
+    overflow: visible;
+}
+
+body.login #dialogue_popup_holder,
+body.login #dialogue_popup_text {
+    width: 100%;
+    height: auto;
+    overflow: visible;
+    padding: 0;
+}
+
+body.login .auth-login-card {
+    width: 100%;
+    max-width: 520px;
+    padding: 40px 34px 34px;
+    background: rgba(15, 23, 42, 0.55);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-top-color: rgba(255, 255, 255, 0.22);
+    box-shadow:
+        0 24px 60px -12px rgba(0, 0, 0, 0.6),
+        0 0 40px rgba(59, 130, 246, 0.15),
+        inset 0 1px 1px rgba(255, 255, 255, 0.18);
+    backdrop-filter: blur(28px) saturate(180%);
+    -webkit-backdrop-filter: blur(28px) saturate(180%);
+}
+
+body.login #userSelectBlock {
+    width: 100%;
+    max-width: none;
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+.auth-header,
+.register-header {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    width: 100%;
+    margin: 0 0 24px;
+}
+
+.auth-header .st-loader-logo-wrapper,
+.register-header .st-loader-logo-wrapper {
+    margin: 0 0 18px;
+}
+
+.auth-fallback-icon {
+    position: relative;
+    z-index: 1;
+    display: none;
+    color: #3b82f6;
+    font-size: 2.2rem;
+}
+
+.auth-title,
+.register-title {
+    margin: 0;
+    color: #f8fafc;
+    font-size: 1.2rem;
+    font-weight: 600;
+    letter-spacing: 0;
+    -webkit-text-fill-color: currentColor;
+}
+
+.register-subtitle {
+    margin: 8px 0 0;
+    color: #94a3b8;
+    font-size: 0.88rem;
+}
+
+body.login #normalLoginPrompt,
+body.login #discreetLoginPrompt {
+    margin: 0 0 18px;
+    color: #cbd5e1;
+    font-size: 0.9rem;
+    font-weight: 500;
+}
+
+body.login #userList {
+    gap: 10px;
+}
+
+body.login .userSelect {
+    min-width: 120px;
+    padding: 10px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.05);
+}
+
+body.login .userSelect:hover {
+    border-color: rgba(56, 189, 248, 0.45);
+    background: rgba(255, 255, 255, 0.09);
+}
+
+body.login #handleEntryBlock,
+body.login #passwordEntryBlock,
+body.login #passwordRecoveryBlock {
+    width: 100%;
+    margin: 0;
+}
+
+body.login .text_pole,
+.register-page .form-input {
+    width: 100%;
+    min-height: 44px;
+    padding: 10px 13px;
+    border: 1px solid rgba(255, 255, 255, 0.13);
+    border-radius: 8px;
+    box-sizing: border-box;
+    background: rgba(255, 255, 255, 0.06);
+    color: #f8fafc;
+    font: inherit;
+    transition: border-color 160ms ease, background-color 160ms ease, box-shadow 160ms ease;
+}
+
+body.login .text_pole::placeholder,
+.register-page .form-input::placeholder {
+    color: #64748b;
+}
+
+body.login .text_pole:focus,
+.register-page .form-input:focus {
+    border-color: #38bdf8;
+    outline: none;
+    background: rgba(255, 255, 255, 0.09);
+    box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.14);
+}
+
+body.login #recoverPassword {
+    align-self: flex-end;
+    margin: 8px 0 16px;
+    color: #7dd3fc;
+    font-size: 0.82rem;
+}
+
+body.login .menu_button,
+.register-page .btn,
+.register-page .btn-send-code {
+    min-height: 44px;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    box-sizing: border-box;
+    font-weight: 600;
+    transition: border-color 160ms ease, background-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+}
+
+body.login #loginButton,
+body.login #sendRecovery,
+body.login #submitRenewal,
+.register-page .btn-primary {
+    background: #2563eb;
+    color: #f8fafc;
+    box-shadow: 0 8px 24px rgba(37, 99, 235, 0.28);
+}
+
+body.login:not(.register-page) #registerButton,
+body.login #cancelRecovery,
+body.login #cancelRenewal,
+.register-page .btn-secondary {
+    border-color: rgba(255, 255, 255, 0.18);
+    background: rgba(255, 255, 255, 0.08);
+    color: #f8fafc;
+}
+
+body.login .menu_button:not(.disabled):not([disabled]):hover,
+.register-page .btn:hover,
+.register-page .btn-send-code:hover {
+    transform: translateY(-1px);
+    filter: none;
+}
+
+body.login #loginButton:hover,
+body.login #sendRecovery:hover,
+body.login #submitRenewal:hover,
+.register-page .btn-primary:hover {
+    background: #3b82f6;
+    box-shadow: 0 10px 28px rgba(59, 130, 246, 0.35);
+}
+
+.oauth-divider {
+    margin: 22px 0 16px;
+}
+
+.oauth-divider span {
+    color: #94a3b8;
+}
+
+.oauth-button {
+    min-height: 44px;
+    border-color: rgba(255, 255, 255, 0.14);
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.06);
+    box-shadow: none;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    transition: border-color 160ms ease, background-color 160ms ease, transform 160ms ease;
+}
+
+.oauth-button:hover {
+    transform: translateY(-1px);
+    border-color: rgba(255, 255, 255, 0.28);
+    background: rgba(255, 255, 255, 0.11);
+    box-shadow: none;
+}
+
+.login-announcement-item {
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.05);
+}
+
+body.register-page #shadow_popup {
+    align-items: flex-start;
+}
+
+body.register-page #dialogue_popup {
+    width: 100%;
+}
+
+.register-container {
+    min-height: 0;
+    padding: 0;
+}
+
+.register-card.auth-register-card {
+    width: 100%;
+    max-width: 560px;
+    padding: 40px 34px 34px;
+    overflow: visible;
+}
+
+.register-card.auth-register-card::before {
+    content: none;
+}
+
+.register-header {
+    position: relative;
+    z-index: 1;
+}
+
+.register-logo {
+    animation: none;
+}
+
+.register-form,
+.password-registration-fields {
+    gap: 18px;
+}
+
+.form-section {
+    padding: 0 0 18px;
+    border: 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 0;
+    background: transparent;
+}
+
+.form-section:hover {
+    border-color: rgba(255, 255, 255, 0.1);
+    background: transparent;
+}
+
+.form-section-title {
+    margin-bottom: 14px;
+    padding: 0;
+    border: 0;
+    color: #e2e8f0;
+    font-size: 0.95rem;
+}
+
+.form-section-title i,
+.form-label i {
+    color: #38bdf8;
+}
+
+.form-label {
+    color: #cbd5e1;
+    font-size: 0.88rem;
+}
+
+.form-hint {
+    color: #64748b;
+    font-size: 0.78rem;
+}
+
+.register-page .btn-send-code {
+    border-color: rgba(255, 255, 255, 0.18);
+    background: rgba(255, 255, 255, 0.08);
+    color: #e2e8f0;
+}
+
+.message-box {
+    border-radius: 8px;
+}
+
+@media (max-width: 600px) {
+    body.login #shadow_popup {
+        padding: 18px 12px;
+    }
+
+    body.login .auth-login-card,
+    .register-card.auth-register-card {
+        width: 100%;
+        padding: 30px 20px 24px;
+    }
+
+    body.login #passwordEntryBlock .flexGap10,
+    body.login #passwordRecoveryBlock .flexGap10 {
+        gap: 10px;
+    }
+
+    body.login .menu_button {
+        width: 100%;
+        max-width: none;
+    }
+
+    .input-with-button {
+        flex-direction: column;
+    }
+
+    .register-page .btn-send-code {
+        width: 100%;
+        justify-content: center;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    body.login .menu_button,
+    .register-page .btn,
+    .register-page .btn-send-code,
+    .oauth-button {
+        transition: none;
+    }
+}
