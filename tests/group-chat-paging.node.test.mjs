@@ -20,7 +20,8 @@ const testRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sillytavern-group-paging
 const configPath = path.join(testRoot, 'config.yaml');
 const defaultConfigPath = fileURLToPath(new URL('../default/config.yaml', import.meta.url));
 const config = parseYaml(fs.readFileSync(defaultConfigPath, 'utf8'));
-config.backups.chat.enabled = false;
+config.backups.chat.enabled = true;
+config.backups.chat.throttleInterval = 0;
 config.performance.chatChunkingEnabled = true;
 config.performance.chatChunkSize = 50;
 config.performance.chatTailCompareLimit = 200;
@@ -31,6 +32,7 @@ globalThis.DATA_ROOT = path.join(testRoot, 'data');
 fs.mkdirSync(globalThis.DATA_ROOT, { recursive: true });
 
 const { router: chatsRouter } = await import('../src/endpoints/chats.js');
+const { getRecentChatsCacheStatus } = await import('../src/recent-chats-cache.js');
 const { default: systemMonitor } = await import('../src/system-monitor.js');
 
 const directories = {
@@ -105,6 +107,18 @@ function makeMessages(count, prefix = 'message') {
     }));
 }
 
+function snapshotFiles(candidates, baseDirectory) {
+    return Object.fromEntries(candidates.filter(candidate => fs.existsSync(candidate)).map(candidate => {
+        const stats = fs.statSync(candidate, { bigint: true });
+        return [path.relative(baseDirectory, candidate), {
+            bytes: fs.readFileSync(candidate).toString('base64'),
+            ino: String(stats.ino),
+            mtimeNs: String(stats.mtimeNs),
+            size: String(stats.size),
+        }];
+    }));
+}
+
 function snapshotChatArtifacts(filePath) {
     const candidates = [
         filePath,
@@ -116,15 +130,14 @@ function snapshotChatArtifacts(filePath) {
     if (fs.existsSync(chunkDirectory)) {
         candidates.push(...fs.readdirSync(chunkDirectory).sort().map(name => path.join(chunkDirectory, name)));
     }
-    return Object.fromEntries(candidates.filter(candidate => fs.existsSync(candidate)).map(candidate => {
-        const stats = fs.statSync(candidate, { bigint: true });
-        return [path.relative(path.dirname(filePath), candidate), {
-            bytes: fs.readFileSync(candidate).toString('base64'),
-            ino: String(stats.ino),
-            mtimeNs: String(stats.mtimeNs),
-            size: String(stats.size),
-        }];
-    }));
+    return snapshotFiles(candidates, path.dirname(filePath));
+}
+
+function snapshotDirectoryFiles(directory) {
+    const candidates = fs.existsSync(directory)
+        ? fs.readdirSync(directory).sort().map(name => path.join(directory, name)).filter(candidate => fs.statSync(candidate).isFile())
+        : [];
+    return snapshotFiles(candidates, directory);
 }
 
 async function readAllGroupRangeMessages(id, pageSize = 200) {
@@ -397,7 +410,7 @@ test('previous embedded-header chunk layout remains readable and normalizes on f
     assert.deepEqual(splitGroupChatFile((await post('/group/get', { id })).data).messages, [...messages, appended]);
 });
 
-test('stale group revision returns 409 without modifying any chat artifact', async () => {
+test('stale group revision returns 409 without modifying disk or caches', async () => {
     const id = 'stale-revision';
     const header = makeHeader('stale-revision-integrity');
     const messages = makeMessages(240, 'stale');
@@ -420,6 +433,10 @@ test('stale group revision returns 409 without modifying any chat artifact', asy
 
     const filePath = path.join(directories.groupChats, `${id}.jsonl`);
     const beforeConflict = snapshotChatArtifacts(filePath);
+    const backupsBeforeConflict = snapshotDirectoryFiles(directories.backups);
+    assert.equal((await post('/recent', { max: 10 })).response.status, 200);
+    const cacheBeforeConflict = getRecentChatsCacheStatus();
+    assert.equal(cacheBeforeConflict.entries > 0, true);
     const staleMessage = { ...makeMessages(1, 'stale-tab')[0], send_date: 1_900_000_000_001 };
     const staleSave = await post('/group/save-tail', {
         id,
@@ -433,6 +450,8 @@ test('stale group revision returns 409 without modifying any chat artifact', asy
     assert.equal(staleSave.response.status, 409);
     assert.equal(staleSave.data.error, 'revision_conflict');
     assert.deepEqual(snapshotChatArtifacts(filePath), beforeConflict);
+    assert.deepEqual(snapshotDirectoryFiles(directories.backups), backupsBeforeConflict);
+    assert.deepEqual(getRecentChatsCacheStatus(), cacheBeforeConflict);
     assert.deepEqual(splitGroupChatFile((await post('/group/get', { id })).data).messages, [...messages, secondTabMessage]);
 });
 
