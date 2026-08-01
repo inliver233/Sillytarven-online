@@ -363,6 +363,23 @@ enableServerPluginsAutoUpdate: true
 
 enableInvitationCodes: false
 
+# -- REGISTRATION CONFIGURATION --
+# Each method can independently allow new accounts and require an invitation
+# code. null inherits the legacy enableInvitationCodes value above.
+registration:
+  password:
+    enabled: true
+    requireInvitationCode: null
+  github:
+    enabled: true
+    requireInvitationCode: null
+  discord:
+    enabled: true
+    requireInvitationCode: null
+  linuxdo:
+    enabled: true
+    requireInvitationCode: null
+
 # -- USER STORAGE LIMITS --
 userStorage:
   # Enable per-user storage limits

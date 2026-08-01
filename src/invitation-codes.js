@@ -1,6 +1,6 @@
 import storage from 'node-persist';
 import crypto from 'node:crypto';
-import { getConfigValue } from './util.js';
+import { isInvitationCodeSystemEnabled } from './registration-policy.js';
 import {
     ADMIN_INVITATION_SOURCE,
     getInvitationSource,
@@ -9,7 +9,6 @@ import {
 
 const INVITATION_PREFIX = 'invitation:';
 const PURCHASE_LINK_KEY = 'invitation:purchaseLink';
-const ENABLE_INVITATION_CODES = getConfigValue('enableInvitationCodes', false, 'boolean');
 const invitationUseLocks = new Set();
 
 /**
@@ -69,7 +68,7 @@ function getDurationDays(durationType) {
  * @returns {Promise<InvitationCode>} 创建的邀请码对象
  */
 export async function createInvitationCode(createdBy, durationType = 'permanent', { issuanceSource = ADMIN_INVITATION_SOURCE } = {}) {
-    if (!ENABLE_INVITATION_CODES) {
+    if (!isInvitationCodesEnabled()) {
         throw new Error('邀请码功能未启用');
     }
 
@@ -102,10 +101,11 @@ export async function createInvitationCode(createdBy, durationType = 'permanent'
 /**
  * 验证邀请码
  * @param {string} code 邀请码
+ * @param {{required?: boolean}} [options] Whether this operation requires a code
  * @returns {Promise<{valid: boolean, reason?: string, invitation?: InvitationCode}>} 验证结果
  */
-export async function validateInvitationCode(code) {
-    if (!ENABLE_INVITATION_CODES) {
+export async function validateInvitationCode(code, { required = isInvitationCodesEnabled() } = {}) {
+    if (!required) {
         return { valid: true }; // 如果功能未启用，则认为有效
     }
 
@@ -133,10 +133,11 @@ export async function validateInvitationCode(code) {
  * @param {string} code 邀请码
  * @param {string} usedBy 使用者用户句柄
  * @param {number | null} userExpiresAt 用户到期时间
+ * @param {{required?: boolean}} [options] Whether this operation requires a code
  * @returns {Promise<{success: boolean, reason?: string, invitation?: InvitationCode}>} 使用结果及邀请码信息
  */
-export async function useInvitationCode(code, usedBy, userExpiresAt = null) {
-    if (!ENABLE_INVITATION_CODES) {
+export async function useInvitationCode(code, usedBy, userExpiresAt = null, { required = isInvitationCodesEnabled() } = {}) {
+    if (!required) {
         return { success: true }; // 如果功能未启用，则认为成功
     }
 
@@ -152,7 +153,7 @@ export async function useInvitationCode(code, usedBy, userExpiresAt = null) {
     invitationUseLocks.add(normalizedCode);
     try {
         // 在锁内重新读取，避免两个并发注册同时消费同一个邀请码。
-        const validation = await validateInvitationCode(normalizedCode);
+        const validation = await validateInvitationCode(normalizedCode, { required });
         if (!validation.valid) {
             return { success: false, reason: validation.reason || '邀请码无效' };
         }
@@ -180,7 +181,7 @@ export async function useInvitationCode(code, usedBy, userExpiresAt = null) {
  * @returns {Promise<InvitationCode[]>} 邀请码列表
  */
 export async function getAllInvitationCodes() {
-    if (!ENABLE_INVITATION_CODES) {
+    if (!isInvitationCodesEnabled()) {
         return [];
     }
 
@@ -247,7 +248,7 @@ export async function setInvitationCodeSource(code, issuanceSource) {
  * @returns {Promise<boolean>} 是否成功删除
  */
 export async function deleteInvitationCode(code, { issuanceSource } = {}) {
-    if (!ENABLE_INVITATION_CODES) {
+    if (!isInvitationCodesEnabled()) {
         return false;
     }
 
@@ -273,7 +274,7 @@ export async function deleteInvitationCode(code, { issuanceSource } = {}) {
  * @returns {boolean} 是否启用
  */
 export function isInvitationCodesEnabled() {
-    return ENABLE_INVITATION_CODES;
+    return isInvitationCodeSystemEnabled();
 }
 
 /**
@@ -281,7 +282,7 @@ export function isInvitationCodesEnabled() {
  * @returns {Promise<number>} 清理的数量
  */
 export async function cleanupExpiredInvitationCodes() {
-    if (!ENABLE_INVITATION_CODES) {
+    if (!isInvitationCodesEnabled()) {
         return 0;
     }
 

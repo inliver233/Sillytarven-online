@@ -152,7 +152,8 @@ node server.js
     - 纯 OAuth 用户（未设置密码）：只能通过第三方 OAuth 登录
     - OAuth 用户（已设置密码）：可以使用 OAuth 登录或用户名密码登录
   - **密码设置功能**：OAuth 用户可在个人设置中设置密码，设置后即可使用两种登录方式
-  - **与邀请码系统完美集成**：如果启用了邀请码，OAuth 注册时需要输入邀请码
+  - **独立注册策略**：密码、GitHub、Discord、Linux.do 可分别控制新用户注册和邀请码要求
+  - **登录不受注册开关影响**：关闭某个 OAuth 的新用户注册后，已绑定用户仍可继续登录
   - **动态回调 URL**：自动适配反向代理和 SSL 配置
   - **安全验证**：使用 state 参数防止 CSRF 攻击
 - **备份文件清理**：管理员可清理用户备份文件释放空间
@@ -167,7 +168,7 @@ node server.js
 - **注册限制**：通过邀请码控制用户注册
 - **有效期管理**：支持邀请码过期时间设置
 - **使用统计**：邀请码使用情况跟踪
-- **打开关闭方式**：更改根目录./config.yaml  搜索：enableInvitationCodes: true/false  开/关
+- **打开关闭方式**：`enableInvitationCodes` 提供全局默认值，也可通过 `registration.*.requireInvitationCode` 按注册方式覆盖
 
 ### 🎫 邀请码系统新增功能 （V1.13.10 新增功能）
 - **按时间邀请码生成**：当用户使用一天有效期的邀请码注册，用户从注册开始计算一天后到期，以此类推。
@@ -406,6 +407,22 @@ enableUserProfile: true  # 启用用户个人资料系统
 enableUserSettings: true  # 启用用户设置系统
 enableUserTheme: true  # 启用用户主题系统
 
+# 新用户注册策略
+# requireInvitationCode 为 null 时继承 enableInvitationCodes
+registration:
+  password:
+    enabled: true
+    requireInvitationCode: null
+  github:
+    enabled: true
+    requireInvitationCode: null
+  discord:
+    enabled: true
+    requireInvitationCode: null
+  linuxdo:
+    enabled: true
+    requireInvitationCode: null
+
 # OAuth第三方登录配置（V1.13.12 新增）
 oauth:
   github:
@@ -442,8 +459,12 @@ email:
 
 **OAuth配置说明**：
 - 支持 GitHub、Discord、Linux.do 三种 OAuth 提供商
+- `oauth.<provider>.enabled` 控制该 OAuth 登录服务是否可用；`registration.<provider>.enabled` 只控制是否允许该方式创建新账号
+- 如需停止某个 OAuth 的新用户注册但保留老用户登录，请保持 `oauth.<provider>.enabled: true`，并设置 `registration.<provider>.enabled: false`
+- `registration.<method>.requireInvitationCode` 可设为 `true`、`false` 或 `null`；`null` 继承全局 `enableInvitationCodes`
+- 旧配置不包含 `registration` 时，四种注册方式默认开放且邀请码要求继续继承 `enableInvitationCodes`，升级行为不变
+- 只要全局开关或任一注册方式要求邀请码，邀请码管理功能就会保持可用
 - 回调 URL 可留空，系统会根据当前访问地址自动生成（支持反向代理和 SSL）
-- 如果启用了邀请码系统，OAuth 注册时需要输入邀请码
 - 配置修改后需要重启服务才能生效
 - 获取 OAuth 凭证：
   - **GitHub**：访问 https://github.com/settings/developers 创建 OAuth App
@@ -594,9 +615,10 @@ oauth:
 ### API 端点说明
 
 #### OAuth 认证流程
-1. **GET** `/api/oauth/:provider` - 发起 OAuth 授权
-2. **GET** `/api/oauth/:provider/callback` - OAuth 回调处理
-3. **POST** `/api/oauth/complete-registration` - 完成邀请码验证（如果需要）
+1. **GET** `/api/oauth/:provider` - 发起 OAuth 登录授权
+2. **GET** `/api/oauth/:provider?intent=register` - 发起明确的新用户注册授权
+3. **GET** `/api/oauth/:provider/callback` - OAuth 回调处理
+4. **POST** `/api/oauth/verify-invitation` - 完成邀请码验证（如果需要）
 
 #### 第三方平台端点（Linux.do）
 - **授权端点**：`https://connect.linux.do/oauth2/authorize`

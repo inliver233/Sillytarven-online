@@ -5,7 +5,8 @@
 
 let publicPagesConfig = {
     enablePublicCharacters: true,
-    enableForum: true
+    enableForum: true,
+    registrationAvailable: true,
 };
 
 /**
@@ -15,13 +16,13 @@ async function fetchPublicPagesConfig() {
     try {
         const response = await fetch('/api/public-config/public-pages', {
             method: 'GET',
-            credentials: 'include'
+            credentials: 'include',
         });
 
         if (response.ok) {
             const config = await response.json();
-            publicPagesConfig = config;
-            return config;
+            publicPagesConfig = { ...publicPagesConfig, ...config };
+            return publicPagesConfig;
         } else {
             console.warn('Failed to fetch public pages config, using defaults');
             return publicPagesConfig;
@@ -29,6 +30,34 @@ async function fetchPublicPagesConfig() {
     } catch (error) {
         console.warn('Error fetching public pages config:', error);
         return publicPagesConfig;
+    }
+}
+
+/**
+ * 注册页是所有注册方式的统一入口，仅在至少一种方式可用时显示。
+ */
+async function fetchRegistrationAvailability() {
+    try {
+        const [registrationResponse, oauthResponse] = await Promise.all([
+            fetch('/api/users/registration-config', { credentials: 'include' }),
+            fetch('/api/oauth/config', { credentials: 'include' }),
+        ]);
+        if (!registrationResponse.ok || !oauthResponse.ok) {
+            return publicPagesConfig.registrationAvailable;
+        }
+
+        const registration = await registrationResponse.json();
+        const oauth = await oauthResponse.json();
+        const oauthProviders = ['github', 'discord', 'linuxdo'];
+        publicPagesConfig.registrationAvailable = registration.password?.enabled !== false ||
+            oauthProviders.some(provider =>
+                registration[provider]?.enabled !== false &&
+                oauth[provider]?.enabled === true &&
+                oauth[provider]?.registrationEnabled !== false);
+        return publicPagesConfig.registrationAvailable;
+    } catch (error) {
+        console.warn('Error fetching registration availability:', error);
+        return publicPagesConfig.registrationAvailable;
     }
 }
 
@@ -55,13 +84,21 @@ function updatePageLinks() {
             link.style.display = '';
         }
     });
+
+    const registrationLinks = document.querySelectorAll('a[href="/register"], #registrationLink');
+    registrationLinks.forEach(link => {
+        link.style.display = publicPagesConfig.registrationAvailable ? '' : 'none';
+    });
 }
 
 /**
  * 初始化公共页面配置
  */
 async function initPublicPagesConfig() {
-    await fetchPublicPagesConfig();
+    await Promise.all([
+        fetchPublicPagesConfig(),
+        fetchRegistrationAvailability(),
+    ]);
     updatePageLinks();
 }
 
@@ -77,5 +114,5 @@ window.publicPagesConfig = {
     fetch: fetchPublicPagesConfig,
     update: updatePageLinks,
     init: initPublicPagesConfig,
-    getConfig: () => publicPagesConfig
+    getConfig: () => publicPagesConfig,
 };

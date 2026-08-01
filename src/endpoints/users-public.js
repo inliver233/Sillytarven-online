@@ -6,12 +6,13 @@ import { RateLimiterMemory, RateLimiterRes } from 'rate-limiter-flexible';
 import { getIpFromRequest, getRealIpFromHeader } from '../express-common.js';
 import { color, Cache, getConfigValue } from '../util.js';
 import { KEY_PREFIX, getUserAvatar, toKey, getPasswordHash, getPasswordSalt, getAllUserHandles, getUserDirectories, ensurePublicDirectoriesExist, normalizeHandle } from '../users.js';
-import { validateInvitationCode, useInvitationCode, getPurchaseLink, isInvitationCodesEnabled } from '../invitation-codes.js';
+import { validateInvitationCode, useInvitationCode, getPurchaseLink } from '../invitation-codes.js';
 import { isUserIssuedInvitation } from '../user-invitation-policy.js';
 import { checkForNewContent, CONTENT_TYPES } from './content-manager.js';
 import { applyDefaultTemplateToUser } from '../default-template.js';
 import systemMonitor from '../system-monitor.js';
 import { isEmailServiceAvailable, sendVerificationCode, sendPasswordRecoveryCode } from '../email-service.js';
+import { getRegistrationConfig, getRegistrationMethodConfig } from '../registration-policy.js';
 
 const DISCREET_LOGIN = getConfigValue('enableDiscreetLogin', false, 'boolean');
 const PREFER_REAL_IP_HEADER = getConfigValue('rateLimiting.preferRealIpHeader', false, 'boolean');
@@ -439,8 +440,23 @@ router.post('/recover-step2', async (request, response) => {
     }
 });
 
+router.get('/registration-config', (_request, response) => {
+    try {
+        return response.json(getRegistrationConfig());
+    } catch (error) {
+        console.error('Get registration config failed:', error);
+        return response.status(500).json({ error: '获取注册配置失败' });
+    }
+});
+
 router.post('/register', async (request, response) => {
     try {
+        const passwordRegistration = getRegistrationMethodConfig('password');
+        if (!passwordRegistration.enabled) {
+            console.warn('Register failed: Password registration is disabled');
+            return response.status(403).json({ error: '账号密码注册当前未开放' });
+        }
+
         const { handle, name, password, confirmPassword, email, verificationCode, invitationCode } = request.body;
 
         if (!handle || !name || !password || !confirmPassword) {
@@ -496,7 +512,9 @@ router.post('/register', async (request, response) => {
         await registerLimiter.consume(ip);
 
         // 验证邀请码（如果启用）
-        const invitationValidation = await validateInvitationCode(invitationCode);
+        const invitationValidation = await validateInvitationCode(invitationCode, {
+            required: passwordRegistration.requireInvitationCode,
+        });
         if (!invitationValidation.valid) {
             console.warn('Register failed: Invalid invitation code');
             return response.status(400).json({ error: invitationValidation.reason || '邀请码无效' });
@@ -540,7 +558,7 @@ router.post('/register', async (request, response) => {
 
         // 计算用户过期时间。复用前面的验证结果，避免注册过程中重复读取邀请码状态。
         let userExpiresAt = null;
-        if (isInvitationCodesEnabled() && invitationValidation.invitation) {
+        if (passwordRegistration.requireInvitationCode && invitationValidation.invitation) {
             const invitation = invitationValidation.invitation;
             if (invitation.durationDays !== null && invitation.durationDays > 0) {
                 userExpiresAt = Date.now() + (invitation.durationDays * 24 * 60 * 60 * 1000);
@@ -573,8 +591,8 @@ router.post('/register', async (request, response) => {
         await storage.setItem(toKey(normalizedHandle), newUser);
 
         // 消费邀请码时必须检查结果；若并发请求已先使用该邀请码，则回滚刚创建的用户。
-        if (isInvitationCodesEnabled() && invitationCode) {
-            const invitationUse = await useInvitationCode(invitationCode, normalizedHandle, userExpiresAt);
+        if (passwordRegistration.requireInvitationCode && invitationCode) {
+            const invitationUse = await useInvitationCode(invitationCode, normalizedHandle, userExpiresAt, { required: true });
             if (!invitationUse.success) {
                 await storage.removeItem(toKey(normalizedHandle));
                 console.warn('Register failed: Invitation code could not be consumed');

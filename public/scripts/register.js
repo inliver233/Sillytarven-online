@@ -18,7 +18,9 @@ document.addEventListener('DOMContentLoaded', async function() {
     const registerButton = /** @type {HTMLButtonElement} */ (document.getElementById('registerButton'));
     const backToLoginButton = /** @type {HTMLButtonElement} */ (document.getElementById('backToLoginButton'));
     const invitationSection = /** @type {HTMLElement} */ (document.getElementById('invitationSection'));
-    const invitationCodeGroup = /** @type {HTMLElement} */ (document.getElementById('invitationCodeGroup'));
+    const passwordRegistrationFields = /** @type {HTMLElement} */ (document.getElementById('passwordRegistrationFields'));
+    const oauthRegistrationSection = /** @type {HTMLElement} */ (document.getElementById('oauthRegistrationSection'));
+    const registrationClosedMessage = /** @type {HTMLElement} */ (document.getElementById('registrationClosedMessage'));
 
     const userHandleInput = /** @type {HTMLInputElement} */ (document.getElementById('userHandle'));
     const displayNameInput = /** @type {HTMLInputElement} */ (document.getElementById('displayName'));
@@ -29,14 +31,25 @@ document.addEventListener('DOMContentLoaded', async function() {
     const sendVerificationButton = /** @type {HTMLButtonElement} */ (document.getElementById('sendVerificationButton'));
     const invitationCodeInput = /** @type {HTMLInputElement} */ (document.getElementById('invitationCode'));
 
-    let verificationCodeSent = false;
     let verificationCooldown = 0;
     let emailServiceEnabled = false;
+    let passwordRegistrationEnabled = true;
 
-    // 先获取CSRF Token，再检查是否需要邀请码和邮件服务状态
+    // 先获取CSRF Token，再分别加载注册方式、邮件和邀请码策略。
     await getCsrfToken();
-    await checkEmailServiceStatus();
-    await checkInvitationCodeStatus();
+    const passwordRegistration = await loadRegistrationOptions();
+    passwordRegistrationEnabled = passwordRegistration.enabled;
+    if (passwordRegistrationEnabled) {
+        await checkEmailServiceStatus();
+        checkInvitationCodeStatus(passwordRegistration.requireInvitationCode);
+    } else {
+        const emailSection = document.getElementById('emailSection');
+        if (emailSection) emailSection.style.display = 'none';
+        if (invitationSection) invitationSection.style.display = 'none';
+        userEmailInput.required = false;
+        verificationCodeInput.required = false;
+        invitationCodeInput.required = false;
+    }
 
     // 返回登录按钮事件
     backToLoginButton.addEventListener('click', function() {
@@ -73,6 +86,11 @@ document.addEventListener('DOMContentLoaded', async function() {
     registerForm.addEventListener('submit', function(e) {
         e.preventDefault();
 
+        if (!passwordRegistrationEnabled) {
+            showError('账号密码注册当前未开放');
+            return;
+        }
+
         const formData = {
             handle: userHandleInput.value.trim(),
             name: displayNameInput.value.trim(),
@@ -96,6 +114,92 @@ document.addEventListener('DOMContentLoaded', async function() {
     userHandleInput.addEventListener('input', validateHandle);
     userPasswordInput.addEventListener('input', validatePassword);
     confirmPasswordInput.addEventListener('input', validateConfirmPassword);
+
+    async function loadRegistrationOptions() {
+        const registrationConfig = {
+            password: { enabled: true, requireInvitationCode: null },
+            github: { enabled: true },
+            discord: { enabled: true },
+            linuxdo: { enabled: true },
+        };
+        let registrationConfigLoaded = false;
+        let oauthConfig = {};
+
+        try {
+            const response = await fetch('/api/users/registration-config', {
+                method: 'GET',
+                credentials: 'same-origin',
+            });
+            if (response.ok) {
+                Object.assign(registrationConfig, await response.json());
+                registrationConfigLoaded = true;
+            }
+        } catch (error) {
+            console.warn('Error loading registration config:', error);
+        }
+
+        try {
+            const response = await fetch('/api/oauth/config', {
+                method: 'GET',
+                credentials: 'same-origin',
+            });
+            if (response.ok) {
+                oauthConfig = await response.json();
+            }
+        } catch (error) {
+            console.warn('Error loading OAuth registration options:', error);
+        }
+
+        let requireInvitationCode = registrationConfig.password?.requireInvitationCode;
+        if (!registrationConfigLoaded || typeof requireInvitationCode !== 'boolean') {
+            try {
+                const response = await fetch('/api/invitation-codes/status', {
+                    method: 'GET',
+                    headers: regCsrfToken ? { 'x-csrf-token': regCsrfToken } : {},
+                    credentials: 'same-origin',
+                });
+                if (response.ok) {
+                    requireInvitationCode = Boolean((await response.json()).enabled);
+                }
+            } catch (error) {
+                console.warn('Error loading legacy invitation-code status:', error);
+            }
+        }
+
+        const passwordEnabled = registrationConfig.password?.enabled !== false;
+        passwordRegistrationFields.style.display = passwordEnabled ? 'flex' : 'none';
+        passwordRegistrationFields.querySelectorAll('input, button').forEach(element => {
+            element.disabled = !passwordEnabled;
+        });
+
+        const providers = [
+            { id: 'githubRegisterButton', name: 'github' },
+            { id: 'discordRegisterButton', name: 'discord' },
+            { id: 'linuxdoRegisterButton', name: 'linuxdo' },
+        ];
+        let hasOAuthRegistration = false;
+        for (const provider of providers) {
+            const button = /** @type {HTMLButtonElement} */ (document.getElementById(provider.id));
+            const enabled = oauthConfig[provider.name]?.enabled === true &&
+                registrationConfig[provider.name]?.enabled !== false &&
+                oauthConfig[provider.name]?.registrationEnabled !== false;
+            button.style.display = enabled ? '' : 'none';
+            if (enabled) {
+                button.addEventListener('click', () => {
+                    window.location.href = `/api/oauth/${provider.name}?intent=register`;
+                });
+                hasOAuthRegistration = true;
+            }
+        }
+
+        oauthRegistrationSection.style.display = hasOAuthRegistration ? 'block' : 'none';
+        registrationClosedMessage.classList.toggle('show', !passwordEnabled && !hasOAuthRegistration);
+
+        return {
+            enabled: passwordEnabled,
+            requireInvitationCode: Boolean(requireInvitationCode),
+        };
+    }
 
     async function checkEmailServiceStatus() {
         try {
@@ -133,24 +237,13 @@ document.addEventListener('DOMContentLoaded', async function() {
         }
     }
 
-    async function checkInvitationCodeStatus() {
-        try {
-            const response = await fetch('/api/invitation-codes/status', {
-                method: 'GET',
-                headers: regCsrfToken ? { 'x-csrf-token': regCsrfToken } : {},
-                credentials: 'same-origin',
-            });
-            if (!response.ok) {
-                // 可能是被中间件拦截，直接退出不影响注册
-                return;
-            }
-            const data = await response.json();
-            if (data && data.enabled) {
-                if (invitationSection) invitationSection.style.display = 'block';
-                invitationCodeInput.required = true;
-            }
-        } catch (error) {
-            console.error('Error checking invitation code status:', error);
+    function checkInvitationCodeStatus(requireInvitationCode) {
+        if (requireInvitationCode) {
+            if (invitationSection) invitationSection.style.display = 'block';
+            invitationCodeInput.required = true;
+        } else {
+            if (invitationSection) invitationSection.style.display = 'none';
+            invitationCodeInput.required = false;
         }
     }
 

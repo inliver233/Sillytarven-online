@@ -104,6 +104,17 @@
     z-index: 1;
 }
 
+.password-registration-fields {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+#oauthRegistrationSection {
+    position: relative;
+    z-index: 1;
+}
+
 /* 表单分区 */
 .form-section {
     background: rgba(255, 255, 255, 0.02);

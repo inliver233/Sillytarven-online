@@ -349,6 +349,9 @@ function configureDiscreetLogin() {
         configureNormalLogin(userList);
     }
 
+    // 注册入口和 OAuth 登录入口使用独立配置。
+    await loadRegistrationConfig();
+
     // 加载OAuth配置并显示按钮
     await loadOAuthConfig();
 
@@ -615,6 +618,31 @@ function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+/**
+ * Only the password-registration entry is controlled here. OAuth buttons are
+ * login entries and must remain available to already-bound users.
+ */
+async function loadRegistrationConfig() {
+    let passwordRegistrationEnabled = true;
+
+    try {
+        const response = await fetch('/api/users/registration-config', {
+            method: 'GET',
+            credentials: 'same-origin',
+        });
+        if (response.ok) {
+            const config = await response.json();
+            passwordRegistrationEnabled = config.password?.enabled !== false;
+        } else {
+            console.warn('Failed to load registration config, using backwards-compatible defaults');
+        }
+    } catch (error) {
+        console.warn('Error loading registration config:', error);
+    }
+
+    $('#registerButton').toggle(passwordRegistrationEnabled);
 }
 
 /**

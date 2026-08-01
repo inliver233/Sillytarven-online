@@ -16,8 +16,8 @@ import {
 import {
     validateInvitationCode,
     useInvitationCode,
-    isInvitationCodesEnabled
 } from '../invitation-codes.js';
+import { getRegistrationConfig, getRegistrationMethodConfig } from '../registration-policy.js';
 import { checkForNewContent, CONTENT_TYPES } from './content-manager.js';
 import { applyDefaultTemplateToUser } from '../default-template.js';
 
@@ -270,14 +270,22 @@ function generateState() {
 }
 
 /**
+ * Registration links identify their intent explicitly. Existing links without
+ * an intent remain login flows for backwards compatibility.
+ */
+function getOAuthIntent(request) {
+    return request.query?.intent === 'register' ? 'register' : 'login';
+}
+
+/**
  * 将 OAuth state 同时绑定到服务端缓存和当前浏览器会话，防止登录 CSRF。
  */
-function storeOAuthState(request, provider, state) {
+function storeOAuthState(request, provider, state, intent = 'login') {
     if (!request.session) {
         throw new Error('OAuth session is unavailable');
     }
 
-    oauthStateCache.set(state, { provider, timestamp: Date.now() });
+    oauthStateCache.set(state, { provider, intent, timestamp: Date.now() });
     const sessionStates = request.session.oauthStates && typeof request.session.oauthStates === 'object'
         ? request.session.oauthStates
         : {};
@@ -295,14 +303,14 @@ function storeOAuthState(request, provider, state) {
  */
 function consumeOAuthState(request, provider, state) {
     if (typeof state !== 'string' || !state || !request.session) {
-        return false;
+        return null;
     }
 
     const cachedState = oauthStateCache.get(state);
     const sessionState = request.session.oauthStates?.[provider];
     if (!cachedState || cachedState.provider !== provider ||
         Date.now() - cachedState.timestamp > OAUTH_PENDING_TTL || sessionState !== state) {
-        return false;
+        return null;
     }
 
     oauthStateCache.delete(state);
@@ -313,7 +321,7 @@ function consumeOAuthState(request, provider, state) {
     } else {
         delete request.session.oauthStates;
     }
-    return true;
+    return cachedState;
 }
 
 /**
@@ -322,15 +330,22 @@ function consumeOAuthState(request, provider, state) {
 router.get('/config', async (request, response) => {
     try {
         const oauthConfig = await getOAuthConfig(request);
+        const registrationConfig = getRegistrationConfig();
         const config = {
             github: {
                 enabled: oauthConfig.github.enabled && !!oauthConfig.github.clientId,
+                registrationEnabled: registrationConfig.github.enabled,
+                requireInvitationCode: registrationConfig.github.requireInvitationCode,
             },
             discord: {
                 enabled: oauthConfig.discord.enabled && !!oauthConfig.discord.clientId,
+                registrationEnabled: registrationConfig.discord.enabled,
+                requireInvitationCode: registrationConfig.discord.requireInvitationCode,
             },
             linuxdo: {
                 enabled: oauthConfig.linuxdo.enabled && !!oauthConfig.linuxdo.clientId,
+                registrationEnabled: registrationConfig.linuxdo.enabled,
+                requireInvitationCode: registrationConfig.linuxdo.requireInvitationCode,
             },
         };
         return response.json(config);
@@ -349,9 +364,13 @@ router.get('/github', async (request, response) => {
         if (!oauthConfig.github.enabled || !oauthConfig.github.clientId) {
             return response.status(400).json({ error: 'GitHub OAuth未启用' });
         }
+        const intent = getOAuthIntent(request);
+        if (intent === 'register' && !getRegistrationMethodConfig('github').enabled) {
+            return response.status(403).json({ error: 'GitHub 新用户注册当前未开放' });
+        }
 
         const state = generateState();
-        storeOAuthState(request, 'github', state);
+        storeOAuthState(request, 'github', state, intent);
 
         const params = new URLSearchParams({
             client_id: oauthConfig.github.clientId,
@@ -377,9 +396,13 @@ router.get('/discord', async (request, response) => {
         if (!oauthConfig.discord.enabled || !oauthConfig.discord.clientId) {
             return response.status(400).json({ error: 'Discord OAuth未启用' });
         }
+        const intent = getOAuthIntent(request);
+        if (intent === 'register' && !getRegistrationMethodConfig('discord').enabled) {
+            return response.status(403).json({ error: 'Discord 新用户注册当前未开放' });
+        }
 
         const state = generateState();
-        storeOAuthState(request, 'discord', state);
+        storeOAuthState(request, 'discord', state, intent);
 
         const params = new URLSearchParams({
             client_id: oauthConfig.discord.clientId,
@@ -406,9 +429,13 @@ router.get('/linuxdo', async (request, response) => {
         if (!oauthConfig.linuxdo.enabled || !oauthConfig.linuxdo.clientId) {
             return response.status(400).json({ error: 'Linux.do OAuth未启用' });
         }
+        const intent = getOAuthIntent(request);
+        if (intent === 'register' && !getRegistrationMethodConfig('linuxdo').enabled) {
+            return response.status(403).json({ error: 'Linux.do 新用户注册当前未开放' });
+        }
 
         const state = generateState();
-        storeOAuthState(request, 'linuxdo', state);
+        storeOAuthState(request, 'linuxdo', state, intent);
 
         // Linux.do 支持标准 OAuth2 和 OIDC
         // 根据官方文档，基本参数为 response_type=code, client_id, state
@@ -441,7 +468,8 @@ router.get('/github/callback', async (request, response) => {
         const oauthConfig = await getOAuthConfig(request);
 
         // 验证state
-        if (!consumeOAuthState(request, 'github', state)) {
+        const oauthState = consumeOAuthState(request, 'github', state);
+        if (!oauthState) {
             return response.status(400).send('Invalid state parameter');
         }
 
@@ -479,7 +507,7 @@ router.get('/github/callback', async (request, response) => {
         console.log('GitHub user data:', userData);
 
         // 处理OAuth登录
-        await handleOAuthLogin(request, response, 'github', userData);
+        return await handleOAuthLogin(request, response, 'github', userData, oauthState.intent);
     } catch (error) {
         console.error('Error in GitHub OAuth callback:', error);
         return response.status(500).send('GitHub OAuth callback failed');
@@ -498,7 +526,8 @@ router.get('/discord/callback', async (request, response) => {
         const oauthConfig = await getOAuthConfig(request);
 
         // 验证state
-        if (!consumeOAuthState(request, 'discord', state)) {
+        const oauthState = consumeOAuthState(request, 'discord', state);
+        if (!oauthState) {
             return response.status(400).send('Invalid state parameter');
         }
 
@@ -538,7 +567,7 @@ router.get('/discord/callback', async (request, response) => {
         console.log('Discord user data:', userData);
 
         // 处理OAuth登录
-        await handleOAuthLogin(request, response, 'discord', userData);
+        return await handleOAuthLogin(request, response, 'discord', userData, oauthState.intent);
     } catch (error) {
         console.error('Error in Discord OAuth callback:', error);
         return response.status(500).send('Discord OAuth callback failed');
@@ -557,7 +586,8 @@ export async function linuxdoCallbackHandler(request, response) {
         const oauthConfig = await getOAuthConfig(request);
 
         // 验证state
-        if (!consumeOAuthState(request, 'linuxdo', state)) {
+        const oauthState = consumeOAuthState(request, 'linuxdo', state);
+        if (!oauthState) {
             return response.status(400).send('Invalid state parameter');
         }
 
@@ -653,7 +683,7 @@ export async function linuxdoCallbackHandler(request, response) {
         }
 
         // 处理OAuth登录
-        await handleOAuthLogin(request, response, 'linuxdo', userData);
+        return await handleOAuthLogin(request, response, 'linuxdo', userData, oauthState.intent);
     } catch (error) {
         console.error('Error in Linux.do OAuth callback:', error);
         return response.status(500).send('Linux.do OAuth callback failed');
@@ -699,7 +729,7 @@ async function getAvailableOAuthHandle(preferredHandle, provider, userId) {
 /**
  * 处理OAuth登录逻辑
  */
-async function handleOAuthLogin(request, response, provider, userData) {
+export async function handleOAuthLogin(request, response, provider, userData, intent = 'login') {
     try {
         // 提取用户信息
         let userId, username, email, avatar;
@@ -768,11 +798,21 @@ async function handleOAuthLogin(request, response, provider, userData) {
 
         // 登录只能按稳定的 OAuth 身份匹配，绝不按同名本地账号自动绑定。
         let user = await findUserByOAuthIdentity(provider, userId);
+        if (user && intent === 'register') {
+            return response.redirect(`/login?error=${encodeURIComponent('该第三方账号已注册，请从登录页登录')}`);
+        }
         const selectedHandle = user?.handle || await getAvailableOAuthHandle(preferredHandle, provider, userId);
 
         if (!user) {
+            const registrationConfig = getRegistrationMethodConfig(provider);
+            if (!registrationConfig.enabled) {
+                const providerNames = { github: 'GitHub', discord: 'Discord', linuxdo: 'Linux.do' };
+                const providerName = providerNames[provider] || provider;
+                return response.redirect(`/login?error=${encodeURIComponent(`${providerName} 新用户注册当前未开放`)}`);
+            }
+
             // 如果开启了邀请码，需要先验证邀请码
-            if (isInvitationCodesEnabled()) {
+            if (registrationConfig.requireInvitationCode) {
                 // 将用户信息存储到session，等待输入邀请码
                 if (!request.session) {
                     throw new Error('OAuth session is unavailable');
@@ -784,6 +824,7 @@ async function handleOAuthLogin(request, response, provider, userData) {
                     avatar: typeof avatar === 'string' ? avatar : null,
                     provider,
                     userId,
+                    intent,
                     createdAt: Date.now(),
                 };
                 // 重定向到邀请码输入页面
@@ -874,10 +915,6 @@ router.post('/verify-invitation', async (request, response) => {
         }
 
         const pendingUser = request.session.oauthPendingUser;
-        if (!isInvitationCodesEnabled()) {
-            delete request.session.oauthPendingUser;
-            return response.status(403).json({ error: '当前未启用邀请码注册' });
-        }
         if (!pendingUser.createdAt || Date.now() - pendingUser.createdAt > OAUTH_PENDING_TTL) {
             delete request.session.oauthPendingUser;
             return response.status(400).json({ error: 'OAuth注册已超时，请重新使用第三方登录' });
@@ -890,6 +927,16 @@ router.post('/verify-invitation', async (request, response) => {
             !normalizedPendingHandle || normalizedPendingHandle !== pendingUser.handle) {
             delete request.session.oauthPendingUser;
             return response.status(400).json({ error: 'OAuth注册状态无效，请重新使用第三方登录' });
+        }
+
+        const registrationConfig = getRegistrationMethodConfig(pendingUser.provider);
+        if (!registrationConfig.enabled) {
+            delete request.session.oauthPendingUser;
+            return response.status(403).json({ error: '该 OAuth 新用户注册方式当前未开放' });
+        }
+        if (!registrationConfig.requireInvitationCode) {
+            delete request.session.oauthPendingUser;
+            return response.status(409).json({ error: '该 OAuth 注册方式当前不需要邀请码，请重新发起注册' });
         }
 
         // 同一 OAuth 身份或同一目标用户名只能有一个正在进行的注册，避免并发覆盖和误回滚。
@@ -913,7 +960,7 @@ router.post('/verify-invitation', async (request, response) => {
         }
 
         // 验证邀请码
-        const validation = await validateInvitationCode(invitationCode);
+        const validation = await validateInvitationCode(invitationCode, { required: true });
         if (!validation.valid) {
             return response.status(400).json({ error: validation.reason || '邀请码无效' });
         }
@@ -957,7 +1004,7 @@ router.post('/verify-invitation', async (request, response) => {
         }
 
         // 使用邀请码。若并发请求已先消费该邀请码，必须回滚刚创建的 OAuth 用户。
-        const invitationUse = await useInvitationCode(invitationCode, pendingUser.handle, userExpiresAt);
+        const invitationUse = await useInvitationCode(invitationCode, pendingUser.handle, userExpiresAt, { required: true });
         if (!invitationUse.success) {
             await storage.removeItem(toKey(pendingUser.handle));
             if (pendingUser.avatar) {
