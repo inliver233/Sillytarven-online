@@ -1,4 +1,4 @@
-import { characters, eventSource, event_types, getCurrentChatId, messageFormatting, reloadCurrentChat, saveSettingsDebounced, this_chid } from '../../../script.js';
+import { characters, eventSource, event_types, getCurrentChatId, getCurrentChatIdentity, messageFormatting, reloadCurrentChat, saveSettingsDebounced, this_chid } from '../../../script.js';
 import { extension_settings, renderExtensionTemplateAsync } from '../../extensions.js';
 import { selected_group } from '../../group-chats.js';
 import { callGenericPopup, Popup, POPUP_TYPE } from '../../popup.js';
@@ -20,17 +20,22 @@ export { getRegexScripts };
 
 const sanitizeFileName = name => name.replace(/[\s.<>:"/\\|?*\x00-\x1F\x7F]/g, '_').toLowerCase();
 
-const regexRefreshCoordinator = new RegexRefreshCoordinator(async ({ requestCount }) => {
+let activeRegexRefreshIdentity = null;
+const regexRefreshCoordinator = new RegexRefreshCoordinator(async ({ requestCount, contextIdentity, signal, isCurrent }) => {
     const startedAt = performance.now();
+    activeRegexRefreshIdentity = contextIdentity;
     try {
-        await reloadCurrentChat();
+        if (isCurrent()) {
+            await reloadCurrentChat({ expectedIdentity: contextIdentity, signal });
+        }
     } finally {
+        activeRegexRefreshIdentity = null;
         recordPerformanceSample('regex-chat-refresh', performance.now() - startedAt, {
             requests: requestCount,
             merged: Math.max(0, requestCount - 1),
         });
     }
-});
+}, { getContextIdentity: getCurrentChatIdentity });
 
 function updateRegexRefreshDeferral(settingsHtml) {
     const regexDrawer = settingsHtml.find('.inline-drawer').first();
@@ -2144,6 +2149,12 @@ jQuery(async () => {
     }));
 
     eventSource.on(event_types.MAIN_API_CHANGED, onMainApiChanged);
+    eventSource.on(event_types.CHAT_CHANGED, () => {
+        if (activeRegexRefreshIdentity !== null && activeRegexRefreshIdentity === getCurrentChatIdentity()) {
+            return;
+        }
+        regexRefreshCoordinator.invalidate();
+    });
     eventSource.on(event_types.CHAT_CHANGED, checkCharEmbeddedRegexScripts);
     eventSource.on(event_types.CHARACTER_DELETED, purgeEmbeddedRegexScripts);
     eventSource.on(event_types.PRESET_RENAMED_BEFORE, onPresetRenamed);

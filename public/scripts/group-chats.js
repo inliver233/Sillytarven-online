@@ -88,6 +88,7 @@ import {
     resetChatPagingState,
     setCachedChatPage,
     setChatPagingState,
+    invalidateCurrentChatContext,
 } from '../script.js';
 import { printTagList, createTagMapFromList, applyTagsOnCharacterSelect, tag_map, applyTagsOnGroupSelect } from './tags.js';
 import { FILTER_TYPES, FilterHelper } from './filters.js';
@@ -268,21 +269,32 @@ async function validateGroup(group) {
  * Loads the chat messages for a specific group.
  * @param {string} groupId - The ID of the group to load chat messages for.
  * @param {boolean} reload - Whether to reload the group chat after loading.
+ * @param {object} [options] Context guard options
+ * @param {AbortSignal} [options.signal] Parent refresh signal
+ * @param {() => boolean} [options.isCurrent] Parent character/group/chat identity guard
  * @returns {Promise<void>} A promise that resolves when the chat messages have been loaded.
  */
-export async function getGroupChat(groupId, reload = false) {
+export async function getGroupChat(groupId, reload = false, { signal: parentSignal, isCurrent: parentIsCurrent = () => true } = {}) {
     const group = groups.find((x) => x.id === groupId);
     if (!group) {
         console.warn('Group not found', groupId);
         return;
     }
+    if (parentSignal?.aborted || !parentIsCurrent()) return;
 
     groupChatLoadController?.abort();
     const controller = new AbortController();
     groupChatLoadController = controller;
     const loadGeneration = ++groupChatLoadGeneration;
     const chatId = group.chat_id;
-    const isStale = () => loadGeneration !== groupChatLoadGeneration || group.chat_id !== chatId;
+    const abortFromParent = () => controller.abort(parentSignal?.reason);
+    parentSignal?.addEventListener('abort', abortFromParent, { once: true });
+    if (parentSignal?.aborted) abortFromParent();
+    const isStale = () => controller.signal.aborted
+        || loadGeneration !== groupChatLoadGeneration
+        || selected_group !== groupId
+        || group.chat_id !== chatId
+        || !parentIsCurrent();
     resetChatPagingState({ isGroup: true, chatId });
 
     try {
@@ -407,6 +419,7 @@ export async function getGroupChat(groupId, reload = false) {
             console.error('Could not load group chat', error);
         }
     } finally {
+        parentSignal?.removeEventListener('abort', abortFromParent);
         if (groupChatLoadController === controller) {
             groupChatLoadController = null;
         }
@@ -709,6 +722,7 @@ function resetSelectedGroup() {
     groupChatLoadController = null;
     resetChatPagingState({ isGroup: false });
     selected_group = null;
+    invalidateCurrentChatContext();
     is_group_generating = false;
 }
 
@@ -2147,6 +2161,7 @@ export async function openGroupById(groupId) {
             await clearChat();
             cancelTtsPlay();
             selected_group = groupId;
+            invalidateCurrentChatContext();
             setCharacterId(undefined);
             setCharacterName('');
             setEditedMessageId(undefined);
@@ -2257,6 +2272,7 @@ export async function createNewGroupChat(groupId) {
     const newChatName = humanizedDateTime();
     group.chats.push(newChatName);
     group.chat_id = newChatName;
+    invalidateCurrentChatContext();
     updateChatMetadata({}, true);
 
     await editGroup(group.id, true, false);
@@ -2321,6 +2337,7 @@ export async function openGroupChat(groupId, chatId) {
     await clearChat();
     chat.length = 0;
     group.chat_id = chatId;
+    invalidateCurrentChatContext();
     group['date_last_chat'] = Date.now();
     updateChatMetadata({}, true);
 
@@ -2344,6 +2361,7 @@ export async function renameGroupChat(groupId, oldChatId, newChatId) {
 
     if (group.chat_id === oldChatId) {
         group.chat_id = newChatId;
+        invalidateCurrentChatContext();
     }
 
     group.chats.splice(group.chats.indexOf(oldChatId), 1);
@@ -2382,6 +2400,7 @@ export async function deleteGroupChatByName(groupId, chatName) {
     if (group.chat_id === chatName) {
         const newChatName = group.chats.length ? group.chats[group.chats.length - 1] : humanizedDateTime();
         group.chat_id = newChatName;
+        invalidateCurrentChatContext();
     }
 
     await editGroup(groupId, true, true);
@@ -2406,6 +2425,7 @@ export async function deleteGroupChat(groupId, chatId, { jumpToNewChat = true } 
 
     if (group.chat_id === chatId) {
         group.chat_id = '';
+        invalidateCurrentChatContext();
         updateChatMetadata({}, true);
     }
 

@@ -4024,6 +4024,7 @@ jQuery(() => {
 
     $('#prompt_manager_background_tokens').on('input', function () {
         power_user.prompt_manager_background_tokens = !!$(this).prop('checked');
+        void eventSource.emit(event_types.PROMPT_MANAGER_BACKGROUND_TOKENS_CHANGED, power_user.prompt_manager_background_tokens);
         saveSettingsDebounced();
     });
 

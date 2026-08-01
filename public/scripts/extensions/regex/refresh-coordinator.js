@@ -7,15 +7,24 @@ export class RegexRefreshCoordinator {
     #dirty = false;
     #pendingRequestCount = 0;
     #refreshPromise = null;
+    #getContextIdentity;
+    #generation = 0;
+    #controller = null;
 
     /**
-     * @param {(details: {requestCount: number}) => Promise<void>} refresh Refresh callback
+     * @param {(details: {requestCount: number, contextIdentity: unknown, signal: AbortSignal, isCurrent: () => boolean}) => Promise<void>} refresh Refresh callback
+     * @param {object} [options] Coordinator options
+     * @param {() => unknown} [options.getContextIdentity] Current character/group/chat identity
      */
-    constructor(refresh) {
+    constructor(refresh, { getContextIdentity = () => null } = {}) {
         if (typeof refresh !== 'function') {
             throw new TypeError('refresh must be a function');
         }
+        if (typeof getContextIdentity !== 'function') {
+            throw new TypeError('getContextIdentity must be a function');
+        }
         this.#refresh = refresh;
+        this.#getContextIdentity = getContextIdentity;
     }
 
     /**
@@ -36,6 +45,15 @@ export class RegexRefreshCoordinator {
         this.#dirty = true;
         this.#pendingRequestCount++;
         return this.#panelOpen ? Promise.resolve(false) : this.flush();
+    }
+
+    /** Cancel pending work and make the current character/group/chat refresh stale. */
+    invalidate() {
+        this.#generation++;
+        this.#dirty = false;
+        this.#pendingRequestCount = 0;
+        this.#controller?.abort();
+        this.#controller = null;
     }
 
     /**
@@ -64,13 +82,32 @@ export class RegexRefreshCoordinator {
             this.#dirty = false;
             const requestCount = this.#pendingRequestCount;
             this.#pendingRequestCount = 0;
+            const generation = this.#generation;
+            const contextIdentity = this.#getContextIdentity();
+            const controller = new AbortController();
+            this.#controller = controller;
+            const isCurrent = () => !controller.signal.aborted
+                && generation === this.#generation
+                && contextIdentity === this.#getContextIdentity();
             try {
-                await this.#refresh({ requestCount });
-                refreshed = true;
+                await this.#refresh({
+                    requestCount,
+                    contextIdentity,
+                    signal: controller.signal,
+                    isCurrent,
+                });
+                refreshed ||= isCurrent();
             } catch (error) {
+                if (!isCurrent()) {
+                    continue;
+                }
                 this.#dirty = true;
                 this.#pendingRequestCount += requestCount;
                 throw error;
+            } finally {
+                if (this.#controller === controller) {
+                    this.#controller = null;
+                }
             }
         }
         return refreshed;

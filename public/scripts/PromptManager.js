@@ -2,7 +2,7 @@
 
 import { DOMPurify } from '../lib.js';
 
-import { event_types, eventSource, is_send_press, main_api, substituteParams } from '../script.js';
+import { event_types, eventSource, getCurrentChatIdentity, is_send_press, main_api, substituteParams } from '../script.js';
 import { is_group_generating } from './group-chats.js';
 import { Message, MessageCollection, TokenHandler } from './openai.js';
 import { power_user } from './power-user.js';
@@ -15,6 +15,7 @@ import { isMobile } from './RossAscends-mods.js';
 import { LatestTaskScheduler } from './util/latest-task-scheduler.js';
 import { commitPromptManagerResult } from './util/prompt-manager-result.js';
 import { recordPerformanceSample } from './performance-telemetry.js';
+import { createPromptManagerContextIdentity } from './util/prompt-manager-context.js';
 
 function debouncePromise(func, delay) {
     let timeoutId;
@@ -459,6 +460,7 @@ class PromptManager {
 
         // Enable and disable prompts
         this.handleToggle = (event) => {
+            this.#cancelPromptTokenDryRun();
             const promptID = event.target.closest('.' + this.configuration.prefix + 'prompt_manager_prompt').dataset.pmIdentifier;
             const promptOrderEntry = this.getPromptOrderEntry(this.activeCharacter, promptID);
             const counts = this.tokenHandler.getCounts();
@@ -773,17 +775,29 @@ class PromptManager {
         }
 
         // Re-render when chat history changes.
-        eventSource.on(event_types.MESSAGE_DELETED, () => this.renderDebounced());
-        eventSource.on(event_types.MESSAGE_EDITED, () => this.renderDebounced());
-        eventSource.on(event_types.MESSAGE_RECEIVED, () => this.renderDebounced());
+        const invalidateAndRender = () => {
+            this.#cancelPromptTokenDryRun();
+            this.renderDebounced();
+        };
+        eventSource.on(event_types.MESSAGE_DELETED, invalidateAndRender);
+        eventSource.on(event_types.MESSAGE_EDITED, invalidateAndRender);
+        eventSource.on(event_types.MESSAGE_RECEIVED, invalidateAndRender);
+        eventSource.on(event_types.CHAT_CONTEXT_INVALIDATED, () => this.#cancelPromptTokenDryRun({ render: true }));
+        eventSource.on(event_types.CHAT_CHANGED, invalidateAndRender);
 
         // Re-render when chatcompletion settings change
-        eventSource.on(event_types.CHATCOMPLETION_SOURCE_CHANGED, () => this.renderDebounced());
+        eventSource.on(event_types.CHATCOMPLETION_SOURCE_CHANGED, invalidateAndRender);
 
-        eventSource.on(event_types.CHATCOMPLETION_MODEL_CHANGED, () => this.renderDebounced());
+        eventSource.on(event_types.CHATCOMPLETION_MODEL_CHANGED, invalidateAndRender);
+        eventSource.on(event_types.MAIN_API_CHANGED, invalidateAndRender);
+        eventSource.on(event_types.PROMPT_MANAGER_BACKGROUND_TOKENS_CHANGED, enabled => {
+            this.#cancelPromptTokenDryRun({ render: !enabled });
+            if (enabled) this.renderDebounced();
+        });
 
         // Re-render when the character changes.
         eventSource.on('chatLoaded', (event) => {
+            this.#cancelPromptTokenDryRun();
             this.handleCharacterSelected(event);
             this.saveServiceSettings().then(() => this.renderDebounced());
         });
@@ -796,6 +810,7 @@ class PromptManager {
 
         // Re-render when the group changes.
         eventSource.on('groupSelected', (event) => {
+            this.#cancelPromptTokenDryRun();
             this.handleGroupSelected(event);
             this.saveServiceSettings().then(() => this.renderDebounced());
         });
@@ -834,6 +849,7 @@ class PromptManager {
 
         // Re-render prompt manager on openai preset change
         eventSource.on(event_types.OAI_PRESET_CHANGED_AFTER, () => {
+            this.#cancelPromptTokenDryRun();
             this.sanitizeServiceSettings();
             const mainPrompt = this.getPromptById('main');
             this.updateQuickEdit('main', mainPrompt);
@@ -850,7 +866,7 @@ class PromptManager {
         });
 
         // Re-render prompt manager on world settings update
-        eventSource.on(event_types.WORLDINFO_SETTINGS_UPDATED, () => this.renderDebounced());
+        eventSource.on(event_types.WORLDINFO_SETTINGS_UPDATED, invalidateAndRender);
 
         this.log('Initialized');
     }
@@ -878,6 +894,27 @@ class PromptManager {
         }
     }
 
+    #getPromptTokenContextIdentity() {
+        return createPromptManagerContextIdentity({
+            chatIdentity: getCurrentChatIdentity(),
+            activeCharacterId: this.activeCharacter?.id ?? null,
+            mainApi: main_api,
+            backgroundTokensEnabled: power_user.prompt_manager_background_tokens,
+            serviceSettings: this.serviceSettings,
+        });
+    }
+
+    #cancelPromptTokenDryRun({ render = false } = {}) {
+        this.promptTokenScheduler.cancel();
+        this.tokenUsagePending = false;
+        this.#restoreStableTokenCounts();
+        if (render && main_api === 'openai') {
+            void this.#renderPromptManagerUi().catch(error => {
+                console.warn('Prompt Manager could not clear its pending state:', error);
+            });
+        }
+    }
+
     async #renderPromptManagerUi() {
         this.profileStart('render');
         const scrollPosition = this.#getScrollPosition();
@@ -889,8 +926,9 @@ class PromptManager {
     }
 
     async #runPromptTokenDryRun({ requestCount }) {
+        const contextIdentity = this.#getPromptTokenContextIdentity();
         if (!power_user.prompt_manager_background_tokens || main_api !== 'openai') {
-            return null;
+            return { contextIdentity, result: null };
         }
 
         await waitUntilCondition(
@@ -899,13 +937,18 @@ class PromptManager {
             100,
             { rejectOnTimeout: false },
         );
-        if (is_send_press || is_group_generating || !power_user.prompt_manager_background_tokens || main_api !== 'openai') {
-            return null;
+        if (is_send_press
+            || is_group_generating
+            || !power_user.prompt_manager_background_tokens
+            || main_api !== 'openai'
+            || contextIdentity !== this.#getPromptTokenContextIdentity()) {
+            return { contextIdentity, result: null };
         }
 
         const startedAt = performance.now();
         try {
-            return await this.tryGenerate({ deferCommit: true });
+            const result = await this.tryGenerate({ deferCommit: true });
+            return { contextIdentity, result };
         } finally {
             recordPerformanceSample('prompt-token-dry-run', performance.now() - startedAt, {
                 requests: requestCount,
@@ -914,12 +957,15 @@ class PromptManager {
         }
     }
 
-    async #commitPromptTokenDryRun(result) {
+    async #commitPromptTokenDryRun(completion) {
         this.tokenUsagePending = false;
-        if (is_send_press || is_group_generating) {
+        if (is_send_press
+            || is_group_generating
+            || completion?.contextIdentity !== this.#getPromptTokenContextIdentity()) {
             this.#restoreStableTokenCounts();
             return;
         }
+        const result = completion?.result;
         if (power_user.prompt_manager_background_tokens && main_api === 'openai' && result?.chatCompletion) {
             commitPromptManagerResult(this, result);
         }
@@ -943,15 +989,12 @@ class PromptManager {
      * @param afterTryGenerate - Whether a dry run should be attempted before rendering
      */
     render(afterTryGenerate = true) {
+        this.#cancelPromptTokenDryRun();
         if (main_api !== 'openai') {
-            this.promptTokenScheduler.cancel();
-            this.tokenUsagePending = false;
             return;
         }
 
         if ('character' === this.configuration.promptOrder.strategy && null === this.activeCharacter) {
-            this.promptTokenScheduler.cancel();
-            this.tokenUsagePending = false;
             return;
         }
         this.error = null;
