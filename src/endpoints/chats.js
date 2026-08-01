@@ -27,6 +27,7 @@ import { beginEndpointPerformance } from '../performance-monitor.js';
 import { invalidateCharacterListCache } from '../character-list-cache.js';
 import { KeyedMutex } from '../keyed-mutex.js';
 import { invalidateRecentChatsCache, RecentChatsCache, registerRecentChatsCache } from '../recent-chats-cache.js';
+import { createDurableChatTransaction, ensureDurableChatRecovery } from '../chat-journal.js';
 
 const isBackupEnabled = !!getConfigValue('backups.chat.enabled', true, 'boolean');
 const maxTotalChatBackups = Number(getConfigValue('backups.chat.maxTotalBackups', -1, 'number'));
@@ -512,67 +513,13 @@ function writeChatRevision(filePath, revision) {
     writeFileAtomicSync(getChatRevisionPath(filePath), JSON.stringify({ version: 1, revision }), 'utf8');
 }
 
-function removeChatArtifacts(filePath) {
-    for (const artifactPath of [
+function createChatWriteSnapshot(request, filePath) {
+    return createDurableChatTransaction({
         filePath,
-        getChatMetadataPath(filePath),
-        getChatIndexPath(filePath),
-        getChatRevisionPath(filePath),
-    ]) {
-        if (fs.existsSync(artifactPath)) {
-            fs.unlinkSync(artifactPath);
-        }
-    }
-    const chunkDirectory = getChatChunkDir(filePath);
-    if (fs.existsSync(chunkDirectory)) {
-        fs.rmSync(chunkDirectory, { recursive: true, force: true });
-    }
-}
-
-function linkOrCopyFile(source, destination) {
-    fs.mkdirSync(path.dirname(destination), { recursive: true });
-    try {
-        fs.linkSync(source, destination);
-    } catch {
-        fs.copyFileSync(source, destination);
-    }
-}
-
-function createChatWriteSnapshot(filePath, temporaryRoot) {
-    fs.mkdirSync(temporaryRoot, { recursive: true });
-    const snapshotDirectory = fs.mkdtempSync(path.join(temporaryRoot, '.chat-write-'));
-    const entries = [];
-    try {
-        for (const [index, artifactPath] of listChatArtifactPaths(filePath).entries()) {
-            const snapshotPath = path.join(snapshotDirectory, String(index));
-            linkOrCopyFile(artifactPath, snapshotPath);
-            entries.push({ artifactPath, snapshotPath });
-        }
-    } catch (error) {
-        fs.rmSync(snapshotDirectory, { recursive: true, force: true });
-        throw error;
-    }
-
-    let settled = false;
-    const cleanup = () => {
-        fs.rmSync(snapshotDirectory, { recursive: true, force: true });
-    };
-    return {
-        commit() {
-            if (settled) return;
-            settled = true;
-            cleanup();
-        },
-        rollback() {
-            if (settled) return;
-            settled = true;
-            removeChatArtifacts(filePath);
-            for (const entry of entries) {
-                linkOrCopyFile(entry.snapshotPath, entry.artifactPath);
-            }
-            cleanup();
-        },
-    };
+        artifactPaths: listChatArtifactPaths(filePath),
+        userRoot: request.user.directories.root,
+        handle: request.user.profile.handle,
+    });
 }
 
 function validateExpectedChatRevision(request, response, filePath) {
@@ -1552,6 +1499,16 @@ export async function getChatInfo(pathToFile, additionalData = {}, isGroup = fal
 
 export const router = express.Router();
 
+router.use((request, response, next) => {
+    try {
+        ensureDurableChatRecovery(request.user.directories.root, request.user.profile.handle);
+        next();
+    } catch (error) {
+        console.error('Failed to recover durable chat journal:', error);
+        response.status(500).send({ error: 'chat_recovery_failed' });
+    }
+});
+
 const CHARACTER_LIST_INVALIDATION_PATHS = new Set(['/save', '/save-tail', '/rename', '/delete', '/import']);
 router.use((request, response, next) => {
     if (request.method === 'POST' && CHARACTER_LIST_INVALIDATION_PATHS.has(request.path)) {
@@ -1634,8 +1591,7 @@ async function persistChatTail({
         }
     }
 
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    const snapshot = createChatWriteSnapshot(filePath, request.user.directories.root);
+    const snapshot = createChatWriteSnapshot(request, filePath);
     try {
         let embeddedHeaderCount = 0;
         let persistedHeader = header ?? structuredClone(defaultHeader);
@@ -1644,6 +1600,8 @@ async function persistChatTail({
         let totalBytes = 0;
         let lastMessage = messages[messages.length - 1] ?? null;
 
+        snapshot.markMutating();
+        fs.mkdirSync(path.dirname(filePath), { recursive: true });
         if (chatChunkingEnabled) {
             let updatedIndex;
             if (!fs.existsSync(filePath) || beforeOffset <= 0) {
@@ -1782,9 +1740,10 @@ async function persistFullChat({ request, response, filePath, header, messages, 
         }
     }
 
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    const snapshot = createChatWriteSnapshot(filePath, request.user.directories.root);
+    const snapshot = createChatWriteSnapshot(request, filePath);
     try {
+        snapshot.markMutating();
+        fs.mkdirSync(path.dirname(filePath), { recursive: true });
         if (chatChunkingEnabled) {
             await writeChunkedChat(filePath, header, messages);
         } else {

@@ -1,5 +1,6 @@
 import express from 'express';
 import { getConfigValue } from '../util.js';
+import { getPublicMigrationFeatureFlags } from '../feature-flags.js';
 
 export const router = express.Router();
 
@@ -20,4 +21,8 @@ router.get('/public-pages', (request, response) => {
         console.error('Error getting public pages config:', error);
         response.status(500).json({ error: 'Failed to get public pages config' });
     }
+});
+
+router.get('/feature-flags', (_request, response) => {
+    response.json(getPublicMigrationFeatureFlags());
 });

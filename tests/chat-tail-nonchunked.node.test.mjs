@@ -1,3 +1,5 @@
+/* eslint-disable playwright/expect-expect -- Node test runner uses assert instead of Playwright expect. */
+/* global globalThis */
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -26,13 +28,14 @@ fs.mkdirSync(globalThis.DATA_ROOT, { recursive: true });
 const { router: chatsRouter } = await import('../src/endpoints/chats.js');
 const { default: systemMonitor } = await import('../src/system-monitor.js');
 
+const userRoot = path.join(testRoot, 'user');
 const directories = {
-    root: path.join(testRoot, 'user'),
-    groupChats: path.join(testRoot, 'group-chats'),
-    backups: path.join(testRoot, 'backups'),
-    characters: path.join(testRoot, 'characters'),
-    chats: path.join(testRoot, 'chats'),
-    groups: path.join(testRoot, 'groups'),
+    root: userRoot,
+    groupChats: path.join(userRoot, 'group-chats'),
+    backups: path.join(userRoot, 'backups'),
+    characters: path.join(userRoot, 'characters'),
+    chats: path.join(userRoot, 'chats'),
+    groups: path.join(userRoot, 'groups'),
 };
 for (const directory of Object.values(directories)) {
     fs.mkdirSync(directory, { recursive: true });

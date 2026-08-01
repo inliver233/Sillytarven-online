@@ -1,6 +1,14 @@
 # -- DATA CONFIGURATION --
 # Root directory for user data storage
 dataRoot: ./data
+# Migration workstreams are opt-in until each phase is validated for production.
+featureFlags:
+  macros2: false
+  reasoningTools: false
+  extensionLifecycle: false
+  swipePicker: false
+  worldInfoRelink: false
+
 # -- SERVER CONFIGURATION --
 # Listen for incoming connections
 listen: true
