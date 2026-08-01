@@ -9,6 +9,6 @@ export default defineConfig({
         video: 'only-on-failure',
         screenshot: 'only-on-failure',
     },
-    workers: 4,
+    workers: process.env.ST_TEST_URL ? 1 : 4,
     fullyParallel: true,
 });

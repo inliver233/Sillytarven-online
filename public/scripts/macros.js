@@ -1,5 +1,5 @@
 import { Handlebars, moment, seedrandom, droll } from '../lib.js';
-import { chat, chat_metadata, main_api, getMaxContextSize, getCurrentChatId, substituteParams, eventSource, event_types, extension_prompts } from '../script.js';
+import { chat, chat_metadata, main_api, getMaxPromptTokens, getMaxContextTokens, getMaxResponseTokens, getCurrentChatId, substituteParams, eventSource, event_types, extension_prompts } from '../script.js';
 import { timestampToMoment, isDigitsOnly, getStringHash, escapeRegex, uuidv4 } from './utils.js';
 import { textgenerationwebui_banned_in_macros } from './textgen-settings.js';
 import { getInstructMacros } from './instruct-mode.js';
@@ -8,6 +8,7 @@ import { isMobile } from './RossAscends-mods.js';
 import { inject_ids } from './constants.js';
 import { initRegisterMacros, macros as macroSystem } from './macros/macro-system.js';
 import { power_user } from './power-user.js';
+import { isMacros2Enabled } from './macros/feature-gate.js';
 
 /**
  * @typedef Macro
@@ -58,10 +59,11 @@ export class MacrosParser {
      *
      * @param {string} method
      * @param {string} replacement
+     * @param {IArguments} [methodArgs=null]
      * @returns {void}
      */
-    static #logDeprecated(method, replacement) {
-        console.warn(`[DEPRECATED] MacrosParser.${method} is deprecated and will be removed in a future version. Use ${replacement} instead.`);
+    static #logDeprecated(method, replacement, methodArgs = null) {
+        console.warn(`[DEPRECATED] MacrosParser.${method} is deprecated and will be removed in a future version. Use ${replacement} instead. Arguments:`, (methodArgs ?? 'none'));
     }
 
     /**
@@ -78,7 +80,7 @@ export class MacrosParser {
      * @returns {void}
      */
     static #registerMacroInNewEngine(key, value, description) {
-        if (!power_user.experimental_macro_engine) {
+        if (!isMacros2Enabled(power_user.experimental_macro_engine)) {
             return;
         }
 
@@ -123,7 +125,7 @@ export class MacrosParser {
      * @returns {void}
      */
     static #unregisterMacroInNewEngine(key) {
-        if (!power_user.experimental_macro_engine) {
+        if (!isMacros2Enabled(power_user.experimental_macro_engine)) {
             return;
         }
 
@@ -136,7 +138,7 @@ export class MacrosParser {
      */
     static [Symbol.iterator] = function* () {
         // When experimental macro engine is active, yield from the new registry
-        if (power_user.experimental_macro_engine) {
+        if (isMacros2Enabled(power_user.experimental_macro_engine)) {
             // Exclude hidden aliases for consistency with autocomplete behavior
             for (const def of macroSystem.registry.getAllMacros({ excludeHiddenAliases: true })) {
                 yield { key: def.name, description: def.description || '' };
@@ -155,7 +157,7 @@ export class MacrosParser {
      * @returns {string|MacroFunction|undefined} The macro value
      */
     static get(key) {
-        MacrosParser.#logDeprecated('get', 'macros.registry.getMacro (from scripts/macros/macro-system.js)');
+        MacrosParser.#logDeprecated('get', 'macros.registry.getMacro (from scripts/macros/macro-system.js)', arguments);
         return MacrosParser.#macros.get(key);
     }
 
@@ -165,8 +167,8 @@ export class MacrosParser {
      * @returns {boolean} True if the macro is registered, false otherwise
      */
     static has(key) {
-        MacrosParser.#logDeprecated('has', 'macros.registry.hasMacro (from scripts/macros/macro-system.js)');
-        if (power_user.experimental_macro_engine) {
+        MacrosParser.#logDeprecated('has', 'macros.registry.hasMacro (from scripts/macros/macro-system.js)', arguments);
+        if (isMacros2Enabled(power_user.experimental_macro_engine)) {
             return macroSystem.registry.hasMacro(key);
         }
 
@@ -180,7 +182,7 @@ export class MacrosParser {
      * @param {string} [description] Optional description of the macro
      */
     static registerMacro(key, value, description = '') {
-        MacrosParser.#logDeprecated('registerMacro', 'macros.registry.registerMacro (from scripts/macros/macro-system.js) or substituteParams({ dynamicMacros })');
+        MacrosParser.#logDeprecated('registerMacro', 'macros.registry.registerMacro (from scripts/macros/macro-system.js) or substituteParams({ dynamicMacros })', arguments);
         if (typeof key !== 'string') {
             throw new Error('Macro key must be a string');
         }
@@ -202,7 +204,7 @@ export class MacrosParser {
         }
 
         MacrosParser.#registerMacroInNewEngine(key, value, description);
-        if (power_user.experimental_macro_engine) {
+        if (isMacros2Enabled(power_user.experimental_macro_engine)) {
             return;
         }
 
@@ -223,7 +225,7 @@ export class MacrosParser {
      * @param {string} key Macro name (key)
      */
     static unregisterMacro(key) {
-        MacrosParser.#logDeprecated('unregisterMacro', 'macros.registry.unregisterMacro (from scripts/macros/macro-system.js)');
+        MacrosParser.#logDeprecated('unregisterMacro', 'macros.registry.unregisterMacro (from scripts/macros/macro-system.js)', arguments);
         if (typeof key !== 'string') {
             throw new Error('Macro key must be a string');
         }
@@ -235,7 +237,7 @@ export class MacrosParser {
             throw new Error('Macro key must not be empty or whitespace only');
         }
 
-        if (power_user.experimental_macro_engine) {
+        if (isMacros2Enabled(power_user.experimental_macro_engine)) {
             MacrosParser.#unregisterMacroInNewEngine(key);
             return;
         }
@@ -639,7 +641,12 @@ export function evaluateMacros(content, env, postProcessFn) {
      * @type {Macro[]}
     */
     const postEnvMacros = [
-        { regex: /{{maxPrompt}}/gi, replace: () => String(getMaxContextSize()) },
+        { regex: /{{maxPrompt}}/gi, replace: () => String(getMaxPromptTokens()) },
+        { regex: /{{maxPromptTokens}}/gi, replace: () => String(getMaxPromptTokens()) },
+        { regex: /{{maxContext}}/gi, replace: () => String(getMaxContextTokens()) },
+        { regex: /{{maxContextTokens}}/gi, replace: () => String(getMaxContextTokens()) },
+        { regex: /{{maxResponse}}/gi, replace: () => String(getMaxResponseTokens()) },
+        { regex: /{{maxResponseTokens}}/gi, replace: () => String(getMaxResponseTokens()) },
         { regex: /{{lastMessage}}/gi, replace: () => getLastMessage() },
         { regex: /{{lastMessageId}}/gi, replace: () => String(getLastMessageId() ?? '') },
         { regex: /{{lastUserMessage}}/gi, replace: () => getLastUserMessage() },
@@ -708,8 +715,8 @@ export function evaluateMacros(content, env, postProcessFn) {
 }
 
 export function initMacros() {
-    // Only manually register those is new macro engine is not on. In the new one, they are already registered automatically
-    if (!power_user.experimental_macro_engine) {
+    // Preserve the legacy registry whenever either the instance gate or saved user opt-in is off.
+    if (!isMacros2Enabled(power_user.experimental_macro_engine)) {
         function initLastGenerationType() {
             let lastGenerationType = '';
 

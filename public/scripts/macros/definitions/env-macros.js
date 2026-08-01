@@ -140,6 +140,30 @@ export function registerEnvMacros() {
         handler: ({ env }) => env.character.creatorNotes ?? '',
     });
 
+    MacroRegistry.registerMacro('charFirstMessage', {
+        aliases: [{ alias: 'greeting' }],
+        category: MacroCategory.CHARACTER,
+        unnamedArgs: [
+            {
+                name: 'index',
+                optional: true,
+                defaultValue: '0',
+                type: MacroValueType.INTEGER,
+                description: '0-based index. 0 (default) returns the main greeting, 1 and up return alternate greetings.',
+            },
+        ],
+        description: 'The character\'s first message / greeting. Optionally specify an index to access alternate greetings.',
+        returns: 'Character greeting at the given index, or empty string if out of bounds.',
+        exampleUsage: ['{{greeting}}', '{{greeting::0}}', '{{greeting::1}}'],
+        handler: ({ env, unnamedArgs: [index] }) => {
+            const i = Number(index ?? 0);
+            if (i === 0) return env.character.firstMessage ?? '';
+            const altGreetings = env.character.alternateGreetings;
+            if (!Array.isArray(altGreetings)) return '';
+            return altGreetings[i - 1] ?? '';
+        },
+    });
+
     // Character version macros (legacy variants and documented {{charVersion}})
     MacroRegistry.registerMacro('charVersion', {
         aliases: [
@@ -158,17 +182,6 @@ export function registerEnvMacros() {
         description: 'Model name for the currently selected API (Chat Completion or Chat Completion).',
         returns: 'Model name.',
         handler: ({ env }) => env.system.model,
-    });
-
-    // TODO: Move this to the summary extension, where it belongs
-    MacroRegistry.registerMacro('summary', {
-        category: MacroCategory.CHAT,
-        description: 'Latest chat summary from the "Summarize" extension (when available).',
-        returns: 'Latest chat summary.',
-        handler: ({ env }) => {
-            const value = /** @type {any} */ (env.extra).summary;
-            return value == null ? '' : String(value);
-        },
     });
 
     MacroRegistry.registerMacro('original', {

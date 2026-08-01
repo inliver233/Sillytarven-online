@@ -191,6 +191,7 @@ import { debounce_timeout, GENERATION_TYPE_TRIGGERS, IGNORE_SYMBOL, inject_ids, 
 
 import { cancelDebouncedMetadataSave, doDailyExtensionUpdatesCheck, extension_settings, initExtensions, loadExtensionSettings, runGenerationInterceptors, saveMetadataDebounced } from './scripts/extensions.js';
 import { COMMENT_NAME_DEFAULT, CONNECT_API_MAP, executeSlashCommandsOnChatInput, initDefaultSlashCommands, initSlashCommandAutoComplete, isExecutingCommandsFromChatInput, pauseScriptExecution, stopScriptExecution, UNIQUE_APIS } from './scripts/slash-commands.js';
+import { initMacroAutoComplete } from './scripts/autocomplete/MacroAutoComplete.js';
 import {
     tag_map,
     tags,
@@ -287,6 +288,7 @@ import { SimpleMutex } from './scripts/util/SimpleMutex.js';
 import { AudioPlayer } from './scripts/audio-player.js';
 import { MacroEnvBuilder } from './scripts/macros/engine/MacroEnvBuilder.js';
 import { MacroEngine } from './scripts/macros/engine/MacroEngine.js';
+import { isMacros2Enabled, loadMacros2FeatureGate } from './scripts/macros/feature-gate.js';
 import { addChatBackupsBrowser } from './scripts/chat-backups.js';
 
 /**
@@ -362,6 +364,8 @@ export {
     setCharacterSettingsOverrides as setScenarioOverride,
     /** @deprecated Use appendMediaToMessage instead. */
     appendMediaToMessage as appendImageToMessage,
+    /** @deprecated Use getMaxPromptTokens instead. */
+    getMaxPromptTokens as getMaxContextSize,
     importCharacterChat,
 };
 
@@ -900,6 +904,7 @@ async function firstLoadInit() {
     await initSecrets();
     await readSecretState();
     await initLocales();
+    await loadMacros2FeatureGate();
     initChatUtilities();
     initDefaultSlashCommands();
     initTextGenModels();
@@ -919,7 +924,6 @@ async function firstLoadInit() {
     initDynamicStyles();
     initTags();
     initBookmarks();
-    initMacros();
     updateLoaderProgress(80, '正在同步角色卡与用户数据...');
     await getUserAvatars(true, user_avatar);
     await getCharacters();
@@ -930,6 +934,9 @@ async function firstLoadInit() {
     initAuthorsNote();
     await initPersonas();
     await initSlashCommandAutoComplete();
+    if (isMacros2Enabled(power_user.experimental_macro_engine)) {
+        initMacroAutoComplete();
+    }
     initWorldInfo();
     initHorde();
     initRossMods();
@@ -3152,7 +3159,7 @@ export function substituteParamsLegacy(content, _name1, _name2, _original, _grou
     }
 
     // If experimental macro engine is enabled, use it. This code will be cleaned up in the future.
-    if (power_user?.experimental_macro_engine) {
+    if (isMacros2Enabled(power_user?.experimental_macro_engine)) {
         return substituteParams(content, {
             name1Override: _name1,
             name2Override: _name2,
@@ -3292,7 +3299,7 @@ export function substituteParams(content, options = {}) {
     }
 
     // Keep the new macro engine behind a feature switch for now
-    if (!power_user?.experimental_macro_engine) {
+    if (!isMacros2Enabled(power_user?.experimental_macro_engine)) {
         return substituteParamsLegacy(content, options.name1Override, options.name2Override, options.original, options.groupOverride, options.replaceCharacterCard, options.dynamicMacros, options.postProcessFn);
     }
 
@@ -3731,6 +3738,14 @@ export function getCharacterCardFieldsLazy({ chid = undefined } = {}) {
             const exampleDialog = chat_metadata['mes_example'] || character.mes_example || '';
             return baseChatReplace(exampleDialog.trim());
         },
+        firstMessage: () => {
+            if (!character) return '';
+            return baseChatReplace(character.first_mes?.trim() || '');
+        },
+        alternateGreetings: () => {
+            if (!character || !Array.isArray(character.data?.alternate_greetings)) return [];
+            return character.data.alternate_greetings.map(greeting => baseChatReplace(greeting?.trim()));
+        },
     };
 
     return createLazyFields(resolvers);
@@ -3756,6 +3771,8 @@ export function getCharacterCardFields({ chid = null } = {}) {
         version: '',
         charDepthPrompt: '',
         creatorNotes: '',
+        firstMessage: '',
+        alternateGreetings: [],
     };
     result.persona = baseChatReplace(power_user.persona_description?.trim(), name1, name2);
 
@@ -3778,6 +3795,10 @@ export function getCharacterCardFields({ chid = null } = {}) {
     result.version = character.data?.character_version ?? '';
     result.charDepthPrompt = baseChatReplace(character.data?.extensions?.depth_prompt?.prompt?.trim(), name1, name2);
     result.creatorNotes = baseChatReplace(character.data?.creator_notes?.trim(), name1, name2);
+    result.firstMessage = baseChatReplace(character.first_mes?.trim(), name1, name2);
+    result.alternateGreetings = Array.isArray(character.data?.alternate_greetings)
+        ? character.data.alternate_greetings.map(greeting => baseChatReplace(greeting?.trim(), name1, name2))
+        : [];
 
     if (selected_group) {
         const groupCards = getGroupCharacterCards(selected_group, Number(currentChid));
@@ -4836,7 +4857,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
     }
 
     // Determine token limit
-    let this_max_context = getMaxContextSize();
+    let this_max_context = getMaxPromptTokens();
 
     if (!dryRun) {
         console.debug('Running extension interceptors');
@@ -6215,21 +6236,15 @@ export async function sendMessageAsUser(messageText, messageBias, insertAt = nul
 }
 
 /**
- * Gets the maximum usable context size for the current API.
- * @param {number|null} overrideResponseLength Optional override for the response length.
- * @returns {number} Maximum usable context size.
+ * Gets the full context-window token limit for the current API.
+ * @returns {number} Maximum context token limit.
  */
-export function getMaxContextSize(overrideResponseLength = null) {
-    if (typeof overrideResponseLength !== 'number' || overrideResponseLength <= 0 || isNaN(overrideResponseLength)) {
-        overrideResponseLength = null;
-    }
-
-    let this_max_context = 1487;
+export function getMaxContextTokens() {
     if (main_api == 'kobold' || main_api == 'koboldhorde' || main_api == 'textgenerationwebui') {
-        this_max_context = (max_context - (overrideResponseLength || amount_gen));
+        return max_context;
     }
     if (main_api == 'novel') {
-        this_max_context = Number(max_context);
+        let this_max_context = Number(max_context);
         if (nai_settings.model_novel.includes('clio')) {
             this_max_context = Math.min(max_context, 8192);
         }
@@ -6243,19 +6258,41 @@ export function getMaxContextSize(overrideResponseLength = null) {
             }
         }
         if (nai_settings.model_novel.includes('erato')) {
-            // subscriber limits coming soon
-            this_max_context = Math.min(max_context, 8192);
-
-            // Added special tokens and whatnot
-            this_max_context -= 10;
+            this_max_context = Math.min(max_context, 8192) - 10;
         }
-
-        this_max_context = this_max_context - (overrideResponseLength || amount_gen);
+        return this_max_context;
     }
     if (main_api == 'openai') {
-        this_max_context = oai_settings.openai_max_context - (overrideResponseLength || oai_settings.openai_max_tokens);
+        return oai_settings.openai_max_context;
     }
-    return this_max_context;
+    return 1487;
+}
+
+/**
+ * Gets the maximum generation/reply token limit for the current API.
+ * @returns {number} Maximum response token limit.
+ */
+export function getMaxResponseTokens() {
+    if (main_api == 'kobold' || main_api == 'koboldhorde' || main_api == 'textgenerationwebui' || main_api == 'novel') {
+        return amount_gen;
+    }
+    if (main_api == 'openai') {
+        return oai_settings.openai_max_tokens;
+    }
+    return 0;
+}
+
+/**
+ * Gets the maximum usable prompt size for the current API.
+ * @param {number|null} overrideResponseLength Optional override for response length.
+ * @returns {number} Maximum prompt token limit.
+ */
+export function getMaxPromptTokens(overrideResponseLength = null) {
+    if (typeof overrideResponseLength !== 'number' || overrideResponseLength <= 0 || isNaN(overrideResponseLength)) {
+        overrideResponseLength = null;
+    }
+
+    return getMaxContextTokens() - (overrideResponseLength || getMaxResponseTokens());
 }
 
 function parseTokenCounts(counts, thisPromptBits) {
@@ -7147,7 +7184,10 @@ export function syncMesToSwipe(messageId = null) {
         return false;
     }
 
-    targetMessage.swipes[targetMessage.swipe_id] = targetMessage.mes;
+    // Only sync swipes after the pristine greeting has changed so greeting macros resolve per swipe.
+    if (chat_metadata.tainted || chatPagingState.hasMore || chat.length > 1) {
+        targetMessage.swipes[targetMessage.swipe_id] = targetMessage.mes;
+    }
 
     targetSwipeInfo.send_date = targetMessage.send_date;
     targetSwipeInfo.gen_started = targetMessage.gen_started;
@@ -8526,6 +8566,9 @@ export async function getSettings() {
 
         selected_button = settings.selected_button;
 
+        // Macros must be registered after the saved preference is loaded and before extensions register theirs.
+        initMacros();
+
         if (data.enable_extensions) {
             const enableAutoUpdate = Boolean(data.enable_extensions_auto_update);
             const isVersionChanged = settings.currentVersion !== currentVersion;
@@ -8793,6 +8836,7 @@ export async function messageEdit(editMessageId) {
     const editTextArea = document.createElement('textarea');
     editTextArea.id = 'curEditTextarea';
     editTextArea.className = 'edit_textarea mdHotkeys';
+    editTextArea.dataset.macros = '';
     messageText.append(editTextArea);
 
     const text = trimSpaces(editMessage.mes || '');

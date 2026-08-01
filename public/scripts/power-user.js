@@ -305,7 +305,7 @@ export const power_user = {
     custom_stopping_strings_macro: true,
     fuzzy_search: false,
     encode_tags: false,
-    experimental_macro_engine: false,
+    experimental_macro_engine: true,
     prompt_manager_background_tokens: false,
     settings_save_noop: false,
     extension_resource_preload: false,
@@ -328,6 +328,7 @@ export const power_user = {
                 right: AUTOCOMPLETE_WIDTH.CHAT,
             },
             select: AUTOCOMPLETE_SELECT_KEY.TAB + AUTOCOMPLETE_SELECT_KEY.ENTER,
+            showInAllMacroFields: false,
         },
         parser: {
             /**@type {Object.<PARSER_FLAG,boolean>} */
@@ -1591,6 +1592,9 @@ export async function loadPowerUserSettings(settings, data) {
             if (power_user.stscript.autocomplete.select === undefined) {
                 power_user.stscript.autocomplete.select = defaultStscript.autocomplete.select;
             }
+            if (power_user.stscript.autocomplete.showInAllMacroFields === undefined) {
+                power_user.stscript.autocomplete.showInAllMacroFields = defaultStscript.autocomplete.showInAllMacroFields;
+            }
         }
         if (power_user.stscript.parser === undefined) {
             power_user.stscript.parser = defaultStscript.parser;
@@ -1731,6 +1735,7 @@ export async function loadPowerUserSettings(settings, data) {
 
     $('#stscript_autocomplete_state').val(power_user.stscript.autocomplete.state).trigger('input');
     $('#stscript_autocomplete_autoHide').prop('checked', power_user.stscript.autocomplete.autoHide ?? false).trigger('input');
+    $('#stscript_autocomplete_showInAllMacroFields').prop('checked', power_user.stscript.autocomplete.showInAllMacroFields ?? false);
     $('#stscript_matching').val(power_user.stscript.matching ?? 'fuzzy');
     $('#stscript_autocomplete_style').val(power_user.stscript.autocomplete.style ?? 'theme');
     document.body.setAttribute('data-stscript-style', power_user.stscript.autocomplete.style);
@@ -4020,6 +4025,18 @@ jQuery(() => {
     $('#experimental_macro_engine').on('input', function () {
         power_user.experimental_macro_engine = !!$(this).prop('checked');
         saveSettingsDebounced();
+
+        eventSource.once(event_types.SETTINGS_UPDATED, function () {
+            toastr.warning(
+                t`Click here to reload.`,
+                t`Toggling the Experimental Macro Engine requires a reload.`,
+                {
+                    onclick: () => window.location.reload(),
+                    timeOut: 10000,
+                    preventDuplicates: true,
+                },
+            );
+        });
     });
 
     $('#prompt_manager_background_tokens').on('input', function () {
@@ -4079,6 +4096,11 @@ jQuery(() => {
 
     $('#stscript_autocomplete_autoHide').on('input', function () {
         power_user.stscript.autocomplete.autoHide = !!$(this).prop('checked');
+        saveSettingsDebounced();
+    });
+
+    $('#stscript_autocomplete_showInAllMacroFields').on('input', function () {
+        power_user.stscript.autocomplete.showInAllMacroFields = !!$(this).prop('checked');
         saveSettingsDebounced();
     });
 

@@ -13,7 +13,7 @@ import {
     saveSettingsDebounced,
     substituteParamsExtended,
     generateRaw,
-    getMaxContextSize,
+    getMaxPromptTokens,
     setExtensionPrompt,
     streamingProcessor,
     animation_easing,
@@ -31,6 +31,7 @@ import { countWebLlmTokens, generateWebLlmChatPrompt, getWebLlmContextSize, isWe
 import { commonEnumProviders } from '../../slash-commands/SlashCommandCommonEnumsProvider.js';
 import { removeReasoningFromString } from '../../reasoning.js';
 import { MacrosParser } from '/scripts/macros.js';
+import { isMacros2Enabled } from '/scripts/macros/feature-gate.js';
 export { MODULE_NAME };
 
 const MODULE_NAME = '1_memory';
@@ -71,7 +72,7 @@ async function getSourceContextSize() {
         return 1024 - 64;
     }
 
-    return getMaxContextSize(overrideLength);
+    return getMaxPromptTokens(overrideLength);
 }
 
 const formatMemoryValue = function (value) {
@@ -349,6 +350,11 @@ function onMaxMessagesPerRequestInput() {
     saveSettingsDebounced();
 }
 
+/**
+ * Get the latest memory summary from the chat.
+ * @param {ChatMessage[]} chat Chat messages
+ * @returns {string} Latest memory summary or empty string
+ */
 function getLatestMemoryFromChat(chat) {
     if (!Array.isArray(chat) || !chat.length) {
         return '';
@@ -365,6 +371,11 @@ function getLatestMemoryFromChat(chat) {
     return '';
 }
 
+/**
+ * Get the index of the latest memory summary from the chat.
+ * @param {ChatMessage[]} chat Chat messages
+ * @returns {number} Index of the latest memory summary or -1 if not found
+ */
 function getIndexOfLatestChatSummary(chat) {
     if (!Array.isArray(chat) || !chat.length) {
         return -1;
@@ -1095,16 +1106,25 @@ jQuery(async function () {
         returns: ARGUMENT_TYPE.STRING,
     }));
 
-    if (power_user.experimental_macro_engine) {
+    const summaryMacroHandler = () => {
+        // Checking content of the UI summary box first
+        const uiSummary = $('#memory_contents').val().toString();
+        if (uiSummary.trim().length > 0) {
+            return uiSummary;
+        }
+        // Fallback to scanning the chat for the latest summary if the UI summary box is empty
+        return getLatestMemoryFromChat(getContext().chat);
+    };
+    if (isMacros2Enabled(power_user.experimental_macro_engine)) {
         macros.register('summary', {
             category: MacroCategory.CHAT,
             description: 'Returns the latest memory/summary from the current chat.',
-            handler: () => getLatestMemoryFromChat(getContext().chat),
+            handler: () => summaryMacroHandler(),
         });
     } else {
         // TODO: Remove this when the experimental macro engine is replacing the old macro engine
         MacrosParser.registerMacro('summary',
-            () => getLatestMemoryFromChat(getContext().chat),
+            () => summaryMacroHandler(),
             'Returns the latest memory/summary from the current chat.');
     }
 });

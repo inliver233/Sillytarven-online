@@ -4,7 +4,7 @@ import { eventSource, event_types, saveSettings, saveSettingsDebounced, getReque
 import { showLoader } from './loader.js';
 import { POPUP_RESULT, POPUP_TYPE, Popup, callGenericPopup } from './popup.js';
 import { renderTemplate, renderTemplateAsync } from './templates.js';
-import { delay, sanitizeSelector, setValueByPath } from './utils.js';
+import { delay, equalsIgnoreCaseAndAccents, sanitizeSelector, setValueByPath } from './utils.js';
 import { getContext } from './st-context.js';
 import { isAdmin } from './user.js';
 import { addLocaleData, getCurrentLocale, t } from './i18n.js';
@@ -332,6 +332,26 @@ export async function disableExtension(name, reload = true) {
     } else {
         requiresReload = true;
     }
+}
+
+/**
+ * Resolves an extension using discovery order, preserving the server's local/global shadowing policy.
+ * The resolver remains valid before activation and resource preloading because discovery populates
+ * extensionNames before either step begins.
+ * @param {string} name Extension name, with or without the third-party/ prefix
+ * @returns {{name: string, enabled: boolean, type: string}|null}
+ */
+export function findExtension(name) {
+    const internalName = extensionNames.find(extensionName =>
+        equalsIgnoreCaseAndAccents(extensionName, name)
+        || equalsIgnoreCaseAndAccents(extensionName, `third-party/${name}`));
+    if (!internalName) return null;
+
+    return {
+        name: internalName,
+        enabled: !extension_settings.disabledExtensions.includes(internalName),
+        type: extensionTypes[internalName] || '',
+    };
 }
 
 /**

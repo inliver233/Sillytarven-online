@@ -22,7 +22,7 @@ import { getStringHash } from '/scripts/utils.js';
  * @property {string|null} [original]
  * @property {string|null} [groupOverride]
  * @property {boolean} [replaceCharacterCard]
- * @property {Record<string, any>|null} [dynamicMacros]
+ * @property {Record<string, import('./MacroEnv.types.js').DynamicMacroValue>|null} [dynamicMacros]
  * @property {(value: string) => string} [postProcessFn]
  */
 
@@ -109,10 +109,19 @@ class MacroEnvBuilder {
                     ['version', 'version'],
                     ['charDepthPrompt', 'charDepthPrompt'],
                     ['creatorNotes', 'creatorNotes'],
+                    ['firstMessage', 'firstMessage'],
+                    ['alternateGreetings', 'alternateGreetings'],
                 ]);
                 for (const [envKey, fieldKey] of fieldMappings) {
                     Object.defineProperty(env.character, envKey, {
-                        get() { return fields[fieldKey] || ''; },
+                        get() {
+                            const value = fields[fieldKey];
+                            // alternateGreetings should default to [] instead of ''
+                            if (envKey === 'alternateGreetings') {
+                                return Array.isArray(value) ? value : [];
+                            }
+                            return value || '';
+                        },
                         enumerable: true,
                         configurable: true,
                     });
@@ -143,8 +152,11 @@ class MacroEnvBuilder {
         env.functions.postProcess = typeof ctx.postProcessFn === 'function' ? ctx.postProcessFn : (x) => x;
 
         // Dynamic, per-call macros that should be visible only for this evaluation run.
+        // Keys are normalized to lowercase for case-insensitive matching.
         if (ctx.dynamicMacros && typeof ctx.dynamicMacros === 'object') {
-            env.dynamicMacros = { ...ctx.dynamicMacros };
+            for (const [key, value] of Object.entries(ctx.dynamicMacros)) {
+                env.dynamicMacros[key.toLowerCase()] = value;
+            }
         }
 
         // Let providers augment the env, if any are registered. Apply them in order,

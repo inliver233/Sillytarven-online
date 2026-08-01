@@ -19,6 +19,23 @@ module.exports = {
         sourceType: 'module',
     },
     overrides: [
+        {
+            files: ['tests/frontend/*.e2e.js', 'frontend/*.e2e.js'],
+            env: { browser: true },
+            globals: { SillyTavern: 'readonly', globalThis: 'readonly' },
+        },
+        {
+            files: ['tests/frontend/MacroEngine.e2e.js', 'frontend/MacroEngine.e2e.js'],
+            rules: { 'playwright/no-conditional-in-test': 'off' },
+        },
+        {
+            files: ['tests/frontend/MacroLexer.e2e.js', 'frontend/MacroLexer.e2e.js'],
+            rules: { 'playwright/no-skipped-test': 'off' },
+        },
+        {
+            files: ['tests/*.node.test.mjs', '*.node.test.mjs'],
+            rules: { 'playwright/expect-expect': 'off' },
+        },
     ],
     ignorePatterns: [
         '*.min.js',
