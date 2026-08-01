@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 import express from 'express';
 
+import { isClientTelemetryJsonPath } from '../src/body-parser-routing.js';
 import { setConfigFilePath } from '../src/util.js';
 
 setConfigFilePath(fileURLToPath(new URL('../config.yaml', import.meta.url)));
@@ -22,6 +23,13 @@ const {
     performanceMonitor,
     performanceRequestStartMiddleware,
 } = await import('../src/performance-monitor.js');
+
+test('client telemetry path variants bypass the global JSON parser', () => {
+    assert.equal(isClientTelemetryJsonPath('/api/performance/client'), true);
+    assert.equal(isClientTelemetryJsonPath('/api/performance/client/'), true);
+    assert.equal(isClientTelemetryJsonPath('/api/performance/client/not-client'), false);
+    assert.equal(isClientTelemetryJsonPath('/api/settings/save'), false);
+});
 
 after(() => {
     systemMonitor.destroy();

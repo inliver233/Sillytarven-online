@@ -1935,7 +1935,7 @@ router.post('/save-tail', validateAvatarUrlMiddleware, async function (request, 
     } catch (error) {
         console.error(error);
         prepareResponse();
-        return response.status(500).send(error);
+        return response.status(500).send({ error: 'chat_tail_save_failed' });
     }
 });
 
