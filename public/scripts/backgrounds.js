@@ -10,6 +10,7 @@ import { Popup } from './popup.js';
 import { groups, selected_group } from './group-chats.js';
 import { humanizedDateTime } from './RossAscends-mods.js';
 import { deleteMediaFromServer } from './chats.js';
+import { invalidateBackgroundClientCache } from './util/background-client-cache.js';
 
 const BG_METADATA_KEY = 'custom_background';
 const LIST_METADATA_KEY = 'chat_backgrounds';
@@ -69,6 +70,21 @@ const THUMBNAIL_CONFIG = {
     width: 160,
     height: 90,
 };
+
+async function clearBackgroundClientCaches(backgroundName, { refresh = true } = {}) {
+    const result = await invalidateBackgroundClientCache(backgroundName, {
+        thumbnailStorage: THUMBNAIL_STORAGE,
+        thumbnailBlobs: THUMBNAIL_BLOBS,
+        resourcePaths: [
+            getBackgroundPath(backgroundName),
+            getThumbnailUrl('bg', backgroundName),
+        ],
+        refresh,
+    });
+    if (result.failures.length > 0) {
+        console.warn('Background was saved, but one or more browser caches could not be cleared:', result.failures);
+    }
+}
 
 /**
  * Background source types.
@@ -453,24 +469,15 @@ async function onRenameBackgroundClick(e) {
     const wasGlobalBackground = background_settings.name === oldBackground || background_settings.url === oldUrl;
     const wasLockedBackground = chat_metadata[BG_METADATA_KEY] === oldUrl;
 
+    await clearBackgroundClientCaches(oldBackground, { refresh: false });
+    await clearBackgroundClientCaches(newBackground);
+
     if (wasGlobalBackground) {
         await setBackground(newBackground, newUrl);
     }
     if (wasLockedBackground) {
         saveBackgroundMetadata(newUrl);
         $('#bg1').css('background-image', newUrl);
-    }
-
-    try {
-        for (const cacheKey of [oldBackground, newBackground]) {
-            await THUMBNAIL_STORAGE.removeItem(cacheKey);
-            if (THUMBNAIL_BLOBS.has(cacheKey)) {
-                URL.revokeObjectURL(THUMBNAIL_BLOBS.get(cacheKey));
-                THUMBNAIL_BLOBS.delete(cacheKey);
-            }
-        }
-    } catch (error) {
-        console.warn('Failed to clear renamed background thumbnail cache:', error);
     }
 
     await getBackgrounds();
@@ -758,15 +765,7 @@ async function delBackground(bg) {
         return false;
     }
 
-    try {
-        await THUMBNAIL_STORAGE.removeItem(bg);
-        if (THUMBNAIL_BLOBS.has(bg)) {
-            URL.revokeObjectURL(THUMBNAIL_BLOBS.get(bg));
-            THUMBNAIL_BLOBS.delete(bg);
-        }
-    } catch (error) {
-        console.warn('Background was deleted, but its thumbnail cache could not be cleared:', error);
-    }
+    await clearBackgroundClientCaches(bg, { refresh: false });
     return true;
 }
 
@@ -929,6 +928,7 @@ async function uploadBackground(formData) {
         }
 
         const bg = await response.text();
+        await clearBackgroundClientCaches(bg);
         await setBackground(bg, generateUrlParameter(bg, false));
         await getBackgrounds();
         highlightNewBackground(bg);
