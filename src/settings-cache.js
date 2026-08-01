@@ -60,6 +60,9 @@ export class SettingsCache {
         this.runIo = createConcurrencyLimiter(this.ioConcurrency);
         this.cache = new BoundedCache({ enabled, ttlMs, maxEntries, maxBytes, now });
         this.signatures = new Map();
+        this.signatureGenerations = new Map();
+        this.signatureScans = new Map();
+        this.signatureEpoch = 0;
     }
 
     /**
@@ -86,17 +89,24 @@ export class SettingsCache {
     /** Invalidate one user's payload and its short-lived signature. */
     invalidate(userKey) {
         const trustedKey = String(userKey);
+        this.signatureGenerations.set(trustedKey, Object.freeze({}));
         this.signatures.delete(trustedKey);
         this.cache.invalidate(trustedKey);
+        if (!this.signatureScans.has(trustedKey)) {
+            this.signatureGenerations.delete(trustedKey);
+        }
     }
 
     /** Clear all settings payload/signature entries. */
     clear() {
         this.signatures.clear();
+        this.signatureGenerations.clear();
+        this.signatureScans.clear();
+        this.signatureEpoch++;
         this.cache.clear();
     }
 
-    /** @returns {{entries: number, inflight: number, totalBytes: number, signatures: number}} Cache status */
+    /** @returns {{entries: number, inflight: number, totalBytes: number, generations: number, signatures: number}} Cache status */
     getStatus() {
         return { ...this.cache.getStatus(), signatures: this.signatures.size };
     }
@@ -214,13 +224,38 @@ export class SettingsCache {
     }
 
     async #getSignature(userKey, directories) {
-        const cached = this.signatures.get(userKey);
-        if (cached && this.now() - cached.checkedAt < this.signatureTtlMs) {
-            this.signatures.delete(userKey);
-            this.signatures.set(userKey, cached);
-            return cached;
-        }
+        while (true) {
+            const cached = this.signatures.get(userKey);
+            if (cached && this.now() - cached.checkedAt < this.signatureTtlMs) {
+                this.signatures.delete(userKey);
+                this.signatures.set(userKey, cached);
+                return cached;
+            }
 
+            const scan = this.#beginSignatureScan(userKey);
+            let result;
+            let isCurrent = false;
+            try {
+                result = await this.#scanSignature(directories);
+                isCurrent = scan.epoch === this.signatureEpoch
+                    && this.signatureGenerations.get(userKey) === scan.generation;
+            } finally {
+                this.#endSignatureScan(userKey, scan);
+            }
+            if (!isCurrent) {
+                continue;
+            }
+
+            this.signatures.delete(userKey);
+            this.signatures.set(userKey, result);
+            while (this.signatures.size > this.maxSignatureEntries) {
+                this.signatures.delete(this.signatures.keys().next().value);
+            }
+            return result;
+        }
+    }
+
+    async #scanSignature(directories) {
         const fileGroups = await Promise.all(DIRECTORY_DEFINITIONS.map(async ([directoryKey]) => {
             const directory = directories[directoryKey];
             try {
@@ -259,13 +294,29 @@ export class SettingsCache {
             }
         }
 
-        const result = { value: hash.digest('hex'), files, checkedAt: this.now() };
-        this.signatures.delete(userKey);
-        this.signatures.set(userKey, result);
-        while (this.signatures.size > this.maxSignatureEntries) {
-            this.signatures.delete(this.signatures.keys().next().value);
+        return { value: hash.digest('hex'), files, checkedAt: this.now() };
+    }
+
+    #beginSignatureScan(userKey) {
+        let generation = this.signatureGenerations.get(userKey);
+        if (!generation) {
+            generation = Object.freeze({});
+            this.signatureGenerations.set(userKey, generation);
         }
-        return result;
+        const scan = { generation, epoch: this.signatureEpoch };
+        const active = this.signatureScans.get(userKey) ?? new Set();
+        active.add(scan);
+        this.signatureScans.set(userKey, active);
+        return scan;
+    }
+
+    #endSignatureScan(userKey, scan) {
+        const active = this.signatureScans.get(userKey);
+        active?.delete(scan);
+        if (active && active.size === 0 && this.signatureScans.get(userKey) === active) {
+            this.signatureScans.delete(userKey);
+            this.signatureGenerations.delete(userKey);
+        }
     }
 
     async #statSignature(targetPath) {
@@ -297,7 +348,7 @@ export function clearSettingsCache() {
 
 /** Return aggregate cache status without keys or settings content. */
 export function getSettingsCacheStatus() {
-    return activeSettingsCache?.getStatus() ?? { entries: 0, inflight: 0, totalBytes: 0, signatures: 0 };
+    return activeSettingsCache?.getStatus() ?? { entries: 0, inflight: 0, totalBytes: 0, generations: 0, signatures: 0 };
 }
 
 const MUTATION_ROUTES = new Set([

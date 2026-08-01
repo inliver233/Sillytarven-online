@@ -112,6 +112,21 @@ test('bounded cache applies TTL, LRU, byte limits, invalidation, and single-flig
     assert.equal(cache.get('race', '1').hit, false);
     assert.equal((await cache.getOrLoad('race', { signature: '1', load: () => load('new') })).value, 'new');
 
+    let releaseOldSignature;
+    const oldSignature = cache.getOrLoad('signature-race', {
+        signature: 'old',
+        load: () => new Promise(resolve => { releaseOldSignature = () => resolve('old-value'); }),
+    });
+    await delay(0);
+    const newSignature = await cache.getOrLoad('signature-race', {
+        signature: 'new',
+        load: () => load('new-value'),
+    });
+    releaseOldSignature();
+    await oldSignature;
+    assert.equal(newSignature.value, 'new-value');
+    assert.equal(cache.get('signature-race', 'new').value, 'new-value');
+
     await assert.rejects(() => cache.getOrLoad('failure', {
         signature: '1',
         load: async () => { throw new Error('load failed'); },
@@ -119,7 +134,7 @@ test('bounded cache applies TTL, LRU, byte limits, invalidation, and single-flig
     assert.equal((await cache.getOrLoad('failure', { signature: '1', load: () => load('recovered') })).value, 'recovered');
 
     cache.clear();
-    assert.deepEqual(cache.getStatus(), { entries: 0, inflight: 0, totalBytes: 0 });
+    assert.deepEqual(cache.getStatus(), { entries: 0, inflight: 0, totalBytes: 0, generations: 0 });
 
     const disabled = new BoundedCache({ enabled: false });
     assert.equal((await disabled.getOrLoad('key', { signature: '1', load: () => load('value') })).state, 'miss');
@@ -218,7 +233,7 @@ test('character list signature and explicit invalidation refresh edited librarie
         assert.equal(calls, 3);
         assert.ok(getCharacterListCacheStatus().entries >= 1);
         clearCharacterListCache();
-        assert.deepEqual(getCharacterListCacheStatus(), { entries: 0, inflight: 0, totalBytes: 0, signatures: 0 });
+        assert.deepEqual(getCharacterListCacheStatus(), { entries: 0, inflight: 0, totalBytes: 0, generations: 0, signatures: 0 });
     });
 });
 
@@ -241,5 +256,53 @@ test('concurrent identical character list requests share one complete build and 
         assert.equal(calls, 3);
         assert.equal(first.characters.length, 3);
         assert.deepEqual(second.characters, first.characters);
+    });
+});
+
+test('invalidation during a character signature scan retries before caching files', async () => {
+    await withCharacterDirectory(async directory => {
+        await fs.promises.writeFile(path.join(directory, 'old.png'), 'old');
+        const cache = new CharacterListCache({ concurrency: 2, signatureTtlMs: 60_000, ttlMs: 60_000 });
+        const originalReaddir = fs.promises.readdir;
+        let releaseScan;
+        let markScanStarted;
+        let intercepted = false;
+        const scanGate = new Promise(resolve => { releaseScan = resolve; });
+        const scanStarted = new Promise(resolve => { markScanStarted = resolve; });
+
+        fs.promises.readdir = async (target, options) => {
+            const result = await originalReaddir(target, options);
+            if (!intercepted && path.resolve(String(target)) === path.resolve(directory)) {
+                intercepted = true;
+                markScanStarted();
+                await scanGate;
+            }
+            return result;
+        };
+
+        try {
+            const pending = cache.get({
+                userKey: 'alice',
+                directory,
+                shallow: false,
+                loadCharacter: async fileName => ({ name: fileName, avatar: fileName }),
+            });
+            await scanStarted;
+            await fs.promises.writeFile(path.join(directory, 'new.png'), 'new');
+            cache.invalidate('alice');
+            releaseScan();
+
+            const refreshed = await pending;
+            assert.deepEqual(refreshed.characters.map(character => character.avatar), ['new.png', 'old.png']);
+            assert.equal((await cache.get({
+                userKey: 'alice',
+                directory,
+                shallow: false,
+                loadCharacter: async () => { throw new Error('cache should contain the refreshed list'); },
+            })).state, 'hit');
+        } finally {
+            releaseScan?.();
+            fs.promises.readdir = originalReaddir;
+        }
     });
 });

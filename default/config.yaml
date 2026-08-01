@@ -237,6 +237,7 @@ performance:
     # Root directory checks catch common out-of-process changes; TTL bounds nested-file staleness.
     signatureTtlMs: 2000
     maxEntries: 300
+    maxVariantsPerUser: 8
     maxBytes: 52428800
 
 # CACHE BUSTER CONFIGURATION

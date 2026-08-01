@@ -131,7 +131,14 @@ test('root signatures, absolute TTL, and explicit invalidation refresh stale res
         assert.equal((await get(cache, directories, load)).state, 'miss');
         assert.ok(getRecentChatsCacheStatus().entries > 0);
         clearRecentChatsCache();
-        assert.deepEqual(getRecentChatsCacheStatus(), { entries: 0, inflight: 0, totalBytes: 0, signatures: 0 });
+        assert.deepEqual(getRecentChatsCacheStatus(), {
+            entries: 0,
+            inflight: 0,
+            totalBytes: 0,
+            generations: 0,
+            signatures: 0,
+            variants: 0,
+        });
     });
 });
 
@@ -158,6 +165,35 @@ test('invalidation during an in-flight scan prevents the older result from being
     });
 });
 
+test('recent chat variants are bounded per user and retired generations are reclaimed', async () => {
+    await withDirectories(async directories => {
+        const cache = new RecentChatsCache({
+            signatureTtlMs: 1_000,
+            ttlMs: 60_000,
+            maxVariantsPerUser: 2,
+        });
+        let loads = 0;
+        const load = async () => [{ file_name: `chat-${++loads}` }];
+
+        await get(cache, directories, load, { max: 1 });
+        await get(cache, directories, load, { max: 2 });
+        await get(cache, directories, load, { max: 3 });
+        assert.equal(cache.getStatus().entries, 2);
+        assert.equal(cache.getStatus().generations, 0);
+
+        const evicted = await get(cache, directories, load, { max: 1 });
+        assert.equal(evicted.state, 'miss');
+        assert.equal(cache.getStatus().entries, 2);
+
+        for (let max = 4; max < 40; max++) {
+            await get(cache, directories, load, { max });
+            cache.invalidate('alice');
+        }
+        assert.equal(cache.getStatus().generations, 0);
+        assert.equal(cache.getStatus().variants, 0);
+    });
+});
+
 test('mutation middleware invalidates successful chat, character, and group writes only', async () => {
     await withDirectories(async directories => {
         const cache = new RecentChatsCache({ signatureTtlMs: 1_000, ttlMs: 60_000 });
@@ -168,6 +204,7 @@ test('mutation middleware invalidates successful chat, character, and group writ
             ['/api/chats', '/save-tail'],
             ['/api/characters', '/rename'],
             ['', '/api/groups/edit'],
+            ['/api/data-maid', '/delete'],
         ]) {
             await get(cache, directories, load);
             assert.equal((await get(cache, directories, load)).state, 'hit');

@@ -25,6 +25,7 @@ export class BoundedCache {
         this.entries = new Map();
         this.inflight = new Map();
         this.generations = new Map();
+        this.activeLoads = new Map();
         this.totalBytes = 0;
         this.epoch = 0;
     }
@@ -73,22 +74,31 @@ export class BoundedCache {
             return { value: await running.promise, state: 'shared' };
         }
 
-        const generation = this.generations.get(key) ?? 0;
+        const generation = Object.freeze({});
+        this.generations.set(key, generation);
         const epoch = this.epoch;
         const promise = Promise.resolve().then(load).then(value => {
-            if (this.enabled && this.epoch === epoch && (this.generations.get(key) ?? 0) === generation) {
+            if (this.enabled && this.epoch === epoch && this.generations.get(key) === generation) {
                 this.#set(key, signature, value, sizeOf(value));
             }
             return value;
         });
         const record = { signature, promise };
         this.inflight.set(key, record);
+        const active = this.activeLoads.get(key) ?? new Set();
+        active.add(record);
+        this.activeLoads.set(key, active);
 
         try {
             return { value: await promise, state: 'miss' };
         } finally {
             if (this.inflight.get(key) === record) {
                 this.inflight.delete(key);
+            }
+            active.delete(record);
+            if (active.size === 0 && this.activeLoads.get(key) === active) {
+                this.activeLoads.delete(key);
+                this.generations.delete(key);
             }
         }
     }
@@ -97,12 +107,20 @@ export class BoundedCache {
     invalidate(key) {
         this.#deleteEntry(key);
         this.inflight.delete(key);
-        this.generations.set(key, (this.generations.get(key) ?? 0) + 1);
+        this.generations.set(key, Object.freeze({}));
+        if (!this.activeLoads.has(key)) {
+            this.generations.delete(key);
+        }
     }
 
     /** Invalidate all keys matching a predicate. */
     invalidateWhere(predicate) {
-        const keys = new Set([...this.entries.keys(), ...this.inflight.keys(), ...this.generations.keys()]);
+        const keys = new Set([
+            ...this.entries.keys(),
+            ...this.inflight.keys(),
+            ...this.generations.keys(),
+            ...this.activeLoads.keys(),
+        ]);
         for (const key of keys) {
             if (predicate(key)) {
                 this.invalidate(key);
@@ -115,13 +133,19 @@ export class BoundedCache {
         this.entries.clear();
         this.inflight.clear();
         this.generations.clear();
+        this.activeLoads.clear();
         this.totalBytes = 0;
         this.epoch++;
     }
 
-    /** @returns {{entries: number, inflight: number, totalBytes: number}} Cache status */
+    /** @returns {{entries: number, inflight: number, totalBytes: number, generations: number}} Cache status */
     getStatus() {
-        return { entries: this.entries.size, inflight: this.inflight.size, totalBytes: this.totalBytes };
+        return {
+            entries: this.entries.size,
+            inflight: this.inflight.size,
+            totalBytes: this.totalBytes,
+            generations: this.generations.size,
+        };
     }
 
     #set(key, signature, value, rawSize) {

@@ -178,7 +178,7 @@ test('file signatures and explicit invalidation refresh settings immediately', a
         assert.equal((await cache.get({ userKey: 'alice', directories, runtimeConfig: RUNTIME_CONFIG })).state, 'miss');
         assert.ok(getSettingsCacheStatus().entries >= 1);
         clearSettingsCache();
-        assert.deepEqual(getSettingsCacheStatus(), { entries: 0, inflight: 0, totalBytes: 0, signatures: 0 });
+        assert.deepEqual(getSettingsCacheStatus(), { entries: 0, inflight: 0, totalBytes: 0, generations: 0, signatures: 0 });
     });
 });
 
@@ -214,5 +214,44 @@ test('settings mutation middleware invalidates successful writes but not failed 
         }, failedResponse, () => {});
         failedResponse.emit('finish');
         assert.equal((await get()).state, 'hit');
+    });
+});
+
+test('invalidation during a settings signature scan retries before caching payloads', async () => {
+    await withDirectories(async directories => {
+        await fs.promises.writeFile(path.join(directories.root, 'settings.json'), '{}');
+        await writeJson(directories.themes, 'old.json', { name: 'old' });
+        const cache = new SettingsCache({ signatureTtlMs: 60_000, ttlMs: 60_000 });
+        const originalReaddir = fs.promises.readdir;
+        let releaseScan;
+        let markScanStarted;
+        let intercepted = false;
+        const scanGate = new Promise(resolve => { releaseScan = resolve; });
+        const scanStarted = new Promise(resolve => { markScanStarted = resolve; });
+
+        fs.promises.readdir = async (target, options) => {
+            const result = await originalReaddir(target, options);
+            if (!intercepted && path.resolve(String(target)) === path.resolve(directories.themes)) {
+                intercepted = true;
+                markScanStarted();
+                await scanGate;
+            }
+            return result;
+        };
+
+        try {
+            const pending = cache.get({ userKey: 'alice', directories, runtimeConfig: RUNTIME_CONFIG });
+            await scanStarted;
+            await writeJson(directories.themes, 'new.json', { name: 'new' });
+            cache.invalidate('alice');
+            releaseScan();
+
+            const refreshed = await pending;
+            assert.deepEqual(refreshed.payload.themes.map(theme => theme.name).sort(), ['new', 'old']);
+            assert.equal((await cache.get({ userKey: 'alice', directories, runtimeConfig: RUNTIME_CONFIG })).state, 'hit');
+        } finally {
+            releaseScan?.();
+            fs.promises.readdir = originalReaddir;
+        }
     });
 });

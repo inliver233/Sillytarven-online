@@ -42,6 +42,7 @@ const recentChatsCache = new RecentChatsCache({
     ttlMs: getConfigValue('performance.recentChatsCache.ttlMs', 15_000, 'number'),
     signatureTtlMs: getConfigValue('performance.recentChatsCache.signatureTtlMs', 2_000, 'number'),
     maxEntries: getConfigValue('performance.recentChatsCache.maxEntries', 300, 'number'),
+    maxVariantsPerUser: getConfigValue('performance.recentChatsCache.maxVariantsPerUser', 8, 'number'),
     maxBytes: getConfigValue('performance.recentChatsCache.maxBytes', 50 * 1024 * 1024, 'number'),
 });
 registerRecentChatsCache(recentChatsCache);
