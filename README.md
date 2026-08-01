@@ -154,6 +154,7 @@ node server.js
   - **密码设置功能**：OAuth 用户可在个人设置中设置密码，设置后即可使用两种登录方式
   - **独立注册策略**：密码、GitHub、Discord、Linux.do 可分别控制新用户注册和邀请码要求
   - **登录不受注册开关影响**：关闭某个 OAuth 的新用户注册后，已绑定用户仍可继续登录
+  - **Discord 服务器资历验证**：可要求新用户加入指定 Discord 服务器满一定天数后才能注册
   - **动态回调 URL**：自动适配反向代理和 SSL 配置
   - **安全验证**：使用 state 参数防止 CSRF 攻击
 - **备份文件清理**：管理员可清理用户备份文件释放空间
@@ -419,6 +420,11 @@ registration:
   discord:
     enabled: true
     requireInvitationCode: null
+    guildMembership:
+      enabled: false          # 是否验证指定 Discord 服务器的加入时长
+      guildId: ''             # Discord 服务器 ID
+      guildName: ''           # 提示中显示的服务器名称，例如：类脑
+      minimumDays: 14         # 必须加入满多少天
   linuxdo:
     enabled: true
     requireInvitationCode: null
@@ -462,6 +468,10 @@ email:
 - `oauth.<provider>.enabled` 控制该 OAuth 登录服务是否可用；`registration.<provider>.enabled` 只控制是否允许该方式创建新账号
 - 如需停止某个 OAuth 的新用户注册但保留老用户登录，请保持 `oauth.<provider>.enabled: true`，并设置 `registration.<provider>.enabled: false`
 - `registration.<method>.requireInvitationCode` 可设为 `true`、`false` 或 `null`；`null` 继承全局 `enableInvitationCodes`
+- `registration.discord.guildMembership.enabled: true` 时，Discord 新用户必须属于 `guildId` 指定的服务器，且 `joined_at` 距今不少于 `minimumDays`
+- Discord 服务器验证会在注册授权时请求 `guilds.members.read` scope；普通登录不增加该 scope，已绑定用户不受此规则影响
+- 用户不在服务器、加入天数不足、授权缺失或 Discord API 异常时，注册会被后端拒绝并显示具体原因
+- 接口和字段依据：[Discord Get Current User Guild Member](https://docs.discord.com/developers/resources/user#get-current-user-guild-member) 与 [Guild Member `joined_at`](https://docs.discord.com/developers/resources/guild#guild-member-object)
 - 旧配置不包含 `registration` 时，四种注册方式默认开放且邀请码要求继续继承 `enableInvitationCodes`，升级行为不变
 - 只要全局开关或任一注册方式要求邀请码，邀请码管理功能就会保持可用
 - 回调 URL 可留空，系统会根据当前访问地址自动生成（支持反向代理和 SSL）

@@ -18,6 +18,10 @@ import {
     useInvitationCode,
 } from '../invitation-codes.js';
 import { getRegistrationConfig, getRegistrationMethodConfig } from '../registration-policy.js';
+import {
+    fetchDiscordGuildMembershipEligibility,
+    getDiscordGuildMembershipConfig,
+} from '../discord-registration-policy.js';
 import { checkForNewContent, CONTENT_TYPES } from './content-manager.js';
 import { applyDefaultTemplateToUser } from '../default-template.js';
 
@@ -331,6 +335,7 @@ router.get('/config', async (request, response) => {
     try {
         const oauthConfig = await getOAuthConfig(request);
         const registrationConfig = getRegistrationConfig();
+        const discordGuildMembership = getDiscordGuildMembershipConfig();
         const config = {
             github: {
                 enabled: oauthConfig.github.enabled && !!oauthConfig.github.clientId,
@@ -341,6 +346,11 @@ router.get('/config', async (request, response) => {
                 enabled: oauthConfig.discord.enabled && !!oauthConfig.discord.clientId,
                 registrationEnabled: registrationConfig.discord.enabled,
                 requireInvitationCode: registrationConfig.discord.requireInvitationCode,
+                guildMembership: {
+                    enabled: discordGuildMembership.enabled,
+                    guildName: discordGuildMembership.guildName,
+                    minimumDays: discordGuildMembership.minimumDays,
+                },
             },
             linuxdo: {
                 enabled: oauthConfig.linuxdo.enabled && !!oauthConfig.linuxdo.clientId,
@@ -400,6 +410,11 @@ router.get('/discord', async (request, response) => {
         if (intent === 'register' && !getRegistrationMethodConfig('discord').enabled) {
             return response.status(403).json({ error: 'Discord 新用户注册当前未开放' });
         }
+        const discordGuildMembership = getDiscordGuildMembershipConfig();
+        const scopes = ['identify', 'email'];
+        if (intent === 'register' && discordGuildMembership.enabled) {
+            scopes.push('guilds.members.read');
+        }
 
         const state = generateState();
         storeOAuthState(request, 'discord', state, intent);
@@ -408,7 +423,7 @@ router.get('/discord', async (request, response) => {
             client_id: oauthConfig.discord.clientId,
             redirect_uri: oauthConfig.discord.callbackUrl,
             response_type: 'code',
-            scope: 'identify email',
+            scope: scopes.join(' '),
             state: state,
         });
 
@@ -566,8 +581,23 @@ router.get('/discord/callback', async (request, response) => {
         const userData = await userResponse.json();
         console.log('Discord user data:', userData);
 
+        let discordGuildMembership = null;
+        const discordGuildMembershipConfig = getDiscordGuildMembershipConfig();
+        if (oauthState.intent === 'register' && discordGuildMembershipConfig.enabled &&
+            userData.id !== undefined && userData.id !== null) {
+            const existingUser = await findUserByOAuthIdentity('discord', `discord_${userData.id}`);
+            if (!existingUser) {
+                discordGuildMembership = await fetchDiscordGuildMembershipEligibility(
+                    String(tokenData.access_token),
+                    discordGuildMembershipConfig,
+                );
+            }
+        }
+
         // 处理OAuth登录
-        return await handleOAuthLogin(request, response, 'discord', userData, oauthState.intent);
+        return await handleOAuthLogin(request, response, 'discord', userData, oauthState.intent, {
+            discordGuildMembership,
+        });
     } catch (error) {
         console.error('Error in Discord OAuth callback:', error);
         return response.status(500).send('Discord OAuth callback failed');
@@ -729,7 +759,7 @@ async function getAvailableOAuthHandle(preferredHandle, provider, userId) {
 /**
  * 处理OAuth登录逻辑
  */
-export async function handleOAuthLogin(request, response, provider, userData, intent = 'login') {
+export async function handleOAuthLogin(request, response, provider, userData, intent = 'login', registrationContext = {}) {
     try {
         // 提取用户信息
         let userId, username, email, avatar;
@@ -809,6 +839,22 @@ export async function handleOAuthLogin(request, response, provider, userData, in
                 const providerNames = { github: 'GitHub', discord: 'Discord', linuxdo: 'Linux.do' };
                 const providerName = providerNames[provider] || provider;
                 return response.redirect(`/login?error=${encodeURIComponent(`${providerName} 新用户注册当前未开放`)}`);
+            }
+
+            if (provider === 'discord') {
+                const guildMembershipConfig = getDiscordGuildMembershipConfig();
+                if (guildMembershipConfig.enabled) {
+                    const guildMembership = registrationContext.discordGuildMembership;
+                    if (!guildMembership) {
+                        const message = intent === 'register'
+                            ? '无法验证 Discord 服务器成员信息，请重新发起注册'
+                            : '请从注册页面使用 Discord 注册并授权服务器成员信息';
+                        return response.redirect(`/login?error=${encodeURIComponent(message)}`);
+                    }
+                    if (!guildMembership.eligible) {
+                        return response.redirect(`/login?error=${encodeURIComponent(guildMembership.message)}`);
+                    }
+                }
             }
 
             // 如果开启了邀请码，需要先验证邀请码

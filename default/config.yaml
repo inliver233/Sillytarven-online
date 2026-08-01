@@ -376,6 +376,12 @@ registration:
   discord:
     enabled: true
     requireInvitationCode: null
+    # Optional: require new Discord users to have stayed in a guild long enough.
+    guildMembership:
+      enabled: false
+      guildId: ""
+      guildName: ""
+      minimumDays: 14
   linuxdo:
     enabled: true
     requireInvitationCode: null

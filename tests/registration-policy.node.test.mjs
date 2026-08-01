@@ -13,6 +13,11 @@ import {
     isInvitationCodeSystemEnabled,
     resolveRegistrationConfig,
 } from '../src/registration-policy.js';
+import {
+    evaluateDiscordGuildMembership,
+    fetchDiscordGuildMembershipEligibility,
+    getDiscordGuildMembershipConfig,
+} from '../src/discord-registration-policy.js';
 
 const testRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sillytavern-registration-policy-'));
 const configPath = path.join(testRoot, 'config.yaml');
@@ -57,6 +62,11 @@ before(async () => {
         '  discord:',
         '    enabled: true',
         '    requireInvitationCode: true',
+        '    guildMembership:',
+        '      enabled: true',
+        '      guildId: "123456789012345678"',
+        '      guildName: "类脑"',
+        '      minimumDays: 14',
         '  linuxdo:',
         '    enabled: true',
         '    requireInvitationCode: false',
@@ -67,7 +77,10 @@ before(async () => {
         '    clientSecret: test-secret',
         '    callbackUrl: http://localhost/api/oauth/github/callback',
         '  discord:',
-        '    enabled: false',
+        '    enabled: true',
+        '    clientId: discord-test-client',
+        '    clientSecret: discord-test-secret',
+        '    callbackUrl: http://localhost/api/oauth/discord/callback',
         '  linuxdo:',
         '    enabled: false',
         'email:',
@@ -174,6 +187,75 @@ test('invitation storage stays enabled for any method-specific requirement', () 
     assert.equal(isInvitationCodeSystemEnabled(noRequirements, true), true);
 });
 
+test('Discord guild membership uses joined_at and reports remaining days', () => {
+    const config = {
+        enabled: true,
+        guildId: '123456789012345678',
+        guildName: '类脑',
+        minimumDays: 14,
+    };
+    const now = Date.parse('2026-08-01T00:00:00.000Z');
+    const tooNew = evaluateDiscordGuildMembership(
+        { joined_at: '2026-07-21T12:00:00.000Z' },
+        config,
+        now,
+    );
+    assert.equal(tooNew.eligible, false);
+    assert.equal(tooNew.reason, 'membership_too_new');
+    assert.equal(tooNew.membershipDays, 10);
+    assert.equal(tooNew.remainingDays, 4);
+    assert.match(tooNew.message, /类脑.*10 天.*4 天/);
+
+    const eligible = evaluateDiscordGuildMembership(
+        { joined_at: '2026-07-18T00:00:00.000Z' },
+        config,
+        now,
+    );
+    assert.equal(eligible.eligible, true);
+    assert.equal(eligible.membershipDays, 14);
+    assert.equal(eligible.remainingDays, 0);
+
+    const unavailable = evaluateDiscordGuildMembership({ joined_at: null }, config, now);
+    assert.equal(unavailable.reason, 'joined_at_unavailable');
+});
+
+test('Discord membership fetch handles membership and authorization errors without exposing tokens', async () => {
+    const config = {
+        enabled: true,
+        guildId: '123456789012345678',
+        guildName: '类脑',
+        minimumDays: 14,
+    };
+    const now = Date.parse('2026-08-01T00:00:00.000Z');
+    let requestedUrl;
+    let authorization;
+    const eligible = await fetchDiscordGuildMembershipEligibility('secret-token', config, async (url, options) => {
+        requestedUrl = url;
+        authorization = options.headers.Authorization;
+        return {
+            ok: true,
+            status: 200,
+            json: async () => ({ joined_at: '2026-01-01T00:00:00.000Z' }),
+        };
+    }, now);
+    assert.equal(eligible.eligible, true);
+    assert.match(requestedUrl, /\/users\/@me\/guilds\/123456789012345678\/member$/);
+    assert.equal(authorization, 'Bearer secret-token');
+
+    const notMember = await fetchDiscordGuildMembershipEligibility('token', config, async () => ({
+        ok: false,
+        status: 404,
+    }), now);
+    assert.equal(notMember.reason, 'not_a_member');
+    assert.match(notMember.message, /先加入.*类脑.*14 天/);
+
+    const unauthorized = await fetchDiscordGuildMembershipEligibility('token', config, async () => ({
+        ok: false,
+        status: 403,
+    }), now);
+    assert.equal(unauthorized.reason, 'authorization_failed');
+});
+
 test('public config exposes effective policies and password registration is rejected server-side', async () => {
     assert.deepEqual(getRegistrationConfig(), {
         password: { enabled: false, requireInvitationCode: false },
@@ -215,6 +297,76 @@ test('OAuth registration intent is blocked while the login entry remains availab
     });
     assert.equal(loginResponse.status, 302);
     assert.match(loginResponse.headers.get('location') || '', /^https:\/\/github\.com\/login\/oauth\/authorize\?/);
+});
+
+test('Discord registration requests guild membership scope without changing normal login scope', async () => {
+    assert.deepEqual(getDiscordGuildMembershipConfig(), {
+        enabled: true,
+        guildId: '123456789012345678',
+        guildName: '类脑',
+        minimumDays: 14,
+    });
+
+    const configResponse = await fetch(`${baseUrl}/api/oauth/config`);
+    const discordConfig = (await configResponse.json()).discord;
+    assert.deepEqual(discordConfig.guildMembership, {
+        enabled: true,
+        guildName: '类脑',
+        minimumDays: 14,
+    });
+
+    const registrationResponse = await fetch(`${baseUrl}/api/oauth/discord?intent=register`, {
+        redirect: 'manual',
+    });
+    const registrationLocation = new URL(registrationResponse.headers.get('location'));
+    assert.equal(registrationResponse.status, 302);
+    assert.match(registrationLocation.searchParams.get('scope'), /guilds\.members\.read/);
+
+    const loginResponse = await fetch(`${baseUrl}/api/oauth/discord`, { redirect: 'manual' });
+    const loginLocation = new URL(loginResponse.headers.get('location'));
+    assert.equal(loginResponse.status, 302);
+    assert.doesNotMatch(loginLocation.searchParams.get('scope'), /guilds\.members\.read/);
+});
+
+test('Discord guild rule blocks unverified new users but not already-bound logins', async () => {
+    const newUserResponse = createRedirectResponse();
+    await handleOAuthLogin(
+        { session: {} },
+        newUserResponse,
+        'discord',
+        { id: 88, username: 'too-new-discord-user' },
+        'register',
+        {
+            discordGuildMembership: {
+                eligible: false,
+                reason: 'membership_too_new',
+                message: '您加入 Discord 服务器“类脑”已 3 天，还需 11 天才能注册',
+            },
+        },
+    );
+    assert.match(decodeURIComponent(newUserResponse.location), /已 3 天.*还需 11 天/);
+    assert.equal(await storage.getItem('user:too-new-discord-user'), undefined);
+
+    await storage.setItem('user:bound-discord-user', {
+        handle: 'bound-discord-user',
+        name: 'Bound Discord User',
+        created: Date.now(),
+        enabled: true,
+        password: null,
+        salt: null,
+        oauthProvider: 'discord',
+        oauthUserId: 'discord_88',
+    });
+    const loginSession = {};
+    const loginResponse = createRedirectResponse();
+    await handleOAuthLogin(
+        { session: loginSession },
+        loginResponse,
+        'discord',
+        { id: 88, username: 'bound-discord-user' },
+    );
+    assert.equal(loginResponse.location, '/');
+    assert.equal(loginSession.handle, 'bound-discord-user');
 });
 
 test('disabled OAuth registration rejects new identities but still logs in bound users', async () => {
@@ -266,6 +418,12 @@ test('a method-specific invitation requirement works while the legacy global swi
         'discord',
         { id: 7, username: 'discord-new-user' },
         'register',
+        {
+            discordGuildMembership: {
+                eligible: true,
+                reason: 'eligible',
+            },
+        },
     );
     assert.equal(oauthResponse.location, '/login?oauth_pending=true');
     assert.equal(oauthSession.oauthPendingUser.provider, 'discord');
