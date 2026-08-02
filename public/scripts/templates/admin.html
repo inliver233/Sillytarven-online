@@ -462,7 +462,7 @@
                 <span>这里配置的 URL 和 API Key 仅保存在服务器端。普通成员只能看到渠道名称、选择模型并使用，无法查看连接信息。</span>
             </div>
 
-            <form id="freeGeminiChannelForm" class="flex-container flexFlowColumn flexGap10" action="javascript:void(0);" style="padding: 16px; border: 1px solid var(--SmartThemeBorderColor); border-radius: 10px; background: var(--SmartThemeBlurTintColor);">
+            <div id="freeGeminiChannelForm" class="flex-container flexFlowColumn flexGap10" style="padding: 16px; border: 1px solid var(--SmartThemeBorderColor); border-radius: 10px; background: var(--SmartThemeBlurTintColor);">
                 <input type="hidden" id="freeGeminiChannelId" value="">
                 <div class="flex-container flexGap10" style="flex-wrap: wrap;">
                     <label class="flex1" style="min-width: 220px;">
@@ -484,7 +484,7 @@
                     <input id="freeGeminiChannelKey" class="text_pole wide100p" type="password" maxlength="8192" placeholder="新建时必填；编辑时留空表示保留原 Key" autocomplete="new-password">
                 </label>
                 <div class="flex-container flexGap10" style="flex-wrap: wrap;">
-                    <button type="submit" class="menu_button menu_button_icon" id="saveFreeGeminiChannel">
+                    <button type="button" class="menu_button menu_button_icon" id="saveFreeGeminiChannel">
                         <i class="fa-fw fa-solid fa-plus"></i><span>新增渠道</span>
                     </button>
                     <button type="button" class="menu_button menu_button_icon" id="cancelFreeGeminiChannelEdit" style="display: none;">
@@ -494,7 +494,7 @@
                         <i class="fa-fw fa-solid fa-rotate"></i><span>刷新列表</span>
                     </button>
                 </div>
-            </form>
+            </div>
 
             <div id="freeGeminiChannelsStatus" class="notes">尚未加载。</div>
             <div id="freeGeminiChannelsList" class="flex-container flexFlowColumn flexGap10">

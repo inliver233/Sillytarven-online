@@ -125,3 +125,13 @@ test('concurrent channel creation does not lose entries', async () => {
         assert.equal(channels.every(channel => !Object.hasOwn(channel, 'key')), true);
     });
 });
+
+test('admin channel creation cannot fall back to browser form navigation', async () => {
+    const template = await fs.promises.readFile(new URL('../public/scripts/templates/admin.html', import.meta.url), 'utf8');
+    const adminScript = await fs.promises.readFile(new URL('../public/scripts/admin-extensions.js', import.meta.url), 'utf8');
+    const channelBlock = template.match(/<!-- 全局免费 Gemini 渠道管理 -->([\s\S]*?)<!-- 旧管理员邀请码管理选项卡 -->/)?.[1] || '';
+
+    assert.doesNotMatch(channelBlock, /<form\b/i);
+    assert.match(channelBlock, /<button type="button"[^>]+id="saveFreeGeminiChannel">/);
+    assert.match(adminScript, /\.on\('click\.freeGeminiChannels', '#saveFreeGeminiChannel', saveFreeGeminiChannel\)/);
+});

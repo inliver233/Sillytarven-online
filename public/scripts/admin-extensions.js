@@ -11,26 +11,26 @@ let csrfToken = null;
 
 // ===== 全局免费 Gemini 渠道（管理员端） =====
 function bindFreeGeminiChannelEvents() {
-    $('#freeGeminiChannelForm').off('submit').on('submit', saveFreeGeminiChannel);
-    $('#cancelFreeGeminiChannelEdit').off('click').on('click', resetFreeGeminiChannelForm);
-    $('#refreshFreeGeminiChannels').off('click').on('click', loadFreeGeminiChannelsAdmin);
-
-    $('#freeGeminiChannelsList')
-        .off('click', '.freeGeminiEditChannel')
-        .on('click', '.freeGeminiEditChannel', function () {
+    // 管理面板内容是动态插入弹窗的，使用 document 委托可避免初始化早于 DOM 挂载时漏绑事件。
+    $(document)
+        .off('.freeGeminiChannels')
+        .on('click.freeGeminiChannels', '#saveFreeGeminiChannel', saveFreeGeminiChannel)
+        .on('keydown.freeGeminiChannels', '#freeGeminiChannelForm input', async function (event) {
+            if (event.key === 'Enter') await saveFreeGeminiChannel(event);
+        })
+        .on('click.freeGeminiChannels', '#cancelFreeGeminiChannelEdit', resetFreeGeminiChannelForm)
+        .on('click.freeGeminiChannels', '#refreshFreeGeminiChannels', loadFreeGeminiChannelsAdmin)
+        .on('click.freeGeminiChannels', '.freeGeminiEditChannel', function () {
             const channel = currentFreeGeminiChannels.find(item => item.id === String($(this).data('id') || ''));
             if (channel) beginFreeGeminiChannelEdit(channel);
         })
-        .off('click', '.freeGeminiDeleteChannel')
-        .on('click', '.freeGeminiDeleteChannel', async function () {
+        .on('click.freeGeminiChannels', '.freeGeminiDeleteChannel', async function () {
             await deleteFreeGeminiChannel(String($(this).data('id') || ''));
         })
-        .off('click', '.freeGeminiTestChannel')
-        .on('click', '.freeGeminiTestChannel', async function () {
+        .on('click.freeGeminiChannels', '.freeGeminiTestChannel', async function () {
             await testFreeGeminiChannel(String($(this).data('id') || ''), $(this));
         })
-        .off('click', '.freeGeminiToggleChannel')
-        .on('click', '.freeGeminiToggleChannel', async function () {
+        .on('click.freeGeminiChannels', '.freeGeminiToggleChannel', async function () {
             const channel = currentFreeGeminiChannels.find(item => item.id === String($(this).data('id') || ''));
             if (channel) await updateFreeGeminiChannelState(channel, !channel.enabled);
         });
@@ -120,7 +120,19 @@ function renderFreeGeminiChannelsAdmin() {
 }
 
 async function saveFreeGeminiChannel(event) {
-    event.preventDefault();
+    event?.preventDefault();
+
+    const button = $('#saveFreeGeminiChannel');
+    if (button.prop('disabled')) return;
+
+    const invalidInput = ['freeGeminiChannelName', 'freeGeminiChannelUrl']
+        .map(id => document.getElementById(id))
+        .find(input => input && !input.checkValidity());
+    if (invalidInput) {
+        invalidInput.reportValidity();
+        return;
+    }
+
     const id = String($('#freeGeminiChannelId').val() || '');
     const key = String($('#freeGeminiChannelKey').val() || '');
     const body = {
@@ -135,7 +147,6 @@ async function saveFreeGeminiChannel(event) {
         return;
     }
 
-    const button = $('#saveFreeGeminiChannel');
     button.prop('disabled', true);
     try {
         const url = id
@@ -3461,6 +3472,8 @@ async function clearDefaultConfigTemplate() {
 
 // 导出函数供外部调用
 if (typeof window !== 'undefined') {
+    // 模块载入时先注册动态弹窗的委托事件；初始化函数后续可安全重复绑定。
+    bindFreeGeminiChannelEvents();
     window.initializeAdminExtensions = initializeAdminExtensions;
     window.disposeAdminExtensions = disposeAdminExtensions;
     window.toggleAnnouncement = toggleAnnouncement;
