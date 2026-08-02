@@ -69,6 +69,13 @@ function beginFreeGeminiChannelEdit(channel) {
     $('#freeGeminiChannelName').trigger('focus');
 }
 
+async function getFreeGeminiRequestHeaders() {
+    if (!csrfToken) {
+        await getCsrfToken();
+    }
+    return getRequestHeaders();
+}
+
 async function loadFreeGeminiChannelsAdmin() {
     const list = $('#freeGeminiChannelsList');
     const status = $('#freeGeminiChannelsStatus');
@@ -78,7 +85,7 @@ async function loadFreeGeminiChannelsAdmin() {
     try {
         const response = await fetch('/api/free-gemini-channels/admin', {
             method: 'GET',
-            headers: getRequestHeaders(),
+            headers: await getFreeGeminiRequestHeaders(),
             cache: 'no-cache',
         });
         const payload = await response.json().catch(() => ({}));
@@ -170,12 +177,27 @@ async function saveFreeGeminiChannel(event) {
             : '/api/free-gemini-channels/admin';
         const response = await fetch(url, {
             method: id ? 'PUT' : 'POST',
-            headers: getRequestHeaders(),
+            headers: await getFreeGeminiRequestHeaders(),
             body: JSON.stringify(body),
         });
-        const payload = await response.json().catch(() => ({}));
+        const responseText = await response.text();
+        let payload = {};
+        try {
+            payload = responseText ? JSON.parse(responseText) : {};
+        } catch {
+            // 保留原始响应文本用于显示 HTTP 错误。
+        }
         if (!response.ok) {
-            throw new Error(payload.error || '保存免费渠道失败');
+            const fallbackMessage = response.status === 404
+                ? '免费渠道后端接口尚未加载，请重启 SillyTavern 服务后重试。'
+                : `保存免费渠道失败（HTTP ${response.status}）`;
+            const responseMessage = /Invalid CSRF token/i.test(responseText)
+                ? '安全令牌已过期，请刷新页面后重试。'
+                : responseText.trim().slice(0, 300);
+            const errorMessage = response.status === 404
+                ? fallbackMessage
+                : (payload.error || payload.message || responseMessage || fallbackMessage);
+            throw new Error(errorMessage);
         }
         toastr.success(id ? '免费渠道已更新' : '免费渠道已新增');
         status.text(id ? '渠道修改已保存。' : '渠道新增成功。');
@@ -194,7 +216,7 @@ async function updateFreeGeminiChannelState(channel, enabled) {
     try {
         const response = await fetch(`/api/free-gemini-channels/admin/${encodeURIComponent(channel.id)}`, {
             method: 'PUT',
-            headers: getRequestHeaders(),
+            headers: await getFreeGeminiRequestHeaders(),
             body: JSON.stringify({ name: channel.name, url: channel.url, enabled }),
         });
         const payload = await response.json().catch(() => ({}));
@@ -212,7 +234,7 @@ async function deleteFreeGeminiChannel(id) {
     try {
         const response = await fetch(`/api/free-gemini-channels/admin/${encodeURIComponent(id)}`, {
             method: 'DELETE',
-            headers: getRequestHeaders(),
+            headers: await getFreeGeminiRequestHeaders(),
         });
         const payload = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(payload.error || '删除免费渠道失败');
@@ -232,7 +254,7 @@ async function testFreeGeminiChannel(id, button) {
     try {
         const response = await fetch('/api/backends/chat-completions/status', {
             method: 'POST',
-            headers: getRequestHeaders(),
+            headers: await getFreeGeminiRequestHeaders(),
             body: JSON.stringify({
                 chat_completion_source: 'free-gemini',
                 free_gemini_channel_id: id,

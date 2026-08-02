@@ -5,6 +5,8 @@ import writeFileAtomic from 'write-file-atomic';
 import { KeyedMutex } from './keyed-mutex.js';
 import { trimTrailingSlash, uuidv4 } from './util.js';
 
+const STORAGE_DIRECTORY = '_global';
+const LEGACY_STORAGE_DIRECTORY = '_storage';
 const STORAGE_FILE = 'free-gemini-channels.json';
 const STORAGE_VERSION = 1;
 const MAX_NAME_LENGTH = 80;
@@ -17,7 +19,38 @@ function getStoragePath() {
         throw new Error('DATA_ROOT is not initialized.');
     }
 
-    return path.join(globalThis.DATA_ROOT, '_storage', STORAGE_FILE);
+    return path.join(globalThis.DATA_ROOT, STORAGE_DIRECTORY, STORAGE_FILE);
+}
+
+function getLegacyStoragePath() {
+    if (!globalThis.DATA_ROOT) {
+        throw new Error('DATA_ROOT is not initialized.');
+    }
+
+    return path.join(globalThis.DATA_ROOT, LEGACY_STORAGE_DIRECTORY, STORAGE_FILE);
+}
+
+/**
+ * Moves files written by the initial implementation out of node-persist's private directory.
+ * This must run before initUserStorage(), because node-persist tries to parse every file in _storage.
+ */
+export async function migrateLegacyFreeGeminiChannels() {
+    const legacyPath = getLegacyStoragePath();
+    const storagePath = getStoragePath();
+
+    if (!fs.existsSync(legacyPath)) {
+        return false;
+    }
+
+    await fs.promises.mkdir(path.dirname(storagePath), { recursive: true });
+    if (!fs.existsSync(storagePath)) {
+        await fs.promises.rename(legacyPath, storagePath);
+    } else {
+        await fs.promises.unlink(legacyPath);
+    }
+
+    console.info(`Migrated free Gemini channels to ${storagePath}`);
+    return true;
 }
 
 function createValidationError(message) {

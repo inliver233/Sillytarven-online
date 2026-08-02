@@ -10,6 +10,7 @@ import {
     getEnabledFreeGeminiChannel,
     listAdminFreeGeminiChannels,
     listPublicFreeGeminiChannels,
+    migrateLegacyFreeGeminiChannels,
     updateFreeGeminiChannel,
 } from '../src/free-gemini-channels.js';
 
@@ -126,6 +127,32 @@ test('concurrent channel creation does not lose entries', async () => {
     });
 });
 
+test('legacy free Gemini storage is moved out of node-persist directory', async () => {
+    await withTempDataRoot(async dataRoot => {
+        const legacyDirectory = path.join(dataRoot, '_storage');
+        const legacyPath = path.join(legacyDirectory, 'free-gemini-channels.json');
+        const targetPath = path.join(dataRoot, '_global', 'free-gemini-channels.json');
+        await fs.promises.mkdir(legacyDirectory, { recursive: true });
+        await fs.promises.writeFile(legacyPath, JSON.stringify({
+            version: 1,
+            channels: [{
+                id: 'legacy-channel',
+                name: 'legacy-free-gemini',
+                url: 'https://legacy.example.com',
+                key: 'legacy-secret',
+                enabled: true,
+                createdAt: new Date().toISOString(),
+                updatedAt: new Date().toISOString(),
+            }],
+        }), 'utf8');
+
+        assert.equal(await migrateLegacyFreeGeminiChannels(), true);
+        assert.equal(fs.existsSync(legacyPath), false);
+        assert.equal(fs.existsSync(targetPath), true);
+        assert.deepEqual(await listPublicFreeGeminiChannels(), [{ id: 'legacy-channel', name: 'legacy-free-gemini' }]);
+    });
+});
+
 test('admin channel creation cannot fall back to browser form navigation', async () => {
     const template = await fs.promises.readFile(new URL('../public/scripts/templates/admin.html', import.meta.url), 'utf8');
     const adminScript = await fs.promises.readFile(new URL('../public/scripts/admin-extensions.js', import.meta.url), 'utf8');
@@ -135,5 +162,6 @@ test('admin channel creation cannot fall back to browser form navigation', async
     assert.doesNotMatch(channelBlock, /<form\b/i);
     assert.match(channelBlock, /<button type="button"[^>]+id="saveFreeGeminiChannel">/);
     assert.match(adminScript, /findInScope\('#saveFreeGeminiChannel'\)[\s\S]*?\.on\('click\.freeGeminiChannels', saveFreeGeminiChannel\)/);
+    assert.match(adminScript, /headers: await getFreeGeminiRequestHeaders\(\)/);
     assert.match(userScript, /window\.bindFreeGeminiChannelEvents\(template\)/);
 });
