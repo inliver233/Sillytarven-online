@@ -495,6 +495,10 @@ label[for="trim_spaces"]:not(:has(input:checked)) small {
     opacity: 1;
 }
 
+#openai_settings:has(#openai_function_calling:not(:checked)) #tool_call_recurse_limit_block {
+    display: none !important;
+}
+
 #claude_function_prefill_warning {
     display: none;
     color: red;

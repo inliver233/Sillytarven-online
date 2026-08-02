@@ -2330,5 +2330,10 @@
     "Delete chat": "删除聊天",
     "Title/Memo": "标题（备忘）",
     "Strategy": "触发策略",
-    "Trigger %": "触发概率%"
+    "Trigger %": "触发概率%",
+    "Interleaved Thinking": "交错思维",
+    "Since Last User Message": "自上一条用户消息起",
+    "Active Tool Chain": "活动工具链",
+    "Tool Call Recurse Limit": "工具调用递归限制",
+    "openrouter_interleaved_thinking_hint": "发送前面助手轮次的推理并附在工具调用请求中，以维持交错思维上下文。"
 }

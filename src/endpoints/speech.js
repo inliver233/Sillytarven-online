@@ -134,7 +134,7 @@ pollinations.post('/generate', async (req, res) => {
         }
 
         res.set('Content-Type', 'audio/mpeg');
-        forwardFetchResponse(response, res);
+        await forwardFetchResponse(response, res);
     } catch (error) {
         console.error(error);
         return res.sendStatus(500);
@@ -233,7 +233,7 @@ elevenlabs.post('/synthesize', async (req, res) => {
         }
 
         res.set('Content-Type', 'audio/mpeg');
-        forwardFetchResponse(response, res);
+        await forwardFetchResponse(response, res);
     } catch (error) {
         console.error(error);
         return res.sendStatus(500);
@@ -297,7 +297,7 @@ elevenlabs.post('/history-audio', async (req, res) => {
         }
 
         res.set('Content-Type', 'audio/mpeg');
-        forwardFetchResponse(response, res);
+        await forwardFetchResponse(response, res);
     } catch (error) {
         console.error(error);
         return res.sendStatus(500);

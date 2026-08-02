@@ -31,6 +31,8 @@ const GEMINI_MEDIA_RESOLUTION = {
     high: 'media_resolution_high',
 };
 
+const enableThoughtSignatures = !!getConfigValue('gemini.thoughtSignatures', true, 'boolean');
+
 /**
  * @typedef {object} PromptNames
  * @property {string} charName Character name
@@ -574,7 +576,7 @@ export function convertGooglePrompt(messages, model, useSysPrompt, names) {
             const textSignature = message.signature;
 
             parts.forEach((part) => {
-                if (textSignature && typeof part.text === 'string') {
+                if (enableThoughtSignatures && textSignature && typeof part.text === 'string') {
                     part.thoughtSignature = textSignature;
                 } else if (/gemini-3/.test(model)) {
                     // Gemini 3: Fall back to bypass magic for function calls (mandatory) and images
@@ -1028,6 +1030,11 @@ export function cachingAtDepthForOpenRouterClaude(messages, cachingAtDepth, ttl)
 
         passedThePrefill = true;
 
+        // OpenRouter hoists system messages into Claude's system parameter.
+        if (messages[i].role === 'system') {
+            continue;
+        }
+
         if (messages[i].role !== previousRoleName) {
             if (depth === cachingAtDepth || depth === cachingAtDepth + 2) {
                 const content = messages[i].content;
@@ -1037,7 +1044,7 @@ export function cachingAtDepthForOpenRouterClaude(messages, cachingAtDepth, ttl)
                         text: content,
                         cache_control: { type: 'ephemeral', ttl: ttl },
                     }];
-                } else {
+                } else if (content?.length > 0) {
                     const contentPartCount = content.length;
                     content[contentPartCount - 1].cache_control = {
                         type: 'ephemeral',
@@ -1110,9 +1117,27 @@ export function cachingSystemPromptForOpenRouter(messages, ttl = undefined) {
  * @param {number} maxTokens Maximum tokens
  * @param {string} reasoningEffort Reasoning effort
  * @param {boolean} stream If streaming is enabled
- * @returns {number?} Budget tokens
+ * @param {boolean} isAdaptiveModel If the model supports adaptive thinking
+ * @returns {number|string|null} Budget tokens, effort string, or null
  */
-export function calculateClaudeBudgetTokens(maxTokens, reasoningEffort, stream) {
+export function calculateClaudeBudgetTokens(maxTokens, reasoningEffort, stream, isAdaptiveModel = false) {
+    if (isAdaptiveModel) {
+        switch (reasoningEffort) {
+            case REASONING_EFFORT.auto:
+                return null;
+            case REASONING_EFFORT.min:
+            case REASONING_EFFORT.low:
+                return 'low';
+            case REASONING_EFFORT.medium:
+                return 'medium';
+            case REASONING_EFFORT.high:
+                return 'high';
+            case REASONING_EFFORT.max:
+                return 'max';
+        }
+        return null;
+    }
+
     let budgetTokens = 0;
 
     switch (reasoningEffort) {
@@ -1397,7 +1422,9 @@ export function addOpenRouterSignatures(messages, model) {
             details.push(detail);
         };
         if (typeof message.signature === 'string') {
-            addDetail(message.signature);
+            if (enableThoughtSignatures) {
+                addDetail(message.signature);
+            }
             delete message.signature;
         }
         if (Array.isArray(message.tool_calls)) {

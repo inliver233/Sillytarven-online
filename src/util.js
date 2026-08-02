@@ -510,14 +510,11 @@ export function getImages(directoryPath, sortBy = 'name', type = MEDIA_REQUEST_T
  * Pipe a fetch() response to an Express.js Response, including status code.
  * @param {import('node-fetch').Response} from The Fetch API response to pipe from.
  * @param {import('express').Response} to The Express response to pipe to.
+ * @returns {Promise<void>}
  */
-export function forwardFetchResponse(from, to) {
+export async function forwardFetchResponse(from, to) {
     let statusCode = from.status;
-    let statusText = from.statusText;
-
-    if (!from.ok) {
-        console.warn(`Streaming request failed with status ${statusCode} ${statusText}`);
-    }
+    const statusText = from.statusText;
 
     // Avoid sending 401 responses as they reset the client Basic auth.
     // This can produce an interesting artifact as "400 Unauthorized", but it's not out of spec.
@@ -531,22 +528,62 @@ export function forwardFetchResponse(from, to) {
     to.statusCode = statusCode;
     to.statusMessage = statusText;
 
-    if (from.body && to.socket) {
-        from.body.pipe(to);
-
-        to.socket.on('close', function () {
-            if (from.body instanceof Readable) from.body.destroy(); // Close the remote stream
-
-            to.end(); // End the Express response
-        });
-
-        from.body.on('end', function () {
-            console.info('Streaming request finished');
+    if (!from.ok) {
+        try {
+            const rawErrorText = await from.text();
+            const detail = rawErrorText || 'Unknown error occurred';
+            console.warn(`Streaming request failed with status ${from.status} ${statusText}: ${detail}`);
+            to.end(rawErrorText, 'utf-8');
+        } catch {
+            console.warn(`Streaming request failed with status ${from.status} ${statusText}: Unknown error occurred`);
             to.end();
-        });
-    } else {
-        to.end();
+        }
+        return;
     }
+
+    if (!from.body) {
+        to.end();
+        return;
+    }
+
+    await new Promise((resolve, reject) => {
+        let settled = false;
+        const settle = (error = null) => {
+            if (settled) return;
+            settled = true;
+            from.body.removeListener('end', onEnd);
+            from.body.removeListener('close', onBodyClose);
+            from.body.removeListener('error', onError);
+            to.socket?.removeListener('close', onClose);
+            error ? reject(error) : resolve();
+        };
+        const onClose = () => {
+            if (from.body instanceof Readable && !from.body.destroyed) {
+                from.body.destroy();
+            }
+            if (!to.writableEnded) to.end();
+            settle();
+        };
+        const onEnd = () => {
+            console.info('Streaming request finished');
+            if (!to.writableEnded) to.end();
+            settle();
+        };
+        const onBodyClose = () => {
+            if (!to.writableEnded) to.end();
+            settle();
+        };
+        const onError = (error) => {
+            if (!to.writableEnded) to.end();
+            settle(error);
+        };
+
+        to.socket?.once('close', onClose);
+        from.body.once('end', onEnd);
+        from.body.once('close', onBodyClose);
+        from.body.once('error', onError);
+        from.body.pipe(to, { end: false });
+    });
 }
 
 /**

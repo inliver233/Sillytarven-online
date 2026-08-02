@@ -8,6 +8,9 @@ featureFlags:
   extensionLifecycle: false
   swipePicker: false
   worldInfoRelink: false
+# Instance hard cap for tool-call recursion. User settings can only lower this value.
+toolCalling:
+  recurseHardLimit: 50
 
 # -- SERVER CONFIGURATION --
 # Listen for incoming connections
@@ -350,11 +353,15 @@ claude:
   ## 5m: base price x 1.25
   ## 1h: base price x 2
   extendedTTL: false
+  # Enables adaptive thinking for supported models (Opus 4.6+). Disabled by default.
+  enableAdaptiveThinking: false
 # -- GOOGLE GEMINI API CONFIGURATION --
 gemini:
   # API endpoint version ("v1beta" or "v1alpha")
   apiVersion: 'v1beta'
-# Enables caching of the system prompt (if supported). Only for OpenRouter.
+  # Adds thought signatures to requests (if available). Only for Gemini 3 and above.
+  thoughtSignatures: true
+  # Enables caching of the system prompt (if supported). Only for OpenRouter.
   # -- IMPORTANT! --
   # Use only when the prompt before the chat history is static and doesn't change between requests
   # (e.g {{random}} macro or lorebooks not as in-chat injections).

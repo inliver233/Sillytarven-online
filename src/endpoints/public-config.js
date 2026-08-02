@@ -26,3 +26,15 @@ router.get('/public-pages', (request, response) => {
 router.get('/feature-flags', (_request, response) => {
     response.json(getPublicMigrationFeatureFlags());
 });
+
+router.get('/reasoning-tools', (_request, response) => {
+    const configuredLimit = getConfigValue('toolCalling.recurseHardLimit', 50, 'number');
+    const recurseHardLimit = Number.isInteger(configuredLimit) && configuredLimit >= 1 && configuredLimit <= 50
+        ? configuredLimit
+        : 50;
+
+    response.json({
+        enabled: getPublicMigrationFeatureFlags().reasoningTools,
+        recurseHardLimit,
+    });
+});

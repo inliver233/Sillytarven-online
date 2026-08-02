@@ -20,11 +20,13 @@ import { isTrueBoolean } from './utils.js';
  * @property {string} parameters - The parameters for the tool invocation.
  * @property {string} result - The result of the tool invocation.
  * @property {string?} signature - The thought signature associated with the tool invocation.
+ * @property {string?} reasoning - The plaintext reasoning associated with this tool call turn.
+ * @property {boolean} [error] - Whether the tool invocation failed.
  */
 
 /**
  * @typedef {object} ToolInvocationResult
- * @property {ToolInvocation[]} invocations Successful tool invocations
+ * @property {ToolInvocation[]} invocations Tool invocations (both successful and failed)
  * @property {Error[]} errors Errors that occurred during tool invocation
  * @property {string[]} stealthCalls Names of stealth tools that were invoked
  */
@@ -251,6 +253,31 @@ export class ToolManager {
      * @type {number}
      */
     static RECURSE_LIMIT = 5;
+    static #userRecurseLimit = 5;
+    static #instanceRecurseLimit = 50;
+    static #modernRecurseLimitEnabled = false;
+
+    /**
+     * Configures recursion without rewriting the saved user setting.
+     * @param {unknown} userLimit User-selected limit
+     * @param {unknown} instanceLimit Instance hard cap
+     * @param {boolean} enabled Whether modern recursion controls are enabled
+     */
+    static configureRecurseLimit(userLimit, instanceLimit, enabled) {
+        const isValid = value => Number.isInteger(Number(value)) && Number(value) >= 1 && Number(value) <= 50;
+        this.#userRecurseLimit = isValid(userLimit) ? Number(userLimit) : 5;
+        this.#instanceRecurseLimit = isValid(instanceLimit) ? Number(instanceLimit) : 50;
+        this.#modernRecurseLimitEnabled = enabled === true;
+    }
+
+    /**
+     * @returns {number} Effective recursion limit.
+     */
+    static getRecurseLimit() {
+        return this.#modernRecurseLimitEnabled
+            ? Math.min(this.#userRecurseLimit, this.#instanceRecurseLimit)
+            : this.RECURSE_LIMIT;
+    }
 
     /**
      * Returns an Array of all tools that have been registered.
@@ -335,10 +362,10 @@ export class ToolManager {
 
             if (error instanceof Error) {
                 error.cause = name;
-                return error.toString();
+                return error;
             }
 
-            return new Error('Unknown error occurred while invoking the tool.', { cause: name }).toString();
+            return new Error('Unknown error occurred while invoking the tool.', { cause: name });
         }
     }
 
@@ -762,9 +789,11 @@ export class ToolManager {
     /**
      * Check for function tool calls in the response data and invoke them.
      * @param {any} data Reply data
-     * @returns {Promise<ToolInvocationResult>} Successful tool invocations
+     * @param {object} [options] Invocation options
+     * @param {string?} [options.reasoningText] Plaintext reasoning captured for this tool turn
+     * @returns {Promise<ToolInvocationResult>} Tool invocations and errors
      */
-    static async invokeFunctionTools(data) {
+    static async invokeFunctionTools(data, { reasoningText = null } = {}) {
         /** @type {ToolInvocationResult} */
         const result = {
             invocations: [],
@@ -794,9 +823,23 @@ export class ToolManager {
             toastr.clear(toast);
             console.log('[ToolManager] Function tool result:', result);
 
-            // Save a successful invocation
+            // Failed non-stealth calls are persisted so the model receives a stable failure result.
             if (toolResult instanceof Error) {
                 result.errors.push(toolResult);
+                if (isStealth) {
+                    result.stealthCalls.push(name);
+                } else {
+                    result.invocations.push({
+                        id,
+                        displayName,
+                        name,
+                        parameters: stringify(parameters),
+                        result: toolResult.toString(),
+                        error: true,
+                        signature: toolCall.signature || null,
+                        reasoning: reasoningText || null,
+                    });
+                }
                 continue;
             }
 
@@ -812,7 +855,9 @@ export class ToolManager {
                 name,
                 parameters: stringify(parameters),
                 result: toolResult,
+                error: false,
                 signature: toolCall.signature || null,
+                reasoning: reasoningText || null,
             };
             result.invocations.push(invocation);
         }
