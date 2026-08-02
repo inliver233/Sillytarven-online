@@ -38,10 +38,23 @@ test('free Gemini status and generation use only server-side channel credentials
 
         if (request.method === 'GET' && request.url === '/v1beta/models?key=server-secret') {
             response.end(JSON.stringify({
-                models: [{
-                    name: 'models/gemini-test',
-                    supportedGenerationMethods: ['generateContent'],
-                }],
+                models: [
+                    {
+                        name: 'models/gemini-test',
+                        supportedGenerationMethods: ['generateContent'],
+                    },
+                    {
+                        name: 'models/gemini-null-methods',
+                        supportedGenerationMethods: null,
+                    },
+                    {
+                        name: 'models/gemini-missing-methods',
+                    },
+                    {
+                        name: 'models/embedding-only',
+                        supportedGenerationMethods: ['embedContent'],
+                    },
+                ],
             }));
             return;
         }
@@ -87,7 +100,13 @@ test('free Gemini status and generation use only server-side channel credentials
             }),
         });
         assert.equal(statusResponse.status, 200);
-        assert.deepEqual(await statusResponse.json(), { data: [{ id: 'gemini-test' }] });
+        assert.deepEqual(await statusResponse.json(), {
+            data: [
+                { id: 'gemini-test' },
+                { id: 'gemini-null-methods' },
+                { id: 'gemini-missing-methods' },
+            ],
+        });
 
         const generateResponse = await fetch(`${appUrl}/api/backends/chat-completions/generate`, {
             method: 'POST',

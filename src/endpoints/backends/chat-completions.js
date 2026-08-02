@@ -1741,7 +1741,8 @@ router.post('/status', async function (request, statusResponse) {
                     const data = await response.json();
                     // Transform Google AI Studio models to OpenAI format
                     const models = data.models
-                        ?.filter(model => model.supportedGenerationMethods?.includes('generateContent'))
+                        ?.filter(model => model.supportedGenerationMethods == null
+                            || model.supportedGenerationMethods.includes?.('generateContent') === true)
                         ?.map(model => ({
                             id: model.name.replace('models/', ''),
                         })) || [];
