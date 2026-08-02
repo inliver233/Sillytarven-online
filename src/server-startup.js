@@ -60,6 +60,7 @@ import { router as oauthConfigRouter } from './endpoints/oauth-config.js';
 import { router as defaultConfigRouter } from './endpoints/default-config.js';
 import { router as scheduledTasksRouter } from './endpoints/scheduled-tasks.js';
 import { router as userStorageRouter } from './endpoints/user-storage.js';
+import { router as freeGeminiChannelsRouter } from './endpoints/free-gemini-channels.js';
 import { router as performanceRouter } from './endpoints/performance.js';
 import { getConfigValue } from './util.js';
 import { settingsCacheInvalidationMiddleware } from './settings-cache.js';
@@ -218,6 +219,7 @@ export function setupPrivateEndpoints(app) {
     app.use('/api/announcements', announcementsRouter);
     app.use('/api/scheduled-tasks', scheduledTasksRouter);
     app.use('/api/user-storage', userStorageRouter);
+    app.use('/api/free-gemini-channels', freeGeminiChannelsRouter);
 }
 
 /**

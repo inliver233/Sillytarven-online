@@ -60,6 +60,7 @@ import {
     getWebTokenizer,
 } from '../tokenizers.js';
 import { getVertexAIAuth, getProjectIdFromServiceAccount } from '../google.js';
+import { getEnabledFreeGeminiChannel } from '../../free-gemini-channels.js';
 
 const API_OPENAI = 'https://api.openai.com/v1';
 const API_CLAUDE = 'https://api.anthropic.com/v1';
@@ -85,6 +86,11 @@ const API_ZAI_COMMON = 'https://api.z.ai/api/paas/v4';
 const API_ZAI_CODING = 'https://api.z.ai/api/coding/paas/v4';
 const API_SILICONFLOW = 'https://api.siliconflow.com/v1';
 const API_OPENROUTER = 'https://openrouter.ai/api/v1';
+
+function getGeminiVersionBaseUrl(apiUrl, apiVersion) {
+    const baseUrl = trimTrailingSlash(apiUrl.toString());
+    return /\/v1(?:beta)?$/i.test(baseUrl) ? baseUrl : `${baseUrl}/${apiVersion}`;
+}
 
 /**
  * Module-scoped Claude caching configuration values.
@@ -385,9 +391,10 @@ async function sendClaudeRequest(request, response) {
  * @param {express.Request} request Express request
  * @param {express.Response} response Express response
  */
-async function sendMakerSuiteRequest(request, response) {
+async function sendMakerSuiteRequest(request, response, options = {}) {
+    const freeGeminiChannel = options.freeGeminiChannel;
     const useVertexAi = request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.VERTEXAI;
-    const apiName = useVertexAi ? 'Google Vertex AI' : 'Google AI Studio';
+    const apiName = freeGeminiChannel?.name || (useVertexAi ? 'Google Vertex AI' : 'Google AI Studio');
     let apiUrl;
     let apiKey;
 
@@ -407,10 +414,10 @@ async function sendMakerSuiteRequest(request, response) {
             return response.status(400).send({ error: true, message: error.message });
         }
     } else {
-        apiUrl = new URL(request.body.reverse_proxy || API_MAKERSUITE);
-        apiKey = request.body.reverse_proxy ? request.body.proxy_password : readSecret(request.user.directories, SECRET_KEYS.MAKERSUITE);
+        apiUrl = new URL(freeGeminiChannel?.url || request.body.reverse_proxy || API_MAKERSUITE);
+        apiKey = freeGeminiChannel?.key || (request.body.reverse_proxy ? request.body.proxy_password : readSecret(request.user.directories, SECRET_KEYS.MAKERSUITE));
 
-        if (!request.body.reverse_proxy && !apiKey) {
+        if (!apiKey && (!request.body.reverse_proxy || freeGeminiChannel)) {
             console.warn(`${apiName} API key is missing.`);
             return response.status(400).send({ error: true });
         }
@@ -650,7 +657,8 @@ async function sendMakerSuiteRequest(request, response) {
                 headers['Authorization'] = authHeader;
             }
         } else {
-            url = `${apiUrl.toString().replace(/\/$/, '')}/${apiVersion}/models/${model}:${responseType}?key=${apiKey}${stream ? '&alt=sse' : ''}`;
+            const versionBaseUrl = getGeminiVersionBaseUrl(apiUrl, apiVersion);
+            url = `${versionBaseUrl}/models/${model}:${responseType}?key=${apiKey}${stream ? '&alt=sse' : ''}`;
         }
 
         const generateResponse = await fetch(url, {
@@ -708,7 +716,10 @@ async function sendMakerSuiteRequest(request, response) {
             return response.send(reply);
         }
     } catch (error) {
-        console.error(`Error communicating with ${apiName} API:`, error);
+        const errorDetails = freeGeminiChannel
+            ? (error?.cause?.code || error?.code || error?.name || 'request_failed')
+            : error;
+        console.error(`Error communicating with ${apiName} API:`, errorDetails);
         if (!response.headersSent) {
             return response.status(500).send({ error: true });
         }
@@ -1697,21 +1708,33 @@ router.post('/status', async function (request, statusResponse) {
             apiUrl = API_FIREWORKS;
             apiKey = readSecret(request.user.directories, SECRET_KEYS.FIREWORKS);
             headers = {};
-        } else if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.MAKERSUITE) {
-            apiKey = request.body.reverse_proxy ? request.body.proxy_password : readSecret(request.user.directories, SECRET_KEYS.MAKERSUITE);
-            apiUrl = trimTrailingSlash(request.body.reverse_proxy || API_MAKERSUITE);
-            const apiVersion = getConfigValue('gemini.apiVersion', 'v1beta');
-            const modelsUrl = !apiKey && request.body.reverse_proxy
-                ? `${apiUrl}/${apiVersion}/models`
-                : `${apiUrl}/${apiVersion}/models?key=${apiKey}`;
+        } else if ([CHAT_COMPLETION_SOURCES.MAKERSUITE, CHAT_COMPLETION_SOURCES.FREE_GEMINI].includes(request.body.chat_completion_source)) {
+            const isFreeGemini = request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.FREE_GEMINI;
+            const freeGeminiChannel = isFreeGemini
+                ? await getEnabledFreeGeminiChannel(request.body.free_gemini_channel_id)
+                : null;
 
-            if (!apiKey && !request.body.reverse_proxy) {
-                console.warn('Google AI Studio API key is missing.');
+            if (isFreeGemini && !freeGeminiChannel) {
+                return statusResponse.status(404).send({ error: true, message: '该免费 Gemini 渠道不存在或已停用。' });
+            }
+
+            apiKey = freeGeminiChannel?.key || (request.body.reverse_proxy ? request.body.proxy_password : readSecret(request.user.directories, SECRET_KEYS.MAKERSUITE));
+            apiUrl = new URL(freeGeminiChannel?.url || request.body.reverse_proxy || API_MAKERSUITE);
+            const apiVersion = getConfigValue('gemini.apiVersion', 'v1beta');
+            const versionBaseUrl = getGeminiVersionBaseUrl(apiUrl, apiVersion);
+            const modelsUrl = !apiKey && request.body.reverse_proxy && !isFreeGemini
+                ? `${versionBaseUrl}/models`
+                : `${versionBaseUrl}/models?key=${apiKey}`;
+
+            if (!apiKey && (!request.body.reverse_proxy || isFreeGemini)) {
+                console.warn(`${freeGeminiChannel?.name || 'Google AI Studio'} API key is missing.`);
                 return statusResponse.status(400).send({ error: true });
             }
 
             try {
-                const response = await fetch(modelsUrl);
+                const response = await fetch(modelsUrl, {
+                    signal: AbortSignal.timeout(15000),
+                });
 
                 if (response.ok) {
                     /** @type {any} */
@@ -1723,13 +1746,21 @@ router.post('/status', async function (request, statusResponse) {
                             id: model.name.replace('models/', ''),
                         })) || [];
 
-                    console.info('Available Google AI Studio models:', models.map(m => m.id));
+                    console.info(`Available ${freeGeminiChannel?.name || 'Google AI Studio'} models:`, models.map(m => m.id));
                     return statusResponse.send({ data: models });
                 } else {
-                    console.warn('Google AI Studio models endpoint failed:', response.status, response.statusText);
+                    console.warn(`${freeGeminiChannel?.name || 'Google AI Studio'} models endpoint failed:`, response.status, response.statusText);
+                    if (isFreeGemini) {
+                        return statusResponse.status(response.status).send({ error: true, message: '免费 Gemini 渠道连接失败。' });
+                    }
                     return statusResponse.send({ error: true, bypass: true, data: { data: [] } });
                 }
             } catch (error) {
+                if (isFreeGemini) {
+                    const errorCode = error?.cause?.code || error?.code || error?.name || 'request_failed';
+                    console.error(`Error fetching ${freeGeminiChannel.name} models:`, errorCode);
+                    return statusResponse.status(502).send({ error: true, message: '免费 Gemini 渠道连接失败。' });
+                }
                 console.error('Error fetching Google AI Studio models:', error);
                 return statusResponse.send({ error: true, bypass: true, data: { data: [] } });
             }
@@ -2017,6 +2048,13 @@ router.post('/generate', async function (request, response) {
             case CHAT_COMPLETION_SOURCES.CLAUDE: return await sendClaudeRequest(request, response);
             case CHAT_COMPLETION_SOURCES.AI21: return await sendAI21Request(request, response);
             case CHAT_COMPLETION_SOURCES.MAKERSUITE: return await sendMakerSuiteRequest(request, response);
+            case CHAT_COMPLETION_SOURCES.FREE_GEMINI: {
+                const freeGeminiChannel = await getEnabledFreeGeminiChannel(request.body.free_gemini_channel_id);
+                if (!freeGeminiChannel) {
+                    return response.status(404).send({ error: true, message: '该免费 Gemini 渠道不存在或已停用。' });
+                }
+                return await sendMakerSuiteRequest(request, response, { freeGeminiChannel });
+            }
             case CHAT_COMPLETION_SOURCES.VERTEXAI: return await sendMakerSuiteRequest(request, response);
             case CHAT_COMPLETION_SOURCES.MISTRALAI: return await sendMistralAIRequest(request, response);
             case CHAT_COMPLETION_SOURCES.COHERE: return await sendCohereRequest(request, response);

@@ -2874,6 +2874,7 @@
                                 <option value="fireworks">Fireworks AI</option>
                                 <option value="groq">Groq</option>
                                 <option value="makersuite">Google AI Studio</option>
+                                <option value="free-gemini">free-gemini（管理员福利）</option>
                                 <option value="vertexai">Google Vertex AI</option>
                                 <option value="mistralai">MistralAI</option>
                                 <option value="moonshot">Moonshot AI</option>
@@ -2886,6 +2887,25 @@
                                 <option value="zai">Z.AI (GLM)</option>
                             </optgroup>
                         </select>
+                        <div class="flex-container flexFlowColumn flexGap10 marginTopBot5" data-source="free-gemini">
+                            <div class="neutral_warning">
+                                <i class="fa-fw fa-solid fa-gift"></i>
+                                <span>这是管理员提供给全体成员的免费 Gemini 渠道。连接地址和 API Key 由服务器统一保管，不会下发到成员浏览器。</span>
+                            </div>
+                            <label for="free_gemini_channel_select">
+                                <span>免费渠道</span>
+                            </label>
+                            <select id="free_gemini_channel_select">
+                                <option value="">正在加载管理员渠道...</option>
+                            </select>
+                            <label for="model_free_gemini_select">
+                                <span>Gemini 模型</span>
+                            </label>
+                            <select id="model_free_gemini_select">
+                                <option value="">连接后加载模型</option>
+                            </select>
+                            <small class="notes">如果管理员增加或删除了渠道，重新切换到该来源即可刷新列表。</small>
+                        </div>
                         <div class="inline-drawer wide100p" data-source="openai,claude,mistralai,makersuite,vertexai,deepseek,xai">
                             <div class="inline-drawer-toggle inline-drawer-header">
                                 <b data-i18n="Reverse Proxy">Reverse Proxy</b>

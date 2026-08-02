@@ -18,6 +18,9 @@
         <button type="button" class="userInvitationsAdminButton menu_button menu_button_icon" data-target-tab="userInvitationsAdminBlock">
             <h4>用户邀请管理</h4>
         </button>
+        <button type="button" class="freeGeminiChannelsButton menu_button menu_button_icon" data-target-tab="freeGeminiChannelsBlock">
+            <h4>免费 Gemini 渠道</h4>
+        </button>
         <button type="button" class="announcementsButton menu_button menu_button_icon" data-target-tab="announcementsBlock">
             <h4 data-i18n="Announcements">公告管理</h4>
         </button>
@@ -446,6 +449,56 @@
                 <div id="userInvStatsContainer" class="flex-container flexFlowColumn" style="gap: 6px; max-height: 360px; overflow-y: auto;">
                     <div style="color: var(--st-text-muted, #64748b); padding: 14px; text-align: center; font-size: 0.85rem;">点击「刷新统计」加载</div>
                 </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 全局免费 Gemini 渠道管理 -->
+    <div class="navTab freeGeminiChannelsBlock" style="display: none;">
+        <div class="flex-container flexFlowColumn flexGap10">
+            <h3>免费 Gemini 渠道</h3>
+            <div class="neutral_warning">
+                <i class="fa-fw fa-solid fa-shield-halved"></i>
+                <span>这里配置的 URL 和 API Key 仅保存在服务器端。普通成员只能看到渠道名称、选择模型并使用，无法查看连接信息。</span>
+            </div>
+
+            <form id="freeGeminiChannelForm" class="flex-container flexFlowColumn flexGap10" action="javascript:void(0);" style="padding: 16px; border: 1px solid var(--SmartThemeBorderColor); border-radius: 10px; background: var(--SmartThemeBlurTintColor);">
+                <input type="hidden" id="freeGeminiChannelId" value="">
+                <div class="flex-container flexGap10" style="flex-wrap: wrap;">
+                    <label class="flex1" style="min-width: 220px;">
+                        <span style="display: block; margin-bottom: 5px;">渠道名称</span>
+                        <input id="freeGeminiChannelName" class="text_pole wide100p" type="text" maxlength="80" value="free-gemini" placeholder="free-gemini" required>
+                    </label>
+                    <label class="checkbox_label" style="align-self: end; margin-bottom: 8px;">
+                        <input id="freeGeminiChannelEnabled" type="checkbox" checked>
+                        <span>立即对全体成员启用</span>
+                    </label>
+                </div>
+                <label>
+                    <span style="display: block; margin-bottom: 5px;">Gemini API Base URL</span>
+                    <input id="freeGeminiChannelUrl" class="text_pole wide100p" type="url" maxlength="2048" placeholder="https://generativelanguage.googleapis.com" autocomplete="off" required>
+                    <small class="notes">填写 Gemini 原生 API 的基础地址；系统会自动追加 API 版本、models 和 generateContent 路径。</small>
+                </label>
+                <label>
+                    <span style="display: block; margin-bottom: 5px;">API Key</span>
+                    <input id="freeGeminiChannelKey" class="text_pole wide100p" type="password" maxlength="8192" placeholder="新建时必填；编辑时留空表示保留原 Key" autocomplete="new-password">
+                </label>
+                <div class="flex-container flexGap10" style="flex-wrap: wrap;">
+                    <button type="submit" class="menu_button menu_button_icon" id="saveFreeGeminiChannel">
+                        <i class="fa-fw fa-solid fa-plus"></i><span>新增渠道</span>
+                    </button>
+                    <button type="button" class="menu_button menu_button_icon" id="cancelFreeGeminiChannelEdit" style="display: none;">
+                        <i class="fa-fw fa-solid fa-xmark"></i><span>取消编辑</span>
+                    </button>
+                    <button type="button" class="menu_button menu_button_icon" id="refreshFreeGeminiChannels">
+                        <i class="fa-fw fa-solid fa-rotate"></i><span>刷新列表</span>
+                    </button>
+                </div>
+            </form>
+
+            <div id="freeGeminiChannelsStatus" class="notes">尚未加载。</div>
+            <div id="freeGeminiChannelsList" class="flex-container flexFlowColumn flexGap10">
+                <div style="padding: 18px; text-align: center; color: var(--SmartThemeEmColor);">点击“刷新列表”加载渠道。</div>
             </div>
         </div>
     </div>

@@ -4,9 +4,224 @@ let systemLoadInterval;
 let systemLoadAutoPaused = false;
 let currentSystemData = null;
 let currentPerformanceData = null;
+let currentFreeGeminiChannels = [];
 let currentInvitationCodes = [];
 const selectedInvitationCodes = new Set();
 let csrfToken = null;
+
+// ===== 全局免费 Gemini 渠道（管理员端） =====
+function bindFreeGeminiChannelEvents() {
+    $('#freeGeminiChannelForm').off('submit').on('submit', saveFreeGeminiChannel);
+    $('#cancelFreeGeminiChannelEdit').off('click').on('click', resetFreeGeminiChannelForm);
+    $('#refreshFreeGeminiChannels').off('click').on('click', loadFreeGeminiChannelsAdmin);
+
+    $('#freeGeminiChannelsList')
+        .off('click', '.freeGeminiEditChannel')
+        .on('click', '.freeGeminiEditChannel', function () {
+            const channel = currentFreeGeminiChannels.find(item => item.id === String($(this).data('id') || ''));
+            if (channel) beginFreeGeminiChannelEdit(channel);
+        })
+        .off('click', '.freeGeminiDeleteChannel')
+        .on('click', '.freeGeminiDeleteChannel', async function () {
+            await deleteFreeGeminiChannel(String($(this).data('id') || ''));
+        })
+        .off('click', '.freeGeminiTestChannel')
+        .on('click', '.freeGeminiTestChannel', async function () {
+            await testFreeGeminiChannel(String($(this).data('id') || ''), $(this));
+        })
+        .off('click', '.freeGeminiToggleChannel')
+        .on('click', '.freeGeminiToggleChannel', async function () {
+            const channel = currentFreeGeminiChannels.find(item => item.id === String($(this).data('id') || ''));
+            if (channel) await updateFreeGeminiChannelState(channel, !channel.enabled);
+        });
+}
+
+function resetFreeGeminiChannelForm() {
+    $('#freeGeminiChannelId').val('');
+    $('#freeGeminiChannelName').val('free-gemini');
+    $('#freeGeminiChannelUrl').val('');
+    $('#freeGeminiChannelKey').val('').attr('placeholder', '新建时必填；编辑时留空表示保留原 Key');
+    $('#freeGeminiChannelEnabled').prop('checked', true);
+    $('#saveFreeGeminiChannel').html('<i class="fa-fw fa-solid fa-plus"></i><span>新增渠道</span>');
+    $('#cancelFreeGeminiChannelEdit').hide();
+}
+
+function beginFreeGeminiChannelEdit(channel) {
+    $('#freeGeminiChannelId').val(channel.id);
+    $('#freeGeminiChannelName').val(channel.name || 'free-gemini');
+    $('#freeGeminiChannelUrl').val(channel.url || '');
+    $('#freeGeminiChannelKey').val('').attr('placeholder', '留空表示保留现有 API Key');
+    $('#freeGeminiChannelEnabled').prop('checked', !!channel.enabled);
+    $('#saveFreeGeminiChannel').html('<i class="fa-fw fa-solid fa-floppy-disk"></i><span>保存修改</span>');
+    $('#cancelFreeGeminiChannelEdit').show();
+    $('#freeGeminiChannelName').trigger('focus');
+}
+
+async function loadFreeGeminiChannelsAdmin() {
+    const list = $('#freeGeminiChannelsList');
+    const status = $('#freeGeminiChannelsStatus');
+    list.html('<div style="padding:18px;text-align:center;"><i class="fa-solid fa-spinner fa-spin"></i> 正在加载...</div>');
+    status.text('正在读取服务器配置...');
+
+    try {
+        const response = await fetch('/api/free-gemini-channels/admin', {
+            method: 'GET',
+            headers: getRequestHeaders(),
+            cache: 'no-cache',
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            throw new Error(payload.error || '加载免费渠道失败');
+        }
+
+        const channels = Array.isArray(payload) ? payload : payload.channels;
+        currentFreeGeminiChannels = Array.isArray(channels) ? channels : [];
+        renderFreeGeminiChannelsAdmin();
+        status.text(`共 ${currentFreeGeminiChannels.length} 个渠道，启用 ${currentFreeGeminiChannels.filter(channel => channel.enabled).length} 个。`);
+    } catch (error) {
+        console.error('加载免费 Gemini 渠道失败:', error);
+        currentFreeGeminiChannels = [];
+        status.text('加载失败。');
+        list.html(`<div style="padding:18px;text-align:center;color:#ef4444;">${escapeHtml(error.message)}</div>`);
+    }
+}
+
+function renderFreeGeminiChannelsAdmin() {
+    const list = $('#freeGeminiChannelsList');
+    if (currentFreeGeminiChannels.length === 0) {
+        list.html('<div style="padding:18px;text-align:center;color:var(--SmartThemeEmColor);">暂无免费渠道，请在上方新增。</div>');
+        return;
+    }
+
+    list.html(currentFreeGeminiChannels.map(channel => {
+        const enabledText = channel.enabled ? '已启用' : '已停用';
+        const enabledColor = channel.enabled ? '#22c55e' : '#94a3b8';
+        const keyText = channel.maskedKey || channel.masked_key || (channel.hasKey || channel.keyConfigured ? '已配置（已隐藏）' : '未配置');
+        const updatedAt = channel.updatedAt ? new Date(channel.updatedAt).toLocaleString() : '—';
+        return `<div style="padding:14px;border:1px solid var(--SmartThemeBorderColor);border-radius:10px;background:var(--SmartThemeBlurTintColor);">
+            <div class="flex-container alignItemsCenter justifySpaceBetween flexGap10" style="flex-wrap:wrap;">
+                <div style="min-width:0;flex:1;">
+                    <div class="flex-container alignItemsCenter flexGap10" style="flex-wrap:wrap;">
+                        <strong style="font-size:1.05em;">${escapeHtml(channel.name || 'free-gemini')}</strong>
+                        <span style="color:${enabledColor};font-weight:600;">${enabledText}</span>
+                    </div>
+                    <div class="notes" style="word-break:break-all;margin-top:5px;">URL：${escapeHtml(channel.url || '')}</div>
+                    <div class="notes">API Key：${escapeHtml(keyText)} · 最后更新：${escapeHtml(updatedAt)}</div>
+                </div>
+                <div class="flex-container flexGap10" style="flex-wrap:wrap;">
+                    <button type="button" class="menu_button menu_button_icon freeGeminiTestChannel" data-id="${escapeHtml(channel.id)}" ${channel.enabled ? '' : 'disabled title="请先启用渠道再测试"'}><i class="fa-fw fa-solid fa-plug-circle-check"></i><span>测试</span></button>
+                    <button type="button" class="menu_button menu_button_icon freeGeminiToggleChannel" data-id="${escapeHtml(channel.id)}"><i class="fa-fw fa-solid ${channel.enabled ? 'fa-pause' : 'fa-play'}"></i><span>${channel.enabled ? '停用' : '启用'}</span></button>
+                    <button type="button" class="menu_button menu_button_icon freeGeminiEditChannel" data-id="${escapeHtml(channel.id)}"><i class="fa-fw fa-solid fa-pen"></i><span>编辑</span></button>
+                    <button type="button" class="menu_button menu_button_icon warning freeGeminiDeleteChannel" data-id="${escapeHtml(channel.id)}"><i class="fa-fw fa-solid fa-trash"></i><span>删除</span></button>
+                </div>
+            </div>
+        </div>`;
+    }).join(''));
+}
+
+async function saveFreeGeminiChannel(event) {
+    event.preventDefault();
+    const id = String($('#freeGeminiChannelId').val() || '');
+    const key = String($('#freeGeminiChannelKey').val() || '');
+    const body = {
+        name: String($('#freeGeminiChannelName').val() || '').trim(),
+        url: String($('#freeGeminiChannelUrl').val() || '').trim(),
+        enabled: $('#freeGeminiChannelEnabled').prop('checked'),
+    };
+    if (key) body.key = key;
+
+    if (!body.name || !body.url || (!id && !key)) {
+        toastr.error(!id && !key ? '新增渠道时必须填写 API Key' : '请填写完整的渠道名称和 URL');
+        return;
+    }
+
+    const button = $('#saveFreeGeminiChannel');
+    button.prop('disabled', true);
+    try {
+        const url = id
+            ? `/api/free-gemini-channels/admin/${encodeURIComponent(id)}`
+            : '/api/free-gemini-channels/admin';
+        const response = await fetch(url, {
+            method: id ? 'PUT' : 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify(body),
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            throw new Error(payload.error || '保存免费渠道失败');
+        }
+        toastr.success(id ? '免费渠道已更新' : '免费渠道已新增');
+        resetFreeGeminiChannelForm();
+        await loadFreeGeminiChannelsAdmin();
+    } catch (error) {
+        console.error('保存免费 Gemini 渠道失败:', error);
+        toastr.error(error.message);
+    } finally {
+        button.prop('disabled', false);
+    }
+}
+
+async function updateFreeGeminiChannelState(channel, enabled) {
+    try {
+        const response = await fetch(`/api/free-gemini-channels/admin/${encodeURIComponent(channel.id)}`, {
+            method: 'PUT',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({ name: channel.name, url: channel.url, enabled }),
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.error || '更新渠道状态失败');
+        toastr.success(enabled ? '渠道已启用' : '渠道已停用');
+        await loadFreeGeminiChannelsAdmin();
+    } catch (error) {
+        console.error('更新免费 Gemini 渠道状态失败:', error);
+        toastr.error(error.message);
+    }
+}
+
+async function deleteFreeGeminiChannel(id) {
+    if (!id || !confirm('确定删除这个免费 Gemini 渠道吗？已选择该渠道的成员将无法继续使用它。')) return;
+    try {
+        const response = await fetch(`/api/free-gemini-channels/admin/${encodeURIComponent(id)}`, {
+            method: 'DELETE',
+            headers: getRequestHeaders(),
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.error || '删除免费渠道失败');
+        toastr.success('免费渠道已删除');
+        resetFreeGeminiChannelForm();
+        await loadFreeGeminiChannelsAdmin();
+    } catch (error) {
+        console.error('删除免费 Gemini 渠道失败:', error);
+        toastr.error(error.message);
+    }
+}
+
+async function testFreeGeminiChannel(id, button) {
+    if (!id) return;
+    const originalHtml = button.html();
+    button.prop('disabled', true).html('<i class="fa-fw fa-solid fa-spinner fa-spin"></i><span>测试中</span>');
+    try {
+        const response = await fetch('/api/backends/chat-completions/status', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({
+                chat_completion_source: 'free-gemini',
+                free_gemini_channel_id: id,
+            }),
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || payload.error) {
+            throw new Error(payload.message || payload.error || '上游连接测试失败');
+        }
+        const models = Array.isArray(payload.data) ? payload.data : [];
+        toastr.success(`连接成功，发现 ${models.length} 个可用模型`);
+    } catch (error) {
+        console.error('测试免费 Gemini 渠道失败:', error);
+        toastr.error(error.message);
+    } finally {
+        button.prop('disabled', false).html(originalHtml);
+    }
+}
 
 // ===== 独立用户邀请码系统（管理员端） =====
 function bindUserInvitationSystemEvents() {
@@ -181,6 +396,9 @@ function initializeAdminExtensions() {
         // 绑定用户邀请码发放系统事件
         bindUserInvitationSystemEvents();
 
+        // 绑定全局免费 Gemini 渠道事件
+        bindFreeGeminiChannelEvents();
+
         // 绑定公告管理相关事件
         bindAnnouncementEvents();
 
@@ -227,6 +445,11 @@ function checkAndLoadCurrentTab() {
         if (userInvitationsAdminBlock && isElementVisible(userInvitationsAdminBlock)) {
             loadUserInvitationConfig();
             loadUserInvitationStats();
+        }
+
+        const freeGeminiChannelsBlock = document.querySelector('.freeGeminiChannelsBlock');
+        if (freeGeminiChannelsBlock && isElementVisible(freeGeminiChannelsBlock)) {
+            loadFreeGeminiChannelsAdmin();
         }
 
         // 检查公告管理选项卡是否显示
@@ -293,6 +516,12 @@ function bindTabEvents() {
         userInvitationsAdminButton.addEventListener('click', function() {
             showUserInvitationsAdminTab();
         });
+    }
+
+    // 全局免费 Gemini 渠道选项卡
+    const freeGeminiChannelsButton = document.querySelector('.freeGeminiChannelsButton');
+    if (freeGeminiChannelsButton) {
+        freeGeminiChannelsButton.addEventListener('click', showFreeGeminiChannelsTab);
     }
 
     // 公告管理选项卡
@@ -393,6 +622,15 @@ function showUserInvitationsAdminTab() {
     }
 }
 
+function showFreeGeminiChannelsTab() {
+    hideAllTabs();
+    const block = document.querySelector('.freeGeminiChannelsBlock');
+    if (block) {
+        block.style.display = 'block';
+        loadFreeGeminiChannelsAdmin();
+    }
+}
+
 // 显示公告管理选项卡
 function showAnnouncementsTab() {
     // 隐藏其他选项卡
@@ -489,6 +727,7 @@ function disposeAdminExtensions() {
     document.removeEventListener('visibilitychange', handleAdminVisibilityChange);
     currentSystemData = null;
     currentPerformanceData = null;
+    currentFreeGeminiChannels = [];
 }
 
 // 加载系统负载数据

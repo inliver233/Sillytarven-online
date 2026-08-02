@@ -117,6 +117,7 @@ export function extractReasoningFromData(data, {
                 case chat_completion_sources.OPENROUTER:
                     return data?.choices?.[0]?.message?.reasoning ?? '';
                 case chat_completion_sources.MAKERSUITE:
+                case chat_completion_sources.FREE_GEMINI:
                 case chat_completion_sources.VERTEXAI:
                     return data?.responseContent?.parts?.filter(part => part.thought)?.map(part => part.text)?.join('\n\n') ?? '';
                 case chat_completion_sources.CLAUDE:
@@ -163,7 +164,9 @@ export function extractReasoningSignatureFromData(data, {
     }
 
     const source = chatCompletionSource ?? oai_settings.chat_completion_source;
-    const isGemini = source === chat_completion_sources.MAKERSUITE || source === chat_completion_sources.VERTEXAI;
+    const isGemini = source === chat_completion_sources.MAKERSUITE
+        || source === chat_completion_sources.FREE_GEMINI
+        || source === chat_completion_sources.VERTEXAI;
     const isOpenRouter = source === chat_completion_sources.OPENROUTER;
 
     if (!isGemini && !isOpenRouter) {
