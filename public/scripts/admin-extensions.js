@@ -10,16 +10,28 @@ const selectedInvitationCodes = new Set();
 let csrfToken = null;
 
 // ===== 全局免费 Gemini 渠道（管理员端） =====
-function bindFreeGeminiChannelEvents() {
-    // 管理面板内容是动态插入弹窗的，使用 document 委托可避免初始化早于 DOM 挂载时漏绑事件。
-    $(document)
-        .off('.freeGeminiChannels')
-        .on('click.freeGeminiChannels', '#saveFreeGeminiChannel', saveFreeGeminiChannel)
-        .on('keydown.freeGeminiChannels', '#freeGeminiChannelForm input', async function (event) {
+function bindFreeGeminiChannelEvents(root = document) {
+    // 管理面板是动态弹窗：在模板插入前直接对模板节点绑定，不依赖 document 冒泡或延迟初始化。
+    const scope = root?.jquery ? root : $(root);
+    const findInScope = selector => scope.filter(selector).add(scope.find(selector));
+
+    findInScope('#saveFreeGeminiChannel')
+        .off('click.freeGeminiChannels')
+        .on('click.freeGeminiChannels', saveFreeGeminiChannel);
+    findInScope('#freeGeminiChannelForm input')
+        .off('keydown.freeGeminiChannels')
+        .on('keydown.freeGeminiChannels', async function (event) {
             if (event.key === 'Enter') await saveFreeGeminiChannel(event);
-        })
-        .on('click.freeGeminiChannels', '#cancelFreeGeminiChannelEdit', resetFreeGeminiChannelForm)
-        .on('click.freeGeminiChannels', '#refreshFreeGeminiChannels', loadFreeGeminiChannelsAdmin)
+        });
+    findInScope('#cancelFreeGeminiChannelEdit')
+        .off('click.freeGeminiChannels')
+        .on('click.freeGeminiChannels', resetFreeGeminiChannelForm);
+    findInScope('#refreshFreeGeminiChannels')
+        .off('click.freeGeminiChannels')
+        .on('click.freeGeminiChannels', loadFreeGeminiChannelsAdmin);
+
+    findInScope('#freeGeminiChannelsList')
+        .off('.freeGeminiChannels')
         .on('click.freeGeminiChannels', '.freeGeminiEditChannel', function () {
             const channel = currentFreeGeminiChannels.find(item => item.id === String($(this).data('id') || ''));
             if (channel) beginFreeGeminiChannelEdit(channel);
@@ -122,6 +134,7 @@ function renderFreeGeminiChannelsAdmin() {
 async function saveFreeGeminiChannel(event) {
     event?.preventDefault();
 
+    const status = $('#freeGeminiChannelsStatus');
     const button = $('#saveFreeGeminiChannel');
     if (button.prop('disabled')) return;
 
@@ -143,10 +156,13 @@ async function saveFreeGeminiChannel(event) {
     if (key) body.key = key;
 
     if (!body.name || !body.url || (!id && !key)) {
-        toastr.error(!id && !key ? '新增渠道时必须填写 API Key' : '请填写完整的渠道名称和 URL');
+        const message = !id && !key ? '新增渠道时必须填写 API Key' : '请填写完整的渠道名称和 URL';
+        status.text(message);
+        toastr.error(message);
         return;
     }
 
+    status.text(id ? '正在保存渠道修改...' : '正在新增渠道...');
     button.prop('disabled', true);
     try {
         const url = id
@@ -162,10 +178,12 @@ async function saveFreeGeminiChannel(event) {
             throw new Error(payload.error || '保存免费渠道失败');
         }
         toastr.success(id ? '免费渠道已更新' : '免费渠道已新增');
+        status.text(id ? '渠道修改已保存。' : '渠道新增成功。');
         resetFreeGeminiChannelForm();
         await loadFreeGeminiChannelsAdmin();
     } catch (error) {
         console.error('保存免费 Gemini 渠道失败:', error);
+        status.text(`保存失败：${error.message}`);
         toastr.error(error.message);
     } finally {
         button.prop('disabled', false);
@@ -3472,8 +3490,7 @@ async function clearDefaultConfigTemplate() {
 
 // 导出函数供外部调用
 if (typeof window !== 'undefined') {
-    // 模块载入时先注册动态弹窗的委托事件；初始化函数后续可安全重复绑定。
-    bindFreeGeminiChannelEvents();
+    window.bindFreeGeminiChannelEvents = bindFreeGeminiChannelEvents;
     window.initializeAdminExtensions = initializeAdminExtensions;
     window.disposeAdminExtensions = disposeAdminExtensions;
     window.toggleAnnouncement = toggleAnnouncement;

@@ -1791,6 +1791,11 @@ async function openAdminPanel(initialTab = 'usersList') {
 
     const template = $(await renderTemplateAsync('admin'));
 
+    // 管理弹窗尚未插入 DOM 时就直接绑定扩展事件，避免动态内容漏绑导致按钮无响应。
+    if (typeof window.bindFreeGeminiChannelEvents === 'function') {
+        window.bindFreeGeminiChannelEvents(template);
+    }
+
     template.find('.adminNav > button').on('click', function () {
         const target = String($(this).data('target-tab'));
         template.find('.navTab').each(function () {
