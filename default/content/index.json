@@ -28,6 +28,10 @@
         "type": "theme"
     },
     {
+        "filename": "themes/inliver.json",
+        "type": "theme"
+    },
+    {
         "filename": "backgrounds/__transparent.png",
         "type": "background"
     },
