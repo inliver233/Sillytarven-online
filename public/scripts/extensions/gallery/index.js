@@ -20,6 +20,7 @@ import { t, translate } from '../../i18n.js';
 import { Popup } from '../../popup.js';
 import { deleteMediaFromServer } from '../../chats.js';
 import { MEDIA_REQUEST_TYPE, VIDEO_EXTENSIONS } from '../../constants.js';
+import { isExtensionLifecycleEnabled } from '../feature-gate.js';
 
 const isVideo = (/** @type {string} */ url) => VIDEO_EXTENSIONS.some(ext => new RegExp(`.${ext}$`, 'i').test(url));
 const extensionName = 'gallery';
@@ -799,7 +800,7 @@ async function listGalleryCommand(args) {
 }
 
 // On extension load, ensure the settings are initialized
-(function () {
+async function initialize() {
     initSettings();
     eventSource.on(event_types.CHARACTER_RENAMED, (oldAvatar, newAvatar) => {
         const context = SillyTavern.getContext();
@@ -830,4 +831,15 @@ async function listGalleryCommand(args) {
             text: translate('Show Gallery'),
         }),
     );
-})();
+}
+
+let initPromise;
+
+export function init() {
+    initPromise ??= initialize();
+    return initPromise;
+}
+
+if (!isExtensionLifecycleEnabled()) {
+    void init().catch(error => console.error('Failed to initialize gallery extension:', error));
+}

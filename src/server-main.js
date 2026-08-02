@@ -59,6 +59,7 @@ import {
     isPathUnderParent,
 } from './util.js';
 import { UPLOADS_DIRECTORY } from './constants.js';
+import { isThirdPartyExtensionPath } from './endpoints/extensions.js';
 import { ensureThumbnailCache } from './endpoints/thumbnails.js';
 
 // Routers
@@ -314,7 +315,7 @@ const webpackMiddleware = getWebpackServeMiddleware();
 app.use(webpackMiddleware);
 const publicDirectory = path.join(serverDirectory, 'public');
 const templatesDirectory = path.join(publicDirectory, 'scripts', 'templates');
-app.use(express.static(publicDirectory, {
+const publicStaticMiddleware = express.static(publicDirectory, {
     maxAge: 0,
     etag: true,
     lastModified: true,
@@ -335,7 +336,13 @@ app.use(express.static(publicDirectory, {
             res.setHeader('Cache-Control', 'public, max-age=0, must-revalidate');
         }
     },
-}));
+});
+app.use((request, response, next) => {
+    if (isThirdPartyExtensionPath(request.path)) {
+        return next();
+    }
+    return publicStaticMiddleware(request, response, next);
+});
 
 // Public API
 app.use('/api/users', usersPublicRouter);

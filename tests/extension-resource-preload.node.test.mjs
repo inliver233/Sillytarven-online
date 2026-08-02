@@ -105,6 +105,31 @@ test('extension preloads share activation eligibility and apply limits after loa
     ]);
 });
 
+test('descriptor preloads preserve ordering and local shadowing', () => {
+    const documentRef = createFakeDocument();
+    const result = preloadExtensionResources([
+        {
+            canonicalName: 'third-party/Demo', shortName: 'Demo', type: 'global', enabled: true,
+            manifest: { js: 'global.js', loading_order: 0 }, resourceBaseUrl: '/global/demo',
+        },
+        {
+            canonicalName: 'third-party/demo', shortName: 'demo', type: 'local', enabled: true,
+            manifest: { js: 'local.js', css: 'local.css', loading_order: 20 }, resourceBaseUrl: '/local/demo',
+        },
+        {
+            canonicalName: 'early', shortName: 'early', type: 'builtin', enabled: true,
+            manifest: { js: 'early.js', loading_order: 10 }, resourceBaseUrl: '/builtin/early',
+        },
+    ], { documentRef });
+
+    assert.equal(result.count, 3);
+    assert.deepEqual(documentRef.appended.map(link => link.href), [
+        '/builtin/early/early.js',
+        '/local/demo/local.js',
+        '/local/demo/local.css',
+    ]);
+});
+
 test('extension resource preloads clean partial hints when insertion fails', () => {
     const documentRef = createFakeDocument({ failAt: 2 });
 
@@ -118,7 +143,7 @@ test('extension resource preloads clean partial hints when insertion fails', () 
 test('extension resource preloads validate public inputs', () => {
     const documentRef = createFakeDocument();
 
-    assert.throws(() => preloadExtensionResources(null, { documentRef }), /manifests must be an object/i);
+    assert.throws(() => preloadExtensionResources(null, { documentRef }), /array or manifest object/i);
     assert.throws(() => preloadExtensionResources({}, { documentRef, excludedExtensions: 'regex' }), /array or Set/);
     assert.throws(() => preloadExtensionResources({}, { documentRef, eligibleExtensions: 'regex' }), /array or Set/);
     assert.throws(() => preloadExtensionResources({}, { documentRef, maxPreloads: -1 }), /non-negative finite number/);

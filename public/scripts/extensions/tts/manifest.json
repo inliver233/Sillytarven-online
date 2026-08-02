@@ -8,6 +8,9 @@
         "coqui-tts"
     ],
     "js": "index.js",
+    "hooks": {
+        "activate": "init"
+    },
     "css": "style.css",
     "author": "Ouoertheo#7264",
     "version": "1.0.0",

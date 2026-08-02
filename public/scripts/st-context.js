@@ -68,6 +68,8 @@ import {
 } from '../script.js';
 import {
     extension_settings,
+    getExtensionManifest,
+    getExtensionStatus,
     ModuleWorkerWrapper,
     openThirdPartyExtensionMenu,
     renderExtensionTemplate,
@@ -187,6 +189,8 @@ export function getContext() {
         hideLoader,
         mainApi: main_api,
         extensionSettings: extension_settings,
+        getExtensionManifest,
+        getExtensionStatus,
         ModuleWorkerWrapper,
         getTokenizerModel,
         generateQuietPrompt,

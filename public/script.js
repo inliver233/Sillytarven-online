@@ -290,6 +290,7 @@ import { MacroEnvBuilder } from './scripts/macros/engine/MacroEnvBuilder.js';
 import { MacroEngine } from './scripts/macros/engine/MacroEngine.js';
 import { isMacros2Enabled, loadMacros2FeatureGate } from './scripts/macros/feature-gate.js';
 import { isReasoningToolsEnabled, loadReasoningToolsFeatureGate } from './scripts/reasoning-tools/feature-gate.js';
+import { loadExtensionLifecycleFeatureGate } from './scripts/extensions/feature-gate.js';
 import { addChatBackupsBrowser } from './scripts/chat-backups.js';
 
 /**
@@ -905,7 +906,7 @@ async function firstLoadInit() {
     await initSecrets();
     await readSecretState();
     await initLocales();
-    await Promise.all([loadMacros2FeatureGate(), loadReasoningToolsFeatureGate()]);
+    await Promise.all([loadMacros2FeatureGate(), loadReasoningToolsFeatureGate(), loadExtensionLifecycleFeatureGate()]);
     initChatUtilities();
     initDefaultSlashCommands();
     initTextGenModels();
@@ -914,7 +915,7 @@ async function firstLoadInit() {
     initKoboldSettings();
     initNovelAISettings();
     initSystemPrompts();
-    initExtensions();
+    await initExtensions();
     initExtensionSlashCommands();
     ToolManager.initToolSlashCommands();
     await initPresetManager();

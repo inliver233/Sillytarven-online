@@ -1,4 +1,26 @@
 const DEFAULT_MAX_PRELOADS = 64;
+const TYPE_PRIORITY = Object.freeze({ local: 3, global: 2, builtin: 1 });
+
+function normalizeName(name) {
+    return String(name).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+}
+
+function normalizeDescriptors(input) {
+    if (Array.isArray(input)) {
+        return input;
+    }
+    if (input && typeof input === 'object') {
+        return Object.entries(input).map(([canonicalName, manifest]) => ({
+            canonicalName,
+            shortName: canonicalName.startsWith('third-party/') ? canonicalName.slice('third-party/'.length) : canonicalName,
+            type: 'builtin',
+            manifest,
+            resourceBaseUrl: `/scripts/extensions/${canonicalName}`,
+            enabled: true,
+        }));
+    }
+    throw new TypeError('Extension descriptors must be an array or manifest object.');
+}
 
 function createDisposer(links) {
     let disposed = false;
@@ -19,7 +41,7 @@ function createDisposer(links) {
 
 /**
  * Add passive preload hints for extension JavaScript and styles without executing either resource.
- * @param {Record<string, object>} manifests Extension manifests keyed by extension name
+ * @param {import('./extension-resolver.js').ExtensionDescriptor[]|Record<string, object>} descriptorInput Extension descriptors or legacy manifest map
  * @param {object} [options] Preload options
  * @param {string[]|Set<string>} [options.excludedExtensions] Extensions that must not be preloaded
  * @param {string[]|Set<string>} [options.eligibleExtensions] Extensions that passed activation eligibility
@@ -27,15 +49,13 @@ function createDisposer(links) {
  * @param {Document} [options.documentRef] Document used to create resource hints
  * @returns {{count: number, dispose: () => void}} Preload count and idempotent cleanup callback
  */
-export function preloadExtensionResources(manifests, {
+export function preloadExtensionResources(descriptorInput, {
     excludedExtensions = [],
     eligibleExtensions = null,
     maxPreloads = DEFAULT_MAX_PRELOADS,
     documentRef = globalThis.document,
 } = {}) {
-    if (!manifests || typeof manifests !== 'object' || Array.isArray(manifests)) {
-        throw new TypeError('Extension manifests must be an object.');
-    }
+    const descriptors = normalizeDescriptors(descriptorInput);
     if (!Array.isArray(excludedExtensions) && !(excludedExtensions instanceof Set)) {
         throw new TypeError('Excluded extensions must be an array or Set.');
     }
@@ -51,23 +71,39 @@ export function preloadExtensionResources(manifests, {
         throw new TypeError('A document with a writable head is required.');
     }
 
-    const excluded = new Set(excludedExtensions);
-    const eligible = eligibleExtensions === null ? null : new Set(eligibleExtensions);
+    const excluded = new Set([...excludedExtensions].map(normalizeName));
+    const eligible = eligibleExtensions === null ? null : new Set([...eligibleExtensions].map(normalizeName));
     const limit = Math.floor(requestedLimit);
     const links = [];
     const dispose = createDisposer(links);
 
     try {
-        const entries = Object.entries(manifests).sort(([leftName, left], [rightName, right]) => {
-            const order = parseInt(left?.loading_order) - parseInt(right?.loading_order);
-            return order || String(left?.display_name || leftName).localeCompare(String(right?.display_name || rightName));
+        const authoritative = new Map();
+        for (const descriptor of descriptors) {
+            if (!descriptor || typeof descriptor !== 'object' || Array.isArray(descriptor)) {
+                continue;
+            }
+            const key = normalizeName(descriptor.canonicalName);
+            const existing = authoritative.get(key);
+            if (!existing || (TYPE_PRIORITY[descriptor.type] ?? 0) > (TYPE_PRIORITY[existing.type] ?? 0)) {
+                authoritative.set(key, descriptor);
+            }
+        }
+
+        const entries = [...authoritative.values()].sort((left, right) => {
+            const order = parseInt(left.manifest?.loading_order) - parseInt(right.manifest?.loading_order);
+            return order || String(left.manifest?.display_name || left.canonicalName)
+                .localeCompare(String(right.manifest?.display_name || right.canonicalName));
         });
-        for (const [name, manifest] of entries) {
+        for (const descriptor of entries) {
             if (links.length >= limit) {
                 break;
             }
-            if (excluded.has(name)
-                || (eligible && !eligible.has(name))
+            const nameKey = normalizeName(descriptor.canonicalName);
+            const manifest = descriptor.manifest;
+            if (!descriptor.enabled
+                || excluded.has(nameKey)
+                || (eligible && !eligible.has(nameKey))
                 || !manifest
                 || typeof manifest !== 'object'
                 || Array.isArray(manifest)) {
@@ -91,7 +127,7 @@ export function preloadExtensionResources(manifests, {
                 if (resource.as) {
                     link.as = resource.as;
                 }
-                link.href = `/scripts/extensions/${name}/${resource.file}`;
+                link.href = `${descriptor.resourceBaseUrl}/${resource.file}`;
                 documentRef.head.appendChild(link);
                 links.push(link);
             }

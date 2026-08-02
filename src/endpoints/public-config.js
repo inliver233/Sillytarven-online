@@ -27,6 +27,12 @@ router.get('/feature-flags', (_request, response) => {
     response.json(getPublicMigrationFeatureFlags());
 });
 
+router.get('/extension-lifecycle', (_request, response) => {
+    response.json({
+        enabled: getPublicMigrationFeatureFlags().extensionLifecycle === true,
+    });
+});
+
 router.get('/reasoning-tools', (_request, response) => {
     const configuredLimit = getConfigValue('toolCalling.recurseHardLimit', 50, 'number');
     const recurseHardLimit = Number.isInteger(configuredLimit) && configuredLimit >= 1 && configuredLimit <= 50

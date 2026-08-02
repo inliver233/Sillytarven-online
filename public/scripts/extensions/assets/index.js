@@ -11,6 +11,7 @@ import { executeSlashCommandsWithOptions } from '../../slash-commands.js';
 import { accountStorage } from '../../util/AccountStorage.js';
 import { flashHighlight, getStringHash, isValidUrl } from '../../utils.js';
 import { t, translate } from '../../i18n.js';
+import { isExtensionLifecycleEnabled } from '../feature-gate.js';
 export { MODULE_NAME };
 
 const MODULE_NAME = 'assets';
@@ -441,7 +442,7 @@ async function updateCurrentAssets() {
 //#############################//
 
 // This function is called when the extension is loaded
-jQuery(async () => {
+async function initialize() {
     // This is an example of loading HTML from a file
     const windowTemplate = await renderExtensionTemplateAsync(MODULE_NAME, 'window', {});
     const windowHtml = $(windowTemplate);
@@ -503,4 +504,17 @@ jQuery(async () => {
     eventSource.on(event_types.OPEN_CHARACTER_LIBRARY, async (forceDefault) => {
         openCharacterBrowser(forceDefault);
     });
-});
+}
+
+let initPromise;
+
+export function init() {
+    initPromise ??= initialize();
+    return initPromise;
+}
+
+if (!isExtensionLifecycleEnabled()) {
+    jQuery(() => {
+        void init().catch(error => console.error('Failed to initialize assets extension:', error));
+    });
+}

@@ -19,6 +19,7 @@ import { USER_DIRECTORY_TEMPLATE, DEFAULT_USER, PUBLIC_DIRECTORIES, SETTINGS_FIL
 import { getConfigValue, color, delay, generateTimestamp, isPathUnderParent } from './util.js';
 import { readSecret, writeSecret } from './endpoints/secrets.js';
 import { getContentOfType } from './endpoints/content-manager.js';
+import { createExtensionResourceRouteHandler } from './endpoints/extensions.js';
 import systemMonitor from './system-monitor.js';
 import { serverDirectory } from './server-directory.js';
 
@@ -158,7 +159,7 @@ export async function ensurePublicDirectoriesExist() {
     }
 
     if (totalUsers > 20) {
-        console.log(`✓ 所有用户目录创建完成`);
+        console.log('✓ 所有用户目录创建完成');
     }
 
     return directoriesList;
@@ -1117,38 +1118,14 @@ function createRouteHandler(directoryFn) {
 
 /**
  * Creates a route handler for serving extensions.
- * @param {(req: import('express').Request) => string} directoryFn A function that returns the directory path to serve files from
+ * @param {(req: import('express').Request) => string} directoryFn A function that returns the per-user extension directory
+ * @param {(req: import('express').Request) => string} [globalDirectoryFn] A function that returns the global extension directory
+ * @param {object} [options] Route options
+ * @param {boolean|((request: import('express').Request) => boolean)} [options.enabled] Enablement override
  * @returns {import('express').RequestHandler}
  */
-function createExtensionsRouteHandler(directoryFn) {
-    return async (req, res) => {
-        try {
-            const directory = directoryFn(req);
-            const filePath = decodeURIComponent(req.params[0]);
-
-            const localPath = path.join(directory, filePath);
-            if (!isPathUnderParent(directory, path.resolve(localPath))) {
-                return res.sendStatus(403);
-            }
-            const existsLocal = fs.existsSync(localPath);
-            if (existsLocal) {
-                return res.sendFile(filePath, { root: directory });
-            }
-
-            const globalPath = path.join(PUBLIC_DIRECTORIES.globalExtensions, filePath);
-            if (!isPathUnderParent(PUBLIC_DIRECTORIES.globalExtensions, path.resolve(globalPath))) {
-                return res.sendStatus(403);
-            }
-            const existsGlobal = fs.existsSync(globalPath);
-            if (existsGlobal) {
-                return res.sendFile(filePath, { root: PUBLIC_DIRECTORIES.globalExtensions });
-            }
-
-            return res.sendStatus(404);
-        } catch (error) {
-            return res.sendStatus(500);
-        }
-    };
+export function createExtensionsRouteHandler(directoryFn, globalDirectoryFn = () => PUBLIC_DIRECTORIES.globalExtensions, options = {}) {
+    return createExtensionResourceRouteHandler(directoryFn, globalDirectoryFn, options);
 }
 
 /**

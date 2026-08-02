@@ -7,6 +7,9 @@
     ],
     "generate_interceptor": "vectors_rearrangeChat",
     "js": "index.js",
+    "hooks": {
+        "activate": "init"
+    },
     "css": "style.css",
     "author": "Cohee#1207",
     "version": "1.0.0",

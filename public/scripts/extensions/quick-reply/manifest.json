@@ -4,6 +4,9 @@
     "requires": [],
     "optional": [],
     "js": "index.js",
+    "hooks": {
+        "activate": "init"
+    },
     "css": "style.css",
     "author": "RossAscends#1779",
     "version": "2.0.0",

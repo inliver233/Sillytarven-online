@@ -32,6 +32,7 @@ import { commonEnumProviders } from '../../slash-commands/SlashCommandCommonEnum
 import { removeReasoningFromString } from '../../reasoning.js';
 import { MacrosParser } from '/scripts/macros.js';
 import { isMacros2Enabled } from '/scripts/macros/feature-gate.js';
+import { isExtensionLifecycleEnabled } from '../feature-gate.js';
 export { MODULE_NAME };
 
 const MODULE_NAME = '1_memory';
@@ -1062,7 +1063,9 @@ function setupListeners() {
     });
 }
 
-jQuery(async function () {
+let initPromise = null;
+
+async function initInternal() {
     async function addExtensionControls() {
         const settingsHtml = await renderExtensionTemplateAsync('memory', 'settings', { defaultSettings });
         $('#summarize_container').append(settingsHtml);
@@ -1127,4 +1130,13 @@ jQuery(async function () {
             () => summaryMacroHandler(),
             'Returns the latest memory/summary from the current chat.');
     }
-});
+}
+
+export function init() {
+    initPromise ??= initInternal();
+    return initPromise;
+}
+
+if (!isExtensionLifecycleEnabled()) {
+    jQuery(() => void init().catch(error => console.error('Failed to initialize memory extension:', error)));
+}

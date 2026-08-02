@@ -14,6 +14,7 @@ import { SlashCommandScope } from '../../slash-commands/SlashCommandScope.js';
 import { collapseSpaces, getUniqueName, isFalseBoolean, uuidv4, waitUntilCondition } from '../../utils.js';
 import { t } from '../../i18n.js';
 import { getSecretLabelById } from '../../secrets.js';
+import { isExtensionLifecycleEnabled } from '../feature-gate.js';
 
 const MODULE_NAME = 'connection-manager';
 const NONE = '<None>';
@@ -474,7 +475,7 @@ async function renderDetailsContent(detailsContent) {
     }
 }
 
-(async function () {
+async function initialize() {
     extension_settings.connectionManager = extension_settings.connectionManager || structuredClone(DEFAULT_SETTINGS);
 
     for (const key of Object.keys(DEFAULT_SETTINGS)) {
@@ -824,4 +825,15 @@ async function renderDetailsContent(detailsContent) {
             return JSON.stringify(profile);
         },
     }));
-})();
+}
+
+let initPromise;
+
+export function init() {
+    initPromise ??= initialize();
+    return initPromise;
+}
+
+if (!isExtensionLifecycleEnabled()) {
+    void init().catch(error => console.error('Failed to initialize connection manager extension:', error));
+}

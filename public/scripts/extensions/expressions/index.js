@@ -18,6 +18,7 @@ import { generateWebLlmChatPrompt, isWebLlmSupported } from '../shared.js';
 import { Popup, POPUP_RESULT } from '../../popup.js';
 import { t } from '../../i18n.js';
 import { removeReasoningFromString } from '../../reasoning.js';
+import { isExtensionLifecycleEnabled } from '../feature-gate.js';
 export { MODULE_NAME };
 
 /**
@@ -2158,7 +2159,7 @@ function migrateSettings() {
     }
 }
 
-(async function () {
+async function initialize() {
     function addExpressionImage() {
         const html = `
         <div id="expression-wrapper">
@@ -2529,4 +2530,15 @@ function migrateSettings() {
             </div>
         `,
     }));
-})();
+}
+
+let initPromise;
+
+export function init() {
+    initPromise ??= initialize();
+    return initPromise;
+}
+
+if (!isExtensionLifecycleEnabled()) {
+    void init().catch(error => console.error('Failed to initialize expressions extension:', error));
+}

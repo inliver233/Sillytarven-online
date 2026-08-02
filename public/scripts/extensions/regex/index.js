@@ -14,6 +14,7 @@ import { accountStorage } from '../../util/AccountStorage.js';
 import { getPresetManager } from '../../preset-manager.js';
 import { recordPerformanceSample } from '../../performance-telemetry.js';
 import { RegexRefreshCoordinator } from './refresh-coordinator.js';
+import { isExtensionLifecycleEnabled } from '../feature-gate.js';
 
 // Re-exports for legacy extensions
 export { getRegexScripts };
@@ -1740,7 +1741,9 @@ function onPresetRenamed({ apiId, oldName, newName }) {
 
 // Workaround for loading in sequence with other extensions
 // NOTE: Always puts extension at the top of the list, but this is fine since it's static
-jQuery(async () => {
+let initPromise = null;
+
+async function initInternal() {
     if (!Array.isArray(extension_settings.regex)) {
         extension_settings.regex = [];
     }
@@ -2163,4 +2166,13 @@ jQuery(async () => {
 
     presetManager.setupEventListeners();
     presetManager.registerSlashCommands();
-});
+}
+
+export function init() {
+    initPromise ??= initInternal();
+    return initPromise;
+}
+
+if (!isExtensionLifecycleEnabled()) {
+    jQuery(() => void init().catch(error => console.error('Failed to initialize regex extension:', error)));
+}

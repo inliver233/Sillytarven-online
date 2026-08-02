@@ -35,6 +35,7 @@ import { PollinationsTtsProvider } from './pollinations.js';
 import { MiniMaxTtsProvider } from './minimax.js';
 import { ElectronHubTtsProvider } from './electronhub.js';
 import { ChutesTtsProvider } from './chutes.js';
+import { isExtensionLifecycleEnabled } from '../feature-gate.js';
 
 const UPDATE_INTERVAL = 1000;
 const wrapper = new ModuleWorkerWrapper(moduleWorker);
@@ -1432,7 +1433,9 @@ async function initVoiceMapInternal(unrestricted) {
     updateVoiceMap();
 }
 
-jQuery(async function () {
+let initPromise = null;
+
+async function initInternal() {
     async function addExtensionControls() {
         const settingsHtml = $(await renderExtensionTemplateAsync('tts', 'settings'));
         $('#tts_container').append(settingsHtml);
@@ -1518,4 +1521,13 @@ jQuery(async function () {
     }));
 
     document.body.appendChild(audioElement);
-});
+}
+
+export function init() {
+    initPromise ??= initInternal();
+    return initPromise;
+}
+
+if (!isExtensionLifecycleEnabled()) {
+    jQuery(() => void init().catch(error => console.error('Failed to initialize TTS extension:', error)));
+}

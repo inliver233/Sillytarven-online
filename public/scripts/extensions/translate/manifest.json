@@ -4,6 +4,9 @@
     "requires": [],
     "optional": [],
     "js": "index.js",
+    "hooks": {
+        "activate": "init"
+    },
     "css": "style.css",
     "author": "Cohee#1207",
     "version": "1.0.0",

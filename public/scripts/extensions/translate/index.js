@@ -19,6 +19,7 @@ import { enumIcons } from '../../slash-commands/SlashCommandCommonEnumsProvider.
 import { enumTypes, SlashCommandEnumValue } from '../../slash-commands/SlashCommandEnumValue.js';
 import { SlashCommandParser } from '../../slash-commands/SlashCommandParser.js';
 import { splitRecursive } from '../../utils.js';
+import { isExtensionLifecycleEnabled } from '../feature-gate.js';
 
 export const autoModeOptions = {
     NONE: 'none',
@@ -707,7 +708,9 @@ const handleMessageReasoningDelete = createEventHandler(removeReasoningDisplayTe
 
 globalThis.translate = translate;
 
-jQuery(async () => {
+let initPromise = null;
+
+async function initInternal() {
     const html = await renderExtensionTemplateAsync('translate', 'index');
     const buttonHtml = await renderExtensionTemplateAsync('translate', 'buttons');
 
@@ -801,4 +804,13 @@ jQuery(async () => {
         },
         returns: ARGUMENT_TYPE.STRING,
     }));
-});
+}
+
+export function init() {
+    initPromise ??= initInternal();
+    return initPromise;
+}
+
+if (!isExtensionLifecycleEnabled()) {
+    jQuery(() => void init().catch(error => console.error('Failed to initialize translate extension:', error)));
+}

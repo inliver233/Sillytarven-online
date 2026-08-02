@@ -8,6 +8,7 @@ import { enumIcons } from '../../slash-commands/SlashCommandCommonEnumsProvider.
 import { SlashCommandEnumValue, enumTypes } from '../../slash-commands/SlashCommandEnumValue.js';
 import { SlashCommandExecutor } from '../../slash-commands/SlashCommandExecutor.js';
 import { SlashCommandParser } from '../../slash-commands/SlashCommandParser.js';
+import { isExtensionLifecycleEnabled } from '../feature-gate.js';
 
 /**
  * List of attachment sources
@@ -243,7 +244,7 @@ function handleCharacterRename(oldAvatar, newAvatar) {
     }
 }
 
-jQuery(async () => {
+async function initialize() {
     eventSource.on(event_types.APP_READY, cleanUpAttachments);
     eventSource.on(event_types.CHARACTER_DELETED, cleanUpCharacterAttachments);
     eventSource.on(event_types.CHARACTER_RENAMED, handleCharacterRename);
@@ -407,4 +408,17 @@ jQuery(async () => {
             }),
         ],
     }));
-});
+}
+
+let initPromise;
+
+export function init() {
+    initPromise ??= initialize();
+    return initPromise;
+}
+
+if (!isExtensionLifecycleEnabled()) {
+    jQuery(() => {
+        void init().catch(error => console.error('Failed to initialize attachments extension:', error));
+    });
+}

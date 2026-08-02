@@ -8,6 +8,7 @@ import { debounce_timeout } from '../../constants.js';
 import { POPUP_TYPE, callGenericPopup } from '../../popup.js';
 import { renderExtensionTemplateAsync } from '../../extensions.js';
 import { t } from '../../i18n.js';
+import { isExtensionLifecycleEnabled } from '../feature-gate.js';
 
 async function doTokenCounter() {
     const { tokenizerName, tokenizerId } = getFriendlyTokenizerName(main_api);
@@ -101,7 +102,7 @@ async function doCount() {
     return count;
 }
 
-jQuery(() => {
+async function initialize() {
     const buttonHtml = `
         <div id="token_counter" class="list-group-item flex-container flexGap5">
             <div class="fa-solid fa-1 extensionsMenuExtensionButton" /></div>` +
@@ -115,5 +116,17 @@ jQuery(() => {
         returns: 'number of tokens',
         helpString: 'Counts the number of tokens in the current chat.',
     }));
+}
 
-});
+let initPromise;
+
+export function init() {
+    initPromise ??= initialize();
+    return initPromise;
+}
+
+if (!isExtensionLifecycleEnabled()) {
+    jQuery(() => {
+        void init().catch(error => console.error('Failed to initialize token counter extension:', error));
+    });
+}

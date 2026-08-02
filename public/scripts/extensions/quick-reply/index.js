@@ -11,6 +11,7 @@ import { ButtonUi } from './src/ui/ButtonUi.js';
 import { SettingsUi } from './src/ui/SettingsUi.js';
 import { debounceAsync } from '../../utils.js';
 import { selected_group } from '../../group-chats.js';
+import { isExtensionLifecycleEnabled } from '../feature-gate.js';
 export { debounceAsync };
 
 
@@ -173,7 +174,9 @@ const handleCharChange = () => {
     settings.charConfig = charConfig;
 };
 
-const init = async () => {
+let initPromise = null;
+
+const initInternal = async () => {
     await loadSets();
     await loadSettings();
     log('settings: ', settings);
@@ -219,6 +222,12 @@ const init = async () => {
 
     globalThis.quickReplyApi = quickReplyApi;
 };
+
+export function init() {
+    initPromise ??= initInternal();
+    return initPromise;
+}
+
 const finalizeInit = async () => {
     debug('executing startup');
     await autoExec.handleStartup();
@@ -233,7 +242,10 @@ const finalizeInit = async () => {
     isReady = true;
     debug('READY');
 };
-await init();
+
+if (!isExtensionLifecycleEnabled()) {
+    await init();
+}
 
 const purgeCharacterQuickReplySets = ({ character }) => {
     // Remove the character's Quick Reply Sets from the settings.

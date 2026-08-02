@@ -12,6 +12,9 @@ import { debounce_timeout } from './constants.js';
 import { accountStorage } from './util/AccountStorage.js';
 import { preloadExtensionResources } from './util/extension-resource-preload.js';
 import { getExtensionActivationPlan } from './util/extension-eligibility.js';
+import { createExtensionDescriptors, createExtensionResolver, setExtensionEnabled } from './util/extension-resolver.js';
+import { createExtensionAssetLoader, createExtensionLifecycle, EXTENSION_LIFECYCLE_STATE } from './util/extension-lifecycle.js';
+import { isExtensionLifecycleEnabled } from './extensions/feature-gate.js';
 import { SimpleMutex } from './util/SimpleMutex.js';
 import { power_user } from './power-user.js';
 
@@ -59,6 +62,17 @@ let connectedToApi = false;
  * @type {Record<string, object>}
  */
 let manifests = {};
+let extensionDescriptors = [];
+let extensionResolver = createExtensionResolver([]);
+const extensionLifecycle = createExtensionLifecycle();
+const extensionAssetLoader = createExtensionAssetLoader({
+    document,
+    fetch: (...args) => fetch(...args),
+    sanitizeSelector,
+    getCurrentLocale: () => getCurrentLocale(),
+    addLocaleData: (...args) => addLocaleData(...args),
+    logger: console,
+});
 
 /**
  * Default URL for the Extras API.
@@ -232,12 +246,45 @@ function showHideExtensionsMenu() {
 // Periodically check for new extensions
 const menuInterval = setInterval(showHideExtensionsMenu, 1000);
 
+function resolveExtensionDescriptor(name) {
+    const shortName = String(name).replace(/^\//, '');
+    return extensionResolver.resolve(name)
+        ?? extensionResolver.resolve(shortName)
+        ?? extensionResolver.resolve(`third-party/${shortName}`);
+}
+
+/**
+ * Checks whether a resolved extension declares a valid lifecycle hook.
+ * @param {string} name Extension name
+ * @param {string} hookName Lifecycle hook name
+ * @returns {boolean}
+ */
+function hasExtensionHook(name, hookName) {
+    if (!isExtensionLifecycleEnabled()) {
+        return false;
+    }
+
+    const hooks = resolveExtensionDescriptor(name)?.manifest?.hooks;
+    return Boolean(hooks && typeof hooks === 'object' && !Array.isArray(hooks)
+        && typeof hooks[hookName] === 'string' && hooks[hookName]);
+}
+
+function reportLifecycleFailure(action, name, result) {
+    const message = result?.error?.message || `Lifecycle ended in state "${result?.status || 'unknown'}".`;
+    console.error(`Extension ${action} hook failed`, name, message);
+    toastr.error(message, t`Extension ${action} failed`, { timeOut: 5000 });
+}
+
 /**
  * Gets the type of an extension based on its external ID.
  * @param {string} externalId External ID of the extension (excluding or including the leading 'third-party/')
- * @returns {string} Type of the extension (global, local, system, or empty string if not found)
+ * @returns {string} Type of the extension (builtin, global, local, system, or empty string if not found)
  */
 function getExtensionType(externalId) {
+    if (isExtensionLifecycleEnabled()) {
+        return resolveExtensionDescriptor(externalId)?.type ?? '';
+    }
+
     const id = Object.keys(extensionTypes).find(id => id === externalId || (id.startsWith('third-party') && id.endsWith(externalId)));
     return id ? extensionTypes[id] : '';
 }
@@ -292,46 +339,102 @@ async function discoverExtensions() {
     }
 }
 
-function onDisableExtensionClick() {
+async function onDisableExtensionClick() {
     const name = $(this).data('name');
-    disableExtension(name, false);
+    const success = await disableExtension(name, false);
+    if (!success) {
+        $(this).prop('checked', true);
+    }
 }
 
-function onEnableExtensionClick() {
+async function onEnableExtensionClick() {
     const name = $(this).data('name');
-    enableExtension(name, false);
+    const success = await enableExtension(name, false);
+    if (!success) {
+        $(this).prop('checked', false);
+    }
 }
 
 /**
  * Enables an extension by name.
  * @param {string} name Extension name
  * @param {boolean} [reload=true] If true, reload the page after enabling the extension
+ * @returns {Promise<boolean>} Whether the extension was enabled
  */
 export async function enableExtension(name, reload = true) {
+    if (isExtensionLifecycleEnabled()) {
+        const descriptor = resolveExtensionDescriptor(name);
+        if (!descriptor) {
+            reportLifecycleFailure('enable', name, null);
+            return false;
+        }
+
+        const result = await extensionLifecycle.enable(descriptor);
+        if (result.status !== EXTENSION_LIFECYCLE_STATE.ACTIVE) {
+            reportLifecycleFailure('enable', name, result);
+            return false;
+        }
+
+        extensionDescriptors = setExtensionEnabled(extensionDescriptors, name, true);
+        extensionResolver = createExtensionResolver(extensionDescriptors);
+        activeExtensions.add(descriptor.canonicalName);
+    }
+
     extension_settings.disabledExtensions = extension_settings.disabledExtensions.filter(x => x !== name);
     stateChanged = true;
     await saveSettings();
+
     if (reload) {
         location.reload();
-    } else {
+    } else if (!isExtensionLifecycleEnabled()) {
         requiresReload = true;
     }
+    return true;
 }
 
 /**
  * Disables an extension by name.
  * @param {string} name Extension name
  * @param {boolean} [reload=true] If true, reload the page after disabling the extension
+ * @returns {Promise<boolean>} Whether the extension was disabled
  */
 export async function disableExtension(name, reload = true) {
-    extension_settings.disabledExtensions.push(name);
+    if (isExtensionLifecycleEnabled()) {
+        const descriptor = resolveExtensionDescriptor(name);
+        if (!descriptor) {
+            reportLifecycleFailure('disable', name, null);
+            return false;
+        }
+
+        const result = await extensionLifecycle.disable(descriptor);
+        if (![EXTENSION_LIFECYCLE_STATE.INACTIVE, EXTENSION_LIFECYCLE_STATE.RELOAD_REQUIRED].includes(result.status)) {
+            reportLifecycleFailure('disable', name, result);
+            return false;
+        }
+
+        activeExtensions.delete(descriptor.canonicalName);
+        requiresReload ||= result.status === EXTENSION_LIFECYCLE_STATE.RELOAD_REQUIRED;
+    }
+
+    if (!extension_settings.disabledExtensions.includes(name)) {
+        extension_settings.disabledExtensions.push(name);
+    }
+    if (isExtensionLifecycleEnabled()) {
+        extensionDescriptors = setExtensionEnabled(extensionDescriptors, name, false);
+        extensionResolver = createExtensionResolver(extensionDescriptors);
+        const disabledDescriptor = resolveExtensionDescriptor(name);
+        if (disabledDescriptor) {
+            extensionLifecycle.discover([disabledDescriptor]);
+        }
+    }
     stateChanged = true;
     await saveSettings();
     if (reload) {
         location.reload();
-    } else {
+    } else if (!isExtensionLifecycleEnabled()) {
         requiresReload = true;
     }
+    return true;
 }
 
 /**
@@ -342,6 +445,15 @@ export async function disableExtension(name, reload = true) {
  * @returns {{name: string, enabled: boolean, type: string}|null}
  */
 export function findExtension(name) {
+    if (isExtensionLifecycleEnabled()) {
+        const descriptor = resolveExtensionDescriptor(name);
+        return descriptor ? {
+            name: descriptor.canonicalName,
+            enabled: descriptor.enabled,
+            type: descriptor.type,
+        } : null;
+    }
+
     const internalName = extensionNames.find(extensionName =>
         equalsIgnoreCaseAndAccents(extensionName, name)
         || equalsIgnoreCaseAndAccents(extensionName, `third-party/${name}`));
@@ -352,6 +464,35 @@ export function findExtension(name) {
         enabled: !extension_settings.disabledExtensions.includes(internalName),
         type: extensionTypes[internalName] || '',
     };
+}
+
+/**
+ * Returns an isolated manifest for a canonical or unambiguous short extension name.
+ * @param {string} name Extension name
+ * @returns {object|null} Cloned manifest or null
+ */
+export function getExtensionManifest(name) {
+    if (isExtensionLifecycleEnabled()) {
+        return resolveExtensionDescriptor(name)?.manifest ?? null;
+    }
+
+    const found = extensionNames.find(extensionName =>
+        equalsIgnoreCaseAndAccents(extensionName, name)
+        || equalsIgnoreCaseAndAccents(extensionName, `third-party/${name}`));
+    return found && manifests[found] ? structuredClone(manifests[found]) : null;
+}
+
+/**
+ * Returns an isolated lifecycle status for an extension.
+ * @param {string} name Extension name
+ * @returns {object|null} Lifecycle status or null when unavailable
+ */
+export function getExtensionStatus(name) {
+    if (!isExtensionLifecycleEnabled()) {
+        return null;
+    }
+    const descriptor = resolveExtensionDescriptor(name);
+    return descriptor ? extensionLifecycle.getStatus(descriptor) : null;
 }
 
 /**
@@ -433,18 +574,33 @@ async function activateExtensions() {
         if (eligible) {
             try {
                 console.debug('Activating extension', name);
-                const promise = addExtensionLocale(name, manifest).finally(() =>
-                    Promise.all([addExtensionScript(name, manifest), addExtensionStyle(name, manifest)]),
-                );
-                await promise
-                    .then(() => activeExtensions.add(name))
-                    .catch(err => {
-                        console.log('Could not activate extension', name, err);
-                        extensionLoadErrors.add(t`Extension "${displayName}" failed to load: ${err}`);
-                    });
-                promises.push(promise);
+                if (isExtensionLifecycleEnabled()) {
+                    const descriptor = extensionResolver.resolve(name);
+                    if (!descriptor) {
+                        throw new Error(`No descriptor was resolved for extension "${name}".`);
+                    }
+
+                    await Promise.all([addExtensionLocale(name, manifest), addExtensionStyle(name, manifest)]);
+                    const result = await extensionLifecycle.activate(descriptor);
+                    if (result.status !== EXTENSION_LIFECYCLE_STATE.ACTIVE) {
+                        throw new Error(result.error?.message || `Lifecycle activation ended in state "${result.status}".`);
+                    }
+                    activeExtensions.add(name);
+                } else {
+                    const promise = addExtensionLocale(name, manifest).finally(() =>
+                        Promise.all([addExtensionScript(name, manifest), addExtensionStyle(name, manifest)]),
+                    );
+                    await promise
+                        .then(() => activeExtensions.add(name))
+                        .catch(err => {
+                            console.log('Could not activate extension', name, err);
+                            extensionLoadErrors.add(t`Extension "${displayName}" failed to load: ${err}`);
+                        });
+                    promises.push(promise);
+                }
             } catch (error) {
                 console.error('Could not activate extension', name, error);
+                extensionLoadErrors.add(t`Extension "${displayName}" failed to load: ${error}`);
             }
         } else if (!meetsModuleRequirements && !isDisabled) {
             console.warn(t`Extension "${name}" did not load. Missing required Extras module(s): "${missingModules.join(', ')}"`);
@@ -582,29 +738,7 @@ function updateStatus(success) {
  * @returns {Promise<void>} When the CSS is loaded
  */
 function addExtensionStyle(name, manifest) {
-    if (!manifest.css) {
-        return Promise.resolve();
-    }
-
-    return new Promise((resolve, reject) => {
-        const url = `/scripts/extensions/${name}/${manifest.css}`;
-        const id = sanitizeSelector(`${name}-css`);
-
-        if ($(`link[id="${id}"]`).length === 0) {
-            const link = document.createElement('link');
-            link.id = id;
-            link.rel = 'stylesheet';
-            link.type = 'text/css';
-            link.href = url;
-            link.onload = function () {
-                resolve();
-            };
-            link.onerror = function (e) {
-                reject(e);
-            };
-            document.head.appendChild(link);
-        }
-    });
+    return extensionAssetLoader.addStyle(name, manifest);
 }
 
 /**
@@ -649,34 +783,7 @@ function addExtensionScript(name, manifest) {
  * @param {object} manifest Manifest object
  */
 function addExtensionLocale(name, manifest) {
-    // No i18n data in the manifest
-    if (!manifest.i18n || typeof manifest.i18n !== 'object') {
-        return Promise.resolve();
-    }
-
-    const currentLocale = getCurrentLocale();
-    const localeFile = manifest.i18n[currentLocale];
-
-    // Manifest doesn't provide a locale file for the current locale
-    if (!localeFile) {
-        return Promise.resolve();
-    }
-
-    return fetch(`/scripts/extensions/${name}/${localeFile}`)
-        .then(async response => {
-            if (!response.ok) {
-                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-            }
-
-            const data = await response.json();
-
-            if (data && typeof data === 'object') {
-                addLocaleData(currentLocale, data);
-            }
-        })
-        .catch(err => {
-            console.log('Could not load extension locale data for ' + name, err);
-        });
+    return extensionAssetLoader.addLocale(name, manifest);
 }
 
 /**
@@ -699,6 +806,7 @@ function generateExtensionHtml(name, manifest, isActive, isDisabled, isExternal,
             case 'local':
                 return '<i class="fa-sm fa-fw fa-solid fa-user" data-i18n="[title]ext_type_local" title="This is a local extension, available only for you."></i>';
             case 'system':
+            case 'builtin':
                 return '<i class="fa-sm fa-fw fa-solid fa-cog" data-i18n="[title]ext_type_system" title="This is a built-in extension. It cannot be deleted and updates with the app."></i>';
             default:
                 return '<i class="fa-sm fa-fw fa-solid fa-question" title="Unknown extension type."></i>';
@@ -721,6 +829,7 @@ function generateExtensionHtml(name, manifest, isActive, isDisabled, isExternal,
 
     let deleteButton = isExternal ? `<button class="btn_delete menu_button" data-name="${externalId}" data-i18n="[title]Delete" title="Delete"><i class="fa-fw fa-solid fa-trash-can"></i></button>` : '';
     let updateButton = isExternal ? `<button class="btn_update menu_button displayNone" data-name="${externalId}" title="Update available"><i class="fa-solid fa-download fa-fw"></i></button>` : '';
+    let cleanButton = isExternal && hasExtensionHook(name, 'clean') ? `<button class="btn_clean menu_button" data-name="${externalId}" data-i18n="[title]Clean extension data" title="Clean extension data"><i class="fa-fw fa-solid fa-broom"></i></button>` : '';
     let moveButton = isExternal && isUserAdmin ? `<button class="btn_move menu_button" data-name="${externalId}" data-i18n="[title]Move" title="Move"><i class="fa-solid fa-folder-tree fa-fw"></i></button>` : '';
     let branchButton = isExternal && isUserAdmin ? `<button class="btn_branch menu_button" data-name="${externalId}" data-i18n="[title]Switch branch" title="Switch branch"><i class="fa-solid fa-code-branch fa-fw"></i></button>` : '';
     let modulesInfo = '';
@@ -763,6 +872,7 @@ function generateExtensionHtml(name, manifest, isActive, isDisabled, isExternal,
 
             <div class="extension_actions flex-container alignItemsCenter">
                 ${updateButton}
+                ${cleanButton}
                 ${branchButton}
                 ${moveButton}
                 ${deleteButton}
@@ -975,25 +1085,53 @@ async function onUpdateClick() {
  */
 async function updateExtension(extensionName, quiet, timeout = null) {
     try {
-        const signal = timeout ? AbortSignal.timeout(timeout) : undefined;
-        const response = await fetch('/api/extensions/update', {
-            method: 'POST',
-            signal: signal,
-            headers: getRequestHeaders(),
-            body: JSON.stringify({
-                extensionName,
-                global: getExtensionType(extensionName) === 'global',
-            }),
-        });
+        const pullUpdate = async () => {
+            const signal = timeout ? AbortSignal.timeout(timeout) : undefined;
+            const response = await fetch('/api/extensions/update', {
+                method: 'POST',
+                signal: signal,
+                headers: getRequestHeaders(),
+                body: JSON.stringify({
+                    extensionName,
+                    global: getExtensionType(extensionName) === 'global',
+                }),
+            });
 
-        if (!response.ok) {
-            const text = await response.text();
-            toastr.error(text || response.statusText, t`Extension update failed`, { timeOut: 5000 });
-            console.error('Extension update failed', response.status, response.statusText, text);
-            return;
+            if (!response.ok) {
+                const text = await response.text();
+                toastr.error(text || response.statusText, t`Extension update failed`, { timeOut: 5000 });
+                throw new Error(`Extension update failed: ${response.status} ${response.statusText} ${text}`.trim());
+            }
+
+            return response.json();
+        };
+
+        let data;
+        if (isExtensionLifecycleEnabled()) {
+            const descriptor = resolveExtensionDescriptor(extensionName);
+            if (descriptor) {
+                const result = await extensionLifecycle.update(descriptor, pullUpdate);
+                data = result.updateResponse;
+                if (result.status === EXTENSION_LIFECYCLE_STATE.FAILED) {
+                    if (data) {
+                        reportLifecycleFailure('update', extensionName, result);
+                    } else {
+                        console.error('Extension lifecycle update failed', extensionName, result.error);
+                    }
+                    return;
+                }
+                requiresReload ||= result.status === EXTENSION_LIFECYCLE_STATE.RELOAD_REQUIRED;
+                if (!data) {
+                    console.error('Extension lifecycle update failed', extensionName, result.error);
+                    return;
+                }
+            } else {
+                reportLifecycleFailure('update', extensionName, null);
+                return;
+            }
+        } else {
+            data = await pullUpdate();
         }
-
-        const data = await response.json();
 
         if (!quiet) {
             void showExtensionsDetails();
@@ -1026,11 +1164,62 @@ async function onDeleteClick() {
         return;
     }
 
-    // use callPopup to create a popup for the user to confirm before delete
-    const confirmation = await callGenericPopup(t`Are you sure you want to delete ${extensionName}?`, POPUP_TYPE.CONFIRM, '', {});
-    if (confirmation === POPUP_RESULT.AFFIRMATIVE) {
-        await deleteExtension(extensionName);
+    if (!isExtensionLifecycleEnabled()) {
+        const confirmation = await callGenericPopup(t`Are you sure you want to delete ${extensionName}?`, POPUP_TYPE.CONFIRM, '', {});
+        if (confirmation === POPUP_RESULT.AFFIRMATIVE) {
+            await deleteExtension(extensionName);
+        }
+        return;
     }
+
+    const hasCleanHook = hasExtensionHook(extensionName, 'clean');
+    /** @type {import('./popup.js').CustomPopupInput[]} */
+    const customInputs = hasCleanHook ? [{
+        id: 'extension_delete_cleanup',
+        label: t`Also clean up extension data`,
+        defaultState: false,
+    }] : [];
+    const popup = new Popup(t`Are you sure you want to delete ${extensionName}?`, POPUP_TYPE.CONFIRM, '', { customInputs });
+    const confirmation = await popup.show();
+    if (confirmation === POPUP_RESULT.AFFIRMATIVE) {
+        const shouldClean = hasCleanHook && Boolean(popup.inputResults?.get('extension_delete_cleanup'));
+        await deleteExtension(extensionName, shouldClean);
+    }
+}
+
+/**
+ * Handles the clean action for an extension.
+ */
+async function onCleanClick() {
+    const extensionName = $(this).data('name');
+    const confirmation = await Popup.show.confirm(t`Clean extension data`, t`Are you sure you want to clean up data for ${extensionName}? This action cannot be undone.`);
+    if (confirmation === POPUP_RESULT.AFFIRMATIVE) {
+        await cleanExtension(extensionName);
+    }
+}
+
+/**
+ * Runs an extension clean hook and reloads after its settings changes are saved.
+ * @param {string} extensionName Extension name
+ * @returns {Promise<boolean>} Whether the hook completed successfully
+ */
+async function cleanExtension(extensionName) {
+    const descriptor = resolveExtensionDescriptor(extensionName);
+    if (!isExtensionLifecycleEnabled() || !descriptor) {
+        reportLifecycleFailure('clean', extensionName, null);
+        return false;
+    }
+
+    const result = await extensionLifecycle.clean(descriptor);
+    if (result.status === EXTENSION_LIFECYCLE_STATE.FAILED) {
+        reportLifecycleFailure('clean', extensionName, result);
+        return false;
+    }
+
+    await saveSettings();
+    toastr.success(t`Extension ${extensionName} data cleaned`);
+    delay(1000).then(() => location.reload());
+    return true;
 }
 
 async function onBranchClick() {
@@ -1135,10 +1324,14 @@ async function moveExtension(extensionName, source, destination) {
 /**
  * Deletes an extension via the API.
  * @param {string} extensionName Extension name to delete
+ * @param {boolean} [shouldClean=false] Whether to run the clean hook before deletion
+ * @returns {Promise<boolean>} Whether the extension was deleted
  */
-export async function deleteExtension(extensionName) {
-    try {
-        await fetch('/api/extensions/delete', {
+export async function deleteExtension(extensionName, shouldClean = false) {
+    let serverRequestStarted = false;
+    const removeExtension = async () => {
+        serverRequestStarted = true;
+        const response = await fetch('/api/extensions/delete', {
             method: 'POST',
             headers: getRequestHeaders(),
             body: JSON.stringify({
@@ -1146,12 +1339,48 @@ export async function deleteExtension(extensionName) {
                 global: getExtensionType(extensionName) === 'global',
             }),
         });
+
+        if (!response.ok) {
+            const text = await response.text();
+            toastr.error(text || response.statusText, t`Extension deletion failed`, { timeOut: 5000 });
+            throw new Error(`Extension deletion failed: ${response.status} ${response.statusText} ${text}`.trim());
+        }
+
+        return response;
+    };
+
+    const lifecycleEnabled = isExtensionLifecycleEnabled();
+    try {
+        if (lifecycleEnabled) {
+            const descriptor = resolveExtensionDescriptor(extensionName);
+            if (!descriptor) {
+                reportLifecycleFailure('deletion', extensionName, null);
+                return false;
+            }
+
+            const result = await extensionLifecycle.delete(descriptor, removeExtension, { clean: shouldClean });
+            if (result.status === EXTENSION_LIFECYCLE_STATE.FAILED || !result.deleteResponse) {
+                if (serverRequestStarted) {
+                    console.error('Extension deletion error:', result.error);
+                } else {
+                    reportLifecycleFailure('deletion', extensionName, result);
+                }
+                return false;
+            }
+        } else {
+            await removeExtension();
+        }
     } catch (error) {
-        console.error('Error:', error);
+        console.error('Extension deletion error:', error);
+        return false;
     }
 
+    if (lifecycleEnabled) {
+        await saveSettings();
+    }
     toastr.success(t`Extension ${extensionName} deleted`);
     delay(1000).then(() => location.reload());
+    return true;
 }
 
 /**
@@ -1281,10 +1510,29 @@ export async function installExtension(url, global, branch = '') {
     }
 
     const response = await request.json();
-    toastr.success(t`Extension '${response.display_name}' by ${response.author} (version ${response.version}) has been installed successfully!`, t`Extension installation successful`);
+    const lifecycleEnabled = isExtensionLifecycleEnabled();
+    if (!lifecycleEnabled) {
+        toastr.success(t`Extension '${response.display_name}' by ${response.author} (version ${response.version}) has been installed successfully!`, t`Extension installation successful`);
+    }
     console.debug(`Extension "${response.display_name}" has been installed successfully at ${response.extensionPath}`);
     await loadExtensionSettings({}, false, false);
     await eventSource.emit(event_types.EXTENSION_SETTINGS_LOADED, response);
+
+    if (lifecycleEnabled) {
+        const descriptor = response.folderName ? resolveExtensionDescriptor(`third-party/${response.folderName}`) : null;
+        if (!descriptor) {
+            reportLifecycleFailure('installation', response.folderName || response.display_name, null);
+            return;
+        }
+
+        const result = await extensionLifecycle.install(descriptor);
+        if (result.status === EXTENSION_LIFECYCLE_STATE.FAILED) {
+            reportLifecycleFailure('installation', descriptor.canonicalName, result);
+            return;
+        }
+
+        toastr.success(t`Extension '${response.display_name}' by ${response.author} (version ${response.version}) has been installed successfully!`, t`Extension installation successful`);
+    }
 }
 
 /**
@@ -1308,6 +1556,25 @@ export async function loadExtensionSettings(settings, versionChanged, enableAuto
     extensionNames = extensions.map(x => x.name);
     extensionTypes = Object.fromEntries(extensions.map(x => [x.name, x.type]));
     manifests = await getManifests(extensionNames);
+    extensionDescriptors = createExtensionDescriptors(extensions, manifests, {
+        disabledExtensions: extension_settings.disabledExtensions,
+    });
+    extensionResolver = createExtensionResolver(extensionDescriptors);
+    extensionLifecycle.discover(extensionDescriptors);
+
+    const clientVersion = CLIENT_VERSION.split(':')[1];
+    const activationPlan = getExtensionActivationPlan(manifests, {
+        clientVersion,
+        modules,
+        disabledExtensions: extension_settings.disabledExtensions,
+        activeExtensions,
+    });
+    for (const entry of activationPlan) {
+        const descriptor = extensionResolver.resolve(entry.name);
+        if (descriptor) {
+            extensionLifecycle.setEligibility(descriptor, entry.eligible);
+        }
+    }
 
     if (versionChanged && enableAutoUpdate) {
         await autoUpdateExtensions(false);
@@ -1316,14 +1583,8 @@ export async function loadExtensionSettings(settings, versionChanged, enableAuto
     let resourcePreloads = null;
     if (power_user.extension_resource_preload === true) {
         try {
-            const clientVersion = CLIENT_VERSION.split(':')[1];
-            const eligibleExtensions = new Set(getExtensionActivationPlan(manifests, {
-                clientVersion,
-                modules,
-                disabledExtensions: extension_settings.disabledExtensions,
-                activeExtensions,
-            }).filter(entry => entry.eligible).map(entry => entry.name));
-            resourcePreloads = preloadExtensionResources(manifests, {
+            const eligibleExtensions = new Set(activationPlan.filter(entry => entry.eligible).map(entry => entry.name));
+            resourcePreloads = preloadExtensionResources(extensionDescriptors, {
                 eligibleExtensions,
             });
         } catch (error) {
@@ -1661,6 +1922,7 @@ export async function initExtensions() {
     $(document).on('click', '.extensions_info .extension_block .toggle_enable', onEnableExtensionClick);
     $(document).on('click', '.extensions_info .extension_block .btn_update', onUpdateClick);
     $(document).on('click', '.extensions_info .extension_block .btn_delete', onDeleteClick);
+    $(document).on('click', '.extensions_info .extension_block .btn_clean', onCleanClick);
     $(document).on('click', '.extensions_info .extension_block .btn_move', onMoveClick);
     $(document).on('click', '.extensions_info .extension_block .btn_branch', onBranchClick);
 

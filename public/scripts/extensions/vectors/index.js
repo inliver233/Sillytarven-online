@@ -37,6 +37,7 @@ import { generateWebLlmChatPrompt, isWebLlmSupported } from '../shared.js';
 import { WebLlmVectorProvider } from './webllm.js';
 import { removeReasoningFromString } from '../../reasoning.js';
 import { oai_settings } from '../../openai.js';
+import { isExtensionLifecycleEnabled } from '../feature-gate.js';
 
 /**
  * @typedef {object} HashedMessage
@@ -1614,7 +1615,9 @@ async function activateWorldInfo(chat) {
     await eventSource.emit(event_types.WORLDINFO_FORCE_ACTIVATE, activatedEntries);
 }
 
-jQuery(async () => {
+let initPromise = null;
+
+async function initInternal() {
     if (!extension_settings.vectors) {
         extension_settings.vectors = settings;
     }
@@ -2042,4 +2045,13 @@ jQuery(async () => {
         }
         await purgeAllVectorIndexes();
     });
-});
+}
+
+export function init() {
+    initPromise ??= initInternal();
+    return initPromise;
+}
+
+if (!isExtensionLifecycleEnabled()) {
+    jQuery(() => void init().catch(error => console.error('Failed to initialize vectors extension:', error)));
+}

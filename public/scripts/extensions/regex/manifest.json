@@ -4,6 +4,9 @@
     "requires": [],
     "optional": [],
     "js": "index.js",
+    "hooks": {
+        "activate": "init"
+    },
     "css": "style.css",
     "author": "kingbri",
     "version": "1.0.0",

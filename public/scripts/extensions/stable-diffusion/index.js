@@ -63,6 +63,7 @@ import { oai_settings } from '../../openai.js';
 import { power_user } from '/scripts/power-user.js';
 import { isMacros2Enabled } from '/scripts/macros/feature-gate.js';
 import { MacrosParser } from '/scripts/macros.js';
+import { isExtensionLifecycleEnabled } from '../feature-gate.js';
 
 export { MODULE_NAME };
 
@@ -4932,7 +4933,9 @@ function registerFunctionTool() {
     });
 }
 
-jQuery(async () => {
+let initPromise = null;
+
+async function initInternal() {
     await addSDGenButtons();
 
     const getSelectEnumProvider = (id, text) => () => Array.from(document.querySelectorAll(`#${id} > [value]`)).map(x => new SlashCommandEnumValue(x.getAttribute('value'), text ? x.textContent : null));
@@ -5396,4 +5399,13 @@ jQuery(async () => {
             t`Character's negative Image Generation prompt prefix`,
         );
     }
-});
+}
+
+export function init() {
+    initPromise ??= initInternal();
+    return initPromise;
+}
+
+if (!isExtensionLifecycleEnabled()) {
+    jQuery(() => void init().catch(error => console.error('Failed to initialize stable diffusion extension:', error)));
+}

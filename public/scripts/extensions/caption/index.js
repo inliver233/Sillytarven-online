@@ -11,6 +11,7 @@ import { ARGUMENT_TYPE, SlashCommandArgument, SlashCommandNamedArgument } from '
 import { commonEnumProviders } from '../../slash-commands/SlashCommandCommonEnumsProvider.js';
 import { callGenericPopup, Popup, POPUP_TYPE } from '../../popup.js';
 import { debounce_timeout, MEDIA_DISPLAY, MEDIA_SOURCE, MEDIA_TYPE, SCROLL_BEHAVIOR } from '../../constants.js';
+import { isExtensionLifecycleEnabled } from '../feature-gate.js';
 export { MODULE_NAME };
 
 const MODULE_NAME = 'caption';
@@ -458,7 +459,7 @@ function isVideoCaptioningAvailable() {
     return ['google', 'vertexai', 'zai'].includes(extension_settings.caption.multimodal_api);
 }
 
-jQuery(async function () {
+async function initialize() {
     function addSendPictureButton() {
         const sendButton = $(`
         <div id="send_picture" class="list-group-item flex-container flexGap5">
@@ -802,4 +803,17 @@ jQuery(async function () {
     }));
 
     document.body.classList.add('caption');
-});
+}
+
+let initPromise;
+
+export function init() {
+    initPromise ??= initialize();
+    return initPromise;
+}
+
+if (!isExtensionLifecycleEnabled()) {
+    jQuery(() => {
+        void init().catch(error => console.error('Failed to initialize caption extension:', error));
+    });
+}
