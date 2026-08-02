@@ -18,9 +18,9 @@ theme.custom_css = css;
 // 与 CSS 变量保持同步的主题字段(柔和莫奈雾蓝)
 Object.assign(theme, {
     main_text_color: 'rgba(233, 238, 244, 1)',
-    italics_text_color: 'rgba(169, 194, 218, 1)',
-    underline_text_color: 'rgba(163, 168, 201, 1)',
-    quote_text_color: 'rgba(147, 179, 201, 1)',
+    italics_text_color: 'rgba(169, 203, 232, 1)',
+    underline_text_color: 'rgba(168, 174, 212, 1)',
+    quote_text_color: 'rgba(143, 188, 221, 1)',
     blur_tint_color: 'rgba(18, 24, 31, 0.78)',
     chat_tint_color: 'rgba(18, 24, 31, 0)',
     user_mes_blur_tint_color: 'rgba(29, 38, 50, 0.6)',

@@ -24,19 +24,19 @@
     --il-t25: #242f3d;  /* 浮起面 */
     --il-t30: #2b3848;  /* hover 面 */
     --il-t40: #3c4d63;  /* 描边亮阶 */
-    --il-t50: #50637c;  /* 弱强调 */
-    --il-t60: #6d82a0;  /* 次级文字启发 */
-    --il-t70: #8ba2bd;  /* 柔和辅助色 */
-    --il-t80: #a9c2da;  /* 主强调(柔) */
-    --il-t90: #c9dbea;  /* 亮强调 */
+    --il-t50: #567199;  /* 弱强调 */
+    --il-t60: #6d8ab2;  /* 次级文字启发 */
+    --il-t70: #8caacc;  /* 柔和辅助色 */
+    --il-t80: #a9cbe8;  /* 主强调(柔) */
+    --il-t90: #c8def1;  /* 亮强调 */
     --il-t95: #e3eef7;  /* 正文亮文字 */
     --il-t99: #f7fafc;  /* 最亮 */
 
     /* 语义色 — 全部从同族低饱和蓝延伸 */
     --il-primary:   var(--il-t80);
     --il-primary-soft: rgba(169, 194, 218, 0.72);
-    --il-accent-2:  #93b3c9;  /* 青灰蓝(quote/secondary) */
-    --il-accent-3:  #a3a8c9;  /* 极淡紫蓝(underline) */
+    --il-accent-2:  #8fbcdd;  /* 青灰蓝(quote/secondary) */
+    --il-accent-3:  #a8aed4;  /* 极淡紫蓝(underline) */
     --il-danger:    #c98a92;  /* 低饱和雾玫瑰 */
     --il-success:   #8fb8a6;  /* 低饱和青瓷绿 */
     --il-warning:   #c9b389;  /* 低饱和沙金 */
