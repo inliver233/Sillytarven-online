@@ -28,7 +28,15 @@
         "type": "theme"
     },
     {
+        "filename": "themes/inliver.json",
+        "type": "theme"
+    },
+    {
         "filename": "backgrounds/__transparent.png",
+        "type": "background"
+    },
+    {
+        "filename": "backgrounds/inliver.jpg",
         "type": "background"
     },
     {

@@ -3,6 +3,7 @@ import path from 'node:path';
 
 import { SETTINGS_FILE, USER_DIRECTORY_TEMPLATE } from './constants.js';
 import { SECRETS_FILE } from './endpoints/secrets.js';
+import { safeCopySync } from './util.js';
 
 const DEFAULT_TEMPLATE_DIR_NAME = 'default-template';
 const DEFAULT_TEMPLATE_ROOT = path.join(globalThis.DATA_ROOT, DEFAULT_TEMPLATE_DIR_NAME);
@@ -110,7 +111,11 @@ function copyDirectoryContents(sourceDir, targetDir) {
     for (const entry of entries) {
         const sourcePath = path.join(sourceDir, entry.name);
         const targetPath = path.join(targetDir, entry.name);
-        fs.cpSync(sourcePath, targetPath, { recursive: true, force: true });
+        // Hand-rolled copy: fs.cpSync({recursive:true}) crashes with non-ASCII paths on some Windows setups
+        if (fs.existsSync(targetPath)) {
+            fs.rmSync(targetPath, { recursive: true, force: true });
+        }
+        safeCopySync(sourcePath, targetPath);
     }
 }
 

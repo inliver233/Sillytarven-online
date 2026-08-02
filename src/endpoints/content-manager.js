@@ -8,7 +8,7 @@ import fetch from 'node-fetch';
 import sanitize from 'sanitize-filename';
 import { sync as writeFileAtomicSync } from 'write-file-atomic';
 
-import { getConfigValue, color, setPermissionsSync, isValidUrl } from '../util.js';
+import { getConfigValue, color, setPermissionsSync, isValidUrl, safeCopySync } from '../util.js';
 import { write } from '../character-card-parser.js';
 import { serverDirectory } from '../server-directory.js';
 import { Jimp, JimpMime } from '../jimp.js';
@@ -153,7 +153,8 @@ async function seedContentForUser(contentIndex, directories, forceCategories) {
             continue;
         }
 
-        fs.cpSync(contentPath, targetPath, { recursive: true, force: false });
+        // fs.cpSync({recursive:true}) hard-crashes with non-ASCII paths on some Windows setups
+        safeCopySync(contentPath, targetPath);
         setPermissionsSync(targetPath);
         console.info(`Content file ${contentItem.filename} copied to ${contentTarget}`);
         anyContentAdded = true;
