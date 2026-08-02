@@ -162,6 +162,7 @@ test('admin channel creation cannot fall back to browser form navigation', async
     assert.doesNotMatch(channelBlock, /<form\b/i);
     assert.match(channelBlock, /<button type="button"[^>]+id="saveFreeGeminiChannel">/);
     assert.match(adminScript, /findInScope\('#saveFreeGeminiChannel'\)[\s\S]*?\.on\('click\.freeGeminiChannels', saveFreeGeminiChannel\)/);
+    assert.match(adminScript, /findInScope\('\.freeGeminiChannelsButton'\)[\s\S]*?setTimeout\(loadFreeGeminiChannelsAdmin, 0\)/);
     assert.match(adminScript, /headers: await getFreeGeminiRequestHeaders\(\)/);
     assert.match(userScript, /window\.bindFreeGeminiChannelEvents\(template\)/);
 });

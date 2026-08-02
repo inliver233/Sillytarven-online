@@ -29,6 +29,9 @@ function bindFreeGeminiChannelEvents(root = document) {
     findInScope('#refreshFreeGeminiChannels')
         .off('click.freeGeminiChannels')
         .on('click.freeGeminiChannels', loadFreeGeminiChannelsAdmin);
+    findInScope('.freeGeminiChannelsButton')
+        .off('click.freeGeminiChannels')
+        .on('click.freeGeminiChannels', () => setTimeout(loadFreeGeminiChannelsAdmin, 0));
 
     findInScope('#freeGeminiChannelsList')
         .off('.freeGeminiChannels')
@@ -569,12 +572,6 @@ function bindTabEvents() {
         });
     }
 
-    // 全局免费 Gemini 渠道选项卡
-    const freeGeminiChannelsButton = document.querySelector('.freeGeminiChannelsButton');
-    if (freeGeminiChannelsButton) {
-        freeGeminiChannelsButton.addEventListener('click', showFreeGeminiChannelsTab);
-    }
-
     // 公告管理选项卡
     const announcementsButton = document.querySelector('.announcementsButton');
     if (announcementsButton) {
@@ -670,15 +667,6 @@ function showUserInvitationsAdminTab() {
         block.style.display = 'block';
         loadUserInvitationConfig();
         loadUserInvitationStats();
-    }
-}
-
-function showFreeGeminiChannelsTab() {
-    hideAllTabs();
-    const block = document.querySelector('.freeGeminiChannelsBlock');
-    if (block) {
-        block.style.display = 'block';
-        loadFreeGeminiChannelsAdmin();
     }
 }
 
