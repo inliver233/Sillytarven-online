@@ -133,7 +133,7 @@ test('forwardFetchResponse does not copy unsafe or entity headers from upstream'
     assert.deepEqual(result.target.forwardedHeaders, []);
 });
 
-test('all 19 forwardFetchResponse production callers await or return the promise', () => {
+test('all 20 forwardFetchResponse production callers await or return the promise', () => {
     const productionFiles = [
         'src/endpoints/backends/chat-completions.js',
         'src/endpoints/backends/kobold.js',
@@ -144,7 +144,7 @@ test('all 19 forwardFetchResponse production callers await or return the promise
     ];
     const calls = productionFiles.flatMap(file => [...source(file).matchAll(/^(.*forwardFetchResponse\([^\n]+)$/gm)]
         .map(match => ({ file, line: match[1].trim() })));
-    assert.equal(calls.length, 19);
+    assert.equal(calls.length, 20);
     for (const call of calls) {
         assert.match(call.line, /^(?:return\s+)?await\s+forwardFetchResponse\(/, `${call.file}: ${call.line}`);
     }

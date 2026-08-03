@@ -1171,6 +1171,26 @@ export function setWindowTitle(title) {
  * @param {function(any): void} mutation Mutation function to apply to the parsed JSON object
  * @returns {string} Mutated JSON string
  */
+/**
+ * Recursively copies a file or directory with mkdir/copyFile primitives.
+ * Hand-rolled replacement for fs.cpSync({recursive:true}), which hard-crashes
+ * Node on some Windows setups when the path contains non-ASCII characters.
+ * @param {string} src Source path
+ * @param {string} dst Destination path
+ */
+export function safeCopySync(src, dst) {
+    const stat = fs.statSync(src);
+    if (stat.isDirectory()) {
+        fs.mkdirSync(dst, { recursive: true });
+        for (const entry of fs.readdirSync(src)) {
+            safeCopySync(path.join(src, entry), path.join(dst, entry));
+        }
+    } else {
+        fs.mkdirSync(path.dirname(dst), { recursive: true });
+        fs.copyFileSync(src, dst);
+    }
+}
+
 export function mutateJsonString(jsonString, mutation) {
     try {
         const json = JSON.parse(jsonString);

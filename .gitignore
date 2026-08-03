@@ -58,3 +58,5 @@ yarn.lock
 *.code-workspace
 test-results/
 .workflow/.debug/
+run.log
+run.err

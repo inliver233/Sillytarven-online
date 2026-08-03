@@ -1,0 +1,731 @@
+/* ==========================================================================
+   inliver UI Theme — Monet 式低饱和雾蓝 · 毛玻璃 · 丝滑动效
+   Palette strategy: Material You tonal scale derived from a single seed hue.
+   Seed: Soft Ice Blue (HSL 210° 32% 65%)
+   所有层级颜色同源取色，低饱和、低对比、柔和不刺眼。
+   ========================================================================== */
+
+:root {
+    /* ---------- Easing ---------- */
+    --il-spring: cubic-bezier(0.16, 1, 0.3, 1);
+    --il-ease-out: cubic-bezier(0.22, 0.61, 0.36, 1);
+    --il-sweep: cubic-bezier(0.25, 1, 0.5, 1);
+    --il-bounce: cubic-bezier(0.34, 1.4, 0.64, 1);
+    --il-dur-fast: 0.18s;
+    --il-dur: 0.3s;
+    --il-dur-slow: 0.5s;
+
+    /* ---------- Monet Tonal Scale (seed ≈ #9fb9d8) ----------
+       同一色系多阶协调: tone0 最深 → tone95 最亮 */
+    --il-t0:  #0b0f14;  /* 最深背景 */
+    --il-t10: #12181f;  /* 页面底 */
+    --il-t15: #171e27;  /* 卡片底(深) */
+    --il-t20: #1d2632;  /* 卡片底 */
+    --il-t25: #242f3d;  /* 浮起面 */
+    --il-t30: #2b3848;  /* hover 面 */
+    --il-t40: #3c4d63;  /* 描边亮阶 */
+    --il-t50: #567199;  /* 弱强调 */
+    --il-t60: #6d8ab2;  /* 次级文字启发 */
+    --il-t70: #8caacc;  /* 柔和辅助色 */
+    --il-t80: #a9cbe8;  /* 主强调(柔) */
+    --il-t90: #c8def1;  /* 亮强调 */
+    --il-t95: #e3eef7;  /* 正文亮文字 */
+    --il-t99: #f7fafc;  /* 最亮 */
+
+    /* 语义色 — 全部从同族低饱和蓝延伸 */
+    --il-primary:   var(--il-t80);
+    --il-primary-soft: rgba(169, 194, 218, 0.72);
+    --il-accent-2:  #8fbcdd;  /* 青灰蓝(quote/secondary) */
+    --il-accent-3:  #a8aed4;  /* 极淡紫蓝(underline) */
+    --il-danger:    #c98a92;  /* 低饱和雾玫瑰 */
+    --il-success:   #8fb8a6;  /* 低饱和青瓷绿 */
+    --il-warning:   #c9b389;  /* 低饱和沙金 */
+
+    /* 玻璃表面 */
+    --il-glass-bg:      rgba(18, 24, 31, 0.78);
+    --il-glass-card:    rgba(29, 38, 50, 0.55);
+    --il-glass-hover:   rgba(43, 56, 72, 0.62);
+    --il-glass-deep:    rgba(11, 15, 20, 0.85);
+    --il-border:        rgba(169, 194, 218, 0.14);
+    --il-border-hover:  rgba(169, 194, 218, 0.32);
+    --il-blur: saturate(1.25) blur(14px);
+    --il-blur-strong: saturate(1.35) blur(20px);
+
+    /* 阴影/辉光 — 全部压暗, 柔和 */
+    --il-glow: 0 4px 22px rgba(0, 0, 0, 0.35), 0 0 12px rgba(169, 194, 218, 0.07);
+    --il-glow-hover: 0 6px 26px rgba(0, 0, 0, 0.42), 0 0 14px rgba(169, 194, 218, 0.13);
+    --il-shadow-pop: 0 10px 40px rgba(0, 0, 0, 0.5);
+
+    /* ST 主题变量接管 */
+    --SmartThemeBodyColor: #e9eef4;
+    --SmartThemeEmColor: #a9c2da;
+    --SmartThemeUnderlineColor: #a3a8c9;
+    --SmartThemeQuoteColor: #93b3c9;
+    --SmartThemeBorderColor: rgba(169, 194, 218, 0.14);
+}
+
+/* ==========================================================================
+   1. Keyframes(仅 transform/opacity, 合成线程, 不吃性能)
+   ========================================================================== */
+@keyframes il-rise {
+    from { opacity: 0; transform: translate3d(0, 12px, 0) scale(0.99); }
+    to   { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+}
+@keyframes il-fade {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+}
+@keyframes il-pop {
+    0%   { opacity: 0; transform: scale(0.94); }
+    60%  { transform: scale(1.015); }
+    100% { opacity: 1; transform: scale(1); }
+}
+@keyframes il-text-sweep {
+    from { clip-path: polygon(0 0, 0 0, 0 100%, 0 100%); opacity: 0.15; transform: translate3d(-8px, 0, 0); }
+    to   { clip-path: polygon(0 0, 100% 0, 100% 100%, 0 100%); opacity: 1; transform: translate3d(0, 0, 0); }
+}
+@keyframes il-sheen {
+    from { transform: translate3d(-120%, 0, 0) skewX(-18deg); }
+    to   { transform: translate3d(260%, 0, 0) skewX(-18deg); }
+}
+@keyframes il-pulse-soft {
+    0%, 100% { box-shadow: 0 0 0 1px rgba(169, 194, 218, 0.22), 0 0 10px rgba(169, 194, 218, 0.1); }
+    50%      { box-shadow: 0 0 0 2px rgba(169, 194, 218, 0.38), 0 0 16px rgba(169, 194, 218, 0.18); }
+}
+@keyframes il-typing-dot {
+    0%, 60%, 100% { transform: translateY(0); opacity: 0.45; }
+    30% { transform: translateY(-4px); opacity: 1; }
+}
+@keyframes il-spin {
+    to { transform: rotate(1turn); }
+}
+@keyframes il-shimmer-bar {
+    from { background-position: -200% 0; }
+    to   { background-position: 200% 0; }
+}
+
+/* ==========================================================================
+   2. 基础: 页面/滚动条/选区
+   ========================================================================== */
+body {
+    background-color: var(--il-t10) !important;
+    color: var(--il-t95) !important;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+}
+
+* {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(169, 194, 218, 0.28) transparent;
+}
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+    background: rgba(169, 194, 218, 0.24);
+    border-radius: 999px;
+    transition: background var(--il-dur-fast) var(--il-ease-out);
+}
+::-webkit-scrollbar-thumb:hover { background: rgba(169, 194, 218, 0.5); }
+
+::selection { background: rgba(169, 194, 218, 0.3); color: var(--il-t99); }
+
+/* 背景图柔光遮罩, 让背景与雾蓝同调 */
+#bg1::after, #bg_custom::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(180deg, rgba(11, 15, 20, 0.42), rgba(11, 15, 20, 0.6));
+    pointer-events: none;
+}
+
+/* ==========================================================================
+   3. 顶栏 & 抽屉(修闪烁: 不给抽屉加 keyframes 动画, 走原生 slide 过渡)
+   ========================================================================== */
+#top-bar {
+    background: var(--il-glass-bg) !important;
+    backdrop-filter: var(--il-blur) !important;
+    -webkit-backdrop-filter: var(--il-blur) !important;
+    border-bottom: 1px solid var(--il-border) !important;
+    box-shadow: 0 2px 16px rgba(0, 0, 0, 0.28) !important;
+}
+
+#top-settings-holder .drawer-icon {
+    color: var(--il-t70) !important;
+    opacity: 0.85 !important;
+    transition: transform var(--il-dur) var(--il-spring), color var(--il-dur-fast) var(--il-ease-out) !important;
+}
+#top-settings-holder .drawer-icon:hover {
+    transform: scale(1.14) rotate(4deg) !important;
+    color: var(--il-t90) !important;
+    opacity: 1 !important;
+    filter: drop-shadow(0 0 6px rgba(169, 194, 218, 0.45));
+}
+#top-settings-holder .drawer-icon.drawerPinnedOpen,
+#top-settings-holder .drawer-icon.fa-flip-vertical {
+    color: var(--il-primary) !important;
+    opacity: 1 !important;
+}
+
+/* 抽屉外壳: 纯玻璃, 无自绘关键帧 → 原生高度过渡 + display transition, 不会闪烁 */
+.drawer-content {
+    background: rgba(13, 18, 24, 0.9) !important;
+    backdrop-filter: var(--il-blur-strong) !important;
+    -webkit-backdrop-filter: var(--il-blur-strong) !important;
+    border: 1px solid var(--il-border) !important;
+    border-top: none !important;
+    border-radius: 0 0 14px 14px !important;
+    box-shadow: var(--il-glow) !important;
+}
+/* 抽屉内部内容淡入(不动高度, 不与 slide 动画冲突) */
+.drawer-content.openDrawer > * {
+    animation: il-fade var(--il-dur) var(--il-ease-out) both;
+}
+
+/* 顶栏抽屉打开时的联动高亮 */
+.drawer-icon:has(+ .drawer-content.openDrawer) .fa-solid,
+.drawer-toggle.fa-circle-chevron-down {
+    color: var(--il-primary);
+}
+
+/* ==========================================================================
+   4. 标题 & 分区头(长条扫过 + 左侧细 accent, 低饱和)
+   ========================================================================== */
+.standoutHeader,
+.inline-drawer-header,
+#rm_PinAndTabs {
+    position: relative;
+    overflow: hidden;
+    background: linear-gradient(90deg, rgba(29, 38, 50, 0.72), rgba(18, 24, 31, 0.5)) !important;
+    border: 1px solid var(--il-border) !important;
+    border-left: 3px solid var(--il-t50) !important;
+    border-radius: 8px !important;
+    animation: il-text-sweep var(--il-dur) var(--il-sweep) both;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+}
+.standoutHeader::after,
+.inline-drawer-header::after {
+    content: '';
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 32%;
+    background: linear-gradient(90deg, transparent, rgba(169, 194, 218, 0.1), transparent);
+    animation: il-sheen 7s var(--il-sweep) infinite;
+    pointer-events: none;
+}
+.inline-drawer-icon {
+    color: var(--il-t70) !important;
+    transition: transform var(--il-dur) var(--il-spring) !important;
+}
+.inline-drawer-header:hover .inline-drawer-icon {
+    color: var(--il-t90) !important;
+    transform: rotate(90deg) scale(1.1);
+}
+
+/* ==========================================================================
+   5. 聊天气泡(雾蓝玻璃, 序列延迟入场)
+   ========================================================================== */
+#chat { background: transparent !important; }
+
+.mes {
+    background: var(--il-glass-card) !important;
+    backdrop-filter: var(--il-blur) !important;
+    -webkit-backdrop-filter: var(--il-blur) !important;
+    border: 1px solid var(--il-border) !important;
+    border-radius: 14px !important;
+    margin: 12px 0 !important;
+    padding: 12px 14px !important;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.22);
+    transition:
+        border-color var(--il-dur) var(--il-ease-out),
+        box-shadow var(--il-dur) var(--il-ease-out),
+        transform var(--il-dur) var(--il-spring) !important;
+    animation: il-rise var(--il-dur-slow) var(--il-spring) both;
+}
+.mes:nth-child(1) { animation-delay: 0.02s; }
+.mes:nth-child(2) { animation-delay: 0.05s; }
+.mes:nth-child(3) { animation-delay: 0.08s; }
+.mes:nth-child(4) { animation-delay: 0.11s; }
+.mes:nth-child(5) { animation-delay: 0.14s; }
+.mes:nth-child(6) { animation-delay: 0.17s; }
+.mes:nth-child(7) { animation-delay: 0.2s; }
+.mes:nth-child(n+8) { animation-delay: 0.23s; }
+
+.mes:hover {
+    border-color: var(--il-border-hover) !important;
+    box-shadow: var(--il-glow-hover) !important;
+    transform: translate3d(0, -1.5px, 0) !important;
+}
+
+/* 用户/AI 气泡: 同源异阶, 区别含蓄 */
+.mes[is_user="true"] {
+    background: linear-gradient(135deg, rgba(36, 47, 61, 0.66), rgba(29, 38, 50, 0.6)) !important;
+    border-left: 3px solid var(--il-t50) !important;
+}
+.mes[is_user="false"] {
+    background: linear-gradient(135deg, rgba(23, 30, 39, 0.66), rgba(29, 38, 50, 0.55)) !important;
+    border-left: 3px solid var(--il-t30) !important;
+}
+
+.mes_text {
+    color: var(--il-t95) !important;
+    line-height: 1.72;
+    letter-spacing: 0.01em;
+}
+.mes_text em { color: var(--il-primary) !important; }
+.mes_text strong {
+    color: var(--il-t99) !important;
+    text-shadow: 0 0 6px rgba(169, 194, 218, 0.18);
+}
+.mes_text q, .mes_text .quote {
+    color: var(--il-accent-2) !important;
+    background: rgba(147, 179, 201, 0.07);
+    border-left: 2px solid var(--il-accent-2);
+    padding: 2px 8px;
+    border-radius: 4px;
+}
+
+/* 头像: 柔和描边 + 弱呼吸 */
+.avatar {
+    border-radius: 10px !important;
+    overflow: hidden;
+    border: 1px solid var(--il-border) !important;
+    transition: transform var(--il-dur) var(--il-spring), border-color var(--il-dur) var(--il-ease-out) !important;
+}
+.avatar:hover {
+    transform: scale(1.06) !important;
+    border-color: var(--il-t50) !important;
+    box-shadow: 0 0 12px rgba(169, 194, 218, 0.24) !important;
+}
+
+/* 元信息小徽标 */
+.mesIDDisplay, .mes_timer, .tokenCounterDisplay {
+    background: rgba(18, 24, 31, 0.55) !important;
+    border: 1px solid var(--il-border) !important;
+    color: var(--il-t60) !important;
+    border-radius: 5px;
+    transition: color var(--il-dur-fast), border-color var(--il-dur-fast) !important;
+}
+.mesIDDisplay:hover, .mes_timer:hover, .tokenCounterDisplay:hover {
+    color: var(--il-t90) !important;
+    border-color: var(--il-border-hover) !important;
+}
+
+/* 消息操作小按钮 */
+.mes_button, .extraMesButtons > div {
+    color: var(--il-t60) !important;
+    border-radius: 6px !important;
+    padding: 3px 6px !important;
+    transition: all var(--il-dur-fast) var(--il-ease-out) !important;
+}
+.mes_button:hover, .extraMesButtons > div:hover {
+    background: rgba(169, 194, 218, 0.14) !important;
+    color: var(--il-t90) !important;
+    transform: translateY(-1px);
+}
+
+/* swipe 箭头 */
+.swipe_left, .swipe_right {
+    display: flex !important;
+    align-items: center;
+    justify-content: center;
+    width: 26px !important;
+    height: 26px !important;
+    border-radius: 8px !important;
+    color: var(--il-t70);
+    transition: all var(--il-dur-fast) var(--il-spring) !important;
+}
+.swipe_left:hover  { transform: translateX(-2px); color: var(--il-t90); background: rgba(169, 194, 218, 0.14); }
+.swipe_right:hover { transform: translateX(2px);  color: var(--il-t90); background: rgba(169, 194, 218, 0.14); }
+
+/* ==========================================================================
+   6. 推理块
+   ========================================================================== */
+.mes_reasoning {
+    background: linear-gradient(90deg, rgba(29, 38, 50, 0.45), rgba(18, 24, 31, 0.3)) !important;
+    border: 1px solid var(--il-border) !important;
+    border-left: 3px solid var(--il-t50) !important;
+    border-radius: 8px !important;
+}
+.mes_reasoning_header {
+    background: rgba(169, 194, 218, 0.07) !important;
+    color: var(--il-t70) !important;
+    border-radius: 6px !important;
+    transition: background-color var(--il-dur-fast) !important;
+}
+.mes_reasoning_header:hover { background: rgba(169, 194, 218, 0.13) !important; }
+
+/* ==========================================================================
+   7. 表单控件
+   ========================================================================== */
+input[type="text"], input[type="number"], input[type="password"], input:not([type]),
+textarea.text_pole, textarea:not([class]), select {
+    background: rgba(13, 18, 24, 0.72) !important;
+    color: var(--il-t95) !important;
+    border: 1px solid var(--il-border) !important;
+    border-radius: 8px !important;
+    transition: border-color var(--il-dur-fast) var(--il-ease-out), box-shadow var(--il-dur-fast) var(--il-ease-out) !important;
+    outline: none !important;
+}
+input:focus, textarea:focus, select:focus {
+    border-color: var(--il-t50) !important;
+    box-shadow: 0 0 0 3px rgba(169, 194, 218, 0.14) !important;
+}
+select option { background: var(--il-t15); color: var(--il-t95); }
+
+input[type="range"], .neo-range-slider { accent-color: var(--il-t60); }
+
+/* 复选框重绘 */
+input[type="checkbox"] {
+    appearance: none !important;
+    -webkit-appearance: none !important;
+    width: 16px !important;
+    height: 16px !important;
+    border: 1.5px solid var(--il-t40) !important;
+    background: rgba(13, 18, 24, 0.75) !important;
+    border-radius: 5px !important;
+    cursor: pointer;
+    position: relative;
+    transition: all var(--il-dur-fast) var(--il-spring) !important;
+}
+input[type="checkbox"]:hover { border-color: var(--il-t60) !important; }
+input[type="checkbox"]:checked {
+    background: linear-gradient(135deg, var(--il-t60), var(--il-t50)) !important;
+    border-color: var(--il-t60) !important;
+}
+input[type="checkbox"]:checked::after {
+    content: '✓';
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--il-t10);
+    font-size: 11px;
+    font-weight: bold;
+}
+
+/* 按钮: 低饱和雾蓝渐变 */
+.menu_button {
+    background: linear-gradient(135deg, rgba(80, 99, 124, 0.85), rgba(109, 130, 160, 0.8)) !important;
+    color: var(--il-t99) !important;
+    border: none !important;
+    border-radius: 8px !important;
+    transition:
+        transform var(--il-dur-fast) var(--il-spring),
+        box-shadow var(--il-dur-fast) var(--il-ease-out),
+        filter var(--il-dur-fast) !important;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28) !important;
+}
+.menu_button:hover {
+    transform: translateY(-1.5px) !important;
+    filter: brightness(1.12);
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.36), 0 0 10px rgba(169, 194, 218, 0.16) !important;
+}
+.menu_button:active { transform: translateY(0) scale(0.98) !important; }
+
+/* 危险按钮: 雾玫瑰 */
+.dangerous_button, .redWarningBG, #dialogue_del_mes_ok {
+    background: linear-gradient(135deg, rgba(160, 100, 110, 0.85), rgba(140, 82, 94, 0.85)) !important;
+    box-shadow: 0 2px 8px rgba(140, 82, 94, 0.28) !important;
+}
+
+/* ==========================================================================
+   8. 底部输入区
+   ========================================================================== */
+#send_form {
+    background: var(--il-glass-bg) !important;
+    backdrop-filter: var(--il-blur-strong) !important;
+    -webkit-backdrop-filter: var(--il-blur-strong) !important;
+    border-top: 1px solid var(--il-border) !important;
+    border-radius: 14px 14px 0 0 !important;
+    box-shadow: 0 -2px 18px rgba(0, 0, 0, 0.3) !important;
+}
+#send_textarea {
+    background: rgba(13, 18, 24, 0.66) !important;
+    border: 1px solid var(--il-border) !important;
+    border-radius: 10px !important;
+    caret-color: var(--il-primary);
+    transition: border-color var(--il-dur-fast) !important;
+}
+#send_textarea:focus { border-color: var(--il-t50) !important; box-shadow: 0 0 0 3px rgba(169,194,218,0.12) !important; }
+
+#send_but {
+    color: var(--il-t10);
+    background: linear-gradient(135deg, var(--il-t60), var(--il-t70)) !important;
+    border-radius: 10px !important;
+    transition: transform var(--il-dur-fast) var(--il-spring), box-shadow var(--il-dur-fast) !important;
+}
+#send_but:hover {
+    transform: scale(1.08) !important;
+    box-shadow: 0 0 12px rgba(169, 194, 218, 0.3) !important;
+}
+
+/* 输入区右侧小图标 */
+#rightSendForm > i, #leftSendForm > i, #nonQRFormItems > i {
+    color: var(--il-t60);
+    transition: color var(--il-dur-fast), transform var(--il-dur-fast) var(--il-spring);
+}
+#rightSendForm > i:hover, #leftSendForm > i:hover, #nonQRFormItems > i:hover {
+    color: var(--il-t90);
+    transform: scale(1.12);
+}
+
+/* ==========================================================================
+   9. 角色卡片网格(序列延迟)
+   ========================================================================== */
+#rm_print_characters_block .entity_block {
+    background: var(--il-glass-card) !important;
+    backdrop-filter: var(--il-blur) !important;
+    -webkit-backdrop-filter: var(--il-blur) !important;
+    border: 1px solid var(--il-border) !important;
+    border-radius: 12px !important;
+    transition:
+        transform var(--il-dur) var(--il-spring),
+        border-color var(--il-dur) var(--il-ease-out),
+        box-shadow var(--il-dur) var(--il-ease-out) !important;
+    animation: il-rise 0.42s var(--il-spring) both;
+}
+#rm_print_characters_block .entity_block:nth-child(1) { animation-delay: 0.02s; }
+#rm_print_characters_block .entity_block:nth-child(2) { animation-delay: 0.045s; }
+#rm_print_characters_block .entity_block:nth-child(3) { animation-delay: 0.07s; }
+#rm_print_characters_block .entity_block:nth-child(4) { animation-delay: 0.095s; }
+#rm_print_characters_block .entity_block:nth-child(5) { animation-delay: 0.12s; }
+#rm_print_characters_block .entity_block:nth-child(6) { animation-delay: 0.145s; }
+#rm_print_characters_block .entity_block:nth-child(7) { animation-delay: 0.17s; }
+#rm_print_characters_block .entity_block:nth-child(n+8) { animation-delay: 0.19s; }
+
+#rm_print_characters_block .entity_block:hover {
+    transform: translate3d(0, -3px, 0) !important;
+    border-color: var(--il-border-hover) !important;
+    box-shadow: var(--il-glow-hover) !important;
+}
+#rm_print_characters_block .entity_block.character_selected {
+    border-left: 3px solid var(--il-t60) !important;
+    background: var(--il-glass-hover) !important;
+}
+
+/* ==========================================================================
+   10. 欢迎页 & 最近聊天
+   ========================================================================== */
+.welcomePanel { animation: il-pop var(--il-dur-slow) var(--il-spring) both; }
+
+.recentChat {
+    background: var(--il-glass-card) !important;
+    border: 1px solid var(--il-border) !important;
+    border-left: 3px solid var(--il-t50) !important;
+    border-radius: 12px !important;
+    transition: transform var(--il-dur) var(--il-spring), box-shadow var(--il-dur) var(--il-ease-out) !important;
+    animation: il-rise 0.45s var(--il-spring) both;
+}
+.recentChat:hover {
+    transform: translate3d(3px, -2px, 0) !important;
+    border-color: var(--il-border-hover) !important;
+    box-shadow: var(--il-glow-hover) !important;
+}
+
+/* ==========================================================================
+   11. 代码块
+   ========================================================================== */
+.mes_text pre, .hljs {
+    background: rgba(11, 15, 20, 0.9) !important;
+    border: 1px solid var(--il-border) !important;
+    border-radius: 10px !important;
+    box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.4) !important;
+}
+.mes_text code:not(pre code) {
+    background: rgba(169, 194, 218, 0.1) !important;
+    border: 1px solid var(--il-border) !important;
+    color: var(--il-t80) !important;
+    border-radius: 4px !important;
+}
+
+/* ==========================================================================
+   12. 弹窗 / Toast / 下拉 (玻璃化补全)
+   ========================================================================== */
+.popup {
+    background: rgba(23, 30, 39, 0.88) !important;
+    backdrop-filter: var(--il-blur-strong) !important;
+    -webkit-backdrop-filter: var(--il-blur-strong) !important;
+    border: 1px solid var(--il-border) !important;
+    border-radius: 14px !important;
+    box-shadow: var(--il-shadow-pop) !important;
+    color: var(--il-t95) !important;
+    animation: il-pop 0.28s var(--il-spring) both;
+}
+.popup[open]::backdrop {
+    background: rgba(11, 15, 20, 0.6);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    animation: il-fade 0.25s ease-out both;
+}
+.popup .popup-content h3:first-child,
+.popup .popup-content h2:first-child {
+    color: var(--il-t90);
+}
+.popup input, .popup select, .popup textarea {
+    background: rgba(13, 18, 24, 0.72) !important;
+}
+
+/* Toast 通知 */
+#toast-container > div {
+    background-color: rgba(23, 30, 39, 0.9) !important;
+    backdrop-filter: var(--il-blur) !important;
+    -webkit-backdrop-filter: var(--il-blur) !important;
+    border: 1px solid var(--il-border) !important;
+    border-radius: 10px !important;
+    color: var(--il-t95) !important;
+    box-shadow: var(--il-glow) !important;
+}
+#toast-container > .toast-success { border-left: 3px solid var(--il-success) !important; }
+#toast-container > .toast-error   { border-left: 3px solid var(--il-danger) !important; }
+#toast-container > .toast-info    { border-left: 3px solid var(--il-primary) !important; }
+#toast-container > .toast-warning { border-left: 3px solid var(--il-warning) !important; }
+#toast-container > div .toast-close-button { color: var(--il-t70); text-shadow: none; }
+
+/* select2 下拉 */
+.select2-dropdown {
+    background: rgba(23, 30, 39, 0.94) !important;
+    backdrop-filter: var(--il-blur-strong) !important;
+    -webkit-backdrop-filter: var(--il-blur-strong) !important;
+    border: 1px solid var(--il-border) !important;
+    border-radius: 8px !important;
+    box-shadow: var(--il-shadow-pop) !important;
+}
+.select2-results__option { color: var(--il-t95); transition: background-color var(--il-dur-fast); }
+.select2-results__option--highlighted.select2-results__option--selectable {
+    background: rgba(169, 194, 218, 0.16) !important;
+}
+.select2-container--default .select2-selection--single,
+.select2-container--default .select2-selection--multiple {
+    background: rgba(13, 18, 24, 0.72) !important;
+    border: 1px solid var(--il-border) !important;
+    border-radius: 8px !important;
+}
+
+/* ==========================================================================
+   13. 左/右导航栏 & MovingUI
+   ========================================================================== */
+#right-nav-panel, #left-nav-panel, #WorldInfo {
+    background: rgba(13, 18, 24, 0.92) !important;
+    backdrop-filter: var(--il-blur-strong) !important;
+    -webkit-backdrop-filter: var(--il-blur-strong) !important;
+    border: 1px solid var(--il-border) !important;
+    box-shadow: var(--il-shadow-pop) !important;
+}
+.slider_panel { background: rgba(23, 30, 39, 0.92) !important; backdrop-filter: var(--il-blur) !important; }
+
+/* ==========================================================================
+   14. Typing indicator & Loader
+   ========================================================================== */
+#typing_indicator_container .typing_indicator,
+.typing_indicator {
+    color: var(--il-t70) !important;
+}
+.typing_indicator .typing_dot,
+#typing_indicator_container .fa-circle {
+    animation: il-typing-dot 1.2s var(--il-ease-out) infinite;
+}
+#typing_indicator_container .fa-circle:nth-child(2) { animation-delay: 0.15s; }
+#typing_indicator_container .fa-circle:nth-child(3) { animation-delay: 0.3s; }
+
+/* 生成中: 发送按钮柔光呼吸 */
+#mes_stop { color: var(--il-danger) !important; }
+#mes_butcontinue, #mes_impersonate { transition: color var(--il-dur-fast), transform var(--il-dur-fast) var(--il-spring); }
+#mes_butcontinue:hover, #mes_impersonate:hover { color: var(--il-t90); transform: scale(1.12); }
+
+/* shimer 加载条(占位/骨架) */
+.skeleton-bar, .shimmer-placeholder {
+    background: linear-gradient(90deg,
+        rgba(29, 38, 50, 0.5) 25%,
+        rgba(60, 77, 99, 0.5) 50%,
+        rgba(29, 38, 50, 0.5) 75%);
+    background-size: 200% 100%;
+    animation: il-shimmer-bar 1.6s linear infinite;
+    border-radius: 6px;
+}
+
+/* ==========================================================================
+   15. 图标体系统一(柔和统一色 + 悬浮反馈)
+   ========================================================================== */
+.fa, .fa-solid, .fa-regular {
+    transition: transform var(--il-dur-fast) var(--il-spring), color var(--il-dur-fast) var(--il-ease-out);
+}
+.menu_button:hover .fa, .drawer-icon:hover .fa { transform: scale(1.15); }
+
+/* ==========================================================================
+   16. 毛玻璃性能档位: 低性能设备降级 (配合 fast_ui_mode 的 no-blur)
+   ========================================================================== */
+body.no-blur .mes,
+body.no-blur .drawer-content,
+body.no-blur #send_form,
+body.no-blur #top-bar {
+    background-color: var(--il-t15) !important;
+}
+
+/* ==========================================================================
+   17. 多端适配
+   ========================================================================== */
+
+/* ≥1600px 大屏: 聊天区更宽松 */
+@media (min-width: 1600px) {
+    .mes { padding: 16px 20px !important; }
+    #chat { font-size: 1.02em; }
+}
+
+/* ≤1024px 平板: 收紧间距 */
+@media (max-width: 1024px) {
+    .mes { padding: 10px 12px !important; border-radius: 12px !important; }
+    #send_form { padding: 8px 10px !important; }
+    /* 平板减弱模糊, 省性能 */
+    .mes { backdrop-filter: blur(9px) saturate(1.15) !important; -webkit-backdrop-filter: blur(9px) saturate(1.15) !important; }
+}
+
+/* ≤768px 手机 */
+@media (max-width: 768px) {
+    #chat { padding-left: 4px !important; padding-right: 4px !important; }
+    .mes {
+        margin: 8px 0 !important;
+        padding: 9px 11px !important;
+        border-radius: 12px !important;
+        /* 手机禁用 hover 抬升, 避免触摸滚动抖动 */
+        transition: border-color var(--il-dur) !important;
+    }
+    .mes:hover { transform: none !important; box-shadow: 0 2px 10px rgba(0,0,0,0.22) !important; }
+    .mes { backdrop-filter: blur(8px) !important; -webkit-backdrop-filter: blur(8px) !important; }
+    #send_form { padding: 6px 8px !important; border-radius: 10px 10px 0 0 !important; }
+    #send_but { width: 38px; height: 38px; }
+    /* 输入框跟随软键盘: 16px 字号防 iOS 自动缩放 */
+    #send_textarea { font-size: 16px !important; }
+    .recentChat { padding: 10px 12px !important; }
+    #rm_print_characters_block .entity_block { animation-delay: 0s !important; }
+    .popup { width: calc(100vw - 24px) !important; max-width: calc(100vw - 24px) !important; }
+    #toast-container > div { width: calc(100vw - 24px) !important; max-width: 340px; }
+    .standoutHeader::after, .inline-drawer-header::after { display: none; } /* 关 sheen 省功耗 */
+}
+
+/* ≤480px 小屏手机 */
+@media (max-width: 480px) {
+    .mes { padding: 8px 10px !important; font-size: 0.97em; }
+    .avatar { max-width: 44px; }
+    .swipe_left, .swipe_right { width: 30px !important; height: 30px !important; }
+}
+
+/* 横屏手机 */
+@media (max-height: 460px) and (orientation: landscape) {
+    #top-bar { position: sticky; }
+    .popup { max-height: calc(100dvh - 16px) !important; }
+}
+
+/* ==========================================================================
+   18. 动效降级
+   ========================================================================== */
+body.reduced-motion *, body.reduced-motion *::before, body.reduced-motion *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+}
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        transition-duration: 0.01ms !important;
+    }
+}

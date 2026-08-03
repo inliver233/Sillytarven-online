@@ -1791,6 +1791,11 @@ async function openAdminPanel(initialTab = 'usersList') {
 
     const template = $(await renderTemplateAsync('admin'));
 
+    // 管理弹窗尚未插入 DOM 时就直接绑定扩展事件，避免动态内容漏绑导致按钮无响应。
+    if (typeof window.bindFreeGeminiChannelEvents === 'function') {
+        window.bindFreeGeminiChannelEvents(template);
+    }
+
     template.find('.adminNav > button').on('click', function () {
         const target = String($(this).data('target-tab'));
         template.find('.navTab').each(function () {
@@ -1840,7 +1845,15 @@ if (typeof window.initializeAdminExtensions === 'function') {
     // 绑定定时任务相关按钮
     initScheduledTasksHandlers(template);
 
-    const popupPromise = callGenericPopup(template, POPUP_TYPE.TEXT, '', { okButton: 'Close', wide: true, large: true, allowVerticalScrolling: true, allowHorizontalScrolling: true });
+    const popupPromise = callGenericPopup(template, POPUP_TYPE.TEXT, '', {
+        okButton: 'Close',
+        wide: true,
+        large: true,
+        allowVerticalScrolling: true,
+        allowHorizontalScrolling: true,
+        onClosing: () => typeof window.canCloseFreeGeminiChannelAdmin !== 'function'
+            || window.canCloseFreeGeminiChannelAdmin(),
+    });
     renderUsers();
     await popupPromise;
     if (typeof window.disposeAdminExtensions === 'function') {

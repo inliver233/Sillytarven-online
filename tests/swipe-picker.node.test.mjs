@@ -145,7 +145,7 @@ test('picker action resolver fails closed without an authoritative absolute mess
 });
 
 test('tokenizer cancellation aborts the jqXHR and rejects with AbortError', async () => {
-    const source = fs.readFileSync(tokenizerPath, 'utf8');
+    const source = fs.readFileSync(tokenizerPath, 'utf8').replace(/\r\n/g, '\n');
     const helperStart = source.indexOf('function getTokenizerAbortError');
     const helperEnd = source.indexOf('/**\n * Calls the underlying tokenizer model', helperStart);
     assert.ok(helperStart >= 0 && helperEnd > helperStart);

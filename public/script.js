@@ -6596,7 +6596,8 @@ function extractImagesFromData(data, { mainApi = null, chatCompletionSource = nu
         case 'openai': {
             switch (chatCompletionSource ?? oai_settings.chat_completion_source) {
                 case chat_completion_sources.VERTEXAI:
-                case chat_completion_sources.MAKERSUITE: {
+                case chat_completion_sources.MAKERSUITE:
+                case chat_completion_sources.FREE_GEMINI: {
                     const inlineData = data?.responseContent?.parts?.filter(x => x.inlineData && !x.thought)?.map(x => x.inlineData);
                     if (Array.isArray(inlineData) && inlineData.length > 0) {
                         return inlineData.map(x => `data:${x.mimeType};base64,${x.data}`).filter(isDataURL);
@@ -6721,6 +6722,7 @@ export function extractJsonFromData(data, { mainApi = null, chatCompletionSource
                     break;
                 case chat_completion_sources.VERTEXAI:
                 case chat_completion_sources.MAKERSUITE:
+                case chat_completion_sources.FREE_GEMINI:
                 case chat_completion_sources.DEEPSEEK:
                 case chat_completion_sources.AI21:
                 case chat_completion_sources.GROQ:

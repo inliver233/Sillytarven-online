@@ -173,6 +173,94 @@ const textCompletionModels = [
 
 let biasCache = undefined;
 export let model_list = [];
+let freeGeminiChannels = [];
+let freeGeminiChannelsLoadedAt = 0;
+let freeGeminiChannelsLoadingPromise = null;
+let freeGeminiStatusCheckGeneration = 0;
+const FREE_GEMINI_CHANNELS_TTL_MS = 60 * 1000;
+
+function refreshFreeGeminiSelectUi(select) {
+    if (select.hasClass('select2-hidden-accessible')) {
+        select.trigger('change.select2');
+    }
+}
+
+function renderFreeGeminiChannelSelect(message = '') {
+    const select = $('#free_gemini_channel_select');
+    if (!select.length) return;
+
+    select.empty().append(new Option('自动路由（推荐）', ''));
+    freeGeminiChannels.forEach(channel => select.append(new Option(channel.name, channel.id)));
+    if (message) {
+        select.append(new Option(message, '__free_gemini_status__', false, false));
+        select.find('option[value="__free_gemini_status__"]').prop('disabled', true);
+    } else if (freeGeminiChannels.length === 0) {
+        select.append(new Option('管理员尚未配置可用渠道', '__free_gemini_empty__', false, false));
+        select.find('option[value="__free_gemini_empty__"]').prop('disabled', true);
+    }
+
+    const savedChannelExists = !oai_settings.free_gemini_channel_id
+        || freeGeminiChannels.some(channel => channel.id === oai_settings.free_gemini_channel_id);
+    if (!savedChannelExists) {
+        oai_settings.free_gemini_channel_id = '';
+    }
+    select.val(oai_settings.free_gemini_channel_id || '');
+    refreshFreeGeminiSelectUi(select);
+}
+
+/**
+ * Loads the administrator-provided free Gemini channels without exposing their URL or API key.
+ * Results are cached briefly and concurrent callers share the same request.
+ * @param {boolean} force Ignore the 60-second cache
+ * @returns {Promise<Array<{id: string, name: string}>>} Available channels
+ */
+async function loadFreeGeminiChannels(force = false) {
+    if (!force && freeGeminiChannelsLoadedAt && Date.now() - freeGeminiChannelsLoadedAt < FREE_GEMINI_CHANNELS_TTL_MS) {
+        renderFreeGeminiChannelSelect();
+        return freeGeminiChannels;
+    }
+    if (freeGeminiChannelsLoadingPromise) {
+        return freeGeminiChannelsLoadingPromise;
+    }
+
+    freeGeminiChannelsLoadingPromise = (async () => {
+        try {
+            const response = await fetch('/api/free-gemini-channels', {
+                method: 'GET',
+                headers: getRequestHeaders(),
+                cache: 'no-cache',
+            });
+
+            if (!response.ok) {
+                throw new Error(`Failed to load free Gemini channels: ${response.status}`);
+            }
+
+            const payload = await response.json();
+            const channels = Array.isArray(payload) ? payload : payload.channels;
+            const seenIds = new Set();
+            freeGeminiChannels = Array.isArray(channels)
+                ? channels
+                    .map(channel => ({
+                        id: typeof channel?.id === 'string' ? channel.id.trim() : '',
+                        name: typeof channel?.name === 'string' ? channel.name.trim() : '',
+                    }))
+                    .filter(channel => channel.id && channel.name && !seenIds.has(channel.id) && seenIds.add(channel.id))
+                : [];
+            freeGeminiChannelsLoadedAt = Date.now();
+            renderFreeGeminiChannelSelect();
+            return freeGeminiChannels;
+        } catch (error) {
+            console.error('Failed to load free Gemini channels:', error);
+            freeGeminiChannelsLoadedAt = 0;
+            renderFreeGeminiChannelSelect(freeGeminiChannels.length > 0 ? '刷新失败，暂用缓存列表' : '渠道列表加载失败');
+            return freeGeminiChannels;
+        } finally {
+            freeGeminiChannelsLoadingPromise = null;
+        }
+    })();
+
+    return freeGeminiChannelsLoadingPromise;
+}
 
 export const chat_completion_sources = {
     OPENAI: 'openai',
@@ -180,6 +268,7 @@ export const chat_completion_sources = {
     OPENROUTER: 'openrouter',
     AI21: 'ai21',
     MAKERSUITE: 'makersuite',
+    FREE_GEMINI: 'free-gemini',
     VERTEXAI: 'vertexai',
     MISTRALAI: 'mistralai',
     CUSTOM: 'custom',
@@ -329,6 +418,8 @@ export const settingsToUpdate = {
     custom_include_headers: ['#custom_include_headers', 'custom_include_headers', false, true],
     custom_prompt_post_processing: ['#custom_prompt_post_processing', 'custom_prompt_post_processing', false, true],
     google_model: ['#model_google_select', 'google_model', false, true],
+    free_gemini_channel_id: ['#free_gemini_channel_select', 'free_gemini_channel_id', false, true],
+    free_gemini_model: ['#model_free_gemini_select', 'free_gemini_model', false, true],
     vertexai_model: ['#model_vertexai_select', 'vertexai_model', false, true],
     zai_model: ['#model_zai_select', 'zai_model', false, true],
     zai_endpoint: ['#zai_endpoint', 'zai_endpoint', false, true],
@@ -413,6 +504,8 @@ const default_settings = {
     openai_model: 'gpt-4-turbo',
     claude_model: 'claude-sonnet-4-5',
     google_model: 'gemini-2.5-pro',
+    free_gemini_channel_id: '',
+    free_gemini_model: 'gemini-2.5-flash',
     vertexai_model: 'gemini-2.5-pro',
     ai21_model: 'jamba-large',
     mistralai_model: 'mistral-large-latest',
@@ -1548,20 +1641,23 @@ export async function prepareOpenAIMessages({
         // Fill the chat completion with as much context as the budget allows
         await populateChatCompletion(prompts, chatCompletion, { bias, quietPrompt, quietImage, type, cyclePrompt, messages, messageExamples });
     } catch (error) {
+        console.error('Failed to prepare OpenAI prompt:', error);
+        chatCompletion.log('----- Error while preparing prompts -----');
+        chatCompletion.log(error);
+        chatCompletion.log(error?.stack);
+        chatCompletion.log('---------------------------------------------');
+
         if (error instanceof TokenBudgetExceededError) {
-            toastr.error(t`Mandatory prompts exceed the context size.`);
+            toastr.error(t`Mandatory prompts exceed the context size.`, undefined, { preventDuplicates: true });
             chatCompletion.log('Mandatory prompts exceed the context size.');
             promptManagerError = t`Not enough free tokens for mandatory prompts. Raise your token limit or disable custom prompts.`;
         } else if (error instanceof InvalidCharacterNameError) {
-            toastr.warning(t`An error occurred while counting tokens: Invalid character name`);
+            toastr.warning(t`Could not prepare the prompt: Invalid character name.`, undefined, { preventDuplicates: true });
             chatCompletion.log('Invalid character name');
             promptManagerError = t`The name of at least one character contained whitespaces or special characters. Please check your user and character name.`;
         } else {
-            toastr.error(t`An unknown error occurred while counting tokens. Further information may be available in console.`);
-            chatCompletion.log('----- Unexpected error while preparing prompts -----');
-            chatCompletion.log(error);
-            chatCompletion.log(error.stack);
-            chatCompletion.log('----------------------------------------------------');
+            toastr.error(t`An unexpected error occurred while preparing the prompt. Further information may be available in console.`, undefined, { preventDuplicates: true });
+            promptManagerError = t`The prompt could not be prepared. Check the browser console for details.`;
         }
     } finally {
         promptManagerResult = createPromptManagerResult(chatCompletion, promptManagerError);
@@ -1680,6 +1776,8 @@ export function getChatCompletionModel(settings = null) {
             return settings.openai_model;
         case chat_completion_sources.MAKERSUITE:
             return settings.google_model;
+        case chat_completion_sources.FREE_GEMINI:
+            return settings.free_gemini_model;
         case chat_completion_sources.VERTEXAI:
             return settings.vertexai_model;
         case chat_completion_sources.OPENROUTER:
@@ -2092,6 +2190,34 @@ function saveModelList(data) {
         }
 
         $('#model_pollinations_select').val(oai_settings.pollinations_model).trigger('change');
+    }
+
+    if (oai_settings.chat_completion_source === chat_completion_sources.FREE_GEMINI) {
+        const select = $('#model_free_gemini_select').empty();
+        const availableModels = model_list.filter(model => typeof model?.id === 'string' && model.id.trim());
+        availableModels.forEach(model => {
+            const channelName = model.channel_name
+                || model.channelName
+                || freeGeminiChannels.find(channel => channel.id === model.channel_id)?.name
+                || '';
+            const label = channelName ? `${model.id} · ${channelName}` : model.id;
+            select.append(new Option(label, model.id));
+        });
+
+        const selectedModel = availableModels.find(model => model.id === oai_settings.free_gemini_model);
+        if (availableModels.length === 0) {
+            oai_settings.free_gemini_model = '';
+            const emptyLabel = freeGeminiChannels.length === 0
+                ? '管理员尚未配置可用渠道'
+                : '当前路由没有可用模型';
+            select.append(new Option(emptyLabel, '', true, true));
+            refreshFreeGeminiSelectUi(select);
+        } else {
+            if (!selectedModel || !oai_settings.free_gemini_model) {
+                oai_settings.free_gemini_model = availableModels[0].id;
+            }
+            select.val(oai_settings.free_gemini_model).trigger('change');
+        }
     }
 
     if (oai_settings.chat_completion_source === chat_completion_sources.MAKERSUITE) {
@@ -2551,6 +2677,7 @@ export async function createGenerationParameters(settings, model, type, messages
         chat_completion_sources.AIMLAPI,
         chat_completion_sources.VERTEXAI,
         chat_completion_sources.MAKERSUITE,
+        chat_completion_sources.FREE_GEMINI,
         chat_completion_sources.CHUTES,
     ];
 
@@ -2707,11 +2834,14 @@ export async function createGenerationParameters(settings, model, type, messages
         generate_data['middleout'] = settings.openrouter_middleout;
     }
 
-    if ([chat_completion_sources.MAKERSUITE, chat_completion_sources.VERTEXAI].includes(settings.chat_completion_source)) {
+    if ([chat_completion_sources.MAKERSUITE, chat_completion_sources.FREE_GEMINI, chat_completion_sources.VERTEXAI].includes(settings.chat_completion_source)) {
         const stopStringsLimit = 5;
         generate_data['top_k'] = Number(settings.top_k_openai);
         generate_data['stop'] = getCustomStoppingStrings(stopStringsLimit).slice(0, stopStringsLimit).filter(x => x.length >= 1 && x.length <= 16);
         generate_data['use_sysprompt'] = settings.use_sysprompt;
+        if (settings.chat_completion_source === chat_completion_sources.FREE_GEMINI && settings.free_gemini_channel_id) {
+            generate_data['free_gemini_channel_id'] = settings.free_gemini_channel_id;
+        }
         if (settings.chat_completion_source === chat_completion_sources.VERTEXAI) {
             generate_data['vertexai_auth_mode'] = settings.vertexai_auth_mode;
             generate_data['vertexai_region'] = settings.vertexai_region;
@@ -2979,7 +3109,7 @@ export function getStreamingReply(data, state, { chatCompletionSource = null, ov
             state.reasoning += data?.delta?.thinking || '';
         }
         return data?.delta?.text || '';
-    } else if ([chat_completion_sources.MAKERSUITE, chat_completion_sources.VERTEXAI].includes(chat_completion_source)) {
+    } else if ([chat_completion_sources.MAKERSUITE, chat_completion_sources.FREE_GEMINI, chat_completion_sources.VERTEXAI].includes(chat_completion_source)) {
         const inlineData = data?.candidates?.[0]?.content?.parts?.filter(x => x.inlineData && !x.thought)?.map(x => x.inlineData) || [];
         if (Array.isArray(inlineData) && inlineData.length > 0) {
             state.images.push(...inlineData.map(x => `data:${x.mimeType};base64,${x.data}`).filter(isDataURL));
@@ -3478,6 +3608,7 @@ class Message {
         const compressImageSources = [
             chat_completion_sources.OPENROUTER,
             chat_completion_sources.MAKERSUITE,
+            chat_completion_sources.FREE_GEMINI,
             chat_completion_sources.MISTRALAI,
             chat_completion_sources.VERTEXAI,
         ];
@@ -4221,6 +4352,15 @@ export function getEffectiveToolReasoningMode(settings = oai_settings) {
 }
 
 async function getStatusOpen() {
+    const isFreeGeminiStatusCheck = oai_settings.chat_completion_source === chat_completion_sources.FREE_GEMINI;
+    const freeGeminiStatusCheckId = isFreeGeminiStatusCheck ? ++freeGeminiStatusCheckGeneration : 0;
+    let requestedFreeGeminiChannelId = null;
+    const isStaleFreeGeminiStatusCheck = () => isFreeGeminiStatusCheck && (
+        freeGeminiStatusCheckId !== freeGeminiStatusCheckGeneration
+        || oai_settings.chat_completion_source !== chat_completion_sources.FREE_GEMINI
+        || (requestedFreeGeminiChannelId !== null && requestedFreeGeminiChannelId !== oai_settings.free_gemini_channel_id)
+    );
+
     const noValidateSources = [
         chat_completion_sources.CLAUDE,
         chat_completion_sources.AI21,
@@ -4253,6 +4393,18 @@ async function getStatusOpen() {
         chat_completion_source: oai_settings.chat_completion_source,
     };
 
+    if (isFreeGeminiStatusCheck) {
+        await loadFreeGeminiChannels();
+        if (isStaleFreeGeminiStatusCheck()) {
+            return;
+        }
+
+        requestedFreeGeminiChannelId = oai_settings.free_gemini_channel_id;
+        if (requestedFreeGeminiChannelId) {
+            data.free_gemini_channel_id = requestedFreeGeminiChannelId;
+        }
+    }
+
     const validateProxySources = [
         chat_completion_sources.CLAUDE,
         chat_completion_sources.OPENAI,
@@ -4283,12 +4435,13 @@ async function getStatusOpen() {
         setOnlineStatus(t`Status check bypassed`);
     }
 
+    const statusCheckSignal = abortStatusCheck.signal;
     try {
         const response = await fetch('/api/backends/chat-completions/status', {
             method: 'POST',
             headers: getRequestHeaders(),
             body: JSON.stringify(data),
-            signal: abortStatusCheck.signal,
+            signal: statusCheckSignal,
             cache: 'no-cache',
         });
 
@@ -4298,18 +4451,54 @@ async function getStatusOpen() {
 
         const responseData = await response.json();
 
-        if ('data' in responseData && Array.isArray(responseData.data)) {
+        if (isStaleFreeGeminiStatusCheck()) {
+            return;
+        }
+
+        const responseModels = Array.isArray(responseData.data) ? responseData.data : [];
+        if (isFreeGeminiStatusCheck) {
+            // Always render the response-owned list so a successful empty response cannot retain stale models.
+            saveModelList(responseModels);
+        } else if ('data' in responseData && Array.isArray(responseData.data)) {
             saveModelList(responseData.data);
         }
         if (!('error' in responseData)) {
-            setOnlineStatus(t`Valid`);
+            if (isFreeGeminiStatusCheck) {
+                const availableModels = responseModels.filter(model => typeof model?.id === 'string' && model.id.trim());
+                const status = availableModels.length > 0
+                    ? t`Valid`
+                    : freeGeminiChannels.length === 0
+                        ? t`管理员尚未配置可用渠道`
+                        : t`当前路由没有可用模型`;
+                setOnlineStatus(status);
+            } else {
+                setOnlineStatus(t`Valid`);
+            }
         }
         if (responseData.bypass) {
             setOnlineStatus(t`Status check bypassed`);
         }
     } catch (error) {
+        if (isFreeGeminiStatusCheck && statusCheckSignal.aborted) {
+            console.info('Free Gemini status check aborted or superseded.');
+            if (isStaleFreeGeminiStatusCheck()) {
+                return;
+            }
+            return resultCheckStatus();
+        }
+        if (isStaleFreeGeminiStatusCheck()) {
+            return;
+        }
+
         console.error(error);
 
+        if (isFreeGeminiStatusCheck) {
+            model_list = [];
+            oai_settings.free_gemini_model = '';
+            const select = $('#model_free_gemini_select').empty()
+                .append(new Option('模型加载失败，请重试连接', '', true, true));
+            refreshFreeGeminiSelectUi(select);
+        }
         if (!canBypass) {
             setOnlineStatus('no_connection');
         }
@@ -5181,6 +5370,16 @@ async function onModelChange() {
         oai_settings.google_model = value;
     }
 
+    if ($(this).is('#model_free_gemini_select')) {
+        if (!value) {
+            console.debug('Null free Gemini model selected. Ignoring.');
+            return;
+        }
+
+        console.log('Free Gemini model changed to', value);
+        oai_settings.free_gemini_model = value;
+    }
+
     if ($(this).is('#model_vertexai_select')) {
         console.log('Vertex AI model changed to', value);
         oai_settings.vertexai_model = value;
@@ -5331,7 +5530,7 @@ async function onModelChange() {
         oai_settings.zai_model = value;
     }
 
-    if ([chat_completion_sources.MAKERSUITE, chat_completion_sources.VERTEXAI].includes(oai_settings.chat_completion_source)) {
+    if ([chat_completion_sources.MAKERSUITE, chat_completion_sources.FREE_GEMINI, chat_completion_sources.VERTEXAI].includes(oai_settings.chat_completion_source)) {
         if (oai_settings.max_context_unlocked) {
             $('#openai_max_context').attr('max', max_2mil);
         } else if (value.includes('gemini-2.5-flash-image')) {
@@ -5777,6 +5976,9 @@ function toggleChatCompletionForms() {
     else if (oai_settings.chat_completion_source == chat_completion_sources.MAKERSUITE) {
         $('#model_google_select').trigger('change');
     }
+    else if (oai_settings.chat_completion_source == chat_completion_sources.FREE_GEMINI) {
+        $('#model_free_gemini_select').trigger('change');
+    }
     else if (oai_settings.chat_completion_source == chat_completion_sources.VERTEXAI) {
         $('#model_vertexai_select').trigger('change');
         // Update UI based on authentication mode
@@ -5987,6 +6189,8 @@ export function isImageInliningSupported() {
         }
         case chat_completion_sources.MAKERSUITE:
             return visionSupportedModels.some(model => oai_settings.google_model.includes(model));
+        case chat_completion_sources.FREE_GEMINI:
+            return visionSupportedModels.some(model => oai_settings.free_gemini_model.includes(model));
         case chat_completion_sources.VERTEXAI:
             return visionSupportedModels.some(model => oai_settings.vertexai_model.includes(model));
         case chat_completion_sources.CLAUDE:
@@ -6052,6 +6256,8 @@ export function isVideoInliningSupported() {
     switch (oai_settings.chat_completion_source) {
         case chat_completion_sources.MAKERSUITE:
             return videoSupportedModels.some(model => oai_settings.google_model.includes(model));
+        case chat_completion_sources.FREE_GEMINI:
+            return videoSupportedModels.some(model => oai_settings.free_gemini_model.includes(model));
         case chat_completion_sources.VERTEXAI:
             return videoSupportedModels.some(model => oai_settings.vertexai_model.includes(model));
         case chat_completion_sources.OPENROUTER:
@@ -6087,6 +6293,8 @@ export function isAudioInliningSupported() {
     switch (oai_settings.chat_completion_source) {
         case chat_completion_sources.MAKERSUITE:
             return audioSupportedModels.some(model => oai_settings.google_model.includes(model));
+        case chat_completion_sources.FREE_GEMINI:
+            return audioSupportedModels.some(model => oai_settings.free_gemini_model.includes(model));
         case chat_completion_sources.VERTEXAI:
             return audioSupportedModels.some(model => oai_settings.vertexai_model.includes(model));
         case chat_completion_sources.OPENROUTER:
@@ -6103,7 +6311,7 @@ export function isAudioInliningSupported() {
  */
 export function isReasoningSignatureSupported(settings = oai_settings) {
     // If it's Vertex AI or Makersuite, that's OK - convertGooglePrompt() will handle it later
-    const isGoogle = [chat_completion_sources.VERTEXAI, chat_completion_sources.MAKERSUITE].includes(settings.chat_completion_source);
+    const isGoogle = [chat_completion_sources.VERTEXAI, chat_completion_sources.MAKERSUITE, chat_completion_sources.FREE_GEMINI].includes(settings.chat_completion_source);
     // Need a more crunchy check for OpenRouter: look for Gemini models
     const isOpenRouterGemini = settings.chat_completion_source === chat_completion_sources.OPENROUTER && /google\/gemini/i.test(settings.openrouter_model);
     return isGoogle || isOpenRouterGemini;
@@ -6598,6 +6806,9 @@ export function initOpenAI() {
         oai_settings.chat_completion_source = String($(this).find(':selected').val());
         toggleChatCompletionForms();
         saveSettingsDebounced();
+        if (oai_settings.chat_completion_source === chat_completion_sources.FREE_GEMINI) {
+            loadFreeGeminiChannels(true);
+        }
         reconnectOpenAi();
         forceCharacterEditorTokenize();
         updateFeatureSupportFlags();
@@ -6901,6 +7112,12 @@ export function initOpenAI() {
             templateResult: getNanoGptModelTemplate,
             matcher: textValueMatcher,
         });
+        $('#model_free_gemini_select').select2({
+            placeholder: t`Select a model`,
+            searchInputPlaceholder: t`Search models...`,
+            searchInputCssClass: 'text_pole',
+            width: '100%',
+        });
         $('#completion_prompt_manager_popup_entry_form_injection_trigger').select2({
             placeholder: t`All types (default)`,
             width: '100%',
@@ -6931,6 +7148,24 @@ export function initOpenAI() {
     $('#model_openai_select').on('change', onModelChange);
     $('#model_claude_select').on('change', onModelChange);
     $('#model_google_select').on('change', onModelChange);
+    $('#model_free_gemini_select').on('change', onModelChange);
+    $('#free_gemini_channel_select').on('change', async function () {
+        const selectedChannelId = String($(this).val() || '');
+        if (selectedChannelId.startsWith('__free_gemini_')) return;
+
+        cancelStatusCheck('Free Gemini channel changed');
+        oai_settings.free_gemini_channel_id = selectedChannelId;
+        oai_settings.free_gemini_model = '';
+        model_list = [];
+        const modelSelect = $('#model_free_gemini_select').empty()
+            .append(new Option('正在加载对应模型...', '', true, true));
+        refreshFreeGeminiSelectUi(modelSelect);
+        saveSettingsDebounced();
+        if (oai_settings.chat_completion_source === chat_completion_sources.FREE_GEMINI) {
+            startStatusLoading();
+            await getStatusOpen();
+        }
+    });
     $('#model_vertexai_select').on('change', onModelChange);
     $('#vertexai_auth_mode').on('change', onVertexAIAuthModeChange);
     $('#vertexai_region').on('input', function () {
@@ -6989,4 +7224,5 @@ export function initOpenAI() {
     $('#openai_proxy_password_show').on('click', onProxyPasswordShowClick);
     $('#customize_additional_parameters').on('click', onCustomizeParametersClick);
     $('#openai_proxy_preset').on('change', onProxyPresetChange);
+    loadFreeGeminiChannels();
 }

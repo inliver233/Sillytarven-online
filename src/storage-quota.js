@@ -1,4 +1,3 @@
-import fs from 'node:fs';
 import path from 'node:path';
 import { promises as fsPromises } from 'node:fs';
 
@@ -46,17 +45,24 @@ export function getLocalDateKey(date = new Date()) {
 }
 
 export async function calculateDirectorySize(dirPath) {
-    let totalSize = 0;
+    let items;
 
     try {
-        if (!fs.existsSync(dirPath)) {
+        items = await fsPromises.readdir(dirPath);
+    } catch (error) {
+        if (error?.code === 'ENOENT') {
             return 0;
         }
 
-        const items = await fsPromises.readdir(dirPath);
+        throw error;
+    }
 
-        for (const item of items) {
-            const itemPath = path.join(dirPath, item);
+    let totalSize = 0;
+
+    for (const item of items) {
+        const itemPath = path.join(dirPath, item);
+
+        try {
             const stats = await fsPromises.stat(itemPath);
 
             if (stats.isDirectory()) {
@@ -64,9 +70,13 @@ export async function calculateDirectorySize(dirPath) {
             } else {
                 totalSize += stats.size;
             }
+        } catch (error) {
+            if (error?.code === 'ENOENT') {
+                continue;
+            }
+
+            throw error;
         }
-    } catch (error) {
-        console.error('Error calculating directory size:', error);
     }
 
     return totalSize;

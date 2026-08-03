@@ -4,9 +4,741 @@ let systemLoadInterval;
 let systemLoadAutoPaused = false;
 let currentSystemData = null;
 let currentPerformanceData = null;
+let currentFreeGeminiChannels = [];
+let currentFreeGeminiUpstreamModels = [];
+let freeGeminiModelEnabledState = new Map();
+let freeGeminiChannelFormDirty = false;
+let suppressFreeGeminiChannelDirtyTracking = false;
+let freeGeminiChannelSaveInProgress = false;
+let freeGeminiChannelModelsLoading = false;
+let freeGeminiChannelsLoadRequestId = 0;
+let freeGeminiChannelModelsRequestId = 0;
+let freeGeminiChannelMutationRequestId = 0;
+const freeGeminiChannelDefaults = Object.freeze({
+    priority: 0,
+    modelPolicy: 'all',
+    timeoutMs: 30000,
+    maxRetries: 1,
+    modelCacheTtlMs: 300000,
+    maxOutputTokens: 0,
+});
 let currentInvitationCodes = [];
 const selectedInvitationCodes = new Set();
 let csrfToken = null;
+
+// ===== 全局免费 Gemini 渠道（管理员端） =====
+function resetFreeGeminiChannelRuntimeState() {
+    currentFreeGeminiChannels = [];
+    currentFreeGeminiUpstreamModels = [];
+    freeGeminiModelEnabledState = new Map();
+    freeGeminiChannelFormDirty = false;
+    suppressFreeGeminiChannelDirtyTracking = false;
+    freeGeminiChannelSaveInProgress = false;
+    freeGeminiChannelModelsLoading = false;
+    freeGeminiChannelsLoadRequestId++;
+    freeGeminiChannelModelsRequestId++;
+    freeGeminiChannelMutationRequestId++;
+}
+
+function bindFreeGeminiChannelEvents(root = document) {
+    // 管理面板是动态弹窗：在模板插入前直接对模板节点绑定，不依赖 document 冒泡或延迟初始化。
+    if (root !== document) resetFreeGeminiChannelRuntimeState();
+    const scope = root?.jquery ? root : $(root);
+    const findInScope = selector => scope.filter(selector).add(scope.find(selector));
+
+    findInScope('#saveFreeGeminiChannel')
+        .off('click.freeGeminiChannels')
+        .on('click.freeGeminiChannels', saveFreeGeminiChannel);
+    findInScope('#freeGeminiChannelForm input:not(#freeGeminiModelSearch)')
+        .off('keydown.freeGeminiChannels')
+        .on('keydown.freeGeminiChannels', async function (event) {
+            if (event.key === 'Enter') await saveFreeGeminiChannel(event);
+        });
+    findInScope('#cancelFreeGeminiChannelEdit')
+        .off('click.freeGeminiChannels')
+        .on('click.freeGeminiChannels', () => {
+            if (confirmDiscardFreeGeminiChannelChanges()) resetFreeGeminiChannelForm();
+        });
+    findInScope('#newFreeGeminiChannel')
+        .off('click.freeGeminiChannels')
+        .on('click.freeGeminiChannels', () => {
+            if (confirmDiscardFreeGeminiChannelChanges()) resetFreeGeminiChannelForm();
+        });
+    findInScope('#refreshFreeGeminiChannels')
+        .off('click.freeGeminiChannels')
+        .on('click.freeGeminiChannels', async () => {
+            if (freeGeminiChannelSaveInProgress) return;
+            if (!confirmDiscardFreeGeminiChannelChanges('刷新列表会放弃当前未保存的渠道配置，确定继续吗？')) return;
+            resetFreeGeminiChannelForm();
+            await loadFreeGeminiChannelsAdmin();
+        });
+    findInScope('#refreshFreeGeminiChannelModels')
+        .off('click.freeGeminiChannels')
+        .on('click.freeGeminiChannels', refreshFreeGeminiChannelModels);
+    findInScope('#clearFreeGeminiChannelModels')
+        .off('click.freeGeminiChannels')
+        .on('click.freeGeminiChannels', () => {
+            if (freeGeminiChannelSaveInProgress) return;
+            $('#freeGeminiChannelModels').val('');
+            resetFreeGeminiModelEnabledState();
+            setFreeGeminiChannelFormDirty(true);
+        });
+    findInScope('#freeGeminiChannelModels')
+        .off('input.freeGeminiChannels')
+        .on('input.freeGeminiChannels', resetFreeGeminiModelEnabledState);
+    findInScope('#freeGeminiModelSearch')
+        .off('input.freeGeminiChannels')
+        .on('input.freeGeminiChannels', renderFreeGeminiUpstreamModels);
+    findInScope('#freeGeminiUpstreamModels')
+        .off('change.freeGeminiChannels')
+        .on('change.freeGeminiChannels', '.freeGeminiModelEnabled', function () {
+            if (freeGeminiChannelSaveInProgress) return;
+            const model = String($(this).data('model') || '');
+            if (!model) return;
+            freeGeminiModelEnabledState.set(model, $(this).prop('checked'));
+            syncFreeGeminiModelsFromCheckboxes();
+            updateFreeGeminiModelSelectionCount();
+            setFreeGeminiChannelFormDirty(true);
+        });
+    findInScope('#freeGeminiChannelModelPolicy')
+        .off('change.freeGeminiModelPolicy')
+        .on('change.freeGeminiModelPolicy', handleFreeGeminiModelPolicyChange);
+    findInScope('#freeGeminiChannelForm input:not([type="hidden"]):not(#freeGeminiModelSearch), #freeGeminiChannelForm select, #freeGeminiChannelForm textarea')
+        .off('input.freeGeminiDirty change.freeGeminiDirty')
+        .on('input.freeGeminiDirty change.freeGeminiDirty', function () {
+            setFreeGeminiChannelFormDirty(true);
+            if (this.id === 'freeGeminiChannelName') updateFreeGeminiChannelFormState();
+        });
+    // Keep this guard ahead of the generic tab handler that is attached after
+    // the detached admin template is initialized. Do not reorder it later.
+    if (root !== document) {
+        findInScope('.adminNav > button')
+            .off('click.freeGeminiNavigation')
+            .on('click.freeGeminiNavigation', function (event) {
+                const target = String($(this).data('target-tab') || '');
+                const leavingFreeGemini = target !== 'freeGeminiChannelsBlock'
+                    && findInScope('.freeGeminiChannelsBlock').is(':visible');
+                if (!leavingFreeGemini) return;
+                if (freeGeminiChannelSaveInProgress) {
+                    event.preventDefault();
+                    event.stopImmediatePropagation();
+                    toastr.info('渠道配置正在保存，请稍候。');
+                    return;
+                }
+                if (!confirmDiscardFreeGeminiChannelChanges('切换选项卡会放弃当前未保存的渠道配置，确定继续吗？')) {
+                    event.preventDefault();
+                    event.stopImmediatePropagation();
+                    return;
+                }
+                if (freeGeminiChannelFormDirty) resetFreeGeminiChannelForm();
+            });
+    }
+    findInScope('.freeGeminiChannelsButton')
+        .off('click.freeGeminiChannels')
+        .on('click.freeGeminiChannels', () => {
+            setTimeout(loadFreeGeminiChannelsAdmin, 0);
+        });
+
+    findInScope('#freeGeminiChannelsList')
+        .off('.freeGeminiChannels')
+        .on('click.freeGeminiChannels', '.freeGeminiEditChannel', function () {
+            if (freeGeminiChannelSaveInProgress) return;
+            const channel = currentFreeGeminiChannels.find(item => item.id === String($(this).data('id') || ''));
+            if (channel && confirmDiscardFreeGeminiChannelChanges('切换渠道会放弃当前未保存的配置，确定继续吗？')) {
+                beginFreeGeminiChannelEdit(channel);
+            }
+        })
+        .on('click.freeGeminiChannels', '.freeGeminiDeleteChannel', async function () {
+            if (freeGeminiChannelSaveInProgress) return;
+            if (!confirmDiscardFreeGeminiChannelChanges('删除渠道会放弃当前未保存的渠道配置，确定继续吗？')) return;
+            await deleteFreeGeminiChannel(String($(this).data('id') || ''));
+        })
+        .on('click.freeGeminiChannels', '.freeGeminiTestChannel', async function () {
+            if (freeGeminiChannelSaveInProgress) return;
+            await testFreeGeminiChannel(String($(this).data('id') || ''), $(this));
+        })
+        .on('click.freeGeminiChannels', '.freeGeminiToggleChannel', async function () {
+            if (freeGeminiChannelSaveInProgress) return;
+            const channel = currentFreeGeminiChannels.find(item => item.id === String($(this).data('id') || ''));
+            if (channel) await updateFreeGeminiChannelState(channel, !channel.enabled);
+        });
+}
+
+function normalizeFreeGeminiModels(value) {
+    const values = Array.isArray(value) ? value : String(value || '').split(/\r?\n/);
+    return [...new Set(values
+        .map(item => typeof item === 'object' && item ? item.id : item)
+        .map(item => String(item || '').trim())
+        .filter(Boolean))];
+}
+
+function serializeFreeGeminiModelPolicy(policy, models, enabledModels, preservedModels = []) {
+    const modelIds = normalizeFreeGeminiModels(models);
+    const enabled = new Set(normalizeFreeGeminiModels(enabledModels));
+    if (policy === 'all') return normalizeFreeGeminiModels(preservedModels);
+    return modelIds.filter(model => policy === 'allowlist' ? enabled.has(model) : !enabled.has(model));
+}
+
+function getFreeGeminiNumber(value, fallback) {
+    if (value === null || value === undefined || String(value).trim() === '') return fallback;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : fallback;
+}
+
+function setFreeGeminiModelPolicyValue(value) {
+    const allowedPolicies = new Set(['all', 'allowlist', 'denylist']);
+    const policy = allowedPolicies.has(String(value)) ? String(value) : freeGeminiChannelDefaults.modelPolicy;
+    $('#freeGeminiChannelModelPolicy').val(policy);
+    updateFreeGeminiModelPolicyHelp();
+}
+
+function updateFreeGeminiModelPolicyHelp() {
+    const policy = String($('#freeGeminiChannelModelPolicy').val() || freeGeminiChannelDefaults.modelPolicy);
+    const descriptions = {
+        all: '全部模型均启用，不限制上游模型。',
+        allowlist: '勾选的模型会启用；未勾选的模型不可用。',
+        denylist: '勾选的模型会启用；未勾选的模型会写入排除列表。',
+    };
+    $('#freeGeminiChannelModelsHelp').text(descriptions[policy] || descriptions.all);
+}
+
+function handleFreeGeminiModelPolicyChange() {
+    const policy = String($('#freeGeminiChannelModelPolicy').val() || freeGeminiChannelDefaults.modelPolicy);
+    if (policy === 'all') {
+        currentFreeGeminiUpstreamModels.forEach(model => freeGeminiModelEnabledState.set(model, true));
+    }
+    syncFreeGeminiModelsFromCheckboxes();
+    updateFreeGeminiModelPolicyHelp();
+    renderFreeGeminiUpstreamModels();
+}
+
+function updateFreeGeminiChannelFormState() {
+    const id = String($('#freeGeminiChannelId').val() || '');
+    const name = String($('#freeGeminiChannelName').val() || '').trim() || '未命名渠道';
+    $('#freeGeminiChannelFormMode').text(id ? `正在编辑：${name}` : '正在新建渠道');
+    $('#saveFreeGeminiChannel').html(id
+        ? '<i class="fa-fw fa-solid fa-floppy-disk"></i><span>保存渠道配置</span>'
+        : '<i class="fa-fw fa-solid fa-floppy-disk"></i><span>创建并保存渠道</span>');
+    $('#cancelFreeGeminiChannelEdit').toggle(!!id);
+}
+
+function setFreeGeminiChannelFormDirty(dirty) {
+    if (suppressFreeGeminiChannelDirtyTracking) return;
+    freeGeminiChannelFormDirty = !!dirty;
+    $('#freeGeminiChannelDirtyStatus')
+        .text(freeGeminiChannelFormDirty ? '有未保存更改' : '所有更改均已保存')
+        .css('color', freeGeminiChannelFormDirty ? '#f59e0b' : 'var(--SmartThemeEmColor)');
+}
+
+function confirmDiscardFreeGeminiChannelChanges(message = '当前渠道配置有未保存更改，确定放弃吗？') {
+    return !freeGeminiChannelFormDirty || confirm(message);
+}
+
+function canCloseFreeGeminiChannelAdmin() {
+    if (freeGeminiChannelSaveInProgress) {
+        toastr.info('渠道配置正在保存，请稍候。');
+        return false;
+    }
+    return confirmDiscardFreeGeminiChannelChanges('关闭管理员面板会放弃当前未保存的渠道配置，确定继续吗？');
+}
+
+function updateFreeGeminiModelSelectionCount() {
+    const enabledCount = currentFreeGeminiUpstreamModels.filter(model => freeGeminiModelEnabledState.get(model)).length;
+    $('#freeGeminiModelSelectionCount').text(`${enabledCount} / ${currentFreeGeminiUpstreamModels.length} 已启用`);
+}
+
+function renderFreeGeminiUpstreamModels() {
+    const container = $('#freeGeminiUpstreamModels');
+    if (!container.length) return;
+
+    const policy = String($('#freeGeminiChannelModelPolicy').val() || freeGeminiChannelDefaults.modelPolicy);
+    const query = String($('#freeGeminiModelSearch').val() || '').trim().toLocaleLowerCase();
+    const visibleModels = currentFreeGeminiUpstreamModels.filter(model => model.toLocaleLowerCase().includes(query));
+    const disabled = policy === 'all' || freeGeminiChannelSaveInProgress;
+    container.empty();
+    visibleModels.forEach(model => {
+        const checked = freeGeminiModelEnabledState.get(model) !== false;
+        const checkbox = $('<input type="checkbox">')
+            .addClass('freeGeminiModelEnabled')
+            .data('model', model)
+            .prop('checked', checked)
+            .prop('disabled', disabled);
+        const row = $('<label>')
+            .addClass('freeGeminiModelRow')
+            .append(checkbox, $('<span>').text(model));
+        container.append(row);
+    });
+    if (visibleModels.length === 0) {
+        container.append($('<div>').addClass('freeGeminiModelEmpty').text('没有匹配的模型'));
+    }
+    $('#freeGeminiUpstreamModelsBlock').toggle(currentFreeGeminiUpstreamModels.length > 0);
+    updateFreeGeminiModelSelectionCount();
+}
+
+function resetFreeGeminiModelEnabledState() {
+    const policy = String($('#freeGeminiChannelModelPolicy').val() || freeGeminiChannelDefaults.modelPolicy);
+    const configuredModels = normalizeFreeGeminiModels($('#freeGeminiChannelModels').val());
+    const configured = new Set(configuredModels);
+    currentFreeGeminiUpstreamModels = normalizeFreeGeminiModels([
+        ...currentFreeGeminiUpstreamModels,
+        ...configuredModels,
+    ]).sort((a, b) => a.localeCompare(b));
+    freeGeminiModelEnabledState = new Map(currentFreeGeminiUpstreamModels.map(model => [
+        model,
+        policy === 'allowlist' ? configured.has(model) : (policy === 'denylist' ? !configured.has(model) : true),
+    ]));
+    renderFreeGeminiUpstreamModels();
+}
+
+function mergeFreeGeminiUpstreamModels(models, replaceUpstream = false) {
+    const policy = String($('#freeGeminiChannelModelPolicy').val() || freeGeminiChannelDefaults.modelPolicy);
+    const configured = new Set(normalizeFreeGeminiModels($('#freeGeminiChannelModels').val()));
+    const mergedModels = normalizeFreeGeminiModels([
+        ...(replaceUpstream ? [] : currentFreeGeminiUpstreamModels),
+        ...models,
+        ...configured,
+    ]).sort((a, b) => a.localeCompare(b));
+
+    const nextEnabledState = new Map();
+    mergedModels.forEach(model => {
+        const defaultEnabled = policy === 'allowlist' ? configured.has(model) : (policy === 'denylist' ? !configured.has(model) : true);
+        nextEnabledState.set(model, freeGeminiModelEnabledState.has(model)
+            ? freeGeminiModelEnabledState.get(model)
+            : defaultEnabled);
+    });
+    currentFreeGeminiUpstreamModels = mergedModels;
+    freeGeminiModelEnabledState = nextEnabledState;
+    renderFreeGeminiUpstreamModels();
+}
+
+function syncFreeGeminiModelsFromCheckboxes() {
+    const policy = String($('#freeGeminiChannelModelPolicy').val() || freeGeminiChannelDefaults.modelPolicy);
+    const enabledModels = currentFreeGeminiUpstreamModels.filter(model => freeGeminiModelEnabledState.get(model));
+    const configuredModels = serializeFreeGeminiModelPolicy(
+        policy,
+        currentFreeGeminiUpstreamModels,
+        enabledModels,
+        $('#freeGeminiChannelModels').val(),
+    );
+    $('#freeGeminiChannelModels').val(configuredModels.join('\n'));
+}
+
+function setFreeGeminiChannelModelsLoading(loading, refresh = false) {
+    freeGeminiChannelModelsLoading = !!loading;
+    $('#refreshFreeGeminiChannelModels')
+        .prop('disabled', freeGeminiChannelModelsLoading || freeGeminiChannelSaveInProgress)
+        .html(freeGeminiChannelModelsLoading
+            ? `<i class="fa-fw fa-solid fa-spinner fa-spin"></i><span>${refresh ? '刷新中' : '加载中'}</span>`
+            : '<i class="fa-fw fa-solid fa-cloud-arrow-down"></i><span>刷新上游模型</span>');
+}
+
+function setFreeGeminiChannelSaveBusy(busy) {
+    freeGeminiChannelSaveInProgress = !!busy;
+    $('#freeGeminiChannelForm :input, #freeGeminiChannelsList button').prop('disabled', freeGeminiChannelSaveInProgress);
+    if (!freeGeminiChannelSaveInProgress) {
+        $('#freeGeminiChannelForm :input').prop('disabled', false);
+        setFreeGeminiChannelModelsLoading(freeGeminiChannelModelsLoading);
+        renderFreeGeminiUpstreamModels();
+        renderFreeGeminiChannelsAdmin();
+    }
+}
+
+function isCurrentFreeGeminiChannelMutation(requestId) {
+    return requestId === freeGeminiChannelMutationRequestId;
+}
+
+function resetFreeGeminiChannelForm() {
+    freeGeminiChannelModelsRequestId++;
+    currentFreeGeminiUpstreamModels = [];
+    freeGeminiModelEnabledState = new Map();
+    setFreeGeminiChannelModelsLoading(false);
+    suppressFreeGeminiChannelDirtyTracking = true;
+    try {
+        $('#freeGeminiChannelId').val('');
+        $('#freeGeminiChannelName').val('free-gemini');
+        $('#freeGeminiChannelUrl').val('');
+        $('#freeGeminiChannelKey').val('').attr('placeholder', '新建时必填；编辑时留空表示保留原 Key');
+        $('#freeGeminiChannelEnabled').prop('checked', true);
+        $('#freeGeminiChannelPriority').val(freeGeminiChannelDefaults.priority);
+        setFreeGeminiModelPolicyValue(freeGeminiChannelDefaults.modelPolicy);
+        $('#freeGeminiChannelModels').val('');
+        $('#freeGeminiChannelTimeoutMs').val(freeGeminiChannelDefaults.timeoutMs);
+        $('#freeGeminiChannelMaxRetries').val(freeGeminiChannelDefaults.maxRetries);
+        $('#freeGeminiChannelModelCacheTtlMs').val(freeGeminiChannelDefaults.modelCacheTtlMs);
+        $('#freeGeminiChannelMaxOutputTokens').val(freeGeminiChannelDefaults.maxOutputTokens);
+        $('#freeGeminiModelSearch').val('');
+        $('#freeGeminiUpstreamModels').empty();
+        $('#freeGeminiUpstreamModelsBlock').hide();
+        $('#freeGeminiChannelModelsStatus').text('保存渠道后可刷新并选择上游模型。');
+        updateFreeGeminiChannelFormState();
+    } finally {
+        suppressFreeGeminiChannelDirtyTracking = false;
+    }
+    setFreeGeminiChannelFormDirty(false);
+}
+
+function beginFreeGeminiChannelEdit(channel) {
+    freeGeminiChannelModelsRequestId++;
+    currentFreeGeminiUpstreamModels = [];
+    freeGeminiModelEnabledState = new Map();
+    setFreeGeminiChannelModelsLoading(false);
+    suppressFreeGeminiChannelDirtyTracking = true;
+    try {
+        $('#freeGeminiChannelId').val(channel.id);
+        $('#freeGeminiChannelName').val(channel.name || 'free-gemini');
+        $('#freeGeminiChannelUrl').val(channel.url || '');
+        $('#freeGeminiChannelKey').val('').attr('placeholder', '留空表示保留现有 API Key');
+        $('#freeGeminiChannelEnabled').prop('checked', !!channel.enabled);
+        $('#freeGeminiChannelPriority').val(getFreeGeminiNumber(channel.priority, freeGeminiChannelDefaults.priority));
+        setFreeGeminiModelPolicyValue(channel.modelPolicy);
+        $('#freeGeminiChannelModels').val(normalizeFreeGeminiModels(channel.models).join('\n'));
+        $('#freeGeminiChannelTimeoutMs').val(getFreeGeminiNumber(channel.timeoutMs, freeGeminiChannelDefaults.timeoutMs));
+        $('#freeGeminiChannelMaxRetries').val(getFreeGeminiNumber(channel.maxRetries, freeGeminiChannelDefaults.maxRetries));
+        $('#freeGeminiChannelModelCacheTtlMs').val(getFreeGeminiNumber(channel.modelCacheTtlMs, freeGeminiChannelDefaults.modelCacheTtlMs));
+        $('#freeGeminiChannelMaxOutputTokens').val(getFreeGeminiNumber(channel.maxOutputTokens, freeGeminiChannelDefaults.maxOutputTokens));
+        $('#freeGeminiModelSearch').val('');
+        resetFreeGeminiModelEnabledState();
+        $('#freeGeminiChannelModelsStatus').text('正在加载缓存的上游模型...');
+        updateFreeGeminiChannelFormState();
+    } finally {
+        suppressFreeGeminiChannelDirtyTracking = false;
+    }
+    setFreeGeminiChannelFormDirty(false);
+    $('#freeGeminiChannelName').trigger('focus');
+    void loadFreeGeminiChannelModels(false);
+}
+
+async function refreshFreeGeminiChannelModels() {
+    await loadFreeGeminiChannelModels(true);
+}
+
+async function loadFreeGeminiChannelModels(refresh = false) {
+    const id = String($('#freeGeminiChannelId').val() || '');
+    const status = $('#freeGeminiChannelModelsStatus');
+    if (!id) {
+        const message = '请先保存渠道，再刷新上游模型。';
+        status.text(message);
+        toastr.info(message);
+        return;
+    }
+
+    const requestId = ++freeGeminiChannelModelsRequestId;
+    setFreeGeminiChannelModelsLoading(true, refresh);
+    status.text(refresh ? '正在绕过缓存读取上游模型...' : '正在读取缓存的上游模型...');
+    try {
+        const suffix = refresh ? '?refresh=true' : '';
+        const response = await fetch(`/api/free-gemini-channels/admin/${encodeURIComponent(id)}/models${suffix}`, {
+            method: 'GET',
+            headers: await getFreeGeminiRequestHeaders(),
+            cache: refresh ? 'no-cache' : 'default',
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (requestId !== freeGeminiChannelModelsRequestId || id !== String($('#freeGeminiChannelId').val() || '')) return;
+        if (!response.ok) throw new Error(payload.error || payload.message || '刷新上游模型失败');
+
+        const models = normalizeFreeGeminiModels(Array.isArray(payload.models) ? payload.models : []);
+        mergeFreeGeminiUpstreamModels(models, refresh);
+        status.text(models.length > 0
+            ? `${refresh ? '已刷新' : '已加载'} ${models.length} 个上游模型。`
+            : '上游未返回可用模型；可继续手工填写模型 ID。');
+    } catch (error) {
+        if (requestId !== freeGeminiChannelModelsRequestId || id !== String($('#freeGeminiChannelId').val() || '')) return;
+        console.error('刷新免费 Gemini 上游模型失败:', error);
+        status.text(`${refresh ? '刷新' : '加载'}失败：${error.message}`);
+        if (refresh) toastr.error(error.message);
+    } finally {
+        if (requestId === freeGeminiChannelModelsRequestId) setFreeGeminiChannelModelsLoading(false);
+    }
+}
+
+async function getFreeGeminiRequestHeaders() {
+    if (!csrfToken) {
+        await getCsrfToken();
+    }
+    return getRequestHeaders();
+}
+
+async function loadFreeGeminiChannelsAdmin(preferredChannelId = '') {
+    const list = $('#freeGeminiChannelsList');
+    const status = $('#freeGeminiChannelsStatus');
+    const editingId = String(preferredChannelId || $('#freeGeminiChannelId').val() || '');
+    const requestId = ++freeGeminiChannelsLoadRequestId;
+    list.html('<div style="padding:18px;text-align:center;"><i class="fa-solid fa-spinner fa-spin"></i> 正在加载...</div>');
+    status.text('正在读取服务器配置...');
+
+    try {
+        const response = await fetch('/api/free-gemini-channels/admin', {
+            method: 'GET',
+            headers: await getFreeGeminiRequestHeaders(),
+            cache: 'no-cache',
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (requestId !== freeGeminiChannelsLoadRequestId) return;
+        if (!response.ok) {
+            throw new Error(payload.error || '加载免费渠道失败');
+        }
+
+        const channels = Array.isArray(payload) ? payload : payload.channels;
+        currentFreeGeminiChannels = Array.isArray(channels) ? channels : [];
+        renderFreeGeminiChannelsAdmin();
+        status.text(`共 ${currentFreeGeminiChannels.length} 个渠道，启用 ${currentFreeGeminiChannels.filter(channel => channel.enabled).length} 个。`);
+
+        if (!freeGeminiChannelFormDirty) {
+            const editingChannel = editingId
+                ? currentFreeGeminiChannels.find(channel => channel.id === editingId)
+                : null;
+            if (editingChannel) {
+                beginFreeGeminiChannelEdit(editingChannel);
+            } else if (!editingId && currentFreeGeminiChannels.length === 1) {
+                beginFreeGeminiChannelEdit(currentFreeGeminiChannels[0]);
+            } else if (editingId) {
+                resetFreeGeminiChannelForm();
+            }
+        }
+    } catch (error) {
+        if (requestId !== freeGeminiChannelsLoadRequestId) return;
+        console.error('加载免费 Gemini 渠道失败:', error);
+        currentFreeGeminiChannels = [];
+        status.text('加载失败。');
+        list.html(`<div style="padding:18px;text-align:center;color:#ef4444;">${escapeHtml(error.message)}</div>`);
+    }
+}
+
+function renderFreeGeminiChannelsAdmin() {
+    const list = $('#freeGeminiChannelsList');
+    if (currentFreeGeminiChannels.length === 0) {
+        list.html('<div style="padding:18px;text-align:center;color:var(--SmartThemeEmColor);">暂无免费渠道，请在上方新增。</div>');
+        return;
+    }
+
+    list.html(currentFreeGeminiChannels.map(channel => {
+        const enabledText = channel.enabled ? '已启用' : '已停用';
+        const enabledColor = channel.enabled ? '#22c55e' : '#94a3b8';
+        const keyText = channel.maskedKey || channel.masked_key || (channel.hasKey || channel.keyConfigured ? '已配置（已隐藏）' : '未配置');
+        const updatedAt = channel.updatedAt ? new Date(channel.updatedAt).toLocaleString() : '—';
+        const models = normalizeFreeGeminiModels(channel.models);
+        const modelPolicyText = channel.modelPolicy === 'allowlist'
+            ? '仅允许列表'
+            : (channel.modelPolicy === 'denylist'
+                ? '排除列表'
+                : '全部上游模型');
+        const modelSummary = models.length > 0 ? `${models.length} 个：${models.slice(0, 4).join('、')}${models.length > 4 ? '…' : ''}` : '未指定';
+        const priority = getFreeGeminiNumber(channel.priority, freeGeminiChannelDefaults.priority);
+        const timeoutMs = getFreeGeminiNumber(channel.timeoutMs, freeGeminiChannelDefaults.timeoutMs);
+        const maxRetries = getFreeGeminiNumber(channel.maxRetries, freeGeminiChannelDefaults.maxRetries);
+        const modelCacheTtlMs = getFreeGeminiNumber(channel.modelCacheTtlMs, freeGeminiChannelDefaults.modelCacheTtlMs);
+        const maxOutputTokens = getFreeGeminiNumber(channel.maxOutputTokens, freeGeminiChannelDefaults.maxOutputTokens);
+        const maxOutputTokensText = maxOutputTokens > 0 ? `${maxOutputTokens} tokens` : '自动';
+        const mutationDisabled = freeGeminiChannelSaveInProgress ? 'disabled' : '';
+        return `<div style="padding:14px;border:1px solid var(--SmartThemeBorderColor);border-radius:10px;background:var(--SmartThemeBlurTintColor);">
+            <div class="flex-container alignItemsCenter justifySpaceBetween flexGap10" style="flex-wrap:wrap;">
+                <div style="min-width:0;flex:1;">
+                    <div class="flex-container alignItemsCenter flexGap10" style="flex-wrap:wrap;">
+                        <strong style="font-size:1.05em;">${escapeHtml(channel.name || 'free-gemini')}</strong>
+                        <span style="color:${enabledColor};font-weight:600;">${enabledText}</span>
+                        <span class="notes">优先级 ${escapeHtml(priority)}</span>
+                    </div>
+                    <div class="notes" style="word-break:break-all;margin-top:5px;">URL：${escapeHtml(channel.url || '')}</div>
+                    <div class="notes">模型策略：${escapeHtml(modelPolicyText)} · ${escapeHtml(modelSummary)}</div>
+                    <div class="notes">超时：${escapeHtml(timeoutMs)} ms · 重试：${escapeHtml(maxRetries)} 次 · 模型缓存：${escapeHtml(modelCacheTtlMs)} ms · 输出 cap：${escapeHtml(maxOutputTokensText)}</div>
+                    <div class="notes">API Key：${escapeHtml(keyText)} · 最后更新：${escapeHtml(updatedAt)}</div>
+                </div>
+                <div class="flex-container flexGap10" style="flex-wrap:wrap;">
+                    <button type="button" class="menu_button menu_button_icon freeGeminiTestChannel" data-id="${escapeHtml(channel.id)}" ${mutationDisabled}><i class="fa-fw fa-solid fa-plug-circle-check"></i><span>测试</span></button>
+                    <button type="button" class="menu_button menu_button_icon freeGeminiToggleChannel" data-id="${escapeHtml(channel.id)}" ${mutationDisabled}><i class="fa-fw fa-solid ${channel.enabled ? 'fa-pause' : 'fa-play'}"></i><span>${channel.enabled ? '停用' : '启用'}</span></button>
+                    <button type="button" class="menu_button menu_button_icon freeGeminiEditChannel" data-id="${escapeHtml(channel.id)}" ${mutationDisabled}><i class="fa-fw fa-solid fa-pen"></i><span>编辑</span></button>
+                    <button type="button" class="menu_button menu_button_icon warning freeGeminiDeleteChannel" data-id="${escapeHtml(channel.id)}" ${mutationDisabled}><i class="fa-fw fa-solid fa-trash"></i><span>删除</span></button>
+                </div>
+            </div>
+        </div>`;
+    }).join(''));
+}
+
+async function saveFreeGeminiChannel(event) {
+    event?.preventDefault();
+
+    const status = $('#freeGeminiChannelsStatus');
+    const button = $('#saveFreeGeminiChannel');
+    if (freeGeminiChannelSaveInProgress || button.prop('disabled')) return;
+
+    const invalidInput = [
+        'freeGeminiChannelName',
+        'freeGeminiChannelUrl',
+        'freeGeminiChannelPriority',
+        'freeGeminiChannelTimeoutMs',
+        'freeGeminiChannelMaxRetries',
+        'freeGeminiChannelModelCacheTtlMs',
+        'freeGeminiChannelMaxOutputTokens',
+    ].map(id => document.getElementById(id)).find(input => input && !input.checkValidity());
+    if (invalidInput) {
+        invalidInput.reportValidity();
+        return;
+    }
+
+    const id = String($('#freeGeminiChannelId').val() || '');
+    const key = String($('#freeGeminiChannelKey').val() || '');
+    const body = {
+        name: String($('#freeGeminiChannelName').val() || '').trim(),
+        url: String($('#freeGeminiChannelUrl').val() || '').trim(),
+        enabled: $('#freeGeminiChannelEnabled').prop('checked'),
+        priority: getFreeGeminiNumber($('#freeGeminiChannelPriority').val(), freeGeminiChannelDefaults.priority),
+        modelPolicy: String($('#freeGeminiChannelModelPolicy').val() || freeGeminiChannelDefaults.modelPolicy),
+        models: normalizeFreeGeminiModels($('#freeGeminiChannelModels').val()),
+        timeoutMs: getFreeGeminiNumber($('#freeGeminiChannelTimeoutMs').val(), freeGeminiChannelDefaults.timeoutMs),
+        maxRetries: getFreeGeminiNumber($('#freeGeminiChannelMaxRetries').val(), freeGeminiChannelDefaults.maxRetries),
+        modelCacheTtlMs: getFreeGeminiNumber($('#freeGeminiChannelModelCacheTtlMs').val(), freeGeminiChannelDefaults.modelCacheTtlMs),
+        maxOutputTokens: getFreeGeminiNumber($('#freeGeminiChannelMaxOutputTokens').val(), freeGeminiChannelDefaults.maxOutputTokens),
+    };
+    if (key) body.key = key;
+
+    if (!body.name || !body.url || (!id && !key)) {
+        const message = !id && !key ? '新增渠道时必须填写 API Key' : '请填写完整的渠道名称和 URL';
+        status.text(message);
+        toastr.error(message);
+        return;
+    }
+
+    const mutationRequestId = ++freeGeminiChannelMutationRequestId;
+    status.text(id ? '正在保存渠道修改...' : '正在新增渠道...');
+    setFreeGeminiChannelSaveBusy(true);
+    try {
+        const url = id
+            ? `/api/free-gemini-channels/admin/${encodeURIComponent(id)}`
+            : '/api/free-gemini-channels/admin';
+        const response = await fetch(url, {
+            method: id ? 'PUT' : 'POST',
+            headers: await getFreeGeminiRequestHeaders(),
+            body: JSON.stringify(body),
+        });
+        const responseText = await response.text();
+        let payload = {};
+        try {
+            payload = responseText ? JSON.parse(responseText) : {};
+        } catch {
+            // 保留原始响应文本用于显示 HTTP 错误。
+        }
+        if (!isCurrentFreeGeminiChannelMutation(mutationRequestId)) return;
+        if (!response.ok) {
+            const fallbackMessage = response.status === 404
+                ? '免费渠道后端接口尚未加载，请重启 SillyTavern 服务后重试。'
+                : `保存免费渠道失败（HTTP ${response.status}）`;
+            const responseMessage = /Invalid CSRF token/i.test(responseText)
+                ? '安全令牌已过期，请刷新页面后重试。'
+                : responseText.trim().slice(0, 300);
+            const errorMessage = response.status === 404
+                ? fallbackMessage
+                : (payload.error || payload.message || responseMessage || fallbackMessage);
+            throw new Error(errorMessage);
+        }
+        const savedChannelId = String(payload.channel?.id || id || '');
+        if (!savedChannelId) throw new Error('服务器未返回已保存渠道的 ID');
+        toastr.success(id ? '免费渠道已更新' : '免费渠道已新增');
+        status.text(id ? '渠道修改已保存。' : '渠道新增成功。');
+        $('#freeGeminiChannelId').val(savedChannelId);
+        $('#freeGeminiChannelKey').val('');
+        setFreeGeminiChannelFormDirty(false);
+        await loadFreeGeminiChannelsAdmin(savedChannelId);
+    } catch (error) {
+        if (!isCurrentFreeGeminiChannelMutation(mutationRequestId)) return;
+        console.error('保存免费 Gemini 渠道失败:', error);
+        status.text(`保存失败：${error.message}`);
+        toastr.error(error.message);
+    } finally {
+        if (isCurrentFreeGeminiChannelMutation(mutationRequestId)) setFreeGeminiChannelSaveBusy(false);
+    }
+}
+
+async function updateFreeGeminiChannelState(channel, enabled) {
+    if (freeGeminiChannelSaveInProgress) return;
+    const mutationRequestId = ++freeGeminiChannelMutationRequestId;
+    setFreeGeminiChannelSaveBusy(true);
+    try {
+        const response = await fetch(`/api/free-gemini-channels/admin/${encodeURIComponent(channel.id)}`, {
+            method: 'PUT',
+            headers: await getFreeGeminiRequestHeaders(),
+            body: JSON.stringify({
+                name: channel.name,
+                url: channel.url,
+                enabled,
+                priority: getFreeGeminiNumber(channel.priority, freeGeminiChannelDefaults.priority),
+                modelPolicy: channel.modelPolicy || freeGeminiChannelDefaults.modelPolicy,
+                models: normalizeFreeGeminiModels(channel.models),
+                timeoutMs: getFreeGeminiNumber(channel.timeoutMs, freeGeminiChannelDefaults.timeoutMs),
+                maxRetries: getFreeGeminiNumber(channel.maxRetries, freeGeminiChannelDefaults.maxRetries),
+                modelCacheTtlMs: getFreeGeminiNumber(channel.modelCacheTtlMs, freeGeminiChannelDefaults.modelCacheTtlMs),
+                maxOutputTokens: getFreeGeminiNumber(channel.maxOutputTokens, freeGeminiChannelDefaults.maxOutputTokens),
+            }),
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!isCurrentFreeGeminiChannelMutation(mutationRequestId)) return;
+        if (!response.ok) throw new Error(payload.error || '更新渠道状态失败');
+        toastr.success(enabled ? '渠道已启用' : '渠道已停用');
+        await loadFreeGeminiChannelsAdmin();
+    } catch (error) {
+        if (!isCurrentFreeGeminiChannelMutation(mutationRequestId)) return;
+        console.error('更新免费 Gemini 渠道状态失败:', error);
+        toastr.error(error.message);
+    } finally {
+        if (isCurrentFreeGeminiChannelMutation(mutationRequestId)) setFreeGeminiChannelSaveBusy(false);
+    }
+}
+
+async function deleteFreeGeminiChannel(id) {
+    if (!id || !confirm('确定删除这个免费 Gemini 渠道吗？已选择该渠道的成员将无法继续使用它。')) return;
+    if (freeGeminiChannelSaveInProgress) return;
+    const mutationRequestId = ++freeGeminiChannelMutationRequestId;
+    setFreeGeminiChannelSaveBusy(true);
+    try {
+        const response = await fetch(`/api/free-gemini-channels/admin/${encodeURIComponent(id)}`, {
+            method: 'DELETE',
+            headers: await getFreeGeminiRequestHeaders(),
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!isCurrentFreeGeminiChannelMutation(mutationRequestId)) return;
+        if (!response.ok) throw new Error(payload.error || '删除免费渠道失败');
+        toastr.success('免费渠道已删除');
+        resetFreeGeminiChannelForm();
+        await loadFreeGeminiChannelsAdmin();
+    } catch (error) {
+        if (!isCurrentFreeGeminiChannelMutation(mutationRequestId)) return;
+        console.error('删除免费 Gemini 渠道失败:', error);
+        toastr.error(error.message);
+    } finally {
+        if (isCurrentFreeGeminiChannelMutation(mutationRequestId)) setFreeGeminiChannelSaveBusy(false);
+    }
+}
+
+async function testFreeGeminiChannel(id, button) {
+    if (!id || freeGeminiChannelSaveInProgress) return;
+    const originalHtml = button.html();
+    const mutationRequestId = ++freeGeminiChannelMutationRequestId;
+    setFreeGeminiChannelSaveBusy(true);
+    button.html('<i class="fa-fw fa-solid fa-spinner fa-spin"></i><span>测试中</span>');
+    try {
+        const response = await fetch(`/api/free-gemini-channels/admin/${encodeURIComponent(id)}/models?refresh=true`, {
+            method: 'GET',
+            headers: await getFreeGeminiRequestHeaders(),
+            cache: 'no-cache',
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!isCurrentFreeGeminiChannelMutation(mutationRequestId)) return;
+        if (!response.ok) {
+            throw new Error(payload.message || payload.error || '上游连接测试失败');
+        }
+        const models = normalizeFreeGeminiModels(Array.isArray(payload.models) ? payload.models : []);
+        if (models.length === 0) throw new Error('上游连接成功，但未返回任何可用模型');
+        toastr.success(`连接成功，发现 ${models.length} 个可用模型`);
+    } catch (error) {
+        if (!isCurrentFreeGeminiChannelMutation(mutationRequestId)) return;
+        console.error('测试免费 Gemini 渠道失败:', error);
+        toastr.error(error.message);
+    } finally {
+        if (isCurrentFreeGeminiChannelMutation(mutationRequestId)) {
+            button.html(originalHtml);
+            setFreeGeminiChannelSaveBusy(false);
+        }
+    }
+}
 
 // ===== 独立用户邀请码系统（管理员端） =====
 function bindUserInvitationSystemEvents() {
@@ -181,6 +913,9 @@ function initializeAdminExtensions() {
         // 绑定用户邀请码发放系统事件
         bindUserInvitationSystemEvents();
 
+        // 绑定全局免费 Gemini 渠道事件
+        bindFreeGeminiChannelEvents();
+
         // 绑定公告管理相关事件
         bindAnnouncementEvents();
 
@@ -227,6 +962,11 @@ function checkAndLoadCurrentTab() {
         if (userInvitationsAdminBlock && isElementVisible(userInvitationsAdminBlock)) {
             loadUserInvitationConfig();
             loadUserInvitationStats();
+        }
+
+        const freeGeminiChannelsBlock = document.querySelector('.freeGeminiChannelsBlock');
+        if (freeGeminiChannelsBlock && isElementVisible(freeGeminiChannelsBlock)) {
+            loadFreeGeminiChannelsAdmin();
         }
 
         // 检查公告管理选项卡是否显示
@@ -489,6 +1229,7 @@ function disposeAdminExtensions() {
     document.removeEventListener('visibilitychange', handleAdminVisibilityChange);
     currentSystemData = null;
     currentPerformanceData = null;
+    resetFreeGeminiChannelRuntimeState();
 }
 
 // 加载系统负载数据
@@ -3222,8 +3963,10 @@ async function clearDefaultConfigTemplate() {
 
 // 导出函数供外部调用
 if (typeof window !== 'undefined') {
+    window.bindFreeGeminiChannelEvents = bindFreeGeminiChannelEvents;
     window.initializeAdminExtensions = initializeAdminExtensions;
     window.disposeAdminExtensions = disposeAdminExtensions;
+    window.canCloseFreeGeminiChannelAdmin = canCloseFreeGeminiChannelAdmin;
     window.toggleAnnouncement = toggleAnnouncement;
     window.deleteAnnouncement = deleteAnnouncement;
     window.showOAuthConfigTab = showOAuthConfigTab;

@@ -20,6 +20,7 @@ import { serverDirectory } from './server-directory.js';
 
 import { serverEvents, EVENT_NAMES } from './server-events.js';
 import { loadPlugins } from './plugin-loader.js';
+import { migrateLegacyFreeGeminiChannels } from './free-gemini-channels.js';
 import {
     initUserStorage,
     getCookieSecret,
@@ -579,8 +580,10 @@ function setDnsResolutionOrder() {
     }
 }
 
-// User storage module needs to be initialized before starting the server
-initUserStorage(globalThis.DATA_ROOT)
+// User storage module needs to be initialized before starting the server.
+// Move legacy free-gemini data first so node-persist never tries to parse our JSON file.
+migrateLegacyFreeGeminiChannels()
+    .then(() => initUserStorage(globalThis.DATA_ROOT))
     .then(initializeUserInvitationSystem)
     .then(setDnsResolutionOrder)
     .then(ensurePublicDirectoriesExist)

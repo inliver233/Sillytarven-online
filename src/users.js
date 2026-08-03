@@ -16,7 +16,7 @@ import { sync as writeFileAtomicSync } from 'write-file-atomic';
 import sanitize from 'sanitize-filename';
 
 import { USER_DIRECTORY_TEMPLATE, DEFAULT_USER, PUBLIC_DIRECTORIES, SETTINGS_FILE, UPLOADS_DIRECTORY } from './constants.js';
-import { getConfigValue, color, delay, generateTimestamp, isPathUnderParent } from './util.js';
+import { getConfigValue, color, delay, generateTimestamp, isPathUnderParent, safeCopySync } from './util.js';
 import { readSecret, writeSecret } from './endpoints/secrets.js';
 import { getContentOfType } from './endpoints/content-manager.js';
 import { createExtensionResourceRouteHandler } from './endpoints/extensions.js';
@@ -420,23 +420,30 @@ export async function migrateUserData() {
 
             if (migration.file) {
                 // Copy the file to the new location
-                fs.cpSync(migration.old, migration.new, { force: true });
+                // fs.cpSync crashes with non-ASCII paths on some Windows setups; use safeCopySync
+                if (fs.existsSync(migration.new)) {
+                    fs.rmSync(migration.new, { recursive: true, force: true });
+                }
+                safeCopySync(migration.old, migration.new);
                 // Move the file to the backup location
-                fs.cpSync(
-                    migration.old,
-                    path.join(backupDirectory, path.basename(migration.old)),
-                    { recursive: true, force: true },
-                );
+                const backupTarget = path.join(backupDirectory, path.basename(migration.old));
+                if (fs.existsSync(backupTarget)) {
+                    fs.rmSync(backupTarget, { recursive: true, force: true });
+                }
+                safeCopySync(migration.old, backupTarget);
                 fs.rmSync(migration.old, { recursive: true, force: true });
             } else {
                 // Copy the directory to the new location
-                fs.cpSync(migration.old, migration.new, { recursive: true, force: true });
+                if (fs.existsSync(migration.new)) {
+                    fs.rmSync(migration.new, { recursive: true, force: true });
+                }
+                safeCopySync(migration.old, migration.new);
                 // Move the directory to the backup location
-                fs.cpSync(
-                    migration.old,
-                    path.join(backupDirectory, path.basename(migration.old)),
-                    { recursive: true, force: true },
-                );
+                const backupTarget2 = path.join(backupDirectory, path.basename(migration.old));
+                if (fs.existsSync(backupTarget2)) {
+                    fs.rmSync(backupTarget2, { recursive: true, force: true });
+                }
+                safeCopySync(migration.old, backupTarget2);
                 fs.rmSync(migration.old, { recursive: true, force: true });
             }
         } catch (error) {
