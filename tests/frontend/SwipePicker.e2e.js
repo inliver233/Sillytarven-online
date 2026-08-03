@@ -287,6 +287,7 @@ test.describe('Swipe Picker UI', () => {
     test('yields while opening 500 swipes, caps live DOM, and cancels four-worker token work', async ({ page }) => {
         await page.evaluate(async () => {
             const picker = await import('/scripts/swipe-picker.js');
+            await picker.initSwipePicker({ enabled: true });
             const message = {
                 mes: 'Swipe 1',
                 is_user: false,

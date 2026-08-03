@@ -54,16 +54,19 @@ test('public extension lifecycle config is off by default', async () => {
     }
 });
 
-test('startup awaits all gates and extension UI initialization without moving macro registration', () => {
+test('startup awaits all gates and extension UI initialization before command registration', () => {
     const script = source('public/script.js');
     const gateBarrier = script.indexOf('await Promise.all([loadMacros2FeatureGate(), loadReasoningToolsFeatureGate(), loadExtensionLifecycleFeatureGate(), loadSwipePickerFeatureGate()])');
-    const extensionInit = script.indexOf('await initExtensions()');
+    const extensionInit = script.indexOf('const extensionsReady = initExtensions();');
+    const extensionBarrier = script.indexOf('await Promise.all([extensionsReady, settingsManagersReady]);');
+    const extensionCommands = script.indexOf('initExtensionSlashCommands();');
     const settingsLoad = script.indexOf('await getSettings()');
     const macroRegistration = script.indexOf('initMacros();');
     const extensionSettingsLoad = script.indexOf('await loadExtensionSettings(settings');
 
     assert.ok(gateBarrier >= 0 && gateBarrier < extensionInit);
-    assert.ok(extensionInit < settingsLoad);
+    assert.ok(extensionInit < extensionBarrier);
+    assert.ok(extensionBarrier < extensionCommands && extensionCommands < settingsLoad);
     assert.ok(macroRegistration >= 0 && macroRegistration < extensionSettingsLoad);
 });
 

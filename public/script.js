@@ -282,6 +282,7 @@ import { getSystemMessageByType, initSystemMessages, SAFETY_CHAT, sendSystemMess
 import { event_types, eventSource } from './scripts/events.js';
 import { initAccessibility } from './scripts/a11y.js';
 import { processItemsWithFrameBudget } from './scripts/util/frame-budget.js';
+import { runStrictStartupTasks, startBackgroundStartupTask } from './scripts/util/startup-orchestration.js';
 import { requireSettingsSaveSuccess, SettingsSaveQueue, SettingsSaveTracker } from './scripts/util/settings-save-tracker.js';
 import { applyStreamFadeIn, StreamRenderBuffer } from './scripts/util/stream-fadein.js';
 import { initDomHandlers } from './scripts/dom-handlers.js';
@@ -376,17 +377,6 @@ export {
     getMaxPromptTokens as getMaxContextSize,
     importCharacterChat,
 };
-
-/**
- * Wait for page to load before continuing the app initialization.
- */
-await new Promise((resolve) => {
-    if (document.readyState === 'complete') {
-        resolve();
-    } else {
-        window.addEventListener('load', resolve);
-    }
-});
 
 // Configure toast library:
 toastr.options = {
@@ -925,11 +915,14 @@ async function firstLoadInit() {
     initKoboldSettings();
     initNovelAISettings();
     initSystemPrompts();
-    await initExtensions();
+    const extensionsReady = initExtensions();
+    const settingsManagersReady = runStrictStartupTasks([
+        () => initPresetManager(),
+        () => initSystemMessages(),
+    ]);
+    await Promise.all([extensionsReady, settingsManagersReady]);
     initExtensionSlashCommands();
     ToolManager.initToolSlashCommands();
-    await initPresetManager();
-    await initSystemMessages();
     await getSettings();
     updateLoaderProgress(60, '正在装载标签、宏与界面配置...');
     initKeyboard();
@@ -937,11 +930,12 @@ async function firstLoadInit() {
     initTags();
     initBookmarks();
     updateLoaderProgress(80, '正在同步角色卡与用户数据...');
-    await getUserAvatars(true, user_avatar);
-    await getCharacters();
+    await runStrictStartupTasks([
+        () => getUserAvatars(true, user_avatar),
+        () => getCharacters(),
+        () => initTokenizers(),
+    ]);
     recordStartupMilestone('characters-ready');
-    await getBackgrounds();
-    await initTokenizers();
     initBackgrounds();
     initAuthorsNote();
     await initPersonas();
@@ -951,7 +945,6 @@ async function firstLoadInit() {
     }
     initWorldInfo();
     initHorde();
-    initRossMods();
     initStats();
     initCfg();
     initLogprobs();
@@ -999,11 +992,13 @@ async function firstLoadInit() {
             onBranch: ({ messageId, absoluteMessageId, swipeId, signal }) => branchChat(messageId, { absoluteMessageId, swipeId, signal, requireAtomic: true }),
         });
     }
+    initRossMods();
     addDebugFunctions();
     doDailyExtensionUpdatesCheck();
     updateLoaderProgress(95, '正在构建界面面板与欢迎屏...');
     await hideLoader();
     recordStartupMilestone('first-ui');
+    startBackgroundStartupTask(getBackgrounds);
     await fixViewport();
     await eventSource.emit(event_types.APP_READY);
     recordStartupMilestone('chat-input-ready');
