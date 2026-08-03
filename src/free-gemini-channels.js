@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import dns from 'node:dns';
 import fs from 'node:fs';
 import https from 'node:https';
@@ -19,6 +20,7 @@ const MAX_KEY_LENGTH = 8192;
 const MAX_MODEL_ID_LENGTH = 512;
 const MAX_MODELS = 1000;
 const MAX_MODELS_RESPONSE_BYTES = 2 * 1024 * 1024;
+const MODEL_DISCOVERY_RETRY_STATUSES = new Set([429, 502, 503, 504]);
 const DEFAULTS = Object.freeze({
     priority: 0,
     modelPolicy: 'all',
@@ -31,6 +33,7 @@ const DEFAULTS = Object.freeze({
 const MODEL_POLICIES = new Set(['all', 'allowlist', 'denylist']);
 const storageMutex = new KeyedMutex();
 const modelCache = new Map();
+const modelCacheRevisions = new Map();
 
 function isUnsafeUrlAllowedForTests() {
     return process.env.NODE_ENV === 'test';
@@ -378,12 +381,42 @@ function sortChannels(channels) {
         || left.id.localeCompare(right.id));
 }
 
-function clearChannelModelCache(channelId) {
-    const marker = `:${channelId}:`;
+function getChannelModelCachePrefix(channelId) {
+    return `${getStoragePath()}:${channelId}:`;
+}
+
+function getChannelModelCacheRevision(channelId) {
+    return modelCacheRevisions.get(getChannelModelCachePrefix(channelId)) ?? 0;
+}
+
+function getChannelModelCacheSignature(channel) {
+    const configuration = [
+        channel.url,
+        channel.key,
+        channel.enabled,
+        channel.priority,
+        channel.modelPolicy,
+        channel.models,
+        channel.timeoutMs,
+        channel.maxRetries,
+        channel.modelCacheTtlMs,
+        channel.maxOutputTokens,
+    ];
+    return createHash('sha256').update(JSON.stringify(configuration)).digest('hex');
+}
+
+function clearChannelModelCache(channelId, { forgetRevision = false } = {}) {
+    const prefix = getChannelModelCachePrefix(channelId);
+    modelCacheRevisions.set(prefix, (modelCacheRevisions.get(prefix) ?? 0) + 1);
     for (const key of modelCache.keys()) {
-        if (key.includes(marker)) {
+        if (key.startsWith(prefix)) {
             modelCache.delete(key);
         }
+    }
+    if (forgetRevision) {
+        // No new load can start for a deleted channel. Older promises also
+        // require their removed cache entry to still reference them to write.
+        modelCacheRevisions.delete(prefix);
     }
 }
 
@@ -418,14 +451,12 @@ function getModelsUrl(channel, apiVersion) {
     return modelsUrl;
 }
 
-async function fetchChannelModels(channel, apiVersion) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), channel.timeoutMs);
+async function fetchChannelModelsAttempt(channel, apiVersion, signal) {
     try {
         const response = await fetch(getModelsUrl(channel, apiVersion), {
             method: 'GET',
             headers: { 'Accept': 'application/json' },
-            signal: controller.signal,
+            signal,
             agent: getFreeGeminiFetchAgent(channel),
             redirect: 'error',
             size: MAX_MODELS_RESPONSE_BYTES,
@@ -433,7 +464,9 @@ async function fetchChannelModels(channel, apiVersion) {
         const text = await response.text();
         if (!response.ok) {
             const status = [400, 422, 429, 502, 503, 504].includes(response.status) ? response.status : 502;
-            throw createModelsError('免费 Gemini 渠道模型列表请求失败。', status);
+            const error = createModelsError('免费 Gemini 渠道模型列表请求失败。', status);
+            error.upstreamStatus = response.status;
+            throw error;
         }
         let data;
         try {
@@ -469,6 +502,45 @@ async function fetchChannelModels(channel, apiVersion) {
                     ? 'FREE_GEMINI_MODELS_TIMEOUT'
                     : 'FREE_GEMINI_MODELS_NETWORK',
         );
+    }
+}
+
+async function waitBeforeModelDiscoveryRetry(attempt, signal) {
+    const delayMs = Math.min(500, 100 * (2 ** attempt));
+    await new Promise(resolve => {
+        let timer;
+        const finish = () => {
+            clearTimeout(timer);
+            signal.removeEventListener('abort', finish);
+            resolve();
+        };
+        timer = setTimeout(finish, delayMs);
+        signal.addEventListener('abort', finish, { once: true });
+        if (signal.aborted) {
+            finish();
+        }
+    });
+}
+
+async function fetchChannelModels(channel, apiVersion) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), channel.timeoutMs);
+    const maxAttempts = channel.maxRetries + 1;
+    try {
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+            try {
+                return await fetchChannelModelsAttempt(channel, apiVersion, controller.signal);
+            } catch (error) {
+                const retryable = (error?.code === 'FREE_GEMINI_MODELS_NETWORK'
+                    || MODEL_DISCOVERY_RETRY_STATUSES.has(error?.upstreamStatus))
+                    && !controller.signal.aborted;
+                if (!retryable || attempt + 1 >= maxAttempts) {
+                    throw error;
+                }
+                console.warn(`Free Gemini model discovery failed transiently; retrying (${attempt + 1}/${channel.maxRetries}).`);
+                await waitBeforeModelDiscoveryRetry(attempt, controller.signal);
+            }
+        }
     } finally {
         clearTimeout(timeout);
     }
@@ -517,14 +589,25 @@ export async function getEnabledFreeGeminiChannel(id) {
     return channel?.enabled && channel.key ? channel : null;
 }
 
+async function getCurrentChannelForModelCache(channelId) {
+    let channel;
+    let revision;
+    do {
+        revision = getChannelModelCacheRevision(channelId);
+        channel = await getFreeGeminiChannel(channelId);
+    } while (revision !== getChannelModelCacheRevision(channelId));
+    return { channel, revision };
+}
+
 export async function getFreeGeminiChannelModels(channelOrId, { refresh = false, apiVersion = 'v1beta', allowDisabled = false } = {}) {
-    const channel = typeof channelOrId === 'string' ? await getFreeGeminiChannel(channelOrId) : channelOrId;
+    const channelId = String(typeof channelOrId === 'string' ? channelOrId : channelOrId?.id ?? '').trim();
+    const { channel, revision } = await getCurrentChannelForModelCache(channelId);
     if (!channel || (!allowDisabled && (!channel.enabled || !channel.key)) || !channel.key) {
         throw createModelsError('免费 Gemini 渠道不存在、已停用或未配置密钥。', 404, 'FREE_GEMINI_CHANNEL_UNAVAILABLE');
     }
 
     const normalizedVersion = /^v1(?:beta)?$/i.test(String(apiVersion)) ? String(apiVersion).toLowerCase() : 'v1beta';
-    const cacheKey = `${getStoragePath()}:${channel.id}:${normalizedVersion}`;
+    const cacheKey = `${getChannelModelCachePrefix(channel.id)}${normalizedVersion}:${getChannelModelCacheSignature(channel)}`;
     const cached = modelCache.get(cacheKey);
     const useStaleOnError = promise => refresh || !cached?.models
         ? promise
@@ -542,31 +625,39 @@ export async function getFreeGeminiChannelModels(channelOrId, { refresh = false,
 
     const promise = fetchChannelModels(channel, normalizedVersion)
         .then(models => {
-            modelCache.set(cacheKey, {
-                models,
-                expiresAt: Date.now() + channel.modelCacheTtlMs,
-                promise: null,
-            });
+            if (getChannelModelCacheRevision(channel.id) === revision
+                && modelCache.get(cacheKey)?.promise === promise) {
+                modelCache.set(cacheKey, {
+                    models,
+                    expiresAt: Date.now() + channel.modelCacheTtlMs,
+                    promise: null,
+                });
+            }
             return models.map(model => ({ ...model }));
         })
         .catch(error => {
-            if (cached?.models) {
-                modelCache.set(cacheKey, {
-                    models: cached.models,
-                    expiresAt: cached.expiresAt,
-                    promise: null,
-                });
-            } else {
-                modelCache.delete(cacheKey);
+            if (getChannelModelCacheRevision(channel.id) === revision
+                && modelCache.get(cacheKey)?.promise === promise) {
+                if (cached?.models) {
+                    modelCache.set(cacheKey, {
+                        models: cached.models,
+                        expiresAt: cached.expiresAt,
+                        promise: null,
+                    });
+                } else {
+                    modelCache.delete(cacheKey);
+                }
             }
             throw error;
         });
 
-    modelCache.set(cacheKey, {
-        models: cached?.models,
-        expiresAt: cached?.expiresAt || 0,
-        promise,
-    });
+    if (getChannelModelCacheRevision(channel.id) === revision) {
+        modelCache.set(cacheKey, {
+            models: cached?.models,
+            expiresAt: cached?.expiresAt || 0,
+            promise,
+        });
+    }
     return useStaleOnError(promise);
 }
 
@@ -638,7 +729,7 @@ export async function deleteFreeGeminiChannel(id) {
 
         const [deleted] = store.channels.splice(index, 1);
         await writeStore(store);
-        clearChannelModelCache(deleted.id);
+        clearChannelModelCache(deleted.id, { forgetRevision: true });
         return true;
     });
 }

@@ -102,14 +102,113 @@ function normalizeFreeGeminiModelId(value) {
     return /^[A-Za-z0-9][A-Za-z0-9._-]{0,511}$/.test(modelId) ? modelId : '';
 }
 
-function sanitizeFreeGeminiUpstreamMessage(value, apiKey) {
-    let message = String(value ?? '').trim().replace(/https?:\/\/\S+/gi, '[redacted-url]');
-    for (const secret of [apiKey, apiKey ? encodeURIComponent(apiKey) : '']) {
-        if (secret) {
-            message = message.replaceAll(secret, '[redacted]');
+function redactPercentEncodedSecret(value, secret) {
+    let layer = value;
+    let spans = Array.from({ length: value.length }, (_, index) => ({ start: index, end: index + 1 }));
+    const matches = [];
+
+    // Decode only into a matching view. Spans always point back to the original
+    // text, so unrelated percent-encoded content is returned byte-for-byte.
+    for (let depth = 0; depth <= value.length; depth++) {
+        let matchIndex = layer.indexOf(secret);
+        while (matchIndex !== -1) {
+            const endIndex = matchIndex + secret.length - 1;
+            matches.push({ start: spans[matchIndex].start, end: spans[endIndex].end });
+            matchIndex = layer.indexOf(secret, matchIndex + 1);
+        }
+
+        let decoded = '';
+        const decodedSpans = [];
+        let changed = false;
+        for (let index = 0; index < layer.length;) {
+            const byteMatch = layer.slice(index, index + 3).match(/^%([0-9a-f]{2})$/i);
+            if (!byteMatch) {
+                decoded += layer[index];
+                decodedSpans.push(spans[index]);
+                index++;
+                continue;
+            }
+
+            const firstByte = Number.parseInt(byteMatch[1], 16);
+            const byteCount = firstByte < 0x80 ? 1
+                : firstByte >= 0xC2 && firstByte <= 0xDF ? 2
+                    : firstByte >= 0xE0 && firstByte <= 0xEF ? 3
+                        : firstByte >= 0xF0 && firstByte <= 0xF4 ? 4
+                            : 0;
+            const encodedLength = byteCount * 3;
+            const encoded = layer.slice(index, index + encodedLength);
+            if (!byteCount || encoded.length !== encodedLength
+                || !/^(?:%[0-9a-f]{2})+$/i.test(encoded)) {
+                decoded += layer[index];
+                decodedSpans.push(spans[index]);
+                index++;
+                continue;
+            }
+
+            try {
+                const character = decodeURIComponent(encoded);
+                const sourceSpan = {
+                    start: spans[index].start,
+                    end: spans[index + encodedLength - 1].end,
+                };
+                decoded += character;
+                for (let unit = 0; unit < character.length; unit++) decodedSpans.push(sourceSpan);
+                index += encodedLength;
+                changed = true;
+            } catch {
+                decoded += layer[index];
+                decodedSpans.push(spans[index]);
+                index++;
+            }
+        }
+        if (!changed) break;
+        layer = decoded;
+        spans = decodedSpans;
+    }
+
+    if (matches.length === 0) return value;
+    matches.sort((left, right) => left.start - right.start || left.end - right.end);
+    const merged = [];
+    for (const match of matches) {
+        const previous = merged.at(-1);
+        if (previous && match.start <= previous.end) {
+            previous.end = Math.max(previous.end, match.end);
+        } else {
+            merged.push({ ...match });
         }
     }
+
+    let redacted = '';
+    let cursor = 0;
+    for (const match of merged) {
+        redacted += value.slice(cursor, match.start) + '[redacted]';
+        cursor = match.end;
+    }
+    return redacted + value.slice(cursor);
+}
+
+function sanitizeFreeGeminiUpstreamMessage(value, apiKey) {
+    let message = String(value ?? '').trim().slice(0, 4096).replace(/https?:\/\/\S+/gi, '[redacted-url]');
+    if (apiKey) {
+        message = redactPercentEncodedSecret(message, apiKey);
+    }
     return message.replace(/\s+/g, ' ').slice(0, 500) || '上游请求失败。';
+}
+
+function writeFreeGeminiStreamError(response) {
+    if (!response.headersSent || response.destroyed || response.writableEnded) {
+        return;
+    }
+    try {
+        response.write(`data: ${JSON.stringify({
+            error: {
+                code: 'FREE_GEMINI_STREAM_FAILED',
+                message: '免费 Gemini 流式响应转发失败。',
+            },
+        })}\n\n`);
+    } catch (error) {
+        console.warn('Unable to write free Gemini SSE error:', error?.code || error?.name || 'stream_write_failed');
+    }
 }
 
 function mapFreeGeminiUpstreamStatus(status) {
@@ -300,7 +399,11 @@ function normalizeFreeGeminiGenerationConfig(generationConfig, channel, model) {
 
     const requestedMaxTokens = Number(generationConfig.maxOutputTokens);
     if (generationConfig.maxOutputTokens == null || generationConfig.maxOutputTokens === '' || !Number.isFinite(requestedMaxTokens)) {
-        delete generationConfig.maxOutputTokens;
+        if (Number.isInteger(channel?.maxOutputTokens) && channel.maxOutputTokens > 0) {
+            generationConfig.maxOutputTokens = getFreeGeminiOutputLimit(channel, model);
+        } else {
+            delete generationConfig.maxOutputTokens;
+        }
     } else {
         generationConfig.maxOutputTokens = Math.min(
             Math.max(1, Math.trunc(requestedMaxTokens)),
@@ -393,7 +496,8 @@ function toFreeGeminiStatusModel(channel, model) {
 async function getFreeGeminiStatusModels(channelId, apiVersion) {
     const channels = await listEnabledFreeGeminiChannels();
     const requestedId = String(channelId ?? '').trim();
-    if (requestedId && !channels.some(channel => channel.id === requestedId)) {
+    const selectedChannel = requestedId ? channels.find(channel => channel.id === requestedId) : null;
+    if (requestedId && !selectedChannel) {
         throw createFreeGeminiRouteError(
             '该免费 Gemini 渠道不存在或已停用。',
             'FREE_GEMINI_CHANNEL_UNAVAILABLE',
@@ -423,7 +527,9 @@ async function getFreeGeminiStatusModels(channelId, apiVersion) {
             continue;
         }
         for (const model of result.value.models) {
-            if (isFreeGeminiModelAllowed(result.value.channel, model.id) && !models.has(model.id)) {
+            if ((!selectedChannel || isFreeGeminiModelAllowed(selectedChannel, model.id))
+                && isFreeGeminiModelAllowed(result.value.channel, model.id)
+                && !models.has(model.id)) {
                 models.set(model.id, toFreeGeminiStatusModel(result.value.channel, model));
             }
         }
@@ -437,12 +543,16 @@ async function getFreeGeminiStatusModels(channelId, apiVersion) {
 async function resolveFreeGeminiRoutes(modelId, preferredChannelId, apiVersion, requestStartedAt) {
     const channels = await listEnabledFreeGeminiChannels();
     const preferredId = String(preferredChannelId ?? '').trim();
-    if (preferredId && !channels.some(channel => channel.id === preferredId)) {
+    const preferredChannel = preferredId ? channels.find(channel => channel.id === preferredId) : null;
+    if (preferredId && !preferredChannel) {
         throw createFreeGeminiRouteError(
             '该免费 Gemini 渠道不存在或已停用。',
             'FREE_GEMINI_CHANNEL_UNAVAILABLE',
             404,
         );
+    }
+    if (preferredChannel && !isFreeGeminiModelAllowed(preferredChannel, modelId)) {
+        return { routes: [], deadlineAt: requestStartedAt };
     }
 
     const ordered = preferredId
@@ -462,9 +572,11 @@ async function resolveFreeGeminiRoutes(modelId, preferredChannelId, apiVersion, 
         discoveryDeadlineAt,
     )));
     const routes = [];
+    let firstError;
     for (let index = 0; index < eligible.length; index++) {
         const result = results[index];
         if (result.status === 'rejected') {
+            firstError ??= result.reason;
             const detail = result.reason?.code || 'models_unavailable';
             console.warn(`Free Gemini channel model discovery failed (${detail}).`);
             continue;
@@ -473,6 +585,9 @@ async function resolveFreeGeminiRoutes(modelId, preferredChannelId, apiVersion, 
         if (model) {
             routes.push({ channel: eligible[index], model });
         }
+    }
+    if (routes.length === 0 && firstError) {
+        throw firstError;
     }
 
     const routedTimeoutMs = routes.length > 0
@@ -1298,8 +1413,10 @@ async function sendMakerSuiteRequest(request, response, options = {}) {
         if (stream) {
             try {
                 if (!disconnectController.signal.aborted) {
-                    generateResponse.body?.once('error', () => {
+                    generateResponse.body?.once('error', error => {
+                        console.error('Free Gemini stream failed after commitment:', error?.code || error?.name || 'stream_failed');
                         if (!response.writableEnded) {
+                            writeFreeGeminiStreamError(response);
                             response.end();
                         }
                     });
@@ -1379,7 +1496,7 @@ async function sendMakerSuiteRequest(request, response, options = {}) {
                 ?.filter(part => !part.thought && typeof part.text === 'string')
                 ?.map(part => part.text)
                 ?.join('\n\n');
-        if (!responseText && !functionCall && !inlineData) {
+        if ((!responseText || !responseText.trim()) && !functionCall && !inlineData) {
             const finishReason = String(candidates[0]?.finishReason ?? '').toUpperCase();
             const safetyBlocked = ['SAFETY', 'BLOCKLIST', 'PROHIBITED_CONTENT', 'SPII', 'RECITATION'].includes(finishReason);
             if (freeGeminiChannel) {

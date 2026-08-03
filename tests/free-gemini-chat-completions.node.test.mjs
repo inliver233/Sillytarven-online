@@ -10,7 +10,7 @@ process.env.NODE_ENV = 'test';
 
 import express from 'express';
 
-import { createFreeGeminiChannel } from '../src/free-gemini-channels.js';
+import { createFreeGeminiChannel, updateFreeGeminiChannel } from '../src/free-gemini-channels.js';
 import { setConfigFilePath } from '../src/util.js';
 
 setConfigFilePath(fileURLToPath(new URL('../config.yaml', import.meta.url)));
@@ -203,6 +203,21 @@ test('free Gemini uses server-side credentials and normalizes the first upstream
         });
         assert.equal(generationBodies[1].contents.some(content => content.parts?.some(part => part.text === 'Continue the previous response.')), false);
 
+        const defaultLimitResponse = await fetch(`${appUrl}/api/backends/chat-completions/generate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                chat_completion_source: 'free-gemini',
+                free_gemini_channel_id: channel.id,
+                model: 'gemini-test',
+                messages: [{ role: 'user', content: 'use the channel output limit' }],
+                stream: false,
+            }),
+        });
+        assert.equal(defaultLimitResponse.status, 200);
+        assert.equal(generationBodies.length, 3);
+        assert.equal(generationBodies[2].generationConfig.maxOutputTokens, 40);
+
         const generationCountBeforeInvalidRequests = generationBodies.length;
         const emptyModelResponse = await fetch(`${appUrl}/api/backends/chat-completions/generate`, {
             method: 'POST',
@@ -238,6 +253,7 @@ test('free Gemini uses server-side credentials and normalizes the first upstream
             '/v1beta/models?key=server-secret',
             '/v1beta/models/gemini-test:generateContent?key=server-secret',
             '/v1beta/models/gemini-test:generateContent?key=server-secret',
+            '/v1beta/models/gemini-test:generateContent?key=server-secret',
         ]);
         assert.equal(JSON.stringify(upstreamRequests).includes('attacker-value'), false);
     } finally {
@@ -247,7 +263,7 @@ test('free Gemini uses server-side credentials and normalizes the first upstream
     }
 });
 
-test('free Gemini aggregates by priority and treats channel id as a permitted preference', async () => {
+test('free Gemini aggregates by priority while an explicit channel gates model policy', async () => {
     const previousDataRoot = globalThis.DATA_ROOT;
     const dataRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'st-free-gemini-routing-'));
     globalThis.DATA_ROOT = dataRoot;
@@ -329,7 +345,19 @@ test('free Gemini aggregates by priority and treats channel id as a permitted pr
         const preferredStatus = (await selectedStatusResponse.json()).data;
         assert.equal(preferredStatus.find(model => model.id === 'common').channel_id, high.id);
         assert.equal(preferredStatus.find(model => model.id === 'only-allow').channel_id, allow.id);
-        assert.equal(preferredStatus.find(model => model.id === 'only-low').channel_id, low.id);
+        assert.equal(preferredStatus.some(model => model.id === 'only-low'), false);
+
+        const allowlistedStatusResponse = await fetch(`${appUrl}/api/backends/chat-completions/status`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                chat_completion_source: 'free-gemini',
+                free_gemini_channel_id: allow.id,
+            }),
+        });
+        assert.equal(allowlistedStatusResponse.status, 200);
+        const allowlistedStatus = (await allowlistedStatusResponse.json()).data;
+        assert.deepEqual(allowlistedStatus.map(model => model.id), ['only-allow']);
 
         async function generate(model, preferredId) {
             const result = await fetch(`${appUrl}/api/backends/chat-completions/generate`, {
@@ -352,8 +380,8 @@ test('free Gemini aggregates by priority and treats channel id as a permitted pr
         assert.equal(preferredLow.body.choices[0].message.content, 'low');
 
         const deniedPreferred = await generate('only-low', high.id);
-        assert.equal(deniedPreferred.response.status, 200);
-        assert.equal(deniedPreferred.body.choices[0].message.content, 'low');
+        assert.equal(deniedPreferred.response.status, 400);
+        assert.equal(deniedPreferred.body.error.code, 'FREE_GEMINI_NO_ROUTE');
 
         const allowedFallback = await generate('only-allow', high.id);
         assert.equal(allowedFallback.response.status, 200);
@@ -377,6 +405,143 @@ test('free Gemini aggregates by priority and treats channel id as a permitted pr
     }
 });
 
+test('free Gemini denylist updates persistently block and then restore the only model route', async () => {
+    const previousDataRoot = globalThis.DATA_ROOT;
+    const dataRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'st-free-gemini-denylist-route-'));
+    globalThis.DATA_ROOT = dataRoot;
+    const model = 'denylist-toggle-model';
+    let modelListRequests = 0;
+    let generationRequests = 0;
+
+    const upstream = http.createServer(async (request, response) => {
+        response.setHeader('Content-Type', 'application/json');
+        if (request.method === 'GET') {
+            modelListRequests++;
+            response.end(JSON.stringify({
+                models: [{ name: `models/${model}`, supportedGenerationMethods: ['generateContent'] }],
+            }));
+            return;
+        }
+
+        generationRequests++;
+        await readRequestJson(request);
+        response.end(JSON.stringify({
+            candidates: [{ content: { parts: [{ text: 'route restored after denylist update' }] } }],
+        }));
+    });
+    const appServer = await createChatAppServer();
+
+    try {
+        const upstreamUrl = await listen(upstream);
+        const appUrl = await listen(appServer);
+        const channel = await createFreeGeminiChannel({
+            name: 'denylist-only-route',
+            url: upstreamUrl,
+            key: 'denylist-secret',
+            modelPolicy: 'denylist',
+            models: [model],
+        });
+
+        async function generate() {
+            const response = await fetch(`${appUrl}/api/backends/chat-completions/generate`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    chat_completion_source: 'free-gemini',
+                    free_gemini_channel_id: channel.id,
+                    model,
+                    messages: [{ role: 'user', content: 'test the persisted denylist' }],
+                    max_tokens: 10,
+                    stream: false,
+                }),
+            });
+            return { response, body: await response.json() };
+        }
+
+        const denied = await generate();
+        assert.equal(denied.response.status, 400);
+        assert.equal(denied.body.error.code, 'FREE_GEMINI_NO_ROUTE');
+        assert.equal(modelListRequests, 0);
+        assert.equal(generationRequests, 0);
+
+        const updated = await updateFreeGeminiChannel(channel.id, {
+            modelPolicy: 'denylist',
+            models: [],
+        });
+        assert.equal(updated.modelPolicy, 'denylist');
+        assert.deepEqual(updated.models, []);
+
+        const restored = await generate();
+        assert.equal(restored.response.status, 200);
+        assert.equal(restored.body.choices[0].message.content, 'route restored after denylist update');
+        assert.equal(modelListRequests, 1);
+        assert.equal(generationRequests, 1);
+    } finally {
+        await Promise.allSettled([close(appServer), close(upstream)]);
+        globalThis.DATA_ROOT = previousDataRoot;
+        await fs.promises.rm(dataRoot, { recursive: true, force: true });
+    }
+});
+
+test('free Gemini retries transient model discovery and preserves its final upstream status', async () => {
+    const previousDataRoot = globalThis.DATA_ROOT;
+    const dataRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'st-free-gemini-discovery-errors-'));
+    globalThis.DATA_ROOT = dataRoot;
+    const statuses = [429, 502, 503, 504];
+    const attempts = new Map();
+
+    const upstream = http.createServer((request, response) => {
+        const key = new URL(request.url, 'http://127.0.0.1').searchParams.get('key');
+        const status = Number(key?.replace('discovery-key-', ''));
+        attempts.set(status, (attempts.get(status) || 0) + 1);
+        response.statusCode = status;
+        response.setHeader('Content-Type', 'application/json');
+        response.end(JSON.stringify({ error: { message: `discovery failed with ${status}` } }));
+    });
+    const appServer = await createChatAppServer();
+
+    try {
+        const upstreamUrl = await listen(upstream);
+        const appUrl = await listen(appServer);
+        const channels = new Map();
+        for (const status of statuses) {
+            const model = `discovery-${status}`;
+            channels.set(status, await createFreeGeminiChannel({
+                name: model,
+                url: upstreamUrl,
+                key: `discovery-key-${status}`,
+                modelPolicy: 'allowlist',
+                models: [model],
+                maxRetries: 1,
+                timeoutMs: 5000,
+            }));
+        }
+
+        for (const status of statuses) {
+            const model = `discovery-${status}`;
+            const result = await fetch(`${appUrl}/api/backends/chat-completions/generate`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    chat_completion_source: 'free-gemini',
+                    free_gemini_channel_id: channels.get(status).id,
+                    model,
+                    messages: [{ role: 'user', content: 'preserve discovery errors' }],
+                    stream: false,
+                }),
+            });
+            const body = await result.json();
+            assert.equal(result.status, status);
+            assert.equal(body.error.code, 'FREE_GEMINI_MODELS_FAILED');
+            assert.equal(attempts.get(status), 2);
+        }
+    } finally {
+        await Promise.allSettled([close(appServer), close(upstream)]);
+        globalThis.DATA_ROOT = previousDataRoot;
+        await fs.promises.rm(dataRoot, { recursive: true, force: true });
+    }
+});
+
 test('free Gemini retries only retryable failures and returns machine-readable 422 errors', async () => {
     const previousDataRoot = globalThis.DATA_ROOT;
     const dataRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'st-free-gemini-errors-'));
@@ -387,7 +552,7 @@ test('free Gemini retries only retryable failures and returns machine-readable 4
         response.setHeader('Content-Type', 'application/json');
         if (request.method === 'GET') {
             response.end(JSON.stringify({
-                models: ['retry', 'blocked', 'empty', 'teapot', 'leak', 'stream-error'].map(id => ({
+                models: ['retry', 'blocked', 'empty', 'whitespace', 'teapot', 'leak', 'stream-error'].map(id => ({
                     name: `models/${id}`,
                     supportedGenerationMethods: ['generateContent'],
                 })),
@@ -411,6 +576,10 @@ test('free Gemini retries only retryable failures and returns machine-readable 4
             response.end(JSON.stringify({ candidates: [{ content: { parts: [] } }] }));
             return;
         }
+        if (model === 'whitespace') {
+            response.end(JSON.stringify({ candidates: [{ content: { parts: [{ text: ' \n\t ' }] } }] }));
+            return;
+        }
         if (model === 'teapot') {
             response.statusCode = 418;
             response.end('not json');
@@ -421,7 +590,7 @@ test('free Gemini retries only retryable failures and returns machine-readable 4
             response.end(JSON.stringify({
                 error: {
                     code: 'BAD_KEY',
-                    message: 'server secret is secret; https://private.example/path?key=secret',
+                    message: 'encoded credential: secret%2fkey; fully encoded: %73%65%63%72%65%74%2f%6b%65%79; mixed: %73ecret%2fkey; nested: secret%252525252Fkey; unrelated: %3Cscript%3Ealert%281%29%3C%2Fscript%3E; https://private.example/path?key=secret%2Fkey',
                 },
             }));
             return;
@@ -440,7 +609,7 @@ test('free Gemini retries only retryable failures and returns machine-readable 4
         const appUrl = await listen(appServer);
         await createFreeGeminiChannel({
             url: upstreamUrl,
-            key: 'secret',
+            key: 'secret/key',
             maxRetries: 1,
         });
 
@@ -472,6 +641,10 @@ test('free Gemini retries only retryable failures and returns machine-readable 4
         assert.equal(empty.response.status, 422);
         assert.equal(empty.body.error.code, 'FREE_GEMINI_EMPTY_OUTPUT');
 
+        const whitespace = await generate('whitespace');
+        assert.equal(whitespace.response.status, 422);
+        assert.equal(whitespace.body.error.code, 'FREE_GEMINI_EMPTY_OUTPUT');
+
         const teapot = await generate('teapot');
         assert.equal(teapot.response.status, 502);
         assert.equal(teapot.body.error.code, 'FREE_GEMINI_UPSTREAM_ERROR');
@@ -480,8 +653,16 @@ test('free Gemini retries only retryable failures and returns machine-readable 4
         const leaked = await generate('leak');
         assert.equal(leaked.response.status, 400);
         assert.equal(leaked.body.error.code, 'FREE_GEMINI_UPSTREAM_ERROR');
-        assert.equal(JSON.stringify(leaked.body).includes('secret'), false);
-        assert.equal(JSON.stringify(leaked.body).includes('private.example'), false);
+        const leakedBody = JSON.stringify(leaked.body);
+        assert.equal(leakedBody.includes('secret'), false);
+        assert.equal(leakedBody.includes('secret%2fkey'), false);
+        assert.equal(leakedBody.includes('secret%2Fkey'), false);
+        assert.equal(leakedBody.includes('%73%65%63%72%65%74'), false);
+        assert.equal(leakedBody.includes('%73ecret'), false);
+        assert.equal(leakedBody.includes('secret%252525252Fkey'), false);
+        assert.equal(leakedBody.includes('%3Cscript%3Ealert%281%29%3C%2Fscript%3E'), true);
+        assert.equal(leakedBody.includes('<script>'), false);
+        assert.equal(leakedBody.includes('private.example'), false);
         assert.equal(attempts.get('leak'), 1);
 
         const streamError = await generate('stream-error', true);
@@ -1476,6 +1657,98 @@ test('free Gemini streaming does not try a second route after the first route em
 
         assert.equal(result.status, 200);
         assert.equal(await result.text(), primaryEvent);
+        assert.deepEqual(generationOrder, ['primary']);
+    } finally {
+        await Promise.allSettled([close(appServer), close(primaryUpstream), close(secondaryUpstream)]);
+        globalThis.DATA_ROOT = previousDataRoot;
+        await fs.promises.rm(dataRoot, { recursive: true, force: true });
+    }
+});
+
+test('free Gemini emits a safe machine-readable SSE error after a committed stream fails', async () => {
+    const previousDataRoot = globalThis.DATA_ROOT;
+    const dataRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'st-free-gemini-stream-error-event-'));
+    globalThis.DATA_ROOT = dataRoot;
+    const generationOrder = [];
+    const model = 'stream-error-event';
+    const primaryEvent = 'data: {"candidates":[{"content":{"parts":[{"text":"partial answer"}]}}]}\n\n';
+
+    function sendModels(response) {
+        response.setHeader('Content-Type', 'application/json');
+        response.end(JSON.stringify({
+            models: [{ name: `models/${model}`, supportedGenerationMethods: ['generateContent'] }],
+        }));
+    }
+
+    const primaryUpstream = http.createServer(async (request, response) => {
+        if (request.method === 'GET') {
+            sendModels(response);
+            return;
+        }
+
+        await readRequestJson(request);
+        generationOrder.push('primary');
+        response.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        response.write(primaryEvent);
+        setTimeout(() => response.destroy(new Error('sensitive-upstream-detail')), 20);
+    });
+    const secondaryUpstream = http.createServer(async (request, response) => {
+        if (request.method === 'GET') {
+            sendModels(response);
+            return;
+        }
+
+        await readRequestJson(request);
+        generationOrder.push('secondary');
+        response.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        response.end('data: {"candidates":[{"content":{"parts":[{"text":"duplicate answer"}]}}]}\n\n');
+    });
+    const appServer = await createChatAppServer();
+
+    try {
+        const primaryUrl = await listen(primaryUpstream);
+        const secondaryUrl = await listen(secondaryUpstream);
+        const appUrl = await listen(appServer);
+        const primary = await createFreeGeminiChannel({
+            name: 'stream-error-primary',
+            url: primaryUrl,
+            key: 'primary-secret',
+            priority: 100,
+            maxRetries: 0,
+        });
+        await createFreeGeminiChannel({
+            name: 'stream-error-secondary',
+            url: secondaryUrl,
+            key: 'secondary-secret',
+            priority: 10,
+            maxRetries: 0,
+        });
+
+        const result = await fetch(`${appUrl}/api/backends/chat-completions/generate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                chat_completion_source: 'free-gemini',
+                free_gemini_channel_id: primary.id,
+                model,
+                messages: [{ role: 'user', content: 'stream a partial result' }],
+                stream: true,
+            }),
+        });
+        const body = await result.text();
+        const events = body.trim().split('\n\n');
+        const errorEvent = JSON.parse(events.at(-1).replace(/^data: /, ''));
+
+        assert.equal(result.status, 200);
+        assert.equal(`${events[0]}\n\n`, primaryEvent);
+        assert.deepEqual(errorEvent, {
+            error: {
+                code: 'FREE_GEMINI_STREAM_FAILED',
+                message: '免费 Gemini 流式响应转发失败。',
+            },
+        });
+        assert.equal(body.includes('primary-secret'), false);
+        assert.equal(body.includes('sensitive-upstream-detail'), false);
         assert.deepEqual(generationOrder, ['primary']);
     } finally {
         await Promise.allSettled([close(appServer), close(primaryUpstream), close(secondaryUpstream)]);

@@ -1845,7 +1845,15 @@ if (typeof window.initializeAdminExtensions === 'function') {
     // 绑定定时任务相关按钮
     initScheduledTasksHandlers(template);
 
-    const popupPromise = callGenericPopup(template, POPUP_TYPE.TEXT, '', { okButton: 'Close', wide: true, large: true, allowVerticalScrolling: true, allowHorizontalScrolling: true });
+    const popupPromise = callGenericPopup(template, POPUP_TYPE.TEXT, '', {
+        okButton: 'Close',
+        wide: true,
+        large: true,
+        allowVerticalScrolling: true,
+        allowHorizontalScrolling: true,
+        onClosing: () => typeof window.canCloseFreeGeminiChannelAdmin !== 'function'
+            || window.canCloseFreeGeminiChannelAdmin(),
+    });
     renderUsers();
     await popupPromise;
     if (typeof window.disposeAdminExtensions === 'function') {

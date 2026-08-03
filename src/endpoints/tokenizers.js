@@ -62,6 +62,34 @@ const IS_DOWNLOAD_ALLOWED = getConfigValue('enableDownloadableTokenizers', true,
 const gunzip = promisify(zlib.gunzip);
 
 /**
+ * Gets a safe tokenizer model identifier for diagnostics.
+ * @param {string} model Tokenizer model path or URL
+ * @returns {string} Model file name
+ */
+function getTokenizerModelName(model) {
+    try {
+        const url = new URL(model);
+        return path.basename(url.pathname) || 'unknown';
+    } catch {
+        return path.basename(String(model)) || 'unknown';
+    }
+}
+
+/**
+ * Logs tokenizer failures without including prompt or message contents.
+ * @param {string} model Safe tokenizer model name
+ * @param {string} type Tokenizer operation type
+ * @param {number} [size] Number of input items
+ */
+function warnTokenizerFailure(model, type, size = 0) {
+    console.warn('Tokenizer operation failed.', {
+        model: getTokenizerModelName(model),
+        type,
+        size,
+    });
+}
+
+/**
  * Gets a path to the tokenizer model. Downloads the model if it's a URL.
  * @param {string} model Model URL or path
  * @param {string|undefined} fallbackModel Fallback model path
@@ -150,6 +178,10 @@ class SentencePieceTokenizer {
      */
     #instance;
     /**
+     * @type {Promise<import('@agnai/sentencepiece-js').SentencePieceProcessor|null>|undefined} In-flight tokenizer load
+     */
+    #loadingPromise;
+    /**
      * @type {string} Path to the tokenizer model
      */
     #model;
@@ -157,36 +189,60 @@ class SentencePieceTokenizer {
      * @type {string|undefined} Path to the fallback model
      */
     #fallbackModel;
+    /**
+     * @type {() => Promise<import('@agnai/sentencepiece-js').SentencePieceProcessor>} Tokenizer loader
+     */
+    #loadInstance;
 
     /**
      * Creates a new Sentencepiece tokenizer.
      * @param {string} model Path to the tokenizer model
      * @param {string} [fallbackModel] Path to the fallback model
+     * @param {() => Promise<import('@agnai/sentencepiece-js').SentencePieceProcessor>} [loadInstance] Tokenizer loader override
      */
-    constructor(model, fallbackModel) {
+    constructor(model, fallbackModel, loadInstance) {
         this.#model = model;
         this.#fallbackModel = fallbackModel;
+        this.#loadInstance = loadInstance ?? (async () => {
+            const pathToModel = await getPathToTokenizer(this.#model, this.#fallbackModel);
+            const instance = new SentencePieceProcessor();
+            await instance.load(pathToModel);
+            return instance;
+        });
     }
 
     /**
      * Gets the Sentencepiece tokenizer instance.
      * @returns {Promise<import('@agnai/sentencepiece-js').SentencePieceProcessor|null>} Sentencepiece tokenizer instance
      */
-    async get() {
+    get() {
         if (this.#instance) {
-            return this.#instance;
+            return Promise.resolve(this.#instance);
         }
 
-        try {
-            const pathToModel = await getPathToTokenizer(this.#model, this.#fallbackModel);
-            this.#instance = new SentencePieceProcessor();
-            await this.#instance.load(pathToModel);
-            console.info('Instantiated the tokenizer for', path.parse(pathToModel).name);
-            return this.#instance;
-        } catch (error) {
-            console.error('Sentencepiece tokenizer failed to load: ' + this.#model, error);
-            return null;
+        if (this.#loadingPromise) {
+            return this.#loadingPromise;
         }
+
+        const loadingPromise = Promise.resolve()
+            .then(() => this.#loadInstance())
+            .then(instance => {
+                this.#instance = instance;
+                console.info('Instantiated the tokenizer for', getTokenizerModelName(this.#model));
+                return instance;
+            })
+            .catch(() => {
+                this.#instance = undefined;
+                warnTokenizerFailure(this.#model, 'sentencepiece-load');
+                return null;
+            })
+            .finally(() => {
+                if (this.#loadingPromise === loadingPromise) {
+                    this.#loadingPromise = undefined;
+                }
+            });
+        this.#loadingPromise = loadingPromise;
+        return loadingPromise;
     }
 }
 
@@ -199,6 +255,10 @@ class WebTokenizer {
      */
     #instance;
     /**
+     * @type {Promise<Tokenizer|null>|undefined} In-flight tokenizer load
+     */
+    #loadingPromise;
+    /**
      * @type {string} Path to the tokenizer model
      */
     #model;
@@ -206,36 +266,59 @@ class WebTokenizer {
      * @type {string|undefined} Path to the fallback model
      */
     #fallbackModel;
+    /**
+     * @type {() => Promise<Tokenizer>} Tokenizer loader
+     */
+    #loadInstance;
 
     /**
      * Creates a new Web tokenizer.
      * @param {string} model Path to the tokenizer model
      * @param {string} [fallbackModel] Path to the fallback model
+     * @param {() => Promise<Tokenizer>} [loadInstance] Tokenizer loader override
      */
-    constructor(model, fallbackModel) {
+    constructor(model, fallbackModel, loadInstance) {
         this.#model = model;
         this.#fallbackModel = fallbackModel;
+        this.#loadInstance = loadInstance ?? (async () => {
+            const pathToModel = await getPathToTokenizer(this.#model, this.#fallbackModel);
+            const fileBuffer = await fs.promises.readFile(pathToModel);
+            return await Tokenizer.fromJSON(fileBuffer);
+        });
     }
 
     /**
      * Gets the Web tokenizer instance.
      * @returns {Promise<Tokenizer|null>} Web tokenizer instance
      */
-    async get() {
+    get() {
         if (this.#instance) {
-            return this.#instance;
+            return Promise.resolve(this.#instance);
         }
 
-        try {
-            const pathToModel = await getPathToTokenizer(this.#model, this.#fallbackModel);
-            const fileBuffer = await fs.promises.readFile(pathToModel);
-            this.#instance = await Tokenizer.fromJSON(fileBuffer);
-            console.info('Instantiated the tokenizer for', path.parse(pathToModel).name);
-            return this.#instance;
-        } catch (error) {
-            console.error('Web tokenizer failed to load: ' + this.#model, error);
-            return null;
+        if (this.#loadingPromise) {
+            return this.#loadingPromise;
         }
+
+        const loadingPromise = Promise.resolve()
+            .then(() => this.#loadInstance())
+            .then(instance => {
+                this.#instance = instance;
+                console.info('Instantiated the tokenizer for', getTokenizerModelName(this.#model));
+                return instance;
+            })
+            .catch(() => {
+                this.#instance = undefined;
+                warnTokenizerFailure(this.#model, 'web-load');
+                return null;
+            })
+            .finally(() => {
+                if (this.#loadingPromise === loadingPromise) {
+                    this.#loadingPromise = undefined;
+                }
+            });
+        this.#loadingPromise = loadingPromise;
+        return loadingPromise;
     }
 }
 
@@ -375,13 +458,91 @@ async function countSentencepieceTokens(tokenizer, text) {
 }
 
 /**
+ * Produces a JSON-compatible value with stable object key ordering.
+ * @param {any} value Value to normalize
+ * @param {WeakSet<object>} ancestors Objects in the current traversal path
+ * @returns {any} Stable JSON-compatible value
+ */
+function getStableJsonValue(value, ancestors) {
+    if (value === null || ['string', 'number', 'boolean'].includes(typeof value)) {
+        return value;
+    }
+
+    if (typeof value === 'bigint') {
+        return String(value);
+    }
+
+    if (typeof value !== 'object') {
+        return null;
+    }
+
+    if (ancestors.has(value)) {
+        return '[Circular]';
+    }
+
+    ancestors.add(value);
+    const normalized = Array.isArray(value)
+        ? value.map(item => getStableJsonValue(item, ancestors))
+        : Object.fromEntries(Object.keys(value).sort().map(key => [key, getStableJsonValue(value[key], ancestors)]));
+    ancestors.delete(value);
+    return normalized;
+}
+
+/**
+ * Converts a message property into tokenizer-safe text.
+ * @param {any} value Message property value
+ * @returns {string} Deterministic text representation
+ */
+function normalizeTokenCountValue(value) {
+    if (typeof value === 'string') {
+        return value;
+    }
+
+    if (value === null || value === undefined) {
+        return '';
+    }
+
+    if (typeof value === 'object') {
+        return JSON.stringify(getStableJsonValue(value, new WeakSet()));
+    }
+
+    return String(value);
+}
+
+/**
+ * Converts all message properties to tokenizer-safe text without mutating the request body.
+ * @param {object[]} messages Messages to normalize
+ * @returns {object[]} Normalized messages
+ */
+function normalizeTokenCountMessages(messages) {
+    return messages.map(message => Object.fromEntries(
+        Object.entries(message).map(([key, value]) => [key, normalizeTokenCountValue(value)]),
+    ));
+}
+
+/**
+ * Checks the supported request shape for the OpenAI count endpoint.
+ * @param {any} body Request body
+ * @returns {body is object[]} Whether the body is an array of message objects
+ */
+function isTokenCountBody(body) {
+    return Array.isArray(body) && body.every(message => message !== null && typeof message === 'object' && !Array.isArray(message));
+}
+
+export const tokenizerTestHooks = Object.freeze({
+    SentencePieceTokenizer,
+    WebTokenizer,
+    normalizeTokenCountMessages,
+});
+
+/**
  * Counts the tokens in the given array of objects using the Sentencepiece tokenizer.
  * @param {SentencePieceTokenizer} tokenizer
  * @param {object[]} array Array of objects to tokenize
  * @returns {Promise<number>} Number of tokens
  */
 async function countSentencepieceArrayTokens(tokenizer, array) {
-    const jsonBody = array.flatMap(x => Object.values(x)).join('\n\n');
+    const jsonBody = normalizeTokenCountMessages(array).flatMap(x => Object.values(x)).join('\n\n');
     const result = await countSentencepieceTokens(tokenizer, jsonBody);
     const num_tokens = result.count;
     return num_tokens;
@@ -536,7 +697,7 @@ export function getTiktokenTokenizer(model) {
  */
 export function countWebTokenizerTokens(tokenizer, messages) {
     // Should be fine if we use the old conversion method instead of the messages API one i think?
-    const convertedPrompt = convertClaudePrompt(messages, false, '', false, false, '', false);
+    const convertedPrompt = convertClaudePrompt(normalizeTokenCountMessages(messages), false, '', false, false, '', false);
 
     // Fallback to strlen estimation
     if (!tokenizer) {
@@ -906,12 +1067,15 @@ router.post('/openai/decode', async function (req, res) {
 });
 
 router.post('/openai/count', async function (req, res) {
-    try {
-        if (!req.body) return res.sendStatus(400);
+    if (!isTokenCountBody(req.body)) {
+        return res.sendStatus(400);
+    }
 
+    const queryModel = String(req.query.model || '');
+    const model = getTokenizerModel(queryModel);
+
+    try {
         let num_tokens = 0;
-        const queryModel = String(req.query.model || '');
-        const model = getTokenizerModel(queryModel);
 
         if (model === 'claude') {
             const instance = await claude_tokenizer.get();
@@ -993,17 +1157,13 @@ router.post('/openai/count', async function (req, res) {
 
         const tokenizer = getTiktokenTokenizer(model);
 
-        for (const msg of req.body) {
-            try {
-                num_tokens += tokensPerMessage;
-                for (const [key, value] of Object.entries(msg)) {
-                    num_tokens += tokenizer.encode(value).length;
-                    if (key == 'name') {
-                        num_tokens += tokensPerName;
-                    }
+        for (const msg of normalizeTokenCountMessages(req.body)) {
+            num_tokens += tokensPerMessage;
+            for (const [key, value] of Object.entries(msg)) {
+                num_tokens += tokenizer.encode(value).length;
+                if (key == 'name') {
+                    num_tokens += tokensPerName;
                 }
-            } catch {
-                console.warn('Error tokenizing message:', msg);
             }
         }
         num_tokens += tokensPadding;
@@ -1018,9 +1178,9 @@ router.post('/openai/count', async function (req, res) {
         //tokenizer.free();
 
         res.send({ 'token_count': num_tokens });
-    } catch (error) {
-        console.error('An error counting tokens, using fallback estimation method', error);
-        const jsonBody = JSON.stringify(req.body);
+    } catch {
+        warnTokenizerFailure(model, 'openai-count', req.body.length);
+        const jsonBody = normalizeTokenCountValue(req.body);
         const num_tokens = Math.ceil(jsonBody.length / CHARS_PER_TOKEN);
         res.send({ 'token_count': num_tokens });
     }

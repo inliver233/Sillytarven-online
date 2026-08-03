@@ -1575,20 +1575,23 @@ export async function prepareOpenAIMessages({
         // Fill the chat completion with as much context as the budget allows
         await populateChatCompletion(prompts, chatCompletion, { bias, quietPrompt, quietImage, type, cyclePrompt, messages, messageExamples });
     } catch (error) {
+        console.error('Failed to prepare OpenAI prompt:', error);
+        chatCompletion.log('----- Error while preparing prompts -----');
+        chatCompletion.log(error);
+        chatCompletion.log(error?.stack);
+        chatCompletion.log('---------------------------------------------');
+
         if (error instanceof TokenBudgetExceededError) {
-            toastr.error(t`Mandatory prompts exceed the context size.`);
+            toastr.error(t`Mandatory prompts exceed the context size.`, undefined, { preventDuplicates: true });
             chatCompletion.log('Mandatory prompts exceed the context size.');
             promptManagerError = t`Not enough free tokens for mandatory prompts. Raise your token limit or disable custom prompts.`;
         } else if (error instanceof InvalidCharacterNameError) {
-            toastr.warning(t`An error occurred while counting tokens: Invalid character name`);
+            toastr.warning(t`Could not prepare the prompt: Invalid character name.`, undefined, { preventDuplicates: true });
             chatCompletion.log('Invalid character name');
             promptManagerError = t`The name of at least one character contained whitespaces or special characters. Please check your user and character name.`;
         } else {
-            toastr.error(t`An unknown error occurred while counting tokens. Further information may be available in console.`);
-            chatCompletion.log('----- Unexpected error while preparing prompts -----');
-            chatCompletion.log(error);
-            chatCompletion.log(error.stack);
-            chatCompletion.log('----------------------------------------------------');
+            toastr.error(t`An unexpected error occurred while preparing the prompt. Further information may be available in console.`, undefined, { preventDuplicates: true });
+            promptManagerError = t`The prompt could not be prepared. Check the browser console for details.`;
         }
     } finally {
         promptManagerResult = createPromptManagerResult(chatCompletion, promptManagerError);

@@ -19,6 +19,7 @@
             <h4>用户邀请管理</h4>
         </button>
         <button type="button" class="freeGeminiChannelsButton menu_button menu_button_icon" data-target-tab="freeGeminiChannelsBlock">
+            <img class="freeGeminiBrandIcon" src="/img/free-gemini.svg" alt="">
             <h4>免费 Gemini 渠道</h4>
         </button>
         <button type="button" class="announcementsButton menu_button menu_button_icon" data-target-tab="announcementsBlock">
@@ -456,7 +457,7 @@
     <!-- 全局免费 Gemini 渠道管理 -->
     <div class="navTab freeGeminiChannelsBlock" style="display: none;">
         <div class="flex-container flexFlowColumn flexGap10">
-            <h3>免费 Gemini 渠道</h3>
+            <h3 class="freeGeminiBrandHeading"><img class="freeGeminiBrandIcon" src="/img/free-gemini.svg" alt="">免费 Gemini 渠道</h3>
             <div class="neutral_warning">
                 <i class="fa-fw fa-solid fa-shield-halved"></i>
                 <span>这里配置的 URL 和 API Key 仅保存在服务器端。普通成员只能看到渠道名称、选择模型并使用，无法查看连接信息。</span>
@@ -464,6 +465,24 @@
 
             <div id="freeGeminiChannelForm" class="flex-container flexFlowColumn flexGap10" style="padding: 16px; border: 1px solid var(--SmartThemeBorderColor); border-radius: 10px; background: var(--SmartThemeBlurTintColor);">
                 <input type="hidden" id="freeGeminiChannelId" value="">
+                <div class="flex-container alignItemsCenter justifySpaceBetween flexGap10" style="padding: 10px 12px; border: 1px solid var(--SmartThemeBorderColor); border-radius: 8px; background: var(--SmartThemeChatTintColor); flex-wrap: wrap;">
+                    <strong id="freeGeminiChannelFormMode" style="font-size: 1.05em;">正在新建渠道</strong>
+                    <span id="freeGeminiChannelDirtyStatus" class="notes">所有更改均已保存</span>
+                </div>
+                <div class="freeGeminiChannelActions flex-container flexGap10">
+                    <button type="button" class="menu_button menu_button_icon" id="saveFreeGeminiChannel">
+                        <i class="fa-fw fa-solid fa-floppy-disk"></i><span>创建并保存渠道</span>
+                    </button>
+                    <button type="button" class="menu_button menu_button_icon" id="newFreeGeminiChannel">
+                        <i class="fa-fw fa-solid fa-plus"></i><span>新建其他渠道</span>
+                    </button>
+                    <button type="button" class="menu_button menu_button_icon" id="cancelFreeGeminiChannelEdit" style="display: none;">
+                        <i class="fa-fw fa-solid fa-xmark"></i><span>取消编辑</span>
+                    </button>
+                    <button type="button" class="menu_button menu_button_icon" id="refreshFreeGeminiChannels">
+                        <i class="fa-fw fa-solid fa-rotate"></i><span>刷新列表</span>
+                    </button>
+                </div>
                 <div class="flex-container flexGap10" style="flex-wrap: wrap;">
                     <label class="flex1" style="min-width: 220px;">
                         <span style="display: block; margin-bottom: 5px;">渠道名称</span>
@@ -501,7 +520,7 @@
                 <label>
                     <span style="display: block; margin-bottom: 5px;">模型 ID 列表</span>
                     <textarea id="freeGeminiChannelModels" class="text_pole wide100p" rows="5" placeholder="每行一个模型 ID，例如：&#10;gemini-2.5-flash&#10;gemini-2.5-pro"></textarea>
-                    <small class="notes">可手工逐行填写。选择“允许全部”时列表仅作记录，不限制上游模型。</small>
+                    <small id="freeGeminiChannelModelsHelp" class="notes">允许全部上游模型；下方列表仅作记录，不会限制模型。</small>
                 </label>
                 <div class="flex-container flexGap10 alignItemsCenter" style="flex-wrap: wrap;">
                     <button type="button" class="menu_button menu_button_icon" id="refreshFreeGeminiChannelModels">
@@ -512,11 +531,18 @@
                     </button>
                     <small id="freeGeminiChannelModelsStatus" class="notes">保存渠道后可刷新并选择上游模型。</small>
                 </div>
-                <label id="freeGeminiUpstreamModelsBlock" style="display: none;">
-                    <span style="display: block; margin-bottom: 5px;">上游可用模型（可多选）</span>
-                    <select id="freeGeminiUpstreamModels" class="text_pole wide100p" multiple size="8"></select>
-                    <small class="notes">按 Ctrl / Command 或 Shift 多选；选择结果会同步到上方每行一个的模型列表。</small>
-                </label>
+                <div id="freeGeminiUpstreamModelsBlock" style="display: none;">
+                    <div class="freeGeminiModelListHeader">
+                        <span>上游可用模型</span>
+                        <span id="freeGeminiModelSelectionCount" class="notes">0 / 0 已启用</span>
+                    </div>
+                    <label for="freeGeminiModelSearch" class="freeGeminiModelSearchLabel">
+                        <span>搜索模型</span>
+                        <input id="freeGeminiModelSearch" class="text_pole wide100p" type="search" placeholder="输入模型 ID 筛选" autocomplete="off">
+                    </label>
+                    <div id="freeGeminiUpstreamModels" class="freeGeminiModelList" role="group" aria-label="上游可用模型"></div>
+                    <small class="notes">勾选始终表示启用该模型；在排除列表策略下，未勾选的模型会被排除。</small>
+                </div>
                 <div class="flex-container flexGap10" style="flex-wrap: wrap;">
                     <label class="flex1" style="min-width: 160px;">
                         <span style="display: block; margin-bottom: 5px;">请求超时（毫秒）</span>
@@ -535,17 +561,6 @@
                         <input id="freeGeminiChannelMaxOutputTokens" class="text_pole wide100p" type="number" min="0" max="65536" step="1" value="0">
                         <small class="notes">0 表示按模型上游限制自动适配。</small>
                     </label>
-                </div>
-                <div class="flex-container flexGap10" style="flex-wrap: wrap;">
-                    <button type="button" class="menu_button menu_button_icon" id="saveFreeGeminiChannel">
-                        <i class="fa-fw fa-solid fa-plus"></i><span>新增渠道</span>
-                    </button>
-                    <button type="button" class="menu_button menu_button_icon" id="cancelFreeGeminiChannelEdit" style="display: none;">
-                        <i class="fa-fw fa-solid fa-xmark"></i><span>取消编辑</span>
-                    </button>
-                    <button type="button" class="menu_button menu_button_icon" id="refreshFreeGeminiChannels">
-                        <i class="fa-fw fa-solid fa-rotate"></i><span>刷新列表</span>
-                    </button>
                 </div>
             </div>
 

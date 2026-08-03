@@ -58,6 +58,43 @@ test('free Gemini channels keep credentials server-side', async () => {
     });
 });
 
+test('denylist policy persists across updates while member listings expose only the public contract', async () => {
+    await withTempDataRoot(async dataRoot => {
+        const created = await createFreeGeminiChannel({
+            name: 'denylist-channel',
+            url: 'https://private.example.com/v1beta',
+            key: 'private-secret-key',
+            modelPolicy: 'all',
+        });
+
+        await updateFreeGeminiChannel(created.id, {
+            modelPolicy: 'denylist',
+            models: ['models/gemini-denied', 'gemini-other'],
+        });
+
+        const adminChannels = await listAdminFreeGeminiChannels();
+        const persistedAdminChannel = adminChannels.find(channel => channel.id === created.id);
+        assert.equal(persistedAdminChannel.modelPolicy, 'denylist');
+        assert.deepEqual(persistedAdminChannel.models, ['gemini-denied', 'gemini-other']);
+        assert.equal(persistedAdminChannel.url, 'https://private.example.com/v1beta');
+        assert.equal(persistedAdminChannel.hasKey, true);
+        assert.equal(Object.hasOwn(persistedAdminChannel, 'key'), false);
+
+        const storagePath = path.join(dataRoot, '_global', 'free-gemini-channels.json');
+        const stored = JSON.parse(await fs.promises.readFile(storagePath, 'utf8'));
+        const persistedRecord = stored.channels.find(channel => channel.id === created.id);
+        assert.equal(persistedRecord.modelPolicy, 'denylist');
+        assert.deepEqual(persistedRecord.models, ['gemini-denied', 'gemini-other']);
+
+        const publicChannels = await listPublicFreeGeminiChannels();
+        assert.deepEqual(publicChannels, [{ id: created.id, name: 'denylist-channel' }]);
+        assert.deepEqual(Object.keys(publicChannels[0]).sort(), ['id', 'name']);
+        for (const privateField of ['url', 'key', 'hasKey', 'maskedKey', 'modelPolicy', 'models', 'priority']) {
+            assert.equal(Object.hasOwn(publicChannels[0], privateField), false);
+        }
+    });
+});
+
 test('updating with an empty key preserves the existing credential', async () => {
     await withTempDataRoot(async () => {
         const created = await createFreeGeminiChannel({
@@ -263,6 +300,7 @@ test('model discovery uses TTL caching, single-flight, and stale-if-error withou
                 url: `http://127.0.0.1:${address.port}`,
                 key: 'secret',
                 modelCacheTtlMs: 30000,
+                maxRetries: 0,
             });
             const resolved = await getEnabledFreeGeminiChannel(channel.id);
             const [first, second] = await Promise.all([
@@ -288,6 +326,128 @@ test('model discovery uses TTL caching, single-flight, and stale-if-error withou
             assert.deepEqual(await ordinaryRequest, first);
             await adminFailure;
             assert.equal(requests, 3);
+        } finally {
+            await new Promise(resolve => upstream.close(resolve));
+        }
+    });
+});
+
+test('channel updates prevent an older in-flight model request from refilling the cache', async () => {
+    await withTempDataRoot(async () => {
+        let requests = 0;
+        let markFirstRequestStarted;
+        let releaseFirstRequest;
+        const firstRequestStarted = new Promise(resolve => markFirstRequestStarted = resolve);
+        const firstRequestGate = new Promise(resolve => releaseFirstRequest = resolve);
+        const upstream = http.createServer(async (_request, response) => {
+            requests++;
+            if (requests === 1) {
+                markFirstRequestStarted();
+                await firstRequestGate;
+            }
+            response.setHeader('Content-Type', 'application/json');
+            response.end(JSON.stringify({
+                models: [{
+                    name: requests === 1 ? 'models/stale-model' : 'models/current-model',
+                    supportedGenerationMethods: ['generateContent'],
+                }],
+            }));
+        });
+        await new Promise((resolve, reject) => {
+            upstream.once('error', reject);
+            upstream.listen(0, '127.0.0.1', resolve);
+        });
+
+        try {
+            const address = upstream.address();
+            const channel = await createFreeGeminiChannel({
+                url: `http://127.0.0.1:${address.port}`,
+                key: 'secret',
+                maxRetries: 0,
+            });
+            const originalChannel = await getEnabledFreeGeminiChannel(channel.id);
+            const staleRequest = getFreeGeminiChannelModels(originalChannel);
+            await firstRequestStarted;
+
+            await updateFreeGeminiChannel(channel.id, { priority: 1 });
+            releaseFirstRequest();
+            assert.deepEqual(await staleRequest, [{ id: 'stale-model' }]);
+
+            const updatedChannel = await getEnabledFreeGeminiChannel(channel.id);
+            assert.deepEqual(await getFreeGeminiChannelModels(updatedChannel), [{ id: 'current-model' }]);
+            assert.equal(requests, 2);
+        } finally {
+            releaseFirstRequest?.();
+            await new Promise(resolve => upstream.close(resolve));
+        }
+    });
+});
+
+test('a stale channel snapshot started after an update cannot populate or serve model cache', async () => {
+    await withTempDataRoot(async () => {
+        let requests = 0;
+        const upstream = http.createServer((request, response) => {
+            requests++;
+            const key = new URL(request.url, 'http://localhost').searchParams.get('key');
+            response.setHeader('Content-Type', 'application/json');
+            response.end(JSON.stringify({
+                models: [{
+                    name: key === 'current-secret' ? 'models/current-model' : 'models/stale-model',
+                    supportedGenerationMethods: ['generateContent'],
+                }],
+            }));
+        });
+        await new Promise((resolve, reject) => {
+            upstream.once('error', reject);
+            upstream.listen(0, '127.0.0.1', resolve);
+        });
+
+        try {
+            const address = upstream.address();
+            const channel = await createFreeGeminiChannel({
+                url: `http://127.0.0.1:${address.port}`,
+                key: 'stale-secret',
+                maxRetries: 0,
+            });
+            const staleSnapshot = await getEnabledFreeGeminiChannel(channel.id);
+            assert.deepEqual(await getFreeGeminiChannelModels(staleSnapshot), [{ id: 'stale-model' }]);
+
+            await updateFreeGeminiChannel(channel.id, { key: 'current-secret' });
+            assert.deepEqual(await getFreeGeminiChannelModels(staleSnapshot), [{ id: 'current-model' }]);
+            assert.deepEqual(await getFreeGeminiChannelModels(staleSnapshot), [{ id: 'current-model' }]);
+            assert.equal(requests, 2);
+        } finally {
+            await new Promise(resolve => upstream.close(resolve));
+        }
+    });
+});
+
+test('model discovery does not retry a deterministic 418 mapped to 502', async () => {
+    await withTempDataRoot(async () => {
+        let requests = 0;
+        const upstream = http.createServer((_request, response) => {
+            requests++;
+            response.statusCode = 418;
+            response.end('teapot');
+        });
+        await new Promise((resolve, reject) => {
+            upstream.once('error', reject);
+            upstream.listen(0, '127.0.0.1', resolve);
+        });
+
+        try {
+            const address = upstream.address();
+            const channel = await createFreeGeminiChannel({
+                url: `http://127.0.0.1:${address.port}`,
+                key: 'secret',
+                maxRetries: 3,
+            });
+            const resolved = await getEnabledFreeGeminiChannel(channel.id);
+            await assert.rejects(
+                getFreeGeminiChannelModels(resolved),
+                error => error?.status === 502 && error?.code === 'FREE_GEMINI_MODELS_FAILED',
+            );
+            assert.equal(requests, 1);
         } finally {
             await new Promise(resolve => upstream.close(resolve));
         }
