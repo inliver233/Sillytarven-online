@@ -163,7 +163,10 @@ test('install blocks literal and DNS-resolved private targets before clone', asy
         }
         assert.equal(cloneCalls, 0);
 
-        const publicInstall = await post(baseUrl, 'install', { url: 'https://public.example/public.git' });
+        const publicInstall = await post(baseUrl, 'install', {
+            url: 'https://public.example/public.git',
+            branch: '',
+        });
         assert.equal(publicInstall.status, 200);
         assert.equal(cloneCalls, 1);
         assert.deepEqual(gitOptions.config, [

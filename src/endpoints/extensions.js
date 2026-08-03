@@ -630,7 +630,7 @@ export function sanitizeExtensionUrlForLog(value) {
 }
 
 function validateBranch(branch, required = false) {
-    if (branch === undefined && !required) return;
+    if ((branch === undefined || branch === '') && !required) return;
     if (typeof branch !== 'string' || !branch || /[\0\r\n]/u.test(branch)) {
         throw new ExtensionResolutionError(400, 'Bad Request: A valid branch is required in the request body.');
     }
