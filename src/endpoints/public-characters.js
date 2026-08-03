@@ -3,7 +3,14 @@ import fs from 'node:fs';
 import express from 'express';
 import sanitize from 'sanitize-filename';
 import { sync as writeFileAtomicSync } from 'write-file-atomic';
-import { humanizedISO8601DateTime } from '../util.js';
+import { getUniqueName, humanizedISO8601DateTime } from '../util.js';
+import { canConsumeStorage } from '../storage-quota.js';
+import { invalidateCharacterListCache } from '../character-list-cache.js';
+import { ensureDurableChatRecovery } from '../chat-journal.js';
+import { ensureChatBranchRecovery, getChatBranchUserLockPath } from '../chat-branch.js';
+import { ensureCharacterChatRecovery } from '../character-chat-transaction.js';
+import { ensureFileTransactionRecovery } from '../file-transaction.js';
+import { runWithChatStorageLocks } from './chats.js';
 
 // 公用角色卡存储目录
 const PUBLIC_CHARACTERS_DIR = path.join(globalThis.DATA_ROOT, 'public_characters');
@@ -31,6 +38,61 @@ export const router = express.Router();
  */
 function generateCharacterId() {
     return Date.now().toString(36) + Math.random().toString(36).substr(2);
+}
+
+/**
+ * Checks whether a value is already a safe, direct filename.
+ * @param {unknown} value Filename candidate
+ * @returns {value is string} Whether the value is canonical
+ */
+function isCanonicalDirectFilename(value) {
+    return typeof value === 'string'
+        && value.length > 0
+        && !/[\p{Cc}/\\]/u.test(value)
+        && sanitize(value) === value
+        && path.basename(value) === value;
+}
+
+/**
+ * Resolves an existing regular file directly beneath an allowed public root.
+ * @param {string} root Allowed root directory
+ * @param {unknown} fileName Direct filename
+ * @returns {string|null} Resolved regular file path
+ */
+function resolveDirectPublicFile(root, fileName) {
+    if (!isCanonicalDirectFilename(fileName)) {
+        return null;
+    }
+
+    const resolvedRoot = path.resolve(root);
+    const filePath = path.resolve(resolvedRoot, fileName);
+    if (path.dirname(filePath) !== resolvedRoot) {
+        return null;
+    }
+
+    try {
+        const stats = fs.lstatSync(filePath);
+        return stats.isFile() && !stats.isSymbolicLink() ? filePath : null;
+    } catch (error) {
+        if (error?.code === 'ENOENT' || error?.code === 'ENOTDIR') {
+            return null;
+        }
+        throw error;
+    }
+}
+
+/**
+ * Resolves an avatar from the current or legacy public character root.
+ * @param {unknown} avatar Avatar filename from public metadata
+ * @returns {string|null} Resolved regular file path
+ */
+function resolvePublicCharacterFile(avatar) {
+    if (!isCanonicalDirectFilename(avatar)) {
+        return null;
+    }
+
+    return resolveDirectPublicFile(PUBLIC_CHARACTER_FILES_DIR, avatar)
+        ?? resolveDirectPublicFile(PUBLIC_CHARACTERS_DIR, avatar);
 }
 
 /**
@@ -89,8 +151,12 @@ function getAllPublicCharacters() {
  */
 function getPublicCharacter(characterId) {
     try {
-        const characterPath = path.join(PUBLIC_CHARACTERS_DIR, `${characterId}.json`);
-        if (!fs.existsSync(characterPath)) {
+        if (!isCanonicalDirectFilename(characterId)) {
+            return null;
+        }
+
+        const characterPath = resolveDirectPublicFile(PUBLIC_CHARACTERS_DIR, `${characterId}.json`);
+        if (!characterPath) {
             return null;
         }
 
@@ -347,13 +413,11 @@ router.delete('/:characterId', async function (request, response) {
         const characterPath = path.join(PUBLIC_CHARACTERS_DIR, `${characterId}.json`);
         fs.unlinkSync(characterPath);
         if (character.avatar) {
-            const avatarPath = path.join(PUBLIC_CHARACTER_FILES_DIR, character.avatar);
-            if (fs.existsSync(avatarPath)) {
-                fs.unlinkSync(avatarPath);
-            }
-            const legacyAvatarPath = path.join(PUBLIC_CHARACTERS_DIR, character.avatar);
-            if (fs.existsSync(legacyAvatarPath)) {
-                fs.unlinkSync(legacyAvatarPath);
+            for (const avatarRoot of [PUBLIC_CHARACTER_FILES_DIR, PUBLIC_CHARACTERS_DIR]) {
+                const avatarPath = resolveDirectPublicFile(avatarRoot, character.avatar);
+                if (avatarPath) {
+                    fs.unlinkSync(avatarPath);
+                }
             }
         }
 
@@ -393,19 +457,14 @@ router.post('/:characterId/download', async function (request, response) {
 router.get('/avatar/:filename', async function (request, response) {
     try {
         const { filename } = request.params;
-        const decodedFilename = decodeURIComponent(filename);
+        const avatarPath = resolvePublicCharacterFile(filename);
 
-        // 构造头像文件路径
-        const primaryPath = path.join(PUBLIC_CHARACTER_FILES_DIR, decodedFilename);
-        const fallbackPath = path.join(PUBLIC_CHARACTERS_DIR, decodedFilename);
-        const avatarPath = fs.existsSync(primaryPath) ? primaryPath : fallbackPath;
-
-        if (!fs.existsSync(avatarPath)) {
+        if (!avatarPath) {
             return response.status(404).json({ error: 'Avatar not found' });
         }
 
         // 设置正确的Content-Type
-        const ext = path.extname(decodedFilename).toLowerCase();
+        const ext = path.extname(filename).toLowerCase();
         let contentType = 'image/png';
         if (ext === '.jpg' || ext === '.jpeg') {
             contentType = 'image/jpeg';
@@ -440,13 +499,21 @@ router.post('/:characterId/import', async function (request, response) {
             return response.status(404).json({ error: 'Character not found' });
         }
 
-        // 导入角色卡到用户角色库
-        const importResult = await importCharacterToUserLibrary(character, request.user);
+        // Import the character while holding the same user-root lock as character/chat mutations.
+        const root = path.resolve(request.user.directories.root);
+        const importResult = await runWithChatStorageLocks(request, [getChatBranchUserLockPath(root)], async () => {
+            await ensureFileTransactionRecovery(root, request.user.profile.handle);
+            ensureDurableChatRecovery(root, request.user.profile.handle);
+            ensureChatBranchRecovery(root, request.user.profile.handle, request.user.directories);
+            ensureCharacterChatRecovery(root, request.user.profile.handle, request.user.directories);
+            return await importCharacterToUserLibrary(character, request.user, request);
+        });
 
         if (importResult.success) {
             // 增加下载计数
             character.downloads = (character.downloads || 0) + 1;
             savePublicCharacter(character);
+            invalidateCharacterListCache(request.user.profile.handle);
 
             response.json({
                 success: true,
@@ -454,7 +521,15 @@ router.post('/:characterId/import', async function (request, response) {
                 file_name: importResult.fileName,
             });
         } else {
-            response.status(500).json({ error: importResult.error || '导入失败' });
+            response.status(importResult.status || 500).json({
+                error: importResult.error || '导入失败',
+                ...(importResult.quota ? {
+                    message: '存储空间不足，无法保存角色卡，请删除角色或使用激活码扩容。',
+                    usedBytes: importResult.quota.usedBytes,
+                    limitBytes: importResult.quota.limitBytes,
+                    remainingBytes: importResult.quota.remainingBytes,
+                } : {}),
+            });
         }
     } catch (error) {
         console.error('Error importing character:', error);
@@ -463,26 +538,18 @@ router.post('/:characterId/import', async function (request, response) {
 });
 
 // 导入角色卡到用户角色库的辅助函数 - 使用与主后台相同的导入逻辑
-async function importCharacterToUserLibrary(character, user) {
+async function importCharacterToUserLibrary(character, user, request) {
+    let outPath = null;
     try {
         const { getUserDirectories } = await import('../users.js');
         const userDirs = getUserDirectories(user.profile.handle);
 
-        // 确保用户角色库目录存在
-        if (!fs.existsSync(userDirs.characters)) {
-            fs.mkdirSync(userDirs.characters, { recursive: true });
-        }
-
         // 获取角色卡文件路径
-        let characterFilePath = null;
-        if (character.avatar && character.avatar !== 'img/ai4.png') {
-            const candidate = path.join(PUBLIC_CHARACTER_FILES_DIR, character.avatar);
-            characterFilePath = fs.existsSync(candidate)
-                ? candidate
-                : path.join(PUBLIC_CHARACTERS_DIR, character.avatar);
-        }
+        const characterFilePath = character.avatar === 'img/ai4.png'
+            ? null
+            : resolvePublicCharacterFile(character.avatar);
 
-        if (!characterFilePath || !fs.existsSync(characterFilePath)) {
+        if (!characterFilePath) {
             throw new Error('角色卡文件不存在');
         }
 
@@ -524,8 +591,12 @@ async function importCharacterToUserLibrary(character, user) {
         }
 
         const timestamp = Date.now();
-        const baseFileName = sanitize(jsonData.name || character.name || 'character');
-        const sanitizedFileName = sanitize(`${baseFileName}_${timestamp}`);
+        const baseFileName = sanitize(jsonData.name || character.name || 'character') || 'character';
+        const baseIdentity = sanitize(`${baseFileName}_${timestamp}`) || `character_${timestamp}`;
+        const sanitizedFileName = getUniqueName(baseIdentity, identity =>
+            fs.existsSync(path.join(userDirs.characters, `${identity}.png`)) ||
+            fs.existsSync(path.join(userDirs.chats, identity)),
+        );
 
         // 如果没有头像，使用默认头像
         if (!avatarBuffer || avatarBuffer.length === 0) {
@@ -537,21 +608,43 @@ async function importCharacterToUserLibrary(character, user) {
             }
         }
 
-        // 将角色数据写入PNG（统一格式）
+        // Build the complete PNG before checking quota or mutating user storage.
         const characterCardParser = await import('../character-card-parser.js');
         const { write } = characterCardParser;
         const newPng = write(avatarBuffer, JSON.stringify(jsonData));
-        const outPath = path.join(userDirs.characters, `${sanitizedFileName}.png`);
-        writeFileAtomicSync(outPath, newPng);
 
-        const chatsPath = path.join(userDirs.chats, sanitizedFileName);
-        if (!fs.existsSync(chatsPath)) {
-            fs.mkdirSync(chatsPath, { recursive: true });
+        const quota = await (request.characterImportStorageCheck ?? canConsumeStorage)(
+            user.profile,
+            user.directories,
+            newPng.length,
+        );
+        if (!quota.allowed) {
+            return {
+                success: false,
+                status: 507,
+                error: 'storage_limit',
+                quota,
+            };
         }
+
+        if (!fs.existsSync(userDirs.characters)) {
+            fs.mkdirSync(userDirs.characters, { recursive: true });
+        }
+
+        outPath = path.join(userDirs.characters, `${sanitizedFileName}.png`);
+        const writeCardAtomic = request.characterImportWriteFileAtomicSync ?? writeFileAtomicSync;
+        writeCardAtomic(outPath, newPng);
 
         console.info(`Character ${character.name} imported by user ${user.profile.handle}`);
         return { success: true, fileName: sanitizedFileName };
     } catch (error) {
+        if (outPath && fs.existsSync(outPath)) {
+            try {
+                fs.unlinkSync(outPath);
+            } catch (cleanupError) {
+                console.warn(`Failed to clean up imported character card: ${outPath}`, cleanupError);
+            }
+        }
         console.error('Error importing character to user library:', error);
         return {
             success: false,

@@ -89,11 +89,12 @@ async function postGenerate(baseUrl, body) {
     });
 }
 
-test('forwardFetchResponse settles when an upstream body closes without end or error', async () => {
+test('forwardFetchResponse rejects when an upstream body closes without end or error', async () => {
     const body = new PassThrough();
     const target = new PassThrough();
     target.socket = new EventEmitter();
     const chunks = [];
+    target.on('error', () => {});
     target.on('data', chunk => chunks.push(Buffer.from(chunk)));
 
     const forwarding = forwardFetchResponse({
@@ -105,8 +106,11 @@ test('forwardFetchResponse settles when an upstream body closes without end or e
     body.write('partial');
     body.destroy();
 
-    await within(forwarding, 1000, 'forwarding did not settle after upstream close');
-    assert.equal(target.writableEnded, true);
+    await assert.rejects(
+        within(forwarding, 1000, 'forwarding did not settle after upstream close'),
+        error => error?.code === 'ERR_STREAM_PREMATURE_CLOSE',
+    );
+    assert.equal(target.destroyed, true);
     assert.equal(Buffer.concat(chunks).toString('utf8'), 'partial');
 });
 
@@ -195,6 +199,25 @@ test('Stage2 chat-completions protocol integration', async (t) => {
                 answer: { type: 'string' },
             });
         } finally {
+            await close(upstream);
+        }
+    });
+
+    await t.test('CUSTOM streaming request aborts the downstream response on premature upstream close', async () => {
+        const upstream = http.createServer(async (request, response) => {
+            await readJsonRequest(request);
+            response.writeHead(200, { 'content-type': 'text/event-stream' });
+            response.flushHeaders();
+            response.write('data: {"choices":[{"delta":{"content":"partial"}}]}\n\n');
+            setTimeout(() => response.socket?.destroy(), 20).unref();
+        });
+        await listen(upstream);
+        try {
+            const response = await postGenerate(applicationUrl, customRequest(serverUrl(upstream), { stream: true }));
+            await assert.rejects(response.text(), /aborted|terminated|premature|socket/i);
+        } finally {
+            upstream.closeIdleConnections();
+            upstream.closeAllConnections();
             await close(upstream);
         }
     });

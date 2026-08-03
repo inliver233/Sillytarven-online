@@ -45,6 +45,7 @@ function cloneRecord(record) {
     return {
         descriptor: cloneDescriptor(record.descriptor),
         status: record.status,
+        eligible: record.eligible,
         error: record.error ? { ...record.error } : null,
         hooks: structuredClone(record.hooks),
     };
@@ -210,6 +211,7 @@ export class ExtensionLifecycle {
             this.records.set(identity, {
                 descriptor: cloneDescriptor(descriptor),
                 status: existing?.status ?? EXTENSION_LIFECYCLE_STATE.DISCOVERED,
+                eligible: existing?.eligible ?? true,
                 error: existing?.error ?? null,
                 hooks: existing?.hooks ?? {},
             });
@@ -224,11 +226,13 @@ export class ExtensionLifecycle {
     setEligibility(descriptor, eligible) {
         const record = this.#ensureRecord(descriptor);
         record.descriptor = cloneDescriptor(descriptor);
-        if (!eligible) {
+        record.eligible = eligible === true;
+        if (!record.eligible) {
             record.status = EXTENSION_LIFECYCLE_STATE.INACTIVE;
             record.error = null;
         } else if (record.status === EXTENSION_LIFECYCLE_STATE.INACTIVE) {
             record.status = EXTENSION_LIFECYCLE_STATE.DISCOVERED;
+            record.error = null;
         }
     }
 
@@ -264,6 +268,9 @@ export class ExtensionLifecycle {
         return this.#schedule(descriptor, 'enable', async () => {
             const enabledDescriptor = { ...descriptor, enabled: true };
             const record = this.#ensureRecord(enabledDescriptor);
+            if (!record.eligible) {
+                return this.#rejectIneligible(record);
+            }
             record.descriptor = cloneDescriptor(enabledDescriptor);
             record.error = null;
 
@@ -463,6 +470,7 @@ export class ExtensionLifecycle {
             record = {
                 descriptor: cloneDescriptor(descriptor),
                 status: EXTENSION_LIFECYCLE_STATE.DISCOVERED,
+                eligible: true,
                 error: null,
                 hooks: {},
             };
@@ -492,6 +500,9 @@ export class ExtensionLifecycle {
     }
 
     async #activateRecord(record, descriptor) {
+        if (!record.eligible) {
+            return this.#rejectIneligible(record);
+        }
         record.descriptor = cloneDescriptor(descriptor);
         record.error = null;
 
@@ -523,6 +534,14 @@ export class ExtensionLifecycle {
         record.status = EXTENSION_LIFECYCLE_STATE.ACTIVE;
         record.error = null;
         return this.#result(record, hookResult.status);
+    }
+
+    #rejectIneligible(record) {
+        const error = new Error(`Extension "${record.descriptor.canonicalName}" cannot be enabled because its requirements are not satisfied.`);
+        error.name = 'ExtensionEligibilityError';
+        record.status = EXTENSION_LIFECYCLE_STATE.INACTIVE;
+        record.error = serializeError(error);
+        return this.#result(record, EXTENSION_HOOK_STATUS.SKIPPED);
     }
 
     async #loadNamespace(record) {

@@ -219,6 +219,11 @@ function handleGlobalKeyDown(event) {
             target = target.parentElement;
         }
 
+        // Native controls already translate Enter to their activation behavior.
+        if (target?.matches('button, input, select, textarea, a[href], summary')) {
+            return;
+        }
+
         // Trigger click if a valid interactable is found and it's not disabled
         if (target && !target.classList.contains(DISABLED_CONTROL_CLASS)) {
             console.debug('Triggering click on keyboard-focused interactable control via Enter', target);

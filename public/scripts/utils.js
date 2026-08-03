@@ -2914,3 +2914,84 @@ export function createTimeout(ms, errorMessage = '') {
         setTimeout(() => reject(new Error(errorMessage)), ms);
     });
 }
+
+/**
+ * Registers a delegated long-press event for dynamically created elements.
+ * @param {string} selector CSS selector for target elements
+ * @param {(this: Element, event: TouchEvent) => void} callback Long-press callback
+ * @param {number} [delay=500] Long-press duration in milliseconds
+ */
+export function addLongPressEvent(selector, callback, delay = 500) {
+    const movementThreshold = 10;
+    let timer = null;
+    let fired = false;
+    let target = null;
+    let touchId = null;
+    let startX = 0;
+    let startY = 0;
+
+    document.addEventListener('touchstart', event => {
+        if (!(event.target instanceof Element) || event.touches.length !== 1) return;
+        const element = event.target.closest(selector);
+        if (!element) return;
+
+        clearPress();
+        const touch = event.touches[0];
+        target = element;
+        touchId = touch.identifier;
+        startX = touch.clientX;
+        startY = touch.clientY;
+        timer = setTimeout(() => {
+            timer = null;
+            fired = true;
+            callback.call(element, event);
+        }, delay);
+    }, { passive: false });
+
+    document.addEventListener('touchmove', event => {
+        if (!target) return;
+        const touch = Array.from(event.touches).find(item => item.identifier === touchId);
+        if (!touch) {
+            clearPress();
+            return;
+        }
+
+        const moved = Math.hypot(touch.clientX - startX, touch.clientY - startY) > movementThreshold;
+        if (!fired && moved) {
+            clearPress();
+            return;
+        }
+        if (fired) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+        }
+    }, { passive: false });
+
+    document.addEventListener('touchend', event => {
+        if (!target || Array.from(event.changedTouches).every(item => item.identifier !== touchId)) return;
+        clearTimeout(timer);
+        timer = null;
+        if (!fired) clearPress();
+    });
+    document.addEventListener('touchcancel', clearPress);
+    document.addEventListener('contextmenu', event => {
+        if (!target || !(event.target instanceof Node) || !target.contains(event.target)) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+    }, true);
+    document.addEventListener('click', event => {
+        if (fired && target && event.target instanceof Node && target.contains(event.target)) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+            clearPress();
+        }
+    }, true);
+
+    function clearPress() {
+        clearTimeout(timer);
+        timer = null;
+        fired = false;
+        target = null;
+        touchId = null;
+    }
+}

@@ -400,44 +400,99 @@ function callTokenizer(type, str) {
     }
 }
 
+function getTokenizerAbortError(signal) {
+    if (signal?.reason instanceof Error) return signal.reason;
+    return new DOMException('The tokenizer request was aborted.', 'AbortError');
+}
+
+function throwIfTokenizerAborted(signal) {
+    if (signal?.aborted) throw getTokenizerAbortError(signal);
+}
+
+/**
+ * Runs a tokenizer request and connects AbortSignal to the underlying jqXHR.
+ * @param {JQuery.AjaxSettings} options AJAX options.
+ * @param {AbortSignal} [signal] Cancellation signal.
+ * @returns {Promise<any>} Response body.
+ */
+function tokenizerAjax(options, signal) {
+    throwIfTokenizerAborted(signal);
+    return new Promise((resolve, reject) => {
+        const request = jQuery.ajax(options);
+        const cleanup = () => signal?.removeEventListener('abort', abortRequest);
+        const abortRequest = () => request.abort();
+        signal?.addEventListener('abort', abortRequest, { once: true });
+        request.done(data => {
+            cleanup();
+            resolve(data);
+        });
+        request.fail((_xhr, status, error) => {
+            cleanup();
+            if (signal?.aborted || status === 'abort') {
+                reject(getTokenizerAbortError(signal));
+                return;
+            }
+            reject(error instanceof Error ? error : new Error(String(error || status || 'Tokenizer request failed.')));
+        });
+    });
+}
+
+async function requestTokenCountAsync(endpoint, payload, sourceText, { signal } = {}) {
+    const data = await tokenizerAjax({
+        async: true,
+        type: 'POST',
+        url: endpoint,
+        data: JSON.stringify(payload),
+        dataType: 'json',
+        contentType: 'application/json',
+    }, signal);
+    throwIfTokenizerAborted(signal);
+    return typeof data?.count === 'number' ? data.count : apiFailureTokenCount(sourceText);
+}
+
 /**
  * Calls the underlying tokenizer model to the token count for a string.
  * @param {number} type Tokenizer type.
  * @param {string} str String to tokenize.
+ * @param {{signal?: AbortSignal}} [options] Request options.
  * @returns {Promise<number>} Token count.
  */
-function callTokenizerAsync(type, str) {
-    return new Promise(resolve => {
-        if (type === tokenizers.NONE) {
-            return resolve(guesstimate(str));
-        }
+async function callTokenizerAsync(type, str, { signal } = {}) {
+    throwIfTokenizerAborted(signal);
+    if (type === tokenizers.NONE) {
+        return guesstimate(str);
+    }
 
-        switch (type) {
-            case tokenizers.API_CURRENT:
-                return callTokenizerAsync(currentRemoteTokenizerAPI(), str).then(resolve);
-            case tokenizers.API_KOBOLD:
-                return countTokensFromKoboldAPI(str, resolve);
-            case tokenizers.API_TEXTGENERATIONWEBUI:
-                return countTokensFromTextgenAPI(str, resolve);
-            default: {
-                const endpointUrl = TOKENIZER_URLS[type]?.count;
-                if (!endpointUrl) {
-                    console.warn('Unknown tokenizer type', type);
-                    return resolve(apiFailureTokenCount(str));
-                }
-                return countTokensFromServer(endpointUrl, str, resolve);
+    switch (type) {
+        case tokenizers.API_CURRENT:
+            return await callTokenizerAsync(currentRemoteTokenizerAPI(), str, { signal });
+        case tokenizers.API_KOBOLD:
+            return await requestTokenCountAsync(TOKENIZER_URLS[tokenizers.API_KOBOLD].count, {
+                text: str,
+                url: kai_settings.api_server,
+            }, str, { signal });
+        case tokenizers.API_TEXTGENERATIONWEBUI:
+            return await requestTokenCountAsync(TOKENIZER_URLS[tokenizers.API_TEXTGENERATIONWEBUI].count, getTextgenAPITokenizationParams(str), str, { signal });
+        default: {
+            const endpointUrl = TOKENIZER_URLS[type]?.count;
+            if (!endpointUrl) {
+                console.warn('Unknown tokenizer type', type);
+                return apiFailureTokenCount(str);
             }
+            return await requestTokenCountAsync(endpointUrl, { text: str }, str, { signal });
         }
-    });
+    }
 }
 
 /**
  * Gets the token count for a string using the current model tokenizer.
  * @param {string} str String to tokenize
  * @param {number | undefined} padding Optional padding tokens. Defaults to 0.
+ * @param {{signal?: AbortSignal}} [options] Request options.
  * @returns {Promise<number>} Token count.
  */
-export async function getTokenCountAsync(str, padding = undefined) {
+export async function getTokenCountAsync(str, padding = undefined, { signal } = {}) {
+    throwIfTokenizerAborted(signal);
     if (typeof str !== 'string' || !str?.length) {
         return 0;
     }
@@ -451,7 +506,7 @@ export async function getTokenCountAsync(str, padding = undefined) {
             tokenizerType = tokenizers.NONE;
         } else {
             // For extensions and WI
-            return counterWrapperOpenAIAsync(str);
+            return counterWrapperOpenAIAsync(str, { signal });
         }
     }
 
@@ -475,7 +530,8 @@ export async function getTokenCountAsync(str, padding = undefined) {
         return cacheObject[cacheKey];
     }
 
-    const result = (await callTokenizerAsync(tokenizerType, str)) + padding;
+    const result = (await callTokenizerAsync(tokenizerType, str, { signal })) + padding;
+    throwIfTokenizerAborted(signal);
 
     if (isNaN(result)) {
         console.warn('Token count calculation returned NaN');
@@ -556,11 +612,12 @@ function counterWrapperOpenAI(text) {
 /**
  * Gets the token count for a string using the OpenAI tokenizer.
  * @param {string} text Text to tokenize.
+ * @param {{signal?: AbortSignal}} [options] Request options.
  * @returns {Promise<number>} Token count.
  */
-function counterWrapperOpenAIAsync(text) {
+function counterWrapperOpenAIAsync(text, { signal } = {}) {
     const message = { role: 'system', content: text };
-    return countTokensOpenAIAsync(message, true);
+    return countTokensOpenAIAsync(message, true, { signal });
 }
 
 export function getTokenizerModel() {
@@ -841,9 +898,11 @@ export function countTokensOpenAI(messages, full = false) {
  * Returns the token count for a message using the OpenAI tokenizer.
  * @param {object[]|object} messages
  * @param {boolean} full
+ * @param {{signal?: AbortSignal}} [options] Request options.
  * @returns {Promise<number>} Token count.
  */
-export async function countTokensOpenAIAsync(messages, full = false) {
+export async function countTokensOpenAIAsync(messages, full = false, { signal } = {}) {
+    throwIfTokenizerAborted(signal);
     const tokenizerEndpoint = `/api/tokenizers/openai/count?model=${getTokenizerModel()}`;
     const cacheObject = getTokenCacheObject();
 
@@ -854,6 +913,7 @@ export async function countTokensOpenAIAsync(messages, full = false) {
     let token_count = -1;
 
     for (const message of messages) {
+        throwIfTokenizerAborted(signal);
         const model = getTokenizerModel();
 
         if (model === 'claude') {
@@ -869,15 +929,16 @@ export async function countTokensOpenAIAsync(messages, full = false) {
         }
 
         else {
-            const data = await jQuery.ajax({
+            const data = await tokenizerAjax({
                 async: true,
                 type: 'POST', //
                 url: tokenizerEndpoint,
                 data: JSON.stringify([message]),
                 dataType: 'json',
                 contentType: 'application/json',
-            });
+            }, signal);
 
+            throwIfTokenizerAborted(signal);
             token_count += Number(data.token_count);
             cacheObject[cacheKey] = Number(data.token_count);
         }
@@ -1226,4 +1287,3 @@ export async function initTokenizers() {
     await loadTokenCache();
     registerDebugFunction('resetTokenCache', 'Reset token cache', 'Purges the calculated token counts. Use this if you want to force a full re-tokenization of all chats or suspect the token counts are wrong.', resetTokenCache);
 }
-

@@ -34,7 +34,8 @@ globalThis.DATA_ROOT = path.join(testRoot, 'data');
 fs.mkdirSync(globalThis.DATA_ROOT, { recursive: true });
 
 const { router: chatsRouter } = await import('../src/endpoints/chats.js');
-const { getRecentChatsCacheStatus } = await import('../src/recent-chats-cache.js');
+const { getChatContentHash } = await import('../src/chat-branch.js');
+const { getRecentChatsCacheStatus, invalidateRecentChatsCache } = await import('../src/recent-chats-cache.js');
 const { default: systemMonitor } = await import('../src/system-monitor.js');
 
 const userRoot = path.join(testRoot, 'user');
@@ -143,6 +144,24 @@ function snapshotDirectoryFiles(directory) {
     return snapshotFiles(candidates, directory);
 }
 
+async function captureChunkReads(filePath, callback) {
+    const chunkDirectory = `${filePath}.chunks`;
+    const reads = [];
+    const originalReadFile = fs.promises.readFile;
+    fs.promises.readFile = async function (target, ...args) {
+        if (path.dirname(String(target)) === chunkDirectory) {
+            reads.push(path.basename(String(target)));
+        }
+        return await originalReadFile.call(this, target, ...args);
+    };
+    try {
+        const result = await callback();
+        return { reads, result };
+    } finally {
+        fs.promises.readFile = originalReadFile;
+    }
+}
+
 async function readAllGroupRangeMessages(id, pageSize = 200) {
     const pages = [];
     let before = null;
@@ -217,6 +236,48 @@ test('group paging frontend helpers reject malformed pages and preserve compatib
     assert.equal(getFullGroupMessageIndex(1, null, fullMessages, loaded), 7);
 });
 
+test('group chat routes reject traversal, cross-user paths, sanitize mismatches, controls, and symlinks', async t => {
+    const outsideDirectory = path.join(testRoot, 'other-user');
+    const outsidePath = path.join(outsideDirectory, 'private-chat.jsonl');
+    fs.mkdirSync(outsideDirectory, { recursive: true });
+    fs.writeFileSync(outsidePath, JSON.stringify(makeHeader('outside')));
+    const outsideBefore = fs.readFileSync(outsidePath);
+    const traversalId = `..${path.sep}other-user${path.sep}private-chat`;
+    const routeCases = [
+        ['/group/get', { id: traversalId }],
+        ['/group/get-range', { id: traversalId }],
+        ['/group/save', { id: traversalId, chat: [makeHeader('blocked')] }],
+        ['/group/save-tail', { id: traversalId, header: makeHeader('blocked'), messages: [], before: 0, expectedRevision: null }],
+        ['/group/delete', { id: traversalId }],
+    ];
+    for (const [route, body] of routeCases) {
+        assert.equal((await post(route, body)).response.status, 400, route);
+    }
+
+    for (const id of ['..', '../other-user/private-chat', '..\\other-user\\private-chat', 'bad:name', 'control\u0000name', path.join(outsideDirectory, 'private-chat')]) {
+        assert.equal((await post('/group/get', { id })).response.status, 400, JSON.stringify(id));
+    }
+    assert.deepEqual(fs.readFileSync(outsidePath), outsideBefore);
+
+    const linkPath = path.join(directories.groupChats, 'linked-private-chat.jsonl');
+    try {
+        fs.symlinkSync(outsidePath, linkPath);
+    } catch (error) {
+        // eslint-disable-next-line playwright/no-conditional-in-test -- Symlink creation is unavailable on some test hosts.
+        if (error.code === 'EPERM' || error.code === 'EACCES') {
+            t.diagnostic(`Symlink assertion skipped: ${error.code}`);
+            return;
+        }
+        throw error;
+    }
+    try {
+        assert.equal((await post('/group/get', { id: 'linked-private-chat' })).response.status, 400);
+        assert.deepEqual(fs.readFileSync(outsidePath), outsideBefore);
+    } finally {
+        fs.rmSync(linkPath, { force: true });
+    }
+});
+
 test('group range reads return header and bounded pages while tail saves append and edit safely', async () => {
     const id = 'paged-main';
     const header = makeHeader('integrity-a', { custom: 'initial' });
@@ -232,6 +293,7 @@ test('group range reads return header and bounded pages while tail saves append 
     const first = await post('/group/get-range', { id, limit: 20 });
     assert.equal(first.response.status, 200);
     assert.equal(typeof first.data.revision, 'string');
+    assert.match(first.data.contentHash, /^[a-f0-9]{64}$/);
     assert.equal(first.data.header.chat_metadata.integrity, 'integrity-a');
     assert.deepEqual(first.data.messages, messages.slice(980));
     assert.deepEqual({ cursor: first.data.cursor, offset: first.data.messageOffset, total: first.data.total, hasMore: first.data.hasMore }, {
@@ -257,6 +319,11 @@ test('group range reads return header and bounded pages while tail saves append 
     });
     assert.equal(appendResult.response.status, 200);
     assert.notEqual(appendResult.data.revision, first.data.revision);
+    assert.notEqual(appendResult.data.contentHash, first.data.contentHash);
+    assert.equal(
+        JSON.parse(fs.readFileSync(`${filePath}.revision.json`, 'utf8')).contentHash,
+        appendResult.data.contentHash,
+    );
 
     const afterAppend = await post('/group/get', { id });
     const appendedFile = splitGroupChatFile(afterAppend.data);
@@ -312,9 +379,80 @@ test('group range reads return header and bounded pages while tail saves append 
     assert.equal(splitGroupChatFile((await post('/group/get', { id })).data).header.chat_metadata.integrity, 'other-tab');
 });
 
+test('chunked range hashes scan once per revision and invalidate on external artifact changes', async () => {
+    const id = 'range-hash-cache';
+    const header = makeHeader('range-hash-cache');
+    const messages = makeMessages(1_000, 'cached');
+    const saved = await post('/group/save', { id, chat: [header, ...messages] });
+    assert.equal(saved.response.status, 200);
+
+    const filePath = path.join(directories.groupChats, `${id}.jsonl`);
+    const revisionPath = `${filePath}.revision.json`;
+    const initialRevision = JSON.parse(fs.readFileSync(revisionPath, 'utf8')).revision;
+    fs.writeFileSync(revisionPath, JSON.stringify({ version: 1, revision: initialRevision }));
+    const shardNames = fs.readdirSync(`${filePath}.chunks`).filter(name => name.endsWith('.jsonl')).sort();
+    assert.equal(shardNames.length, 5);
+
+    const initialCapture = await captureChunkReads(filePath, () => post('/group/get-range', { id, limit: 20 }));
+    const first = initialCapture.result;
+    assert.equal(first.response.status, 200);
+    assert.deepEqual(new Set(initialCapture.reads), new Set(shardNames));
+    assert.equal(first.data.total, 1_000);
+    assert.equal(first.data.messageOffset, 980);
+    assert.equal(first.data.contentHash, getChatContentHash(first.data.header, messages));
+
+    const cachedCapture = await captureChunkReads(filePath, () => post('/group/get-range', {
+        id,
+        before: first.data.cursor,
+        limit: 20,
+    }));
+    assert.equal(cachedCapture.result.response.status, 200);
+    assert.equal(cachedCapture.result.data.contentHash, first.data.contentHash);
+    assert.equal(cachedCapture.result.data.messageOffset, 960);
+    assert.equal(cachedCapture.reads.includes('000001.jsonl'), false);
+    assert.equal(cachedCapture.reads.includes('000002.jsonl'), false);
+    assert.equal(cachedCapture.reads.includes('000003.jsonl'), false);
+
+    const changedShardPath = path.join(`${filePath}.chunks`, '000002.jsonl');
+    const changedLines = fs.readFileSync(changedShardPath, 'utf8').split('\n');
+    const changedMessage = JSON.parse(changedLines[0]);
+    changedMessage.mes = 'externally-modified';
+    changedLines[0] = JSON.stringify(changedMessage);
+    fs.writeFileSync(changedShardPath, changedLines.join('\n'));
+
+    const staleSave = await post('/group/save-tail', {
+        id,
+        header: first.data.header,
+        messages: first.data.messages,
+        before: first.data.cursor,
+        expectedRevision: first.data.revision,
+    });
+    assert.equal(staleSave.response.status, 409);
+    assert.equal(staleSave.data.error, 'revision_conflict');
+
+    const refreshCapture = await captureChunkReads(filePath, () => post('/group/get-range', { id, limit: 20 }));
+    const refreshed = refreshCapture.result;
+    assert.equal(refreshed.response.status, 200);
+    assert.notEqual(refreshed.data.revision, first.data.revision);
+    assert.notEqual(refreshed.data.contentHash, first.data.contentHash);
+    assert.deepEqual(new Set(refreshCapture.reads), new Set(shardNames));
+    const complete = splitGroupChatFile((await post('/group/get', { id })).data);
+    assert.equal(refreshed.data.contentHash, getChatContentHash(complete.header, complete.messages));
+
+    const refreshedCachedCapture = await captureChunkReads(filePath, () => post('/group/get-range', {
+        id,
+        before: refreshed.data.cursor,
+        limit: 20,
+    }));
+    assert.equal(refreshedCachedCapture.result.data.contentHash, refreshed.data.contentHash);
+    assert.equal(refreshedCachedCapture.reads.includes('000001.jsonl'), false);
+    assert.equal(refreshedCachedCapture.reads.includes('000002.jsonl'), false);
+    assert.equal(refreshedCachedCapture.reads.includes('000003.jsonl'), false);
+});
+
 test('missing and legacy JSONL group chats retain headers and migrate without losing messages', async () => {
     const missing = await post('/group/get-range', { id: 'missing', limit: 20 });
-    assert.deepEqual(missing.data, { header: null, messages: [], cursor: 0, messageOffset: 0, total: 0, hasMore: false, revision: null });
+    assert.deepEqual(missing.data, { header: null, messages: [], cursor: 0, messageOffset: 0, total: 0, hasMore: false, revision: null, contentHash: null });
 
     const createdHeader = makeHeader('created');
     const createdMessages = makeMessages(20, 'created');
@@ -334,6 +472,24 @@ test('missing and legacy JSONL group chats retain headers and migrate without lo
     assert.equal((await post('/group/delete', { id: 'created-by-tail' })).response.status, 200);
     assert.equal(fs.existsSync(createdPath), false);
     assert.equal(fs.existsSync(`${createdPath}.metadata.json`), false);
+
+    const headerlessId = 'headerless-jsonl';
+    const headerlessMessages = makeMessages(3, 'headerless');
+    const headerlessPath = path.join(directories.groupChats, `${headerlessId}.jsonl`);
+    fs.writeFileSync(headerlessPath, headerlessMessages.map(item => JSON.stringify(item)).join('\n'));
+    const headerlessPage = await post('/group/get-range', { id: headerlessId, limit: 20 });
+    assert.deepEqual(headerlessPage.data.messages, headerlessMessages);
+    assert.equal(headerlessPage.data.total, headerlessMessages.length);
+    assert.equal(headerlessPage.data.header.user_name, 'unused');
+    assert.equal(headerlessPage.data.header.chat_metadata.message_count, headerlessMessages.length);
+    assert.deepEqual(
+        splitGroupChatFile((await post('/group/get', { id: headerlessId })).data).messages,
+        headerlessMessages,
+    );
+    assert.deepEqual(
+        fs.readFileSync(path.join(`${headerlessPath}.chunks`, '000000.jsonl'), 'utf8').split('\n').map(JSON.parse),
+        headerlessMessages,
+    );
 
     const legacyId = 'legacy-jsonl';
     const legacyHeader = makeHeader('legacy');
@@ -497,6 +653,216 @@ test('concurrent group tail saves serialize and leave shards, index, header, and
     assert.equal(additions.some(addition => addition.mes === fullMessages.at(-1).mes), true);
 });
 
+test('forged chunk indexes rebuild from safe shards and stored group ids cannot escape the user root', async t => {
+    const id = 'forged-index-source';
+    const groupId = 'forged-index-group';
+    const header = makeHeader('forged-index-integrity');
+    const messages = makeMessages(80, 'forged-index');
+    assert.equal((await post('/group/save', { id, chat: [header, ...messages] })).response.status, 200);
+
+    const filePath = path.join(directories.groupChats, `${id}.jsonl`);
+    const indexPath = `${filePath}.index.json`;
+    const originalIndex = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+    const outsidePath = path.join(testRoot, 'forged-outside.jsonl');
+    const outsidePayload = JSON.stringify({
+        name: 'Outside',
+        is_user: false,
+        send_date: 2_200_000_000_000,
+        mes: 'cross-user-secret-marker',
+    });
+    fs.writeFileSync(outsidePath, outsidePayload);
+    fs.writeFileSync(path.join(directories.groups, `${groupId}.json`), JSON.stringify({
+        id: groupId,
+        chat_id: id,
+        chats: [id, '../../forged-outside'],
+    }));
+
+    const forgeIndex = () => {
+        const forged = structuredClone(originalIndex);
+        forged.shards[0].file = '../../forged-outside.jsonl';
+        fs.writeFileSync(indexPath, JSON.stringify(forged));
+    };
+    const assertSafeRebuild = () => {
+        const rebuilt = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+        assert.equal(rebuilt.message_count, messages.length);
+        assert.equal(rebuilt.shards.every(shard => /^\d{6}\.jsonl$/.test(shard.file)), true);
+        assert.equal(fs.readFileSync(outsidePath, 'utf8'), outsidePayload);
+    };
+
+    await t.test('range', async () => {
+        forgeIndex();
+        const result = await post('/group/get-range', { id, limit: 20 });
+        assert.equal(result.response.status, 200);
+        assert.deepEqual(result.data.messages, messages.slice(-20));
+        assertSafeRebuild();
+    });
+
+    await t.test('export', async () => {
+        forgeIndex();
+        const result = await post('/export', {
+            is_group: true,
+            file: `${id}.jsonl`,
+            format: 'jsonl',
+            exportfilename: 'forged-index-export.jsonl',
+        });
+        assert.equal(result.response.status, 200);
+        assert.equal(result.data.result.includes('forged-index-79'), true);
+        assertSafeRebuild();
+    });
+
+    await t.test('search', async () => {
+        forgeIndex();
+        const result = await post('/search', { query: 'forged-index-40', group_id: groupId });
+        assert.equal(result.response.status, 200);
+        assert.equal(result.data.some(item => item.file_name === id), true);
+        assertSafeRebuild();
+
+        const escaped = await post('/search', { query: 'cross-user-secret-marker', group_id: groupId });
+        assert.equal(escaped.response.status, 200);
+        assert.deepEqual(escaped.data, []);
+    });
+
+    await t.test('recent', async () => {
+        forgeIndex();
+        invalidateRecentChatsCache('group-test');
+        const result = await post('/recent', { max: 100 });
+        assert.equal(result.response.status, 200);
+        assert.equal(result.data.some(item => item.file_name === `${id}.jsonl`), true);
+        assert.equal(result.data.some(item => item.mes === 'cross-user-secret-marker'), false);
+        assertSafeRebuild();
+    });
+});
+
+test('tail mutation rebuilds a size-valid index with forged shard counts before truncating', async () => {
+    const id = 'forged-count-tail';
+    const header = makeHeader('forged-count-tail');
+    const messages = makeMessages(80, 'forged-count-tail');
+    assert.equal((await post('/group/save', { id, chat: [header, ...messages] })).response.status, 200);
+
+    const filePath = path.join(directories.groupChats, `${id}.jsonl`);
+    const indexPath = `${filePath}.index.json`;
+    const forged = JSON.parse(fs.readFileSync(indexPath, 'utf8'));
+    forged.shards[0].count += 20;
+    forged.message_count += 20;
+    fs.writeFileSync(indexPath, JSON.stringify(forged));
+
+    const forgedPage = await post('/group/get-range', { id, limit: 20 });
+    assert.equal(forgedPage.response.status, 200);
+    assert.equal(forgedPage.data.total, 80);
+    assert.equal(JSON.parse(fs.readFileSync(indexPath, 'utf8')).message_count, 100);
+    const appended = { ...makeMessages(1, 'forged-count-new')[0], send_date: 2_300_000_000_000 };
+    const saved = await post('/group/save-tail', {
+        id,
+        header,
+        messages: [appended],
+        before: 80,
+        expectedRevision: forgedPage.data.revision,
+        force: true,
+    });
+    assert.equal(saved.response.status, 200);
+
+    const stored = splitGroupChatFile((await post('/group/get', { id })).data).messages;
+    assert.deepEqual(stored, [...messages, appended]);
+    assert.equal(JSON.parse(fs.readFileSync(indexPath, 'utf8')).message_count, 81);
+});
+
+test('chunked export holds the chat lock until every shard is assembled', async () => {
+    const id = 'locked-export';
+    const header = makeHeader('locked-export');
+    const messages = makeMessages(80, 'locked-export');
+    assert.equal((await post('/group/save', { id, chat: [header, ...messages] })).response.status, 200);
+    const page = await post('/group/get-range', { id, limit: 20 });
+    const shardPath = path.join(`${path.join(directories.groupChats, `${id}.jsonl`)}.chunks`, '000000.jsonl');
+    const originalReadFile = fs.promises.readFile;
+    let releaseRead;
+    let signalRead;
+    const entered = new Promise(resolve => { signalRead = resolve; });
+    const release = new Promise(resolve => { releaseRead = resolve; });
+    let held = false;
+    fs.promises.readFile = async function (target, ...args) {
+        if (!held && path.resolve(String(target)) === path.resolve(shardPath)) {
+            held = true;
+            signalRead();
+            await release;
+        }
+        return await originalReadFile.call(this, target, ...args);
+    };
+
+    try {
+        const exporting = post('/export', {
+            is_group: true,
+            file: `${id}.jsonl`,
+            format: 'jsonl',
+            exportfilename: 'locked-export.jsonl',
+        });
+        await entered;
+        let saveSettled = false;
+        const appended = { ...makeMessages(1, 'locked-export-new')[0], send_date: 2_400_000_000_000 };
+        const saving = post('/group/save-tail', {
+            id,
+            header,
+            messages: [...page.data.messages, appended],
+            before: page.data.cursor,
+            expectedRevision: page.data.revision,
+        }).finally(() => { saveSettled = true; });
+        await new Promise(resolve => setTimeout(resolve, 30));
+        assert.equal(saveSettled, false);
+        releaseRead();
+        const [exported, saved] = await Promise.all([exporting, saving]);
+        assert.equal(exported.response.status, 200);
+        assert.equal(exported.data.result.includes('locked-export-79'), true);
+        assert.equal(exported.data.result.includes('locked-export-new'), false);
+        assert.equal(saved.response.status, 200);
+    } finally {
+        fs.promises.readFile = originalReadFile;
+        releaseRead?.();
+    }
+});
+
+test('direct group chat deletion rolls a partially removed artifact family back before retry', async () => {
+    const id = 'durable-direct-delete';
+    const header = makeHeader('durable-direct-delete');
+    const messages = makeMessages(75, 'durable-direct-delete');
+    assert.equal((await post('/group/save', { id, chat: [header, ...messages] })).response.status, 200);
+
+    const filePath = path.join(directories.groupChats, `${id}.jsonl`);
+    const bytesOnly = () => Object.fromEntries(Object.entries(snapshotChatArtifacts(filePath))
+        .map(([name, value]) => [name, value.bytes]));
+    const before = bytesOnly();
+    const artifactPaths = new Set([
+        filePath,
+        `${filePath}.metadata.json`,
+        `${filePath}.index.json`,
+        `${filePath}.revision.json`,
+    ].map(candidate => path.resolve(candidate)));
+    const originalRemove = fs.rmSync;
+    let removals = 0;
+    fs.rmSync = function (target, ...args) {
+        if (artifactPaths.has(path.resolve(String(target))) && ++removals === 2) {
+            throw Object.assign(new Error('injected direct-delete failure'), { code: 'EIO' });
+        }
+        return originalRemove.call(this, target, ...args);
+    };
+    let failed;
+    try {
+        failed = await post('/group/delete', { id });
+    } finally {
+        fs.rmSync = originalRemove;
+    }
+
+    assert.equal(failed.response.status, 500);
+    assert.deepEqual(bytesOnly(), before);
+    assert.deepEqual(splitGroupChatFile((await post('/group/get', { id })).data).messages, messages);
+
+    const retried = await post('/group/delete', { id });
+    assert.equal(retried.response.status, 200);
+    assert.equal(fs.existsSync(filePath), false);
+    assert.equal(fs.existsSync(`${filePath}.metadata.json`), false);
+    assert.equal(fs.existsSync(`${filePath}.index.json`), false);
+    assert.equal(fs.existsSync(`${filePath}.revision.json`), false);
+    assert.equal(fs.existsSync(`${filePath}.chunks`), false);
+});
+
 test('character chat range revisions protect tail saves too', async () => {
     const avatar = 'revision-character.png';
     const fileName = 'revision-chat';
@@ -516,6 +882,10 @@ test('character chat range revisions protect tail saves too', async () => {
 
     const page = await post('/get-range', { avatar_url: avatar, file_name: fileName, limit: 20 });
     assert.equal(typeof page.data.revision, 'string');
+    assert.equal(page.data.total, 30);
+    assert.equal(page.data.messageOffset, 10);
+    assert.equal(Number.isFinite(page.data.cursor), true);
+    assert.equal(Number.isFinite(page.data.messageOffset), true);
     const appended = { ...makeMessages(1, 'character-new')[0], send_date: 2_100_000_000_000 };
     const saved = await post('/save-tail', {
         avatar_url: avatar,

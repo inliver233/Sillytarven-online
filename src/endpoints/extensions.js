@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import path from 'node:path';
 import fs from 'node:fs';
 import dns from 'node:dns/promises';
@@ -8,6 +9,9 @@ import sanitize from 'sanitize-filename';
 import { CheckRepoActions, default as simpleGit } from 'simple-git';
 
 import { PUBLIC_DIRECTORIES } from '../constants.js';
+import { canonicalJsonStringify, hashCanonicalJson, sha256 } from '../canonical-hash.js';
+import { KeyedMutex } from '../keyed-mutex.js';
+import { canConsumeStorage } from '../storage-quota.js';
 import { getConfigValue } from '../util.js';
 
 /**
@@ -17,6 +21,16 @@ const OPTIONS = Object.freeze({ timeout: { block: 5 * 60 * 1000 } });
 const THIRD_PARTY_PREFIX = 'third-party/';
 const THIRD_PARTY_ROUTE_PREFIX = '/scripts/extensions/third-party';
 const MANAGED_EXTENSION_TYPES = new Set(['local', 'global']);
+const EXTENSION_TRANSACTION_VERSION = 1;
+const EXTENSION_TRANSACTION_TYPE = 'extension-directory';
+const EXTENSION_TRANSACTION_MANIFEST = 'manifest.json';
+const EXTENSION_TRANSACTION_PATTERN = /^tx-[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
+const EXTENSION_TRANSACTION_STATES = new Set(['staging', 'prepared', 'backing-up', 'backed-up', 'applying', 'published', 'rolledback']);
+const DIRECTORY_SYNC_UNSUPPORTED_CODES = new Set(['EACCES', 'EBADF', 'EINVAL', 'EISDIR', 'ENOTSUP', 'EPERM']);
+const extensionMutationMutex = new KeyedMutex();
+const extensionQuotaMutex = new KeyedMutex();
+const extensionRecoveryMutex = new KeyedMutex();
+const activeExtensionTransactions = new Set();
 const CLOUD_METADATA_HOSTNAMES = new Set([
     'instance-data',
     'instance-data.ec2.internal',
@@ -51,6 +65,16 @@ function areExtensionsEnabled(enabled, request) {
         return enabled;
     }
     return Boolean(getConfigValue('extensions.enabled', true, 'boolean'));
+}
+
+function isExtensionLifecycleEnabledForRequest(enabled, request) {
+    if (typeof enabled === 'function') {
+        return Boolean(enabled(request));
+    }
+    if (typeof enabled === 'boolean') {
+        return enabled;
+    }
+    return Boolean(getConfigValue('featureFlags.extensionLifecycle', false, 'boolean'));
 }
 
 /**
@@ -286,17 +310,111 @@ function findNormalizedRootEntry(root, requestedName, fsModule) {
     return matches[0] ?? null;
 }
 
+function isMissingExtensionResourceError(error) {
+    return ['ENOENT', 'ENOTDIR'].includes(error?.code);
+}
+
 /**
- * Selects one extension root before resolving a resource. A local directory shadows the
- * normalized global directory for every file, including files missing locally.
+ * Resolves one resource inside an already selected extension directory.
+ * @param {object} options Selected resource options
+ * @param {string} options.root Selected extension root
+ * @param {import('node:fs').Dirent} options.entry Selected extension directory entry
+ * @param {string[]} options.segments Resource path segments below the extension directory
+ * @param {'local'|'global'} options.type Selected extension type
+ * @param {typeof fs} options.fsModule Filesystem implementation
+ * @returns {{absolutePath: string, identity: {canonicalName: string, shortName: string, type: 'local'|'global'}}} Resolved resource
+ */
+function resolveExtensionResourceEntry({ root, entry, segments, type, fsModule }) {
+    const extensionPath = path.resolve(root, entry.name);
+    let extensionStat;
+    try {
+        extensionStat = fsModule.lstatSync(extensionPath);
+    } catch (error) {
+        if (isMissingExtensionResourceError(error)) {
+            throw new ExtensionResolutionError(404, 'Extension resource not found.');
+        }
+        throw error;
+    }
+    if (extensionStat.isSymbolicLink()) {
+        throw new ExtensionResolutionError(403, 'Forbidden: Symbolic link extensions are not allowed.');
+    }
+    if (!entry.isDirectory() || !extensionStat.isDirectory()) {
+        throw new ExtensionResolutionError(404, 'Extension resource not found.');
+    }
+
+    let currentPath = extensionPath;
+    for (const segment of segments) {
+        currentPath = path.resolve(currentPath, segment);
+        const relative = path.relative(extensionPath, currentPath);
+        if (relative.startsWith('..') || path.isAbsolute(relative)) {
+            throw new ExtensionResolutionError(403, 'Forbidden: Invalid extension resource path.');
+        }
+        let stat;
+        try {
+            stat = fsModule.lstatSync(currentPath);
+        } catch (error) {
+            if (isMissingExtensionResourceError(error)) {
+                throw new ExtensionResolutionError(404, 'Extension resource not found.');
+            }
+            throw error;
+        }
+        if (stat.isSymbolicLink()) {
+            throw new ExtensionResolutionError(403, 'Forbidden: Symbolic link extension resources are not allowed.');
+        }
+    }
+
+    let finalStat;
+    try {
+        finalStat = fsModule.statSync(currentPath);
+    } catch (error) {
+        if (isMissingExtensionResourceError(error)) {
+            throw new ExtensionResolutionError(404, 'Extension resource not found.');
+        }
+        throw error;
+    }
+    if (!finalStat.isFile()) {
+        throw new ExtensionResolutionError(404, 'Extension resource not found.');
+    }
+    let realExtensionPath;
+    let realResourcePath;
+    try {
+        realExtensionPath = fsModule.realpathSync(extensionPath);
+        realResourcePath = fsModule.realpathSync(currentPath);
+    } catch (error) {
+        if (isMissingExtensionResourceError(error)) {
+            throw new ExtensionResolutionError(404, 'Extension resource not found.');
+        }
+        throw error;
+    }
+    const realRelative = path.relative(realExtensionPath, realResourcePath);
+    if (realRelative.startsWith('..') || path.isAbsolute(realRelative)) {
+        throw new ExtensionResolutionError(403, 'Forbidden: Invalid extension resource path.');
+    }
+
+    return {
+        absolutePath: currentPath,
+        identity: getCanonicalExtensionIdentity(entry.name, type),
+    };
+}
+
+/**
+ * Selects one extension root before resolving a resource. Lifecycle mode shadows the
+ * global directory as one unit; legacy mode falls back per file after a local 404.
  * @param {object} options Resource resolver options
  * @param {string} options.localRoot Per-user extension root
  * @param {string} options.globalRoot Global extension root
  * @param {unknown} options.resourcePath URL path below third-party
  * @param {typeof fs} [options.fsModule=fs] Filesystem implementation
+ * @param {boolean} [options.allowGlobalFileFallback=false] Preserve legacy per-file fallback
  * @returns {{absolutePath: string, identity: {canonicalName: string, shortName: string, type: 'local'|'global'}}} Resolved resource
  */
-export function resolveExtensionResource({ localRoot, globalRoot, resourcePath, fsModule = fs }) {
+export function resolveExtensionResource({
+    localRoot,
+    globalRoot,
+    resourcePath,
+    fsModule = fs,
+    allowGlobalFileFallback = false,
+}) {
     if (typeof resourcePath !== 'string' || !resourcePath) {
         throw new ExtensionResolutionError(404, 'Extension resource not found.');
     }
@@ -312,59 +430,33 @@ export function resolveExtensionResource({ localRoot, globalRoot, resourcePath, 
     getCanonicalExtensionIdentity(requestedDirectory, EXTENSION_TYPES.LOCAL);
 
     const localEntry = findNormalizedRootEntry(localRoot, requestedDirectory, fsModule);
-    const globalEntry = localEntry ? null : findNormalizedRootEntry(globalRoot, requestedDirectory, fsModule);
-    const selectedEntry = localEntry ?? globalEntry;
-    const type = localEntry ? EXTENSION_TYPES.LOCAL : EXTENSION_TYPES.GLOBAL;
-    const selectedRoot = localEntry ? localRoot : globalRoot;
-    if (!selectedEntry) {
-        throw new ExtensionResolutionError(404, 'Extension resource not found.');
-    }
-
-    const extensionPath = path.resolve(selectedRoot, selectedEntry.name);
-    const extensionStat = fsModule.lstatSync(extensionPath);
-    if (extensionStat.isSymbolicLink()) {
-        throw new ExtensionResolutionError(403, 'Forbidden: Symbolic link extensions are not allowed.');
-    }
-    if (!selectedEntry.isDirectory() || !extensionStat.isDirectory()) {
-        throw new ExtensionResolutionError(404, 'Extension resource not found.');
-    }
-
-    let currentPath = extensionPath;
-    for (const segment of segments) {
-        currentPath = path.resolve(currentPath, segment);
-        const relative = path.relative(extensionPath, currentPath);
-        if (relative.startsWith('..') || path.isAbsolute(relative)) {
-            throw new ExtensionResolutionError(403, 'Forbidden: Invalid extension resource path.');
-        }
-        let stat;
+    if (localEntry) {
         try {
-            stat = fsModule.lstatSync(currentPath);
+            return resolveExtensionResourceEntry({
+                root: localRoot,
+                entry: localEntry,
+                segments,
+                type: EXTENSION_TYPES.LOCAL,
+                fsModule,
+            });
         } catch (error) {
-            if (error?.code === 'ENOENT') {
-                throw new ExtensionResolutionError(404, 'Extension resource not found.');
+            if (!allowGlobalFileFallback || error?.status !== 404) {
+                throw error;
             }
-            throw error;
-        }
-        if (stat.isSymbolicLink()) {
-            throw new ExtensionResolutionError(403, 'Forbidden: Symbolic link extension resources are not allowed.');
         }
     }
 
-    const finalStat = fsModule.statSync(currentPath);
-    if (!finalStat.isFile()) {
+    const globalEntry = findNormalizedRootEntry(globalRoot, requestedDirectory, fsModule);
+    if (!globalEntry) {
         throw new ExtensionResolutionError(404, 'Extension resource not found.');
     }
-    const realExtensionPath = fsModule.realpathSync(extensionPath);
-    const realResourcePath = fsModule.realpathSync(currentPath);
-    const realRelative = path.relative(realExtensionPath, realResourcePath);
-    if (realRelative.startsWith('..') || path.isAbsolute(realRelative)) {
-        throw new ExtensionResolutionError(403, 'Forbidden: Invalid extension resource path.');
-    }
-
-    return {
-        absolutePath: currentPath,
-        identity: getCanonicalExtensionIdentity(selectedEntry.name, type),
-    };
+    return resolveExtensionResourceEntry({
+        root: globalRoot,
+        entry: globalEntry,
+        segments,
+        type: EXTENSION_TYPES.GLOBAL,
+        fsModule,
+    });
 }
 
 /**
@@ -373,6 +465,7 @@ export function resolveExtensionResource({ localRoot, globalRoot, resourcePath, 
  * @param {(request: import('express').Request) => string} globalRootFn Global root provider
  * @param {object} [options] Route options
  * @param {boolean|((request: import('express').Request) => boolean)} [options.enabled] Enablement override
+ * @param {boolean|((request: import('express').Request) => boolean)} [options.lifecycleEnabled] Lifecycle resolver override
  * @returns {import('express').RequestHandler} Express request handler
  */
 export function createExtensionResourceRouteHandler(localRootFn, globalRootFn, options = {}) {
@@ -396,6 +489,7 @@ export function createExtensionResourceRouteHandler(localRootFn, globalRootFn, o
                 localRoot: localRootFn(request),
                 globalRoot: globalRootFn(request),
                 resourcePath,
+                allowGlobalFileFallback: !isExtensionLifecycleEnabledForRequest(options.lifecycleEnabled, request),
             });
             return response.sendFile(absolutePath);
         } catch (error) {
@@ -428,6 +522,15 @@ async function checkIfRepoIsUpToDate(extensionPath, createGit) {
 }
 
 function sendResolutionError(response, error, operation) {
+    if (error instanceof ExtensionStorageLimitError) {
+        return response.status(403).json({
+            error: 'storage_limit',
+            message: '存储空间不足，无法保存扩展，请删除文件或使用激活码扩容。',
+            usedBytes: error.storage.usedBytes,
+            limitBytes: error.storage.limitBytes,
+            remainingBytes: error.storage.remainingBytes,
+        });
+    }
     if (error instanceof ExtensionResolutionError) {
         return response.status(error.status).send(error.message);
     }
@@ -512,11 +615,487 @@ function validateInstallUrl(value) {
     return parsedUrl;
 }
 
+/**
+ * Reduces an extension URL to a bounded origin for diagnostic logging.
+ * @param {URL|string} value Extension URL
+ * @returns {string} Credential- and path-free URL origin
+ */
+export function sanitizeExtensionUrlForLog(value) {
+    try {
+        const parsedUrl = value instanceof URL ? value : new URL(String(value));
+        return parsedUrl.origin.slice(0, 256);
+    } catch {
+        return '[invalid extension URL]';
+    }
+}
+
 function validateBranch(branch, required = false) {
     if (branch === undefined && !required) return;
     if (typeof branch !== 'string' || !branch || /[\0\r\n]/u.test(branch)) {
         throw new ExtensionResolutionError(400, 'Bad Request: A valid branch is required in the request body.');
     }
+}
+
+class ExtensionStorageLimitError extends Error {
+    constructor(storage) {
+        super('Extension mutation exceeds the user storage limit.');
+        this.name = 'ExtensionStorageLimitError';
+        this.storage = storage;
+    }
+}
+
+function normalizedPath(filePath) {
+    const normalized = path.normalize(path.resolve(filePath));
+    return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+function isPathInside(parentPath, childPath) {
+    const relative = path.relative(path.resolve(parentPath), path.resolve(childPath));
+    return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function pathExists(fsModule, filePath) {
+    try {
+        fsModule.lstatSync(filePath);
+        return true;
+    } catch (error) {
+        if (error?.code === 'ENOENT') return false;
+        throw error;
+    }
+}
+
+function assertExactDirectory(fsModule, directoryPath, label) {
+    const absolutePath = path.resolve(directoryPath);
+    const stats = fsModule.lstatSync(absolutePath);
+    if (!stats.isDirectory() || stats.isSymbolicLink()
+        || normalizedPath(fsModule.realpathSync(absolutePath)) !== normalizedPath(absolutePath)) {
+        throw new Error(`${label} must be an exact real directory without symbolic links.`);
+    }
+    return absolutePath;
+}
+
+function syncFile(fsModule, filePath) {
+    const descriptor = fsModule.openSync(filePath, process.platform === 'win32' ? 'r+' : 'r');
+    try {
+        fsModule.fsyncSync(descriptor);
+    } finally {
+        fsModule.closeSync(descriptor);
+    }
+}
+
+function syncDirectory(fsModule, directoryPath) {
+    let descriptor;
+    try {
+        descriptor = fsModule.openSync(directoryPath, 'r');
+        fsModule.fsyncSync(descriptor);
+    } catch (error) {
+        if (process.platform !== 'win32' || !DIRECTORY_SYNC_UNSUPPORTED_CODES.has(error?.code)) throw error;
+    } finally {
+        if (descriptor !== undefined) fsModule.closeSync(descriptor);
+    }
+}
+
+function inspectExtensionTree(fsModule, directoryPath) {
+    const root = assertExactDirectory(fsModule, directoryPath, 'Extension directory');
+    const entries = [];
+    let bytes = 0;
+
+    const visit = (currentPath, relativeParent = '') => {
+        const children = fsModule.readdirSync(currentPath, { withFileTypes: true })
+            .sort((left, right) => left.name.localeCompare(right.name));
+        for (const child of children) {
+            const childPath = path.join(currentPath, child.name);
+            const relativePath = path.posix.join(relativeParent, child.name);
+            const stats = fsModule.lstatSync(childPath);
+            if (stats.isSymbolicLink()) {
+                throw new Error(`Extension trees cannot contain symbolic links: ${childPath}`);
+            }
+            if (stats.isDirectory()) {
+                entries.push({ path: `${relativePath}/`, type: 'directory' });
+                visit(childPath, relativePath);
+                continue;
+            }
+            if (!stats.isFile()) {
+                throw new Error(`Extension trees can contain only regular files and directories: ${childPath}`);
+            }
+            const contents = fsModule.readFileSync(childPath);
+            bytes += contents.length;
+            entries.push({ path: relativePath, type: 'file', size: contents.length, sha256: sha256(contents) });
+        }
+    };
+
+    visit(root);
+    return { bytes, entries: entries.length, digest: hashCanonicalJson(entries) };
+}
+
+function syncExtensionTree(fsModule, directoryPath) {
+    const directories = [];
+    const visit = currentPath => {
+        directories.push(currentPath);
+        for (const entry of fsModule.readdirSync(currentPath, { withFileTypes: true })) {
+            const entryPath = path.join(currentPath, entry.name);
+            const stats = fsModule.lstatSync(entryPath);
+            if (stats.isSymbolicLink()) throw new Error(`Extension trees cannot contain symbolic links: ${entryPath}`);
+            if (stats.isDirectory()) visit(entryPath);
+            else if (stats.isFile()) syncFile(fsModule, entryPath);
+            else throw new Error(`Extension trees can contain only regular files and directories: ${entryPath}`);
+        }
+    };
+    visit(assertExactDirectory(fsModule, directoryPath, 'Extension directory'));
+    for (const directory of directories.reverse()) syncDirectory(fsModule, directory);
+}
+
+function isValidTreeSummary(summary) {
+    return summary && Number.isSafeInteger(summary.bytes) && summary.bytes >= 0
+        && Number.isSafeInteger(summary.entries) && summary.entries >= 0
+        && typeof summary.digest === 'string' && /^[a-f0-9]{64}$/u.test(summary.digest);
+}
+
+function verifyExtensionTree(fsModule, directoryPath, expected, label) {
+    const actual = inspectExtensionTree(fsModule, directoryPath);
+    if (actual.bytes !== expected.bytes || actual.entries !== expected.entries || actual.digest !== expected.digest) {
+        throw new Error(`${label} checksum mismatch: ${directoryPath}`);
+    }
+}
+
+function writeExtensionTransactionManifest(fsModule, transactionPath, manifest) {
+    const unsigned = { ...manifest };
+    delete unsigned.checksum;
+    const signed = { ...unsigned, checksum: hashCanonicalJson(unsigned) };
+    const manifestPath = path.join(transactionPath, EXTENSION_TRANSACTION_MANIFEST);
+    const temporaryPath = `${manifestPath}.${crypto.randomUUID()}.tmp`;
+    fsModule.writeFileSync(temporaryPath, canonicalJsonStringify(signed), { flag: 'wx', mode: 0o600 });
+    syncFile(fsModule, temporaryPath);
+    fsModule.renameSync(temporaryPath, manifestPath);
+    syncDirectory(fsModule, transactionPath);
+    return signed;
+}
+
+function readExtensionTransactionManifest(fsModule, transactionPath, context) {
+    const manifestPath = path.join(transactionPath, EXTENSION_TRANSACTION_MANIFEST);
+    const parsed = JSON.parse(fsModule.readFileSync(manifestPath, 'utf8'));
+    const { checksum, ...unsigned } = parsed ?? {};
+    if (typeof checksum !== 'string' || checksum !== hashCanonicalJson(unsigned)) {
+        throw new Error(`Invalid or tampered extension transaction manifest: ${manifestPath}`);
+    }
+    if (parsed.version !== EXTENSION_TRANSACTION_VERSION || parsed.type !== EXTENSION_TRANSACTION_TYPE
+        || parsed.scopeHash !== context.scopeHash || !EXTENSION_TRANSACTION_STATES.has(parsed.state)
+        || !['install', 'update', 'switch', 'delete', 'move-destination', 'move-source'].includes(parsed.operation)
+        || typeof parsed.shortName !== 'string') {
+        throw new Error(`Invalid extension transaction manifest: ${manifestPath}`);
+    }
+    const identity = getCanonicalExtensionIdentity(parsed.shortName, context.type);
+    if (identity.shortName !== parsed.shortName || parsed.extensionType !== context.type) {
+        throw new Error(`Extension transaction identity mismatch: ${manifestPath}`);
+    }
+    if ((parsed.original !== null && !isValidTreeSummary(parsed.original))
+        || (parsed.candidate !== null && !isValidTreeSummary(parsed.candidate))) {
+        throw new Error(`Invalid extension transaction tree summary: ${manifestPath}`);
+    }
+    if ((parsed.original !== null) !== parsed.hadOriginal) {
+        throw new Error(`Invalid extension transaction original-state marker: ${manifestPath}`);
+    }
+    return parsed;
+}
+
+function getExtensionUserRoot(request) {
+    return path.resolve(request.user.directories.root ?? path.dirname(request.user.directories.extensions));
+}
+
+function createExtensionTransactionContext(request, type, roots, stagingRoot, fsModule) {
+    const targetRoot = path.resolve(type === EXTENSION_TYPES.LOCAL ? request.user.directories.extensions : roots.global);
+    fsModule.mkdirSync(targetRoot, { recursive: true });
+    assertExactDirectory(fsModule, targetRoot, 'Extension target root');
+    const handle = String(request.user.profile.handle ?? '');
+    const scopeHash = sha256(`${type}\0${targetRoot}\0${type === EXTENSION_TYPES.LOCAL ? handle : ''}`);
+    const userRoot = getExtensionUserRoot(request);
+    const configuredRoot = typeof stagingRoot === 'function'
+        ? stagingRoot({ request, type, targetRoot, userRoot })
+        : stagingRoot;
+    const stagingParent = configuredRoot
+        ? path.resolve(configuredRoot)
+        : type === EXTENSION_TYPES.LOCAL
+            ? path.join(path.dirname(userRoot), '.extension-staging')
+            : path.join(path.dirname(path.resolve(roots.builtin)), '.extension-staging');
+    const namespace = path.join(stagingParent, type === EXTENSION_TYPES.GLOBAL ? 'global' : `local-${scopeHash}`);
+    if (type === EXTENSION_TYPES.LOCAL && isPathInside(userRoot, namespace)) {
+        throw new Error('Local extension staging must be outside the user quota root.');
+    }
+    if (isPathInside(targetRoot, namespace)) {
+        throw new Error('Extension staging must be outside the live extension root.');
+    }
+    fsModule.mkdirSync(namespace, { recursive: true });
+    assertExactDirectory(fsModule, namespace, 'Extension transaction namespace');
+    if (fsModule.statSync(namespace).dev !== fsModule.statSync(targetRoot).dev) {
+        throw new Error('Extension staging and live directories must use the same filesystem for atomic publication.');
+    }
+    return { type, targetRoot, namespace, scopeHash, userRoot, handle };
+}
+
+function extensionTargetPath(context, shortName) {
+    const targetPath = path.resolve(context.targetRoot, shortName);
+    if (path.dirname(targetPath) !== context.targetRoot) throw new Error('Invalid extension transaction target.');
+    return targetPath;
+}
+
+function extensionMutationLockKey(context, shortName) {
+    return `${context.scopeHash}\0${normalizeExtensionDirectoryName(shortName)}`;
+}
+
+function extensionQuotaLockKey(request) {
+    return `${String(request.user.profile.handle ?? '')}\0${getExtensionUserRoot(request)}`;
+}
+
+async function runWithMutexKeys(mutex, keys, callback) {
+    const ordered = [...new Set(keys)].sort();
+    const acquire = async index => index >= ordered.length
+        ? await callback()
+        : await mutex.runExclusive(ordered[index], () => acquire(index + 1));
+    return await acquire(0);
+}
+
+function beginExtensionTransaction(context, shortName, operation, fsModule) {
+    const targetPath = extensionTargetPath(context, shortName);
+    const original = pathExists(fsModule, targetPath) ? inspectExtensionTree(fsModule, targetPath) : null;
+    const transactionId = `tx-${crypto.randomUUID()}`;
+    const transactionPath = path.join(context.namespace, transactionId);
+    fsModule.mkdirSync(transactionPath);
+    syncDirectory(fsModule, context.namespace);
+    let manifest = {
+        version: EXTENSION_TRANSACTION_VERSION,
+        type: EXTENSION_TRANSACTION_TYPE,
+        id: transactionId,
+        state: 'staging',
+        operation,
+        extensionType: context.type,
+        shortName,
+        scopeHash: context.scopeHash,
+        hadOriginal: original !== null,
+        original,
+        candidate: null,
+    };
+    try {
+        manifest = writeExtensionTransactionManifest(fsModule, transactionPath, manifest);
+    } catch (error) {
+        fsModule.rmSync(transactionPath, { recursive: true, force: true });
+        throw error;
+    }
+    activeExtensionTransactions.add(normalizedPath(transactionPath));
+    return {
+        context,
+        transactionPath,
+        targetPath,
+        candidatePath: path.join(transactionPath, 'candidate'),
+        backupPath: path.join(transactionPath, 'backup'),
+        manifest,
+    };
+}
+
+function updateExtensionTransactionState(transaction, state, fsModule, additions = {}) {
+    transaction.manifest = writeExtensionTransactionManifest(fsModule, transaction.transactionPath, {
+        ...transaction.manifest,
+        ...additions,
+        state,
+    });
+}
+
+function prepareExtensionCandidate(transaction, fsModule) {
+    if (transaction.manifest.state !== 'staging') throw new Error('Extension transaction is not staging.');
+    if (transaction.manifest.original) {
+        verifyExtensionTree(fsModule, transaction.targetPath, transaction.manifest.original, 'Original extension');
+    } else if (pathExists(fsModule, transaction.targetPath)) {
+        throw new Error('Extension transaction target appeared during staging.');
+    }
+    const candidate = inspectExtensionTree(fsModule, transaction.candidatePath);
+    updateExtensionTransactionState(transaction, 'prepared', fsModule, { candidate });
+    return candidate;
+}
+
+function prepareExtensionDeletion(transaction, fsModule) {
+    if (transaction.manifest.state !== 'staging' || !transaction.manifest.original) {
+        throw new Error('Extension deletion transaction requires an existing source.');
+    }
+    verifyExtensionTree(fsModule, transaction.targetPath, transaction.manifest.original, 'Original extension');
+    updateExtensionTransactionState(transaction, 'prepared', fsModule);
+}
+
+async function cleanupExtensionTransaction(transaction, tools) {
+    try {
+        await tools.removeDirectory(transaction.transactionPath, { recursive: true, force: true });
+        syncDirectory(tools.fsModule, transaction.context.namespace);
+    } finally {
+        activeExtensionTransactions.delete(normalizedPath(transaction.transactionPath));
+    }
+}
+
+async function rollbackExtensionTransaction(transaction, tools) {
+    const { fsModule, renameDirectorySync } = tools;
+    transaction.manifest = readExtensionTransactionManifest(fsModule, transaction.transactionPath, transaction.context);
+    if (transaction.manifest.state === 'published') {
+        await cleanupExtensionTransaction(transaction, tools);
+        return;
+    }
+    const targetExists = pathExists(fsModule, transaction.targetPath);
+    const backupExists = pathExists(fsModule, transaction.backupPath);
+    const candidateExists = pathExists(fsModule, transaction.candidatePath);
+
+    if (backupExists) {
+        verifyExtensionTree(fsModule, transaction.backupPath, transaction.manifest.original, 'Extension backup');
+        if (targetExists) {
+            if (!transaction.manifest.candidate || candidateExists) {
+                throw new Error('Cannot safely roll back conflicting extension transaction artifacts.');
+            }
+            verifyExtensionTree(fsModule, transaction.targetPath, transaction.manifest.candidate, 'Published extension candidate');
+            renameDirectorySync(transaction.targetPath, transaction.candidatePath);
+        }
+        renameDirectorySync(transaction.backupPath, transaction.targetPath);
+        syncDirectory(fsModule, transaction.context.targetRoot);
+        verifyExtensionTree(fsModule, transaction.targetPath, transaction.manifest.original, 'Restored extension');
+    } else if (transaction.manifest.original) {
+        if (!targetExists) throw new Error('Original extension is missing and no backup is available.');
+        verifyExtensionTree(fsModule, transaction.targetPath, transaction.manifest.original, 'Unchanged extension');
+    } else if (targetExists) {
+        if (!transaction.manifest.candidate || candidateExists) {
+            throw new Error('Cannot safely roll back a newly published extension.');
+        }
+        verifyExtensionTree(fsModule, transaction.targetPath, transaction.manifest.candidate, 'Published extension candidate');
+        renameDirectorySync(transaction.targetPath, transaction.candidatePath);
+        syncDirectory(fsModule, transaction.context.targetRoot);
+    }
+
+    updateExtensionTransactionState(transaction, 'rolledback', fsModule);
+    await cleanupExtensionTransaction(transaction, tools);
+}
+
+async function publishExtensionTransaction(transaction, tools, { deferCleanup = false } = {}) {
+    const { fsModule, renameDirectorySync, transactionHook } = tools;
+    if (transaction.manifest.state !== 'prepared') throw new Error('Extension transaction is not prepared.');
+    if (transaction.manifest.candidate) {
+        verifyExtensionTree(fsModule, transaction.candidatePath, transaction.manifest.candidate, 'Extension candidate');
+        syncExtensionTree(fsModule, transaction.candidatePath);
+        syncDirectory(fsModule, transaction.transactionPath);
+    }
+    updateExtensionTransactionState(transaction, 'backing-up', fsModule);
+    await transactionHook?.('before-backup', transaction);
+    if (transaction.manifest.original) {
+        verifyExtensionTree(fsModule, transaction.targetPath, transaction.manifest.original, 'Original extension');
+        renameDirectorySync(transaction.targetPath, transaction.backupPath);
+        syncDirectory(fsModule, transaction.context.targetRoot);
+        syncDirectory(fsModule, transaction.transactionPath);
+    } else if (pathExists(fsModule, transaction.targetPath)) {
+        throw new Error('Extension transaction target appeared before publish.');
+    }
+    await transactionHook?.('after-backup', transaction);
+    updateExtensionTransactionState(transaction, 'backed-up', fsModule);
+    updateExtensionTransactionState(transaction, 'applying', fsModule);
+    if (transaction.manifest.candidate) {
+        renameDirectorySync(transaction.candidatePath, transaction.targetPath);
+        syncDirectory(fsModule, transaction.context.targetRoot);
+        syncDirectory(fsModule, transaction.transactionPath);
+        syncExtensionTree(fsModule, transaction.targetPath);
+        verifyExtensionTree(fsModule, transaction.targetPath, transaction.manifest.candidate, 'Published extension');
+    } else if (pathExists(fsModule, transaction.targetPath)) {
+        throw new Error('Deleted extension target still exists.');
+    }
+    await transactionHook?.('after-apply', transaction);
+    updateExtensionTransactionState(transaction, 'published', fsModule);
+    if (deferCleanup) return;
+    try {
+        await cleanupExtensionTransaction(transaction, tools);
+    } catch (error) {
+        console.error(`Extension transaction cleanup will be retried from ${transaction.transactionPath}`, error);
+    }
+}
+
+async function rollbackPublishedNewExtensionTransaction(transaction, tools) {
+    const { fsModule, renameDirectorySync } = tools;
+    transaction.manifest = readExtensionTransactionManifest(fsModule, transaction.transactionPath, transaction.context);
+    if (transaction.manifest.state !== 'published' || transaction.manifest.original || !transaction.manifest.candidate) {
+        throw new Error('Only a newly published extension can be rolled back after publication.');
+    }
+    verifyExtensionTree(fsModule, transaction.targetPath, transaction.manifest.candidate, 'Published extension');
+    renameDirectorySync(transaction.targetPath, transaction.candidatePath);
+    syncDirectory(fsModule, transaction.context.targetRoot);
+    updateExtensionTransactionState(transaction, 'rolledback', fsModule);
+    await cleanupExtensionTransaction(transaction, tools);
+}
+
+async function recoverExtensionTransactions(context, tools) {
+    const { fsModule } = tools;
+    if (!pathExists(fsModule, context.namespace)) return { restored: 0, cleaned: 0 };
+    assertExactDirectory(fsModule, context.namespace, 'Extension transaction namespace');
+    const result = { restored: 0, cleaned: 0 };
+    for (const entry of fsModule.readdirSync(context.namespace, { withFileTypes: true })) {
+        const transactionPath = path.join(context.namespace, entry.name);
+        if (entry.isSymbolicLink() || !entry.isDirectory() || !EXTENSION_TRANSACTION_PATTERN.test(entry.name)) {
+            throw new Error(`Unsafe extension transaction journal entry: ${transactionPath}`);
+        }
+        if (activeExtensionTransactions.has(normalizedPath(transactionPath))) continue;
+        for (const artifact of fsModule.readdirSync(transactionPath, { withFileTypes: true })) {
+            if (artifact.isFile() && /^manifest\.json\.[a-f0-9-]+\.tmp$/u.test(artifact.name)) {
+                fsModule.rmSync(path.join(transactionPath, artifact.name), { force: true });
+                continue;
+            }
+            if (![EXTENSION_TRANSACTION_MANIFEST, 'candidate', 'backup'].includes(artifact.name)
+                || artifact.isSymbolicLink()
+                || (artifact.name !== EXTENSION_TRANSACTION_MANIFEST && !artifact.isDirectory())) {
+                throw new Error(`Unsafe extension transaction artifact: ${path.join(transactionPath, artifact.name)}`);
+            }
+        }
+        const manifestPath = path.join(transactionPath, EXTENSION_TRANSACTION_MANIFEST);
+        if (!pathExists(fsModule, manifestPath)) {
+            if (pathExists(fsModule, path.join(transactionPath, 'backup'))) {
+                throw new Error(`Extension transaction backup has no manifest: ${transactionPath}`);
+            }
+            await tools.removeDirectory(transactionPath, { recursive: true, force: true });
+            result.cleaned += 1;
+            continue;
+        }
+        const manifest = readExtensionTransactionManifest(fsModule, transactionPath, context);
+        const transaction = {
+            context,
+            transactionPath,
+            targetPath: extensionTargetPath(context, manifest.shortName),
+            candidatePath: path.join(transactionPath, 'candidate'),
+            backupPath: path.join(transactionPath, 'backup'),
+            manifest,
+        };
+        if (manifest.state === 'published') {
+            if (manifest.candidate) {
+                if (!pathExists(fsModule, transaction.targetPath)) throw new Error('Published extension target is missing.');
+                verifyExtensionTree(fsModule, transaction.targetPath, manifest.candidate, 'Published extension');
+            } else if (pathExists(fsModule, transaction.targetPath)) {
+                throw new Error('Published extension deletion target still exists.');
+            }
+            await cleanupExtensionTransaction(transaction, tools);
+            result.cleaned += 1;
+        } else if (manifest.state === 'rolledback') {
+            if (manifest.original) verifyExtensionTree(fsModule, transaction.targetPath, manifest.original, 'Rolled-back extension');
+            else if (pathExists(fsModule, transaction.targetPath)) throw new Error('Rolled-back extension target unexpectedly exists.');
+            await cleanupExtensionTransaction(transaction, tools);
+            result.cleaned += 1;
+        } else {
+            await rollbackExtensionTransaction(transaction, tools);
+            result.restored += 1;
+        }
+    }
+    syncDirectory(fsModule, context.namespace);
+    return result;
+}
+
+async function rollbackAfterExtensionFailure(transaction, tools, error) {
+    if (!transaction) throw error;
+    try {
+        await rollbackExtensionTransaction(transaction, tools);
+    } catch (rollbackError) {
+        activeExtensionTransactions.delete(normalizedPath(transaction.transactionPath));
+        throw new globalThis.AggregateError(
+            [error, rollbackError],
+            'Extension mutation failed and could not be fully rolled back.',
+            { cause: error },
+        );
+    }
+    throw error;
 }
 
 /**
@@ -530,17 +1109,77 @@ export function createExtensionsRouter(dependencies = {}) {
     const dnsLookup = dependencies.dnsLookup ?? ((hostname, options) => dns.lookup(hostname, options));
     const removeDirectory = dependencies.removeDirectory ?? ((target, options) => fsModule.promises.rm(target, options));
     const copyDirectorySync = dependencies.copyDirectorySync ?? ((source, destination, options) => fsModule.cpSync(source, destination, options));
-    const removeDirectorySync = dependencies.removeDirectorySync ?? ((target, options) => fsModule.rmSync(target, options));
+    const renameDirectorySync = dependencies.renameDirectorySync ?? ((source, destination) => fsModule.renameSync(source, destination));
+    const storageCapacity = dependencies.canConsumeStorage ?? canConsumeStorage;
+    const mutationMutex = dependencies.mutationMutex ?? extensionMutationMutex;
+    const quotaMutex = dependencies.quotaMutex ?? extensionQuotaMutex;
+    const recoveryMutex = dependencies.recoveryMutex ?? extensionRecoveryMutex;
     const roots = {
         global: dependencies.globalRoot ?? PUBLIC_DIRECTORIES.globalExtensions,
         builtin: dependencies.builtinRoot ?? PUBLIC_DIRECTORIES.extensions,
+    };
+    const transactionTools = {
+        fsModule,
+        removeDirectory,
+        renameDirectorySync,
+        transactionHook: dependencies.transactionHook,
+    };
+
+    const recoverContexts = async (request, contexts) => {
+        const contextList = [...contexts.values()];
+        const recover = async () => {
+            for (const context of contextList) await recoverExtensionTransactions(context, transactionTools);
+        };
+        return await runWithMutexKeys(recoveryMutex, contextList.map(context => context.scopeHash), async () => (
+            contextList.some(context => context.type === EXTENSION_TYPES.LOCAL)
+                ? await quotaMutex.runExclusive(extensionQuotaLockKey(request), recover)
+                : await recover()
+        ));
+    };
+
+    const withMutationLocks = async (request, identities, callback) => {
+        const contexts = new Map();
+        for (const { type } of identities) {
+            if (!contexts.has(type)) {
+                contexts.set(type, createExtensionTransactionContext(
+                    request,
+                    type,
+                    roots,
+                    dependencies.stagingRoot,
+                    fsModule,
+                ));
+            }
+        }
+        const keys = identities.map(({ type, shortName }) => extensionMutationLockKey(contexts.get(type), shortName));
+        return await runWithMutexKeys(mutationMutex, keys, async () => {
+            await recoverContexts(request, contexts);
+            return await callback(contexts);
+        });
+    };
+
+    const ensureLocalTransactionCapacity = async (request, transaction) => {
+        if (transaction.context.type !== EXTENSION_TYPES.LOCAL || !transaction.manifest.candidate) return;
+        const additionalBytes = Math.max(
+            0,
+            transaction.manifest.candidate.bytes - (transaction.manifest.original?.bytes ?? 0),
+        );
+        const result = await storageCapacity(request.user.profile, request.user.directories, additionalBytes);
+        if (!result.allowed) throw new ExtensionStorageLimitError(result);
+    };
+
+    const publishWithQuota = async (request, transaction, options) => {
+        const publish = async () => {
+            await ensureLocalTransactionCapacity(request, transaction);
+            await publishExtensionTransaction(transaction, transactionTools, options);
+        };
+        return transaction.context.type === EXTENSION_TYPES.LOCAL
+            ? await quotaMutex.runExclusive(extensionQuotaLockKey(request), publish)
+            : await publish();
     };
     const extensionsRouter = express.Router();
     extensionsRouter.use(createExtensionsEnabledFeatureGuard(dependencies.enabled));
 
     extensionsRouter.post('/install', async (request, response) => {
-        let extensionPath = null;
-        let shouldCleanup = false;
         try {
             const { global = false, branch } = request.body;
             if (typeof global !== 'boolean') {
@@ -559,56 +1198,75 @@ export function createExtensionsRouter(dependencies = {}) {
             }
             const type = global ? EXTENSION_TYPES.GLOBAL : EXTENSION_TYPES.LOCAL;
             const identity = getCanonicalExtensionIdentity(urlName, type);
-            const basePath = path.resolve(global ? roots.global : request.user.directories.extensions);
-            fsModule.mkdirSync(basePath, { recursive: true });
-            extensionPath = path.resolve(basePath, identity.shortName);
-            if (path.dirname(extensionPath) !== basePath) {
-                throw new ExtensionResolutionError(403, 'Forbidden: Invalid extension path.');
-            }
-            if (findNormalizedRootEntry(basePath, identity.shortName, fsModule)) {
-                return response.status(409).send(`Directory already exists at ${extensionPath}`);
-            }
-
             const resolvedAddress = await validateInstallTarget(parsedUrl, dnsLookup);
-            shouldCleanup = true;
-            const git = createGit({
-                ...OPTIONS,
-                config: getPinnedGitConfig(parsedUrl, resolvedAddress),
-            });
-            const cloneOptions = { '--depth': 1 };
-            if (branch) cloneOptions['--branch'] = branch;
-            await git.clone(parsedUrl.href, extensionPath, cloneOptions);
-            const manifest = await getManifest(extensionPath, fsModule);
-            const { version, author, display_name } = manifest;
-            const folderName = path.basename(extensionPath);
-            shouldCleanup = false;
-            console.info(`Extension has been cloned to ${extensionPath} from ${parsedUrl.href} at ${branch || '(default)'} branch`);
-            return response.send({ version, author, display_name, extensionPath, folderName });
-        } catch (error) {
-            if (shouldCleanup && extensionPath) {
-                try {
-                    await removeDirectory(extensionPath, { recursive: true, force: true });
-                } catch (cleanupError) {
-                    console.error(`Failed to clean incomplete extension clone at ${extensionPath}`, cleanupError);
+            const result = await withMutationLocks(request, [identity], async contexts => {
+                const context = contexts.get(type);
+                const extensionPath = extensionTargetPath(context, identity.shortName);
+                if (findNormalizedRootEntry(context.targetRoot, identity.shortName, fsModule)) {
+                    throw new ExtensionResolutionError(409, `Directory already exists at ${extensionPath}`);
                 }
-            }
+
+                let transaction;
+                try {
+                    transaction = beginExtensionTransaction(context, identity.shortName, 'install', fsModule);
+                    const git = createGit({
+                        ...OPTIONS,
+                        config: getPinnedGitConfig(parsedUrl, resolvedAddress),
+                    });
+                    const cloneOptions = { '--depth': 1 };
+                    if (branch) cloneOptions['--branch'] = branch;
+                    await git.clone(parsedUrl.href, transaction.candidatePath, cloneOptions);
+                    const manifest = await getManifest(transaction.candidatePath, fsModule);
+                    prepareExtensionCandidate(transaction, fsModule);
+                    await publishWithQuota(request, transaction);
+                    const { version, author, display_name } = manifest;
+                    return { version, author, display_name, extensionPath, folderName: identity.shortName };
+                } catch (error) {
+                    return await rollbackAfterExtensionFailure(transaction, transactionTools, error);
+                }
+            });
+            console.info(`Extension has been cloned to ${result.extensionPath} from ${sanitizeExtensionUrlForLog(parsedUrl)}`);
+            return response.send(result);
+        } catch (error) {
             return sendResolutionError(response, error, 'Importing extension');
         }
     });
 
     extensionsRouter.post('/update', async (request, response) => {
         try {
-            const resolved = resolveManagedExtension(request, roots, true, fsModule);
-            const { isUpToDate, remoteUrl } = await checkIfRepoIsUpToDate(resolved.extensionPath, createGit);
-            const git = createGit({ baseDir: resolved.extensionPath, ...OPTIONS });
-            if (!await git.checkIsRepo(CheckRepoActions.IS_REPO_ROOT)) {
-                throw new Error(`Directory is not a Git repository at ${resolved.extensionPath}`);
-            }
-            const currentBranch = await git.branch();
-            if (!isUpToDate) await git.pull('origin', currentBranch.current);
-            await git.fetch('origin');
-            const fullCommitHash = await git.revparse(['HEAD']);
-            return response.send({ shortCommitHash: fullCommitHash.slice(0, 7), extensionPath: resolved.extensionPath, isUpToDate, remoteUrl });
+            const identity = resolveManagedExtension(request, roots, false, fsModule);
+            const result = await withMutationLocks(request, [identity], async contexts => {
+                const resolved = resolveManagedExtension(request, roots, true, fsModule);
+                let transaction;
+                try {
+                    transaction = beginExtensionTransaction(contexts.get(resolved.type), resolved.shortName, 'update', fsModule);
+                    copyDirectorySync(resolved.extensionPath, transaction.candidatePath, {
+                        recursive: true,
+                        force: false,
+                        errorOnExist: true,
+                    });
+                    const { isUpToDate, remoteUrl } = await checkIfRepoIsUpToDate(transaction.candidatePath, createGit);
+                    const git = createGit({ baseDir: transaction.candidatePath, ...OPTIONS });
+                    if (!await git.checkIsRepo(CheckRepoActions.IS_REPO_ROOT)) {
+                        throw new Error(`Directory is not a Git repository at ${resolved.extensionPath}`);
+                    }
+                    const currentBranch = await git.branch();
+                    if (!isUpToDate) await git.pull('origin', currentBranch.current);
+                    await git.fetch('origin');
+                    const fullCommitHash = await git.revparse(['HEAD']);
+                    prepareExtensionCandidate(transaction, fsModule);
+                    await publishWithQuota(request, transaction);
+                    return {
+                        shortCommitHash: fullCommitHash.slice(0, 7),
+                        extensionPath: resolved.extensionPath,
+                        isUpToDate,
+                        remoteUrl,
+                    };
+                } catch (error) {
+                    return await rollbackAfterExtensionFailure(transaction, transactionTools, error);
+                }
+            });
+            return response.send(result);
         } catch (error) {
             return sendResolutionError(response, error, 'Updating extension');
         }
@@ -634,20 +1292,40 @@ export function createExtensionsRouter(dependencies = {}) {
     extensionsRouter.post('/switch', async (request, response) => {
         try {
             validateBranch(request.body.branch, true);
-            const resolved = resolveManagedExtension(request, roots, true, fsModule);
             const branch = request.body.branch;
-            const git = createGit({ baseDir: resolved.extensionPath, ...OPTIONS });
-            const branches = await git.branchLocal();
-            if (branch.startsWith('origin/')) {
-                const localBranch = branch.slice('origin/'.length);
-                if (!localBranch) throw new ExtensionResolutionError(400, 'Bad Request: A valid branch is required in the request body.');
-                if (branches.all.includes(localBranch)) await git.checkout(localBranch);
-                else await git.checkoutBranch(localBranch, branch);
-                return response.sendStatus(204);
-            }
-            if (!branches.all.includes(branch)) return response.status(404).send(`Branch ${branch} does not exist locally`);
-            const currentBranch = await git.branch();
-            if (currentBranch.current !== branch) await git.checkout(branch);
+            const identity = resolveManagedExtension(request, roots, false, fsModule);
+            await withMutationLocks(request, [identity], async contexts => {
+                const resolved = resolveManagedExtension(request, roots, true, fsModule);
+                let transaction;
+                try {
+                    transaction = beginExtensionTransaction(contexts.get(resolved.type), resolved.shortName, 'switch', fsModule);
+                    copyDirectorySync(resolved.extensionPath, transaction.candidatePath, {
+                        recursive: true,
+                        force: false,
+                        errorOnExist: true,
+                    });
+                    const git = createGit({ baseDir: transaction.candidatePath, ...OPTIONS });
+                    const branches = await git.branchLocal();
+                    if (branch.startsWith('origin/')) {
+                        const localBranch = branch.slice('origin/'.length);
+                        if (!localBranch) {
+                            throw new ExtensionResolutionError(400, 'Bad Request: A valid branch is required in the request body.');
+                        }
+                        if (branches.all.includes(localBranch)) await git.checkout(localBranch);
+                        else await git.checkoutBranch(localBranch, branch);
+                    } else {
+                        if (!branches.all.includes(branch)) {
+                            throw new ExtensionResolutionError(404, `Branch ${branch} does not exist locally`);
+                        }
+                        const currentBranch = await git.branch();
+                        if (currentBranch.current !== branch) await git.checkout(branch);
+                    }
+                    prepareExtensionCandidate(transaction, fsModule);
+                    await publishWithQuota(request, transaction);
+                } catch (error) {
+                    return await rollbackAfterExtensionFailure(transaction, transactionTools, error);
+                }
+            });
             return response.sendStatus(204);
         } catch (error) {
             return sendResolutionError(response, error, 'Switching branches');
@@ -655,8 +1333,6 @@ export function createExtensionsRouter(dependencies = {}) {
     });
 
     extensionsRouter.post('/move', async (request, response) => {
-        let destinationPath = null;
-        let destinationCreated = false;
         try {
             if (!request.user.profile.admin) {
                 throw new ExtensionResolutionError(403, 'Forbidden: No permission to move extensions.');
@@ -669,29 +1345,76 @@ export function createExtensionsRouter(dependencies = {}) {
                 throw new ExtensionResolutionError(409, 'Source and destination directories are the same.');
             }
             const sourceRequest = { user: request.user, body: { extensionName: request.body.extensionName, type: source } };
-            const sourceResolved = resolveManagedExtension(sourceRequest, roots, true, fsModule);
-            const destinationRoot = destination === EXTENSION_TYPES.GLOBAL ? roots.global : request.user.directories.extensions;
-            fsModule.mkdirSync(destinationRoot, { recursive: true });
-            if (findNormalizedRootEntry(destinationRoot, sourceResolved.shortName, fsModule)) {
-                return response.status(409).send('Destination directory already exists.');
-            }
-            const destinationRequest = { user: request.user, body: { extensionName: sourceResolved.shortName, type: destination } };
-            const destinationResolved = resolveManagedExtension(destinationRequest, roots, false, fsModule);
-            destinationPath = destinationResolved.extensionPath;
+            const sourceIdentity = resolveManagedExtension(sourceRequest, roots, false, fsModule);
+            const destinationRequest = { user: request.user, body: { extensionName: sourceIdentity.shortName, type: destination } };
+            const destinationIdentity = resolveManagedExtension(destinationRequest, roots, false, fsModule);
+            await withMutationLocks(request, [sourceIdentity, destinationIdentity], async contexts => {
+                const sourceResolved = resolveManagedExtension(sourceRequest, roots, true, fsModule);
+                const destinationRoot = contexts.get(destination).targetRoot;
+                if (findNormalizedRootEntry(destinationRoot, sourceResolved.shortName, fsModule)) {
+                    throw new ExtensionResolutionError(409, 'Destination directory already exists.');
+                }
 
-            destinationCreated = true;
-            copyDirectorySync(sourceResolved.extensionPath, destinationPath, { recursive: true, force: false, errorOnExist: true });
-            removeDirectorySync(sourceResolved.extensionPath, { recursive: true, force: false });
-            destinationCreated = false;
+                let destinationTransaction;
+                try {
+                    destinationTransaction = beginExtensionTransaction(
+                        contexts.get(destination),
+                        sourceResolved.shortName,
+                        'move-destination',
+                        fsModule,
+                    );
+                    copyDirectorySync(sourceResolved.extensionPath, destinationTransaction.candidatePath, {
+                        recursive: true,
+                        force: false,
+                        errorOnExist: true,
+                    });
+                    prepareExtensionCandidate(destinationTransaction, fsModule);
+                    await publishWithQuota(request, destinationTransaction, { deferCleanup: true });
+                } catch (error) {
+                    return await rollbackAfterExtensionFailure(destinationTransaction, transactionTools, error);
+                }
+
+                let sourceTransaction;
+                try {
+                    sourceTransaction = beginExtensionTransaction(
+                        contexts.get(source),
+                        sourceResolved.shortName,
+                        'move-source',
+                        fsModule,
+                    );
+                    prepareExtensionDeletion(sourceTransaction, fsModule);
+                    await publishWithQuota(request, sourceTransaction);
+                } catch (error) {
+                    const rollbackErrors = [];
+                    if (sourceTransaction) {
+                        try {
+                            await rollbackExtensionTransaction(sourceTransaction, transactionTools);
+                        } catch (rollbackError) {
+                            rollbackErrors.push(rollbackError);
+                        }
+                    }
+                    try {
+                        await rollbackPublishedNewExtensionTransaction(destinationTransaction, transactionTools);
+                    } catch (rollbackError) {
+                        rollbackErrors.push(rollbackError);
+                    }
+                    if (rollbackErrors.length > 0) {
+                        throw new globalThis.AggregateError(
+                            [error, ...rollbackErrors],
+                            'Moving extension failed and could not be fully rolled back.',
+                            { cause: error },
+                        );
+                    }
+                    throw error;
+                }
+                try {
+                    await cleanupExtensionTransaction(destinationTransaction, transactionTools);
+                } catch (error) {
+                    console.error(`Extension transaction cleanup will be retried from ${destinationTransaction.transactionPath}`, error);
+                }
+            });
             return response.sendStatus(204);
         } catch (error) {
-            if (destinationCreated && destinationPath) {
-                try {
-                    removeDirectorySync(destinationPath, { recursive: true, force: true });
-                } catch (cleanupError) {
-                    console.error(`Failed to roll back extension move to ${destinationPath}`, cleanupError);
-                }
-            }
             return sendResolutionError(response, error, 'Moving extension');
         }
     });
@@ -719,19 +1442,33 @@ export function createExtensionsRouter(dependencies = {}) {
 
     extensionsRouter.post('/delete', async (request, response) => {
         try {
-            const resolved = resolveManagedExtension(request, roots, true, fsModule);
-            await removeDirectory(resolved.extensionPath, { recursive: true, force: false });
-            return response.send(`Extension has been deleted at ${resolved.extensionPath}`);
+            const identity = resolveManagedExtension(request, roots, false, fsModule);
+            const extensionPath = await withMutationLocks(request, [identity], async contexts => {
+                const resolved = resolveManagedExtension(request, roots, true, fsModule);
+                let transaction;
+                try {
+                    transaction = beginExtensionTransaction(contexts.get(resolved.type), resolved.shortName, 'delete', fsModule);
+                    prepareExtensionDeletion(transaction, fsModule);
+                    await publishWithQuota(request, transaction);
+                    return resolved.extensionPath;
+                } catch (error) {
+                    return await rollbackAfterExtensionFailure(transaction, transactionTools, error);
+                }
+            });
+            return response.send(`Extension has been deleted at ${extensionPath}`);
         } catch (error) {
             return sendResolutionError(response, error, 'Deleting extension');
         }
     });
 
-    extensionsRouter.get('/discover', (request, response) => {
+    extensionsRouter.get('/discover', async (request, response) => {
         try {
             const localRoot = request.user.directories.extensions;
             fsModule.mkdirSync(localRoot, { recursive: true });
             fsModule.mkdirSync(roots.global, { recursive: true });
+            const contexts = new Map([EXTENSION_TYPES.LOCAL, EXTENSION_TYPES.GLOBAL]
+                .map(type => [type, createExtensionTransactionContext(request, type, roots, dependencies.stagingRoot, fsModule)]));
+            await recoverContexts(request, contexts);
             const listDirectories = root => fsModule.readdirSync(root, { withFileTypes: true })
                 .filter(entry => entry.isDirectory() && !entry.isSymbolicLink())
                 .map(entry => entry.name);

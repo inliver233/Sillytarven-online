@@ -19,9 +19,12 @@ import { TavernCardValidator } from '../validator/TavernCardValidator.js';
 import { CharacterCardPngError, parse, read, write } from '../character-card-parser.js';
 import { readWorldInfoFile } from './worldinfo.js';
 import { invalidateThumbnail } from './thumbnails.js';
-import { importRisuSprites } from './sprites.js';
+import { planRisuSprites } from './sprites.js';
 import { getUserDirectoriesList } from '../users.js';
-import { getChatInfo } from './chats.js';
+import { getChatInfo, runWithChatStorageLocks } from './chats.js';
+import { ensureDurableChatRecovery } from '../chat-journal.js';
+import { ensureChatBranchRecovery, getChatBranchUserLockPath, hasChatBranchFamilyCollision } from '../chat-branch.js';
+import { createCharacterChatTransaction, ensureCharacterChatRecovery } from '../character-chat-transaction.js';
 import { ByafParser } from '../byaf.js';
 import { applyCharXAssetRewrites, CharXParser, planCharXAssets } from '../charx.js';
 import cacheBuster from '../middleware/cacheBuster.js';
@@ -30,7 +33,7 @@ import { beginEndpointPerformance } from '../performance-monitor.js';
 import { detectImageFormat } from '../media-validation.js';
 import { CharacterListCache, invalidateCharacterListCache, registerCharacterListCache } from '../character-list-cache.js';
 import { ArchiveReadError } from '../bounded-zip.js';
-import { FileTransaction } from '../file-transaction.js';
+import { FileTransaction, ensureFileTransactionRecovery } from '../file-transaction.js';
 import { KeyedMutex } from '../keyed-mutex.js';
 
 // With 100 MB limit it would take roughly 3000 characters to reach this limit
@@ -52,7 +55,6 @@ const characterListCache = new CharacterListCache({
 registerCharacterListCache(characterListCache);
 const chatDirStatsCache = new Map();
 const characterImportMutex = new KeyedMutex();
-const CHARACTER_SIZE_OVERHEAD = 2048;
 
 class CharacterImportError extends Error {
     /**
@@ -190,19 +192,9 @@ async function cleanupUploadedFile(uploadPath) {
     }
 }
 
-/**
- * Converts writeCharacterData's legacy boolean result into an import error.
- * @param {boolean} result Character write result
- * @param {string} source Import source label
- */
-function assertCharacterImportSaved(result, source) {
-    if (!result) {
-        throw CharacterImportError.writeFailed(`Failed to save ${source} character card.`);
-    }
-}
-
 async function ensureCharacterStorageCapacity(request, response, additionalBytes) {
-    const result = await canConsumeStorage(request.user.profile, request.user.directories, additionalBytes);
+    const storageCheck = request.characterImportStorageCheck ?? canConsumeStorage;
+    const result = await storageCheck(request.user.profile, request.user.directories, additionalBytes);
     if (!result.allowed) {
         return response.status(507).json({
             error: 'storage_limit',
@@ -216,20 +208,47 @@ async function ensureCharacterStorageCapacity(request, response, additionalBytes
     return null;
 }
 
-function estimateCharacterCardBytes(inputFile, data) {
-    let imageSize = 0;
+async function getCharacterWriteDelta(outputImagePath, outputImage) {
+    let previousBytes = 0;
     try {
-        if (Buffer.isBuffer(inputFile)) {
-            imageSize = inputFile.length;
-        } else if (typeof inputFile === 'string') {
-            imageSize = fs.statSync(inputFile).size;
+        const stats = await fsPromises.stat(outputImagePath);
+        if (!stats.isFile()) {
+            throw new Error(`Character target is not a file: ${outputImagePath}`);
         }
+        previousBytes = stats.size;
     } catch (error) {
-        console.warn('Failed to estimate character image size:', error);
+        if (error?.code !== 'ENOENT') throw error;
+    }
+    return Math.max(0, outputImage.length - previousBytes);
+}
+
+async function ensureCharacterStorageRecovery(request, root) {
+    let changed = false;
+    const record = (result) => {
+        changed ||= result.restored > 0 || result.cleaned > 0;
+    };
+
+    try {
+        record(await ensureFileTransactionRecovery(root, request.user.profile.handle));
+        record(ensureDurableChatRecovery(root, request.user.profile.handle));
+        record(ensureChatBranchRecovery(root, request.user.profile.handle, request.user.directories));
+        record(ensureCharacterChatRecovery(root, request.user.profile.handle, request.user.directories));
+    } catch (error) {
+        invalidateCharacterListCache(request.user.profile.handle);
+        throw error;
     }
 
-    const dataSize = Buffer.byteLength(String(data || ''), 'utf8');
-    return imageSize + dataSize + CHARACTER_SIZE_OVERHEAD;
+    if (changed) {
+        invalidateCharacterListCache(request.user.profile.handle);
+    }
+}
+
+async function runWithCharacterRootLock(request, callback) {
+    const root = path.resolve(request.user.directories.root);
+    return await runWithChatStorageLocks(request, [getChatBranchUserLockPath(root)], async () => {
+        await ensureCharacterStorageRecovery(request, root);
+        return await callback(root);
+    });
 }
 
 class DiskCache {
@@ -470,19 +489,38 @@ function invalidateCharacterDataCache(inputFile, request) {
     }
 }
 
-async function writeCharacterData(inputFile, data, outputFile, request, crop = undefined) {
+async function writeCharacterData(inputFile, data, outputFile, request, crop = undefined, preparedOutputImage = undefined) {
     try {
         invalidateCharacterDataCache(inputFile, request);
-        const outputImage = await buildCharacterPng(inputFile, data, crop);
+        const outputImage = preparedOutputImage ?? await buildCharacterPng(inputFile, data, crop);
         const outputImagePath = path.join(request.user.directories.characters, `${outputFile}.png`);
+        const writeCharacterFile = request.characterImportWriteFileAtomicSync ?? writeFileAtomicSync;
 
-        writeFileAtomicSync(outputImagePath, outputImage);
+        writeCharacterFile(outputImagePath, outputImage);
         invalidateCharacterListCache(request.user.profile.handle);
         return true;
     } catch (err) {
         console.error(err);
         return false;
     }
+}
+
+async function prepareCharacterWrite(inputFile, data, outputFile, request, crop = undefined) {
+    const outputImage = await buildCharacterPng(inputFile, data, crop);
+    const outputImagePath = path.join(request.user.directories.characters, `${outputFile}.png`);
+    const additionalBytes = await getCharacterWriteDelta(outputImagePath, outputImage);
+    return { inputFile, data, outputFile, crop, outputImage, outputImagePath, additionalBytes, request };
+}
+
+async function commitPreparedCharacterWrite(prepared) {
+    return await writeCharacterData(
+        prepared.inputFile,
+        prepared.data,
+        prepared.outputFile,
+        prepared.request,
+        prepared.crop,
+        prepared.outputImage,
+    );
 }
 
 /**
@@ -558,6 +596,25 @@ async function commitCharacterImportTransaction(transaction, request) {
     }
     await transaction.commit();
     invalidateCharacterListCache(request.user.profile.handle);
+}
+
+async function saveCharacterImport(inputFile, data, fileName, request, crop = undefined, risuPlan = null) {
+    const transaction = new FileTransaction(request.user.directories.root, {
+        ...request.characterImportTransactionOptions,
+        handle: request.user.profile.handle,
+    });
+    const savedCardPath = path.join(request.user.directories.characters, `${fileName}.png`);
+    try {
+        for (const sprite of risuPlan?.writes ?? []) {
+            await transaction.stageFile(sprite.filePath, sprite.buffer);
+        }
+        const characterPng = await buildCharacterPng(inputFile, data, crop);
+        await transaction.stageFile(savedCardPath, characterPng);
+        await commitCharacterImportTransaction(transaction, request);
+    } finally {
+        await transaction.dispose();
+    }
+    invalidateCharacterDataCache(savedCardPath, request);
 }
 
 /**
@@ -1049,8 +1106,7 @@ async function importFromYaml(uploadPath, context, preservedFileName) {
         'creator': '',
         'tags': '',
     }, context.request.user.directories);
-    const result = await writeCharacterData(DEFAULT_AVATAR_PATH, JSON.stringify(char), fileName, context.request);
-    assertCharacterImportSaved(result, 'YAML');
+    await saveCharacterImport(DEFAULT_AVATAR_PATH, JSON.stringify(char), fileName, context.request);
     return fileName;
 }
 
@@ -1104,7 +1160,10 @@ async function importFromCharX(uploadPath, { request }, preservedFileName) {
     });
     applyCharXAssetRewrites(processedCard, assetPlan.summary.rewrites);
 
-    const transaction = new FileTransaction(request.user.directories.root, request.characterImportTransactionOptions);
+    const transaction = new FileTransaction(request.user.directories.root, {
+        ...request.characterImportTransactionOptions,
+        handle: request.user.profile.handle,
+    });
     const savedCardPath = path.join(request.user.directories.characters, `${fileName}.png`);
     try {
         for (const writePlan of assetPlan.writes) {
@@ -1145,7 +1204,10 @@ async function importFromByaf(uploadPath, { request }, preservedFileName) {
     }
     const card = readFromV2(byafData.card);
     const fileName = preservedFileName || getPngName(sanitize(byafData.character.displayName || card.name, { replacement: sanitizeSafeCharacterReplacements }), request.user.directories);
-    const transaction = new FileTransaction(request.user.directories.root, request.characterImportTransactionOptions);
+    const transaction = new FileTransaction(request.user.directories.root, {
+        ...request.characterImportTransactionOptions,
+        handle: request.user.profile.handle,
+    });
     const savedCardPath = path.join(request.user.directories.characters, `${fileName}.png`);
 
     try {
@@ -1155,7 +1217,10 @@ async function importFromByaf(uploadPath, { request }, preservedFileName) {
             const reserveUniquePath = (directory, baseName, extension) => {
                 const uniqueName = getUniqueName(baseName, name => {
                     const candidate = path.join(directory, `${name}${extension}`);
-                    return fs.existsSync(candidate) || reservedPaths.has(path.resolve(candidate));
+                    const hasDiskCollision = extension === '.jsonl'
+                        ? hasChatBranchFamilyCollision(candidate)
+                        : fs.existsSync(candidate);
+                    return hasDiskCollision || reservedPaths.has(path.resolve(candidate));
                 });
                 const candidate = path.join(directory, `${uniqueName}${extension}`);
                 reservedPaths.add(path.resolve(candidate));
@@ -1238,14 +1303,14 @@ async function importFromJson(uploadPath, { request }, preservedFileName) {
             throw CharacterImportError.invalid('JSON character card is missing a valid name.');
         }
         console.info(`Importing from ${jsonData.spec} json`);
-        importRisuSprites(request.user.directories, jsonData);
+        const risuPlan = planRisuSprites(request.user.directories, jsonData);
+        risuPlan.stripEmbeddedData();
         unsetPrivateFields(jsonData);
         jsonData = readFromV2(jsonData);
         jsonData['create_date'] = humanizedISO8601DateTime();
         const pngName = preservedFileName || getPngName(characterName, request.user.directories);
         const char = JSON.stringify(jsonData);
-        const result = await writeCharacterData(DEFAULT_AVATAR_PATH, char, pngName, request);
-        assertCharacterImportSaved(result, 'JSON');
+        await saveCharacterImport(DEFAULT_AVATAR_PATH, char, pngName, request, undefined, risuPlan);
         return pngName;
     } else if (jsonData.name !== undefined) {
         if (typeof jsonData.name !== 'string' || !jsonData.name.trim()) {
@@ -1274,8 +1339,7 @@ async function importFromJson(uploadPath, { request }, preservedFileName) {
         };
         char = convertToV2(char, request.user.directories);
         let charJSON = JSON.stringify(char);
-        const result = await writeCharacterData(DEFAULT_AVATAR_PATH, charJSON, pngName, request);
-        assertCharacterImportSaved(result, 'JSON');
+        await saveCharacterImport(DEFAULT_AVATAR_PATH, charJSON, pngName, request);
         return pngName;
     } else if (jsonData.char_name !== undefined) {//json Pygmalion notepad
         if (typeof jsonData.char_name !== 'string' || !jsonData.char_name.trim()) {
@@ -1304,8 +1368,7 @@ async function importFromJson(uploadPath, { request }, preservedFileName) {
         };
         char = convertToV2(char, request.user.directories);
         const charJSON = JSON.stringify(char);
-        const result = await writeCharacterData(DEFAULT_AVATAR_PATH, charJSON, pngName, request);
-        assertCharacterImportSaved(result, 'JSON');
+        await saveCharacterImport(DEFAULT_AVATAR_PATH, charJSON, pngName, request);
         return pngName;
     }
 
@@ -1336,13 +1399,13 @@ async function importFromPng(uploadPath, { request }, preservedFileName) {
 
     if (jsonData.spec !== undefined) {
         console.info(`Found a ${jsonData.spec} character file.`);
-        importRisuSprites(request.user.directories, jsonData);
+        const risuPlan = planRisuSprites(request.user.directories, jsonData);
+        risuPlan.stripEmbeddedData();
         unsetPrivateFields(jsonData);
         jsonData = readFromV2(jsonData);
         jsonData['create_date'] = humanizedISO8601DateTime();
         const char = JSON.stringify(jsonData);
-        const result = await writeCharacterData(uploadPath, char, pngName, request);
-        assertCharacterImportSaved(result, 'PNG');
+        await saveCharacterImport(uploadPath, char, pngName, request, undefined, risuPlan);
         return pngName;
     } else if (jsonData.name !== undefined) {
         console.info('Found a v1 character file.');
@@ -1368,8 +1431,7 @@ async function importFromPng(uploadPath, { request }, preservedFileName) {
         };
         char = convertToV2(char, request.user.directories);
         const charJSON = JSON.stringify(char);
-        const result = await writeCharacterData(uploadPath, charJSON, pngName, request);
-        assertCharacterImportSaved(result, 'PNG');
+        await saveCharacterImport(uploadPath, charJSON, pngName, request);
         return pngName;
     }
 
@@ -1379,44 +1441,67 @@ async function importFromPng(uploadPath, { request }, preservedFileName) {
 export const router = express.Router();
 
 router.post('/create', getFileNameValidationFunction('file_name'), async function (request, response) {
+    const uploadPath = request.file ? path.join(request.file.destination, request.file.filename) : null;
     try {
         if (!request.body) return response.sendStatus(400);
 
         request.body.ch_name = sanitize(request.body.ch_name);
-
         const char = JSON.stringify(charaFormatData(request.body, request.user.directories));
-        const internalName = request.body.file_name || getPngName(request.body.ch_name, request.user.directories);
-        const avatarName = `${internalName}.png`;
-        const chatsPath = path.join(request.user.directories.chats, internalName);
 
-        if (!fs.existsSync(chatsPath)) fs.mkdirSync(chatsPath);
+        return await runWithCharacterRootLock(request, async () => {
+            const internalName = request.body.file_name || getPngName(request.body.ch_name, request.user.directories);
+            const avatarName = `${internalName}.png`;
+            const avatarPath = path.join(request.user.directories.characters, avatarName);
+            const chatsPath = path.join(request.user.directories.chats, internalName);
+            const cardOccupied = fs.existsSync(avatarPath) && fs.statSync(avatarPath).isFile();
+            if (request.body.file_name && (cardOccupied || fs.existsSync(chatsPath))) {
+                return response.status(409).json({
+                    error: 'character_exists',
+                    message: 'A character card or chat already occupies that file name.',
+                });
+            }
 
-        if (!request.file) {
-            const estimateBytes = estimateCharacterCardBytes(DEFAULT_AVATAR_PATH, char);
-            const storageError = await ensureCharacterStorageCapacity(request, response, estimateBytes);
+            const inputFile = uploadPath || DEFAULT_AVATAR_PATH;
+            const crop = uploadPath ? tryParse(request.query.crop) : undefined;
+            const prepared = await prepareCharacterWrite(inputFile, char, internalName, request, crop);
+            const storageError = await ensureCharacterStorageCapacity(request, response, prepared.additionalBytes);
             if (storageError) {
                 return storageError;
             }
-            await writeCharacterData(DEFAULT_AVATAR_PATH, char, internalName, request);
-            return response.send(avatarName);
-        } else {
-            const crop = tryParse(request.query.crop);
-            const uploadPath = path.join(request.file.destination, request.file.filename);
-            const estimateBytes = estimateCharacterCardBytes(uploadPath, char);
-            const storageError = await ensureCharacterStorageCapacity(request, response, estimateBytes);
-            if (storageError) {
-                fs.unlinkSync(uploadPath);
-                return storageError;
+
+            const saved = await commitPreparedCharacterWrite(prepared);
+            if (!saved) {
+                return response.sendStatus(500);
             }
-            await writeCharacterData(uploadPath, char, internalName, request, crop);
-            fs.unlinkSync(uploadPath);
+
             return response.send(avatarName);
-        }
+        });
     } catch (err) {
         console.error(err);
-        response.sendStatus(500);
+        return response.sendStatus(500);
+    } finally {
+        await cleanupUploadedFile(uploadPath);
     }
 });
+
+async function runCharacterChatMutation(options, callback) {
+    const transaction = createCharacterChatTransaction(options);
+    try {
+        await transaction.markMutating();
+        const result = await callback();
+        await transaction.commit();
+        return result;
+    } catch (error) {
+        try {
+            await transaction.rollback();
+        } catch (rollbackError) {
+            const transactionError = new Error('Character/chat mutation and rollback failed.', { cause: rollbackError });
+            transactionError.mutationError = error;
+            throw transactionError;
+        }
+        throw error;
+    }
+}
 
 router.post('/rename', validateAvatarUrlMiddleware, async function (request, response) {
     if (!request.body.avatar_url || !request.body.new_name) {
@@ -1426,39 +1511,59 @@ router.post('/rename', validateAvatarUrlMiddleware, async function (request, res
     const oldAvatarName = request.body.avatar_url;
     const newName = sanitize(request.body.new_name);
     const oldInternalName = path.parse(request.body.avatar_url).name;
-    const newInternalName = getPngName(newName, request.user.directories);
-    const newAvatarName = `${newInternalName}.png`;
-
-    const oldAvatarPath = path.join(request.user.directories.characters, oldAvatarName);
-
-    const oldChatsPath = path.join(request.user.directories.chats, oldInternalName);
-    const newChatsPath = path.join(request.user.directories.chats, newInternalName);
+    const root = path.resolve(request.user.directories.root);
 
     try {
-        // Read old file, replace name int it
-        const rawOldData = await readCharacterData(oldAvatarPath);
-        if (rawOldData === undefined) throw new Error('Failed to read character file');
+        return await runWithChatStorageLocks(request, [getChatBranchUserLockPath(root)], async () => {
+            await ensureFileTransactionRecovery(root, request.user.profile.handle);
+            ensureDurableChatRecovery(root, request.user.profile.handle);
+            ensureChatBranchRecovery(root, request.user.profile.handle, request.user.directories);
+            ensureCharacterChatRecovery(root, request.user.profile.handle, request.user.directories);
 
-        const oldData = getCharaCardV2(JSON.parse(rawOldData), request.user.directories);
-        _.set(oldData, 'data.name', newName);
-        _.set(oldData, 'name', newName);
-        const newData = JSON.stringify(oldData);
+            const newInternalName = getPngName(newName, request.user.directories);
+            const newAvatarName = `${newInternalName}.png`;
+            const oldAvatarPath = path.join(request.user.directories.characters, oldAvatarName);
+            const newAvatarPath = path.join(request.user.directories.characters, newAvatarName);
+            const oldChatsPath = path.join(request.user.directories.chats, oldInternalName);
+            const newChatsPath = path.join(request.user.directories.chats, newInternalName);
 
-        // Write data to new location
-        await writeCharacterData(oldAvatarPath, newData, newInternalName, request);
+            // Read old file, replace name int it
+            const rawOldData = await readCharacterData(oldAvatarPath);
+            if (rawOldData === undefined) throw new Error('Failed to read character file');
 
-        // Rename chats folder
-        if (fs.existsSync(oldChatsPath) && !fs.existsSync(newChatsPath)) {
-            fs.cpSync(oldChatsPath, newChatsPath, { recursive: true });
-            fs.rmSync(oldChatsPath, { recursive: true, force: true });
-        }
+            const oldData = getCharaCardV2(JSON.parse(rawOldData), request.user.directories);
+            _.set(oldData, 'data.name', newName);
+            _.set(oldData, 'name', newName);
+            const newData = JSON.stringify(oldData);
 
-        // Remove the old character file
-        fs.unlinkSync(oldAvatarPath);
-        invalidateCharacterListCache(request.user.profile.handle);
+            await runCharacterChatMutation({
+                root,
+                handle: request.user.profile.handle,
+                directories: request.user.directories,
+                operation: 'rename',
+                oldCardPath: oldAvatarPath,
+                newCardPath: newAvatarPath,
+                oldChatsPath,
+                newChatsPath,
+            }, async () => {
+                // Write data to new location
+                const saved = await writeCharacterData(oldAvatarPath, newData, newInternalName, request);
+                if (!saved) throw new Error('Failed to write renamed character file');
 
-        // Return new avatar name to ST
-        return response.send({ avatar: newAvatarName });
+                // Rename chats folder
+                if (fs.existsSync(oldChatsPath) && !fs.existsSync(newChatsPath)) {
+                    fs.cpSync(oldChatsPath, newChatsPath, { recursive: true });
+                    fs.rmSync(oldChatsPath, { recursive: true, force: true });
+                }
+
+                // Remove the old character file
+                fs.unlinkSync(oldAvatarPath);
+            });
+            invalidateCharacterListCache(request.user.profile.handle);
+
+            // Return new avatar name to ST
+            return response.send({ avatar: newAvatarName });
+        });
     }
     catch (err) {
         console.error(err);
@@ -1467,84 +1572,92 @@ router.post('/rename', validateAvatarUrlMiddleware, async function (request, res
 });
 
 router.post('/edit', validateAvatarUrlMiddleware, async function (request, response) {
+    const uploadPath = request.file ? path.join(request.file.destination, request.file.filename) : null;
     if (!request.body) {
         console.warn('Error: no response body detected');
-        response.status(400).send('Error: no response body detected');
-        return;
+        return response.status(400).send('Error: no response body detected');
     }
 
     if (request.body.ch_name === '' || request.body.ch_name === undefined || request.body.ch_name === '.') {
         console.warn('Error: invalid name.');
-        response.status(400).send('Error: invalid name.');
-        return;
+        return response.status(400).send('Error: invalid name.');
     }
 
-    let char = charaFormatData(request.body, request.user.directories);
-    char.chat = request.body.chat;
-    char.create_date = request.body.create_date;
-    char = JSON.stringify(char);
-    let targetFile = (request.body.avatar_url).replace('.png', '');
-
     try {
-        if (!request.file) {
+        return await runWithCharacterRootLock(request, async () => {
             const avatarPath = path.join(request.user.directories.characters, request.body.avatar_url);
-            await writeCharacterData(avatarPath, char, targetFile, request);
-        } else {
-            const crop = tryParse(request.query.crop);
-            const newAvatarPath = path.join(request.file.destination, request.file.filename);
-            invalidateThumbnail(request.user.directories, 'avatar', request.body.avatar_url);
-            await writeCharacterData(newAvatarPath, char, targetFile, request, crop);
-            fs.unlinkSync(newAvatarPath);
+            if (!fs.existsSync(avatarPath)) {
+                return response.status(400).send('Error: character file does not exist');
+            }
 
-            // Bust cache to reload the new avatar
-            cacheBuster.bust(request, response);
-        }
+            let char = charaFormatData(request.body, request.user.directories);
+            char.chat = request.body.chat;
+            char.create_date = request.body.create_date;
+            const characterData = JSON.stringify(char);
+            const targetFile = path.parse(request.body.avatar_url).name;
+            const crop = uploadPath ? tryParse(request.query.crop) : undefined;
+            const prepared = await prepareCharacterWrite(uploadPath || avatarPath, characterData, targetFile, request, crop);
+            const storageError = await ensureCharacterStorageCapacity(request, response, prepared.additionalBytes);
+            if (storageError) return storageError;
 
-        return response.sendStatus(200);
+            const saved = await commitPreparedCharacterWrite(prepared);
+            if (!saved) return response.sendStatus(500);
+
+            if (uploadPath) {
+                invalidateThumbnail(request.user.directories, 'avatar', request.body.avatar_url);
+                cacheBuster.bust(request, response);
+            }
+            return response.sendStatus(200);
+        });
     } catch (err) {
         console.error('An error occurred, character edit invalidated.', err);
         return response.sendStatus(500);
+    } finally {
+        await cleanupUploadedFile(uploadPath);
     }
 });
 
 router.post('/edit-avatar', validateAvatarUrlMiddleware, async function (request, response) {
+    const uploadPath = request.file ? path.join(request.file.destination, request.file.filename) : null;
     try {
-        if (!request.file) {
+        if (!uploadPath) {
             return response.status(400).send('Error: no file uploaded');
         }
-
         if (!request.body || !request.body.avatar_url) {
             return response.status(400).send('Error: no avatar_url in request body');
         }
-
-        const uploadPath = path.join(request.file.destination, request.file.filename);
         if (!fs.existsSync(uploadPath)) {
             return response.status(400).send('Error: uploaded file does not exist');
         }
-        const characterPath = path.join(request.user.directories.characters, request.body.avatar_url);
-        if (!fs.existsSync(characterPath)) {
-            return response.status(400).send('Error: character file does not exist');
-        }
-        const data = await readCharacterData(characterPath);
-        if (!data) {
-            return response.status(400).send('Error: failed to read character data');
-        }
 
-        const crop = tryParse(request.query.crop);
-        const fileName = request.body.avatar_url.replace('.png', '');
-        await writeCharacterData(uploadPath, data, fileName, request, crop);
+        return await runWithCharacterRootLock(request, async () => {
+            const characterPath = path.join(request.user.directories.characters, request.body.avatar_url);
+            if (!fs.existsSync(characterPath)) {
+                return response.status(400).send('Error: character file does not exist');
+            }
+            const data = await readCharacterData(characterPath);
+            if (!data) {
+                return response.status(400).send('Error: failed to read character data');
+            }
 
-        // Remove uploaded temp file
-        fs.unlinkSync(uploadPath);
+            const crop = tryParse(request.query.crop);
+            const fileName = path.parse(request.body.avatar_url).name;
+            const prepared = await prepareCharacterWrite(uploadPath, data, fileName, request, crop);
+            const storageError = await ensureCharacterStorageCapacity(request, response, prepared.additionalBytes);
+            if (storageError) return storageError;
 
-        // Reset images caches
-        cacheBuster.bust(request, response);
-        invalidateThumbnail(request.user.directories, 'avatar', request.body.avatar_url);
+            const saved = await commitPreparedCharacterWrite(prepared);
+            if (!saved) return response.sendStatus(500);
 
-        return response.sendStatus(200);
+            cacheBuster.bust(request, response);
+            invalidateThumbnail(request.user.directories, 'avatar', request.body.avatar_url);
+            return response.sendStatus(200);
+        });
     } catch (err) {
         console.error('An error occurred while editing avatar', err);
         return response.sendStatus(500);
+    } finally {
+        await cleanupUploadedFile(uploadPath);
     }
 });
 
@@ -1576,23 +1689,32 @@ router.post('/edit-attribute', validateAvatarUrlMiddleware, async function (requ
     }
 
     try {
-        const avatarPath = path.join(request.user.directories.characters, request.body.avatar_url);
-        const charJSON = await readCharacterData(avatarPath);
-        if (typeof charJSON !== 'string') throw new Error('Failed to read character file');
+        return await runWithCharacterRootLock(request, async () => {
+            const avatarPath = path.join(request.user.directories.characters, request.body.avatar_url);
+            if (!fs.existsSync(avatarPath)) {
+                return response.status(400).send('Error: character file does not exist');
+            }
+            const charJSON = await readCharacterData(avatarPath);
+            if (typeof charJSON !== 'string') throw new Error('Failed to read character file');
 
-        const char = JSON.parse(charJSON);
-        //check if the field exists
-        if (char[request.body.field] === undefined && char.data[request.body.field] === undefined) {
-            console.warn('Error: invalid field.');
-            response.status(400).send('Error: invalid field.');
-            return;
-        }
-        char[request.body.field] = request.body.value;
-        char.data[request.body.field] = request.body.value;
-        let newCharJSON = JSON.stringify(char);
-        const targetFile = (request.body.avatar_url).replace('.png', '');
-        await writeCharacterData(avatarPath, newCharJSON, targetFile, request);
-        return response.sendStatus(200);
+            const char = JSON.parse(charJSON);
+            //check if the field exists
+            if (char[request.body.field] === undefined && char.data[request.body.field] === undefined) {
+                console.warn('Error: invalid field.');
+                return response.status(400).send('Error: invalid field.');
+            }
+            char[request.body.field] = request.body.value;
+            char.data[request.body.field] = request.body.value;
+            const newCharJSON = JSON.stringify(char);
+            const targetFile = path.parse(request.body.avatar_url).name;
+            const prepared = await prepareCharacterWrite(avatarPath, newCharJSON, targetFile, request);
+            const storageError = await ensureCharacterStorageCapacity(request, response, prepared.additionalBytes);
+            if (storageError) return storageError;
+
+            const saved = await commitPreparedCharacterWrite(prepared);
+            if (!saved) return response.sendStatus(500);
+            return response.sendStatus(200);
+        });
     } catch (err) {
         console.error('An error occurred, character edit invalidated.', err);
         return response.sendStatus(500);
@@ -1612,36 +1734,43 @@ router.post('/edit-attribute', validateAvatarUrlMiddleware, async function (requ
  * */
 router.post('/merge-attributes', getFileNameValidationFunction('avatar'), async function (request, response) {
     try {
-        const update = request.body;
-        const avatarPath = path.join(request.user.directories.characters, update.avatar);
+        return await runWithCharacterRootLock(request, async () => {
+            const update = _.cloneDeep(request.body);
+            const avatarPath = path.join(request.user.directories.characters, update.avatar);
+            if (!fs.existsSync(avatarPath)) {
+                return response.status(400).send('Error: invalid character file.');
+            }
 
-        const pngStringData = await readCharacterData(avatarPath);
+            const pngStringData = await readCharacterData(avatarPath);
+            if (!pngStringData) {
+                console.error('Error: invalid character file.');
+                return response.status(400).send('Error: invalid character file.');
+            }
 
-        if (!pngStringData) {
-            console.error('Error: invalid character file.');
-            return response.status(400).send('Error: invalid character file.');
-        }
+            let character = JSON.parse(pngStringData);
+            _.unset(update, 'json_data');
+            _.unset(character, 'json_data');
+            character = deepMerge(character, update);
 
-        let character = JSON.parse(pngStringData);
+            const validator = new TavernCardValidator(character);
+            if (!validator.validate()) {
+                console.warn(validator.lastValidationError);
+                return response.status(400).send({ message: `Validation failed for ${character.name}`, error: validator.lastValidationError });
+            }
 
-        _.unset(update, 'json_data');
-        _.unset(character, 'json_data');
+            const targetImg = path.parse(update.avatar).name;
+            const prepared = await prepareCharacterWrite(avatarPath, JSON.stringify(character), targetImg, request);
+            const storageError = await ensureCharacterStorageCapacity(request, response, prepared.additionalBytes);
+            if (storageError) return storageError;
 
-        character = deepMerge(character, update);
-
-        const validator = new TavernCardValidator(character);
-        const targetImg = (update.avatar).replace('.png', '');
-
-        //Accept either V1 or V2.
-        if (validator.validate()) {
-            await writeCharacterData(avatarPath, JSON.stringify(character), targetImg, request);
-            response.sendStatus(200);
-        } else {
-            console.warn(validator.lastValidationError);
-            response.status(400).send({ message: `Validation failed for ${character.name}`, error: validator.lastValidationError });
-        }
+            const saved = await commitPreparedCharacterWrite(prepared);
+            if (!saved) {
+                return response.status(500).send({ message: 'Unexpected error while saving character.' });
+            }
+            return response.sendStatus(200);
+        });
     } catch (exception) {
-        response.status(500).send({ message: 'Unexpected error while saving character.', error: exception.toString() });
+        return response.status(500).send({ message: 'Unexpected error while saving character.', error: exception.toString() });
     }
 });
 
@@ -1655,31 +1784,52 @@ router.post('/delete', validateAvatarUrlMiddleware, async function (request, res
         return response.sendStatus(403);
     }
 
-    const avatarPath = path.join(request.user.directories.characters, request.body.avatar_url);
-    if (!fs.existsSync(avatarPath)) {
-        return response.sendStatus(400);
-    }
-
-    fs.unlinkSync(avatarPath);
-    invalidateCharacterListCache(request.user.profile.handle);
-    invalidateThumbnail(request.user.directories, 'avatar', request.body.avatar_url);
-    let dir_name = (request.body.avatar_url.replace('.png', ''));
-
+    const dir_name = request.body.avatar_url.replace('.png', '');
     if (!dir_name.length) {
         console.error('Malicious dirname prevented');
         return response.sendStatus(403);
     }
 
-    if (request.body.delete_chats == true) {
-        try {
-            await fs.promises.rm(path.join(request.user.directories.chats, sanitize(dir_name)), { recursive: true, force: true });
-        } catch (err) {
-            console.error(err);
-            return response.sendStatus(500);
-        }
-    }
+    const root = path.resolve(request.user.directories.root);
+    try {
+        return await runWithChatStorageLocks(request, [getChatBranchUserLockPath(root)], async () => {
+            await ensureFileTransactionRecovery(root, request.user.profile.handle);
+            ensureDurableChatRecovery(root, request.user.profile.handle);
+            ensureChatBranchRecovery(root, request.user.profile.handle, request.user.directories);
+            ensureCharacterChatRecovery(root, request.user.profile.handle, request.user.directories);
 
-    return response.sendStatus(200);
+            const avatarPath = path.join(request.user.directories.characters, request.body.avatar_url);
+            if (!fs.existsSync(avatarPath)) {
+                return response.sendStatus(400);
+            }
+
+            const chatsPath = request.body.delete_chats == true
+                ? path.join(request.user.directories.chats, sanitize(dir_name))
+                : null;
+            await runCharacterChatMutation({
+                root,
+                handle: request.user.profile.handle,
+                directories: request.user.directories,
+                operation: 'delete',
+                oldCardPath: avatarPath,
+                newCardPath: null,
+                oldChatsPath: chatsPath,
+                newChatsPath: null,
+            }, async () => {
+                fs.unlinkSync(avatarPath);
+                if (chatsPath) {
+                    await fs.promises.rm(chatsPath, { recursive: true, force: true });
+                }
+            });
+            invalidateCharacterListCache(request.user.profile.handle);
+            invalidateThumbnail(request.user.directories, 'avatar', request.body.avatar_url);
+
+            return response.sendStatus(200);
+        });
+    } catch (err) {
+        console.error(err);
+        return response.sendStatus(500);
+    }
 });
 
 /**
@@ -1699,6 +1849,7 @@ router.post('/delete', validateAvatarUrlMiddleware, async function (request, res
 router.post('/all', async function (request, response) {
     const performanceTimer = beginEndpointPerformance(request, 'characters-all');
     try {
+        await runWithCharacterRootLock(request, async () => {});
         const result = await performanceTimer.measureAsync('list', () => characterListCache.get({
             userKey: request.user.profile.handle,
             directory: request.user.directories.characters,
@@ -1730,6 +1881,7 @@ router.post('/all', async function (request, response) {
 router.post('/get', validateAvatarUrlMiddleware, async function (request, response) {
     try {
         if (!request.body) return response.sendStatus(400);
+        await runWithCharacterRootLock(request, async () => {});
         const item = request.body.avatar_url;
         const filePath = path.join(request.user.directories.characters, item);
 
@@ -1794,7 +1946,8 @@ function getPngName(file, directories) {
     file = sanitize(String(file || ''), { replacement: sanitizeSafeCharacterReplacements }) || 'Character';
     let i = 1;
     const baseName = file;
-    while (fs.existsSync(path.join(directories.characters, `${file}.png`))) {
+    while (fs.existsSync(path.join(directories.characters, `${file}.png`))
+        || fs.existsSync(path.join(directories.chats, file))) {
         file = baseName + i;
         i++;
     }
@@ -1829,7 +1982,6 @@ router.post('/import', async function (request, response) {
         }
 
         format = String(request.body.file_type || path.extname(request.file.originalname).slice(1)).toLowerCase();
-        const preservedFileName = getPreservedName(request);
         const formatImportFunctions = {
             'yaml': importFromYaml,
             'yml': importFromYaml,
@@ -1843,39 +1995,23 @@ router.post('/import', async function (request, response) {
             throw CharacterImportError.unsupported(format);
         }
 
-        return await characterImportMutex.runExclusive(request.user.profile.handle, async () => {
-            let estimateBytes = 0;
-            try {
-                const uploadStats = fs.statSync(uploadPath);
-                estimateBytes = uploadStats.size + CHARACTER_SIZE_OVERHEAD;
-                if (['json', 'yaml', 'yml'].includes(format)) {
-                    const defaultAvatarSize = fs.statSync(DEFAULT_AVATAR_PATH).size;
-                    estimateBytes += defaultAvatarSize;
+        return await runWithCharacterRootLock(request, async () => {
+            return await characterImportMutex.runExclusive(request.user.profile.handle, async () => {
+                const preservedFileName = getPreservedName(request);
+                const fileName = await importFunction(uploadPath, { request, response }, preservedFileName);
+
+                if (!fileName) {
+                    throw CharacterImportError.invalid('Character importer did not return a file name.');
                 }
-            } catch (error) {
-                console.warn('Failed to estimate import size:', error);
-            }
 
-            if (!['charx', 'byaf'].includes(format)) {
-                const storageError = await ensureCharacterStorageCapacity(request, response, estimateBytes);
-                if (storageError) {
-                    return storageError;
+                if (preservedFileName) {
+                    invalidateThumbnail(request.user.directories, 'avatar', `${preservedFileName}.png`);
                 }
-            }
 
-            const fileName = await importFunction(uploadPath, { request, response }, preservedFileName);
-
-            if (!fileName) {
-                throw CharacterImportError.invalid('Character importer did not return a file name.');
-            }
-
-            if (preservedFileName) {
-                invalidateThumbnail(request.user.directories, 'avatar', `${preservedFileName}.png`);
-            }
-
-            return response.send({
-                file_name: fileName,
-                backgrounds_imported: Number(request.characterImportBackgrounds || 0),
+                return response.send({
+                    file_name: fileName,
+                    backgrounds_imported: Number(request.characterImportBackgrounds || 0),
+                });
             });
         });
     } catch (err) {
@@ -1907,46 +2043,62 @@ router.post('/duplicate', validateAvatarUrlMiddleware, async function (request, 
             console.debug(request.body);
             return response.sendStatus(400);
         }
-        let filename = path.join(request.user.directories.characters, sanitize(request.body.avatar_url));
-        if (!fs.existsSync(filename)) {
-            console.error('file for dupe not found', filename);
-            return response.sendStatus(404);
-        }
-        const estimateBytes = fs.statSync(filename).size + CHARACTER_SIZE_OVERHEAD;
-        const storageError = await ensureCharacterStorageCapacity(request, response, estimateBytes);
-        if (storageError) {
-            return storageError;
-        }
-        let suffix = 1;
-        let newFilename = filename;
 
-        // If filename ends with a _number, increment the number
-        const nameParts = path.basename(filename, path.extname(filename)).split('_');
-        const lastPart = nameParts[nameParts.length - 1];
+        return await runWithCharacterRootLock(request, async () => {
+            const filename = path.join(request.user.directories.characters, sanitize(request.body.avatar_url));
+            if (!fs.existsSync(filename)) {
+                console.error('file for dupe not found', filename);
+                return response.sendStatus(404);
+            }
 
-        let baseName;
+            const sourceCard = await fsPromises.readFile(filename);
+            const extension = path.extname(filename);
+            const nameParts = path.basename(filename, extension).split('_');
+            const lastPart = nameParts[nameParts.length - 1];
+            let suffix = !isNaN(Number(lastPart)) && nameParts.length > 1
+                ? parseInt(lastPart) + 1
+                : 1;
+            const baseName = !isNaN(Number(lastPart)) && nameParts.length > 1
+                ? nameParts.slice(0, -1).join('_')
+                : nameParts.join('_');
 
-        if (!isNaN(Number(lastPart)) && nameParts.length > 1) {
-            suffix = parseInt(lastPart) + 1;
-            baseName = nameParts.slice(0, -1).join('_'); // construct baseName without suffix
-        } else {
-            baseName = nameParts.join('_'); // original filename is completely the baseName
-        }
+            let newFilename;
+            while (true) {
+                const candidateBase = `${baseName}_${suffix}`;
+                const candidate = path.join(request.user.directories.characters, `${candidateBase}${extension}`);
+                const candidateChat = path.join(request.user.directories.chats, candidateBase);
+                if (fs.existsSync(candidate) || fs.existsSync(candidateChat)) {
+                    suffix++;
+                    continue;
+                }
+                newFilename = candidate;
+                break;
+            }
 
-        newFilename = path.join(request.user.directories.characters, `${baseName}_${suffix}${path.extname(filename)}`);
+            const transaction = new FileTransaction(request.user.directories.root, {
+                ...request.characterImportTransactionOptions,
+                handle: request.user.profile.handle,
+            });
+            try {
+                await transaction.stageFile(newFilename, sourceCard);
+                const storageError = await ensureCharacterStorageCapacity(
+                    request,
+                    response,
+                    await transaction.getAdditionalBytes(),
+                );
+                if (storageError) {
+                    return storageError;
+                }
+                await transaction.commit();
+            } finally {
+                await transaction.dispose();
+            }
 
-        while (fs.existsSync(newFilename)) {
-            let suffixStr = '_' + suffix;
-            newFilename = path.join(request.user.directories.characters, `${baseName}${suffixStr}${path.extname(filename)}`);
-            suffix++;
-        }
-
-        fs.copyFileSync(filename, newFilename);
-        invalidateCharacterListCache(request.user.profile.handle);
-        console.info(`${filename} was copied to ${newFilename}`);
-        response.send({ path: path.parse(newFilename).base });
-    }
-    catch (error) {
+            invalidateCharacterListCache(request.user.profile.handle);
+            console.info(`${filename} was copied to ${newFilename}`);
+            return response.send({ path: path.parse(newFilename).base });
+        });
+    } catch (error) {
         console.error(error);
         return response.send({ error: true });
     }

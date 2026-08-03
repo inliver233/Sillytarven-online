@@ -29,7 +29,7 @@ async function createFixture() {
     return { root, publicRoot, globalRoot, userARoot, userBRoot, builtinRoot };
 }
 
-async function startResourceServer(fixture, { enabled = true } = {}) {
+async function startResourceServer(fixture, { enabled = true, lifecycleEnabled = true } = {}) {
     const app = express();
     app.use((request, _response, next) => {
         const isUserA = request.headers.cookie?.includes('user=A');
@@ -39,7 +39,7 @@ async function startResourceServer(fixture, { enabled = true } = {}) {
     app.use('/scripts/extensions/third-party/*', createExtensionResourceRouteHandler(
         request => request.user.directories.extensions,
         () => fixture.globalRoot,
-        { enabled },
+        { enabled, lifecycleEnabled },
     ));
     const server = await new Promise((resolve, reject) => {
         const listener = app.listen(0, '127.0.0.1', () => resolve(listener));
@@ -50,7 +50,7 @@ async function startResourceServer(fixture, { enabled = true } = {}) {
     return { server, baseUrl: `http://127.0.0.1:${address.port}` };
 }
 
-async function startProductionResourceServer(fixture, { enabled = true } = {}) {
+async function startProductionResourceServer(fixture, { enabled = true, lifecycleEnabled = true } = {}) {
     const app = express();
     app.use((request, _response, next) => {
         if (request.headers.authorization === 'Bearer authenticated') {
@@ -70,7 +70,7 @@ async function startProductionResourceServer(fixture, { enabled = true } = {}) {
     app.use('/scripts/extensions/third-party/*', createExtensionResourceRouteHandler(
         request => request.user.directories.extensions,
         () => fixture.globalRoot,
-        { enabled },
+        { enabled, lifecycleEnabled },
     ));
 
     const server = await new Promise((resolve, reject) => {
@@ -280,6 +280,56 @@ test('per-user resource routes isolate the same URL and never fall through after
     }
 });
 
+test('disabled lifecycle mode preserves legacy per-file global fallback', async () => {
+    const fixture = await createFixture();
+    const localExtension = path.join(fixture.userARoot, 'shared');
+    const globalExtension = path.join(fixture.globalRoot, 'shared');
+    await fs.promises.mkdir(localExtension, { recursive: true });
+    await fs.promises.mkdir(globalExtension, { recursive: true });
+    await fs.promises.writeFile(path.join(localExtension, 'index.js'), 'local-index');
+    await fs.promises.writeFile(path.join(localExtension, 'assets'), 'local-file');
+    await fs.promises.writeFile(path.join(globalExtension, 'index.js'), 'global-index');
+    await fs.promises.writeFile(path.join(globalExtension, 'global-only.js'), 'legacy-fallback');
+    await fs.promises.mkdir(path.join(globalExtension, 'assets'));
+    await fs.promises.writeFile(path.join(globalExtension, 'assets', 'nested.js'), 'nested-fallback');
+
+    const lifecycleServer = await startResourceServer(fixture, { lifecycleEnabled: true });
+    try {
+        const response = await fetch(`${lifecycleServer.baseUrl}/scripts/extensions/third-party/shared/global-only.js`, {
+            headers: { cookie: 'user=A' },
+        });
+        assert.equal(response.status, 404);
+    } finally {
+        await closeServer(lifecycleServer.server);
+    }
+
+    const legacyServer = await startResourceServer(fixture, { lifecycleEnabled: false });
+    try {
+        const local = await fetch(`${legacyServer.baseUrl}/scripts/extensions/third-party/shared/index.js`, {
+            headers: { cookie: 'user=A' },
+        });
+        assert.equal(local.status, 200);
+        assert.equal(await local.text(), 'local-index');
+
+        const fallback = await fetch(`${legacyServer.baseUrl}/scripts/extensions/third-party/shared/global-only.js`, {
+            headers: { cookie: 'user=A' },
+        });
+        assert.equal(fallback.status, 200);
+        assert.equal(await fallback.text(), 'legacy-fallback');
+        assert.equal(fallback.headers.get('vary'), 'Cookie');
+        assert.equal(fallback.headers.get('cache-control'), 'private, no-cache, must-revalidate');
+
+        const nestedFallback = await fetch(`${legacyServer.baseUrl}/scripts/extensions/third-party/shared/assets/nested.js`, {
+            headers: { cookie: 'user=A' },
+        });
+        assert.equal(nestedFallback.status, 200);
+        assert.equal(await nestedFallback.text(), 'nested-fallback');
+    } finally {
+        await closeServer(legacyServer.server);
+        await fs.promises.rm(fixture.root, { recursive: true, force: true });
+    }
+});
+
 test('resource resolution rejects traversal and symlinked files without global fallback', async () => {
     const fixture = await createFixture();
     try {
@@ -300,6 +350,7 @@ test('resource resolution rejects traversal and symlinked files without global f
             localRoot: fixture.userARoot,
             globalRoot: fixture.globalRoot,
             resourcePath: 'secure/linked.js',
+            allowGlobalFileFallback: true,
         }), error => error instanceof ExtensionResolutionError && error.status === 403);
 
         const { server, baseUrl } = await startResourceServer(fixture);

@@ -569,12 +569,21 @@ export async function forwardFetchResponse(from, to) {
             if (!to.writableEnded) to.end();
             settle();
         };
+        const abortDownstream = (error) => {
+            if (!to.destroyed && typeof to.destroy === 'function') {
+                to.destroy(error);
+            } else if (!to.writableEnded) {
+                to.end();
+            }
+        };
         const onBodyClose = () => {
-            if (!to.writableEnded) to.end();
-            settle();
+            const error = new Error('Upstream response stream closed before it ended.');
+            error.code = 'ERR_STREAM_PREMATURE_CLOSE';
+            abortDownstream(error);
+            settle(error);
         };
         const onError = (error) => {
-            if (!to.writableEnded) to.end();
+            abortDownstream(error);
             settle(error);
         };
 

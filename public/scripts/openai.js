@@ -2915,7 +2915,10 @@ async function sendOpenAIRequest(type, messages, signal, { jsonSchema = null } =
             const state = { reasoning: '', images: [], signature: '', toolSignatures: {} };
             while (true) {
                 const { done, value } = await reader.read();
-                if (done) return;
+                if (done) {
+                    if (signal.aborted) return;
+                    throw new Error('The upstream response stream ended before its completion marker.');
+                }
                 const rawData = value.data;
                 if (rawData === '[DONE]') return;
                 tryParseStreamingError(response, rawData);

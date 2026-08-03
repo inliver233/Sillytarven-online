@@ -542,6 +542,36 @@ test('inactive update never imports the extension module', async () => {
     assert.equal(result.status, EXTENSION_LIFECYCLE_STATE.INACTIVE);
 });
 
+test('enable refuses an explicitly ineligible extension without importing its module', async () => {
+    let imports = 0;
+    const item = descriptor({
+        enabled: false,
+        hooks: { enable: 'enable', activate: 'activate' },
+    });
+    const lifecycle = createExtensionLifecycle({
+        importModule: async () => {
+            imports++;
+            return { enable() {}, activate() {} };
+        },
+    });
+    lifecycle.discover([item]);
+    lifecycle.setEligibility(item, false);
+
+    const blocked = await lifecycle.enable(item);
+    assert.equal(blocked.status, EXTENSION_LIFECYCLE_STATE.INACTIVE);
+    assert.equal(blocked.hookStatus, EXTENSION_HOOK_STATUS.SKIPPED);
+    assert.equal(blocked.error?.name, 'ExtensionEligibilityError');
+    assert.match(blocked.error?.message, /requirements are not satisfied/u);
+    assert.equal(lifecycle.getStatus(item).eligible, false);
+    assert.equal(lifecycle.getStatus(item).descriptor.enabled, false);
+    assert.equal(imports, 0);
+
+    lifecycle.setEligibility(item, true);
+    const enabled = await lifecycle.enable(item);
+    assert.equal(enabled.status, EXTENSION_LIFECYCLE_STATE.ACTIVE);
+    assert.equal(imports, 1);
+});
+
 test('official install, enable, activate, deactivate, clean, and delete hooks run in lifecycle order', async () => {
     const calls = [];
     const item = descriptor({

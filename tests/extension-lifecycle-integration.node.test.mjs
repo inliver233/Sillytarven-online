@@ -56,7 +56,7 @@ test('public extension lifecycle config is off by default', async () => {
 
 test('startup awaits all gates and extension UI initialization without moving macro registration', () => {
     const script = source('public/script.js');
-    const gateBarrier = script.indexOf('await Promise.all([loadMacros2FeatureGate(), loadReasoningToolsFeatureGate(), loadExtensionLifecycleFeatureGate()])');
+    const gateBarrier = script.indexOf('await Promise.all([loadMacros2FeatureGate(), loadReasoningToolsFeatureGate(), loadExtensionLifecycleFeatureGate(), loadSwipePickerFeatureGate()])');
     const extensionInit = script.indexOf('await initExtensions()');
     const settingsLoad = script.indexOf('await getSettings()');
     const macroRegistration = script.indexOf('initMacros();');
@@ -77,16 +77,36 @@ test('extension startup orders discovery, manifest, eligibility, auto-update, pr
         'await getManifests(extensionNames)',
         'const activationPlan = getExtensionActivationPlan',
         'await autoUpdateExtensions(false)',
-        'preloadExtensionResources(extensionDescriptors',
-        'await activateExtensions()',
-        'resourcePreloads?.dispose()',
+        'await activateDiscoveredExtensions(activationPlan)',
     ].map(text => startup.indexOf(text));
 
     assert.equal(checkpoints.every(index => index >= 0), true);
     assert.deepEqual([...checkpoints].sort((a, b) => a - b), checkpoints);
+
+    const activationStart = extensions.indexOf('async function activateDiscoveredExtensions');
+    const activationEnd = extensions.indexOf('async function connectClickHandler', activationStart);
+    const activation = extensions.slice(activationStart, activationEnd);
+    const activationCheckpoints = [
+        'preloadExtensionResources(extensionDescriptors',
+        'await activateExtensions()',
+        'resourcePreloads?.dispose()',
+    ].map(text => activation.indexOf(text));
+    assert.equal(activationCheckpoints.every(index => index >= 0), true);
+    assert.deepEqual([...activationCheckpoints].sort((a, b) => a - b), activationCheckpoints);
     assert.match(extensions, /if \(isExtensionLifecycleEnabled\(\)\)[\s\S]*extensionLifecycle\.activate\(descriptor\)/);
     assert.match(extensions, /else \{[\s\S]*addExtensionScript\(name, manifest\)/);
     assert.match(extensions, /extensionLifecycle\.update\(descriptor, pullUpdate\)/);
+
+    const installStart = extensions.indexOf('export async function installExtension');
+    const installEnd = extensions.indexOf('export async function loadExtensionSettings', installStart);
+    const installation = extensions.slice(installStart, installEnd);
+    const installCheckpoints = [
+        'const activationPlan = await loadExtensionSettings({}, false, false, { activate: !lifecycleEnabled })',
+        'await extensionLifecycle.install(descriptor)',
+        'await activateDiscoveredExtensions(activationPlan)',
+    ].map(text => installation.indexOf(text));
+    assert.equal(installCheckpoints.every(index => index >= 0), true);
+    assert.deepEqual([...installCheckpoints].sort((a, b) => a - b), installCheckpoints);
 
     const enableStart = extensions.indexOf('export async function enableExtension');
     const enableEnd = extensions.indexOf('export async function disableExtension', enableStart);

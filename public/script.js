@@ -129,6 +129,7 @@ import {
 } from './scripts/nai-settings.js';
 
 import {
+    branchChat,
     initBookmarks,
     showBookmarksButtons,
     updateBookmarkDisplay,
@@ -292,6 +293,9 @@ import { isMacros2Enabled, loadMacros2FeatureGate } from './scripts/macros/featu
 import { isReasoningToolsEnabled, loadReasoningToolsFeatureGate } from './scripts/reasoning-tools/feature-gate.js';
 import { loadExtensionLifecycleFeatureGate } from './scripts/extensions/feature-gate.js';
 import { addChatBackupsBrowser } from './scripts/chat-backups.js';
+import { createSwipeSelectedPrefix, getAbsoluteMessageIndex } from './scripts/group-chat-paging.js';
+import { canJumpToSwipeForMessage, canOpenSwipePickerForMessage, initSwipePicker } from './scripts/swipe-picker.js';
+import { isSwipePickerAvailable, loadSwipePickerFeatureGate } from './scripts/swipe-picker/feature-gate.js';
 
 /**
  * @typedef {Object<string, any>} ChatMessage
@@ -307,6 +311,7 @@ import { addChatBackupsBrowser } from './scripts/chat-backups.js';
  * @property {number|null} messageOffset
  * @property {boolean} hasMore
  * @property {string|null} revision
+ * @property {string|null} contentHash
  * @property {number} updatedAt
  *
  * @typedef {Object} ChatPageCacheParams
@@ -318,6 +323,7 @@ import { addChatBackupsBrowser } from './scripts/chat-backups.js';
  * @property {number|null} [messageOffset]
  * @property {boolean} [hasMore]
  * @property {string|null} [revision]
+ * @property {string|null} [contentHash]
  *
  * @typedef {Object} SaveChatTailOptions
  * @property {string} fileName
@@ -424,6 +430,7 @@ export let name2 = systemUserName;
 /** @type {ChatMessage[]} */
 export let chat = [];
 export let swipeState = SWIPE_STATE.NONE;
+let activeSwipeOperation = null;
 const CHAT_PAGE_SIZE_DEFAULT = 20;
 const CHAT_PAGING_MAX_RENDER = isMobile() ? 200 : 400;
 const CHAT_LOAD_MORE_FRAME_BUDGET_MS = 8;
@@ -440,6 +447,7 @@ const chatPagingState = {
     chatId: null,
     messageOffset: null,
     revision: null,
+    contentHash: null,
     loading: false,
 };
 const chatPageCache = new Map();
@@ -638,6 +646,7 @@ export function resetChatPagingState({ isGroup = false, chatId = null } = {}) {
     chatPagingState.chatId = chatId;
     chatPagingState.messageOffset = null;
     chatPagingState.revision = null;
+    chatPagingState.contentHash = null;
     chatPagingState.loading = false;
 }
 
@@ -647,7 +656,7 @@ function getChatCacheKey({ isGroup = false, chatId = null } = {}) {
         return groupId ? `group:${groupId}` : null;
     }
     const avatar = characters[this_chid]?.avatar ?? '';
-    const chatName = characters[this_chid]?.chat ?? '';
+    const chatName = chatId ?? characters[this_chid]?.chat ?? '';
     if (!avatar || !chatName) return null;
     return `char:${avatar}:${chatName}`;
 }
@@ -680,7 +689,7 @@ export function clearCachedChatPage({ isGroup = false, chatId = null } = {}) {
 /**
  * @param {ChatPageCacheParams} [options]
  */
-export function setCachedChatPage({ isGroup = false, chatId = null, messages, header, cursor, messageOffset, hasMore, revision } = {}) {
+export function setCachedChatPage({ isGroup = false, chatId = null, messages, header, cursor, messageOffset, hasMore, revision, contentHash } = {}) {
     const key = getChatCacheKey({ isGroup, chatId });
     if (!key) return;
     chatPageCache.delete(key);
@@ -691,6 +700,7 @@ export function setCachedChatPage({ isGroup = false, chatId = null, messages, he
         messageOffset: Number.isFinite(messageOffset) ? Math.max(0, messageOffset) : null,
         hasMore: Boolean(hasMore),
         revision: typeof revision === 'string' ? revision : null,
+        contentHash: typeof contentHash === 'string' ? contentHash : null,
         updatedAt: Date.now(),
     });
     while (chatPageCache.size > CHAT_CACHE_MAX_ENTRIES) {
@@ -906,7 +916,7 @@ async function firstLoadInit() {
     await initSecrets();
     await readSecretState();
     await initLocales();
-    await Promise.all([loadMacros2FeatureGate(), loadReasoningToolsFeatureGate(), loadExtensionLifecycleFeatureGate()]);
+    await Promise.all([loadMacros2FeatureGate(), loadReasoningToolsFeatureGate(), loadExtensionLifecycleFeatureGate(), loadSwipePickerFeatureGate()]);
     initChatUtilities();
     initDefaultSlashCommands();
     initTextGenModels();
@@ -956,6 +966,39 @@ async function firstLoadInit() {
     initDataMaid();
     initItemizedPrompts();
     initAccessibility();
+    if (isSwipePickerAvailable()) {
+        const resolvePickerMessageId = (absoluteMessageId, message) => {
+            const offset = chatPagingState.active ? chatPagingState.messageOffset : 0;
+            if (!Number.isSafeInteger(offset) || offset < 0) return null;
+            const localMessageId = absoluteMessageId - offset;
+            return Number.isSafeInteger(localMessageId) && localMessageId >= 0 && chat[localMessageId] === message
+                ? localMessageId
+                : null;
+        };
+        await initSwipePicker({
+            enabled: true,
+            getMessage: messageId => chat[messageId],
+            ensureSwipes,
+            syncMesToSwipe,
+            canJumpToSwipe: (messageId, message) => isSwipingAllowed() && isMessageSwipeable(messageId, message),
+            resolveMessageIndex: messageId => chatPagingState.active
+                ? getAbsoluteMessageIndex(messageId, chatPagingState.messageOffset)
+                : messageId,
+            resolveLocalMessageIndex: resolvePickerMessageId,
+            getContextIdentity: getCurrentChatIdentity,
+            onJump: ({ messageId, swipeId, direction, source, message, signal }) => swipe(null, direction, {
+                source,
+                repeated: false,
+                message,
+                signal,
+                forceMesId: messageId,
+                forceSwipeId: swipeId,
+                persistImmediately: true,
+            }),
+            onDelete: ({ messageId, swipeId, message, signal }) => deleteSwipe(swipeId, messageId, { message, signal }),
+            onBranch: ({ messageId, absoluteMessageId, swipeId, signal }) => branchChat(messageId, { absoluteMessageId, swipeId, signal, requireAtomic: true }),
+        });
+    }
     addDebugFunctions();
     doDailyExtensionUpdatesCheck();
     updateLoaderProgress(95, '正在构建界面面板与欢迎屏...');
@@ -1618,7 +1661,7 @@ export async function fetchChatRange({ before = null, limit = null, isGroup = fa
     const url = isGroup ? '/api/chats/group/get-range' : '/api/chats/get-range';
     const payload = isGroup ? { id: chatId ?? getCurrentChatId() } : {
         ch_name: characters[this_chid]?.name,
-        file_name: characters[this_chid]?.chat,
+        file_name: chatId ?? characters[this_chid]?.chat,
         avatar_url: characters[this_chid]?.avatar,
     };
     if (isGroup && !payload.id) {
@@ -1641,6 +1684,33 @@ export async function fetchChatRange({ before = null, limit = null, isGroup = fa
     }
 
     return await response.json();
+}
+
+export async function refreshChatPagingMetadata({
+    isGroup = chatPagingState.isGroup,
+    chatId = chatPagingState.chatId,
+    expectedRevision = null,
+    expectedIdentity = null,
+    signal,
+} = {}) {
+    const isExpectedContext = () => !signal?.aborted
+        && (expectedIdentity === null || getCurrentChatIdentity() === expectedIdentity);
+    if (!isExpectedContext() || !chatPagingState.active || chatPagingState.isGroup !== isGroup || chatPagingState.chatId !== chatId
+        || (!isGroup && getCurrentChatId() !== chatId)) {
+        return null;
+    }
+
+    const data = await fetchChatRange({ isGroup, chatId, limit: 1, signal });
+    if (!isExpectedContext() || !chatPagingState.active || chatPagingState.isGroup !== isGroup || chatPagingState.chatId !== chatId
+        || (!isGroup && getCurrentChatId() !== chatId)
+        || typeof data?.revision !== 'string' || typeof data?.contentHash !== 'string'
+        || (typeof expectedRevision === 'string' && data.revision !== expectedRevision)) {
+        return null;
+    }
+
+    chatPagingState.revision = data.revision;
+    chatPagingState.contentHash = data.contentHash;
+    return { revision: data.revision, contentHash: data.contentHash };
 }
 
 function shiftDisplayedMessageIds(offset) {
@@ -1711,6 +1781,7 @@ async function loadMoreChatMessages(messagesToLoad = null) {
 
     const loadGeneration = ++chatPagingLoadGeneration;
     const requestedChatId = chatPagingState.isGroup ? chatPagingState.chatId : getCurrentChatId();
+    const requestedChatIdentity = getCurrentChatIdentity();
     chatPagingState.loading = true;
 
     try {
@@ -1721,7 +1792,7 @@ async function loadMoreChatMessages(messagesToLoad = null) {
             chatId: requestedChatId,
         });
 
-        if (loadGeneration !== chatPagingLoadGeneration || getCurrentChatId() !== requestedChatId) {
+        if (loadGeneration !== chatPagingLoadGeneration || getCurrentChatIdentity() !== requestedChatIdentity) {
             return;
         }
 
@@ -1740,6 +1811,8 @@ async function loadMoreChatMessages(messagesToLoad = null) {
 
         const newMessages = data.messages;
         const offset = newMessages.length;
+        const previousChatLength = chat.length;
+        const previousFirstMessage = chat[0];
         chat.unshift(...newMessages);
         shiftDisplayedMessageIds(offset);
 
@@ -1750,11 +1823,23 @@ async function loadMoreChatMessages(messagesToLoad = null) {
             (message, index) => addOneMessage(message, { insertBefore: insertBeforeId, scroll: false, forceId: index, showSwipes: false }),
             {
                 preserveViewport: isButtonInView,
-                shouldContinue: () => loadGeneration === chatPagingLoadGeneration && getCurrentChatId() === requestedChatId,
+                shouldContinue: () => loadGeneration === chatPagingLoadGeneration && getCurrentChatIdentity() === requestedChatIdentity,
             },
         );
         recordChatLoadMoreFrames(insertionResult);
         if (!insertionResult.completed) {
+            const isSameChatArrayState = getCurrentChatIdentity() === requestedChatIdentity
+                && chat.length === previousChatLength + offset
+                && chat[offset] === previousFirstMessage
+                && newMessages.every((message, index) => chat[index] === message);
+            if (isSameChatArrayState) {
+                chat.splice(0, offset);
+                chatElement.children('.mes').filter((_, element) => {
+                    const mesId = Number(element.getAttribute('mesid'));
+                    return Number.isInteger(mesId) && mesId >= 0 && mesId < insertionResult.inserted;
+                }).remove();
+                shiftDisplayedMessageIds(-offset);
+            }
             return;
         }
 
@@ -1766,6 +1851,7 @@ async function loadMoreChatMessages(messagesToLoad = null) {
                 : null;
         chatPagingState.hasMore = Boolean(data.hasMore);
         chatPagingState.revision = typeof data.revision === 'string' ? data.revision : chatPagingState.revision;
+        chatPagingState.contentHash = typeof data.contentHash === 'string' ? data.contentHash : chatPagingState.contentHash;
 
         chatElement.find('.mes').removeClass('last_mes');
         chatElement.find('.mes').last().addClass('last_mes');
@@ -1786,6 +1872,7 @@ async function loadMoreChatMessages(messagesToLoad = null) {
             messageOffset: chatPagingState.messageOffset,
             hasMore: chatPagingState.hasMore,
             revision: chatPagingState.revision,
+            contentHash: chatPagingState.contentHash,
         });
 
         await eventSource.emit(event_types.MORE_MESSAGES_LOADED);
@@ -7223,20 +7310,24 @@ export function syncMesToSwipe(messageId = null) {
  * If the swipe data is invalid in some way, this function will exit out without doing anything.
  * @param {number?} [messageId=null] - The ID of the message to sync with the swipe data. If no ID is given, the last message is used.
  * @param {number?} [swipeId=null] - The ID of the swipe to sync. If no ID is given, the current swipe ID in the message object is used.
+ * @param {ChatMessage?} [targetMessage=null] - A detached message object to sync instead of mutating `chat`.
  * @returns {boolean} Whether the swipe data was successfully synced to the message
  */
-export function syncSwipeToMes(messageId = null, swipeId = null) {
-    if (!chat.length) {
+export function syncSwipeToMes(messageId = null, swipeId = null, targetMessage = null) {
+    if (!targetMessage && !chat.length) {
         return false;
     }
 
-    const targetMessageId = messageId ?? chat.length - 1;
-    if (targetMessageId >= chat.length || targetMessageId < 0) {
-        console.warn(`[syncSwipeToMes] Invalid message ID: ${messageId}`);
-        return false;
+    if (!targetMessage) {
+        const targetMessageId = messageId ?? chat.length - 1;
+        if (targetMessageId >= chat.length || targetMessageId < 0) {
+            console.warn(`[syncSwipeToMes] Invalid message ID: ${messageId}`);
+            return false;
+        }
+
+        targetMessage = chat[targetMessageId];
     }
 
-    const targetMessage = chat[targetMessageId];
     if (!targetMessage) {
         return false;
     }
@@ -7654,8 +7745,8 @@ export function saveChatDebounced() {
         }
 
         console.debug('Chat save timeout triggered');
-        await saveChatConditional();
-        console.debug('Chat saved');
+        const saved = await saveChatConditional();
+        console.debug(saved ? 'Chat saved' : 'Chat save failed');
     }, DEFAULT_SAVE_EDIT_TIMEOUT);
 }
 
@@ -7707,10 +7798,14 @@ async function ensureStorageAvailableForChatAction() {
  * @param {Partial<SaveChatTailOptions>} [options]
  */
 async function saveChatTail(options = {}) {
-    const { fileName, header, messages, force = false } = options;
+    const { fileName, header, messages, force = false, expectedIdentity, signal } = options;
+    const isSameContext = () => expectedIdentity === undefined || getCurrentChatIdentity() === expectedIdentity;
+    const isExpectedContext = () => !signal?.aborted && isSameContext();
     if (!fileName || !header || !Array.isArray(messages)) {
-        return;
+        return false;
     }
+    if (!isExpectedContext()) return false;
+
     const result = await fetch('/api/chats/save-tail', {
         method: 'POST',
         cache: 'no-cache',
@@ -7725,25 +7820,41 @@ async function saveChatTail(options = {}) {
             expectedRevision: typeof chatPagingState.revision === 'string' ? chatPagingState.revision : null,
             force: force,
         }),
+        ...(signal ? { signal } : {}),
     });
+    if (!isSameContext()) return result.ok;
 
     if (result.ok) {
-        const responseData = await result.json();
-        if (typeof responseData?.revision !== 'string') {
-            throw new Error('Chat tail save response did not include a revision.');
+        let responseData = null;
+        try {
+            responseData = await result.json();
+        } catch (error) {
+            console.error('Chat tail save committed but its metadata response could not be parsed.', error);
         }
-        chatPagingState.revision = responseData.revision;
-        if (chatPagingState.active) {
-            setCachedChatPage({
-                isGroup: false,
-                messages: chat,
-                header,
-                cursor: chatPagingState.cursor,
-                hasMore: chatPagingState.hasMore,
-                revision: chatPagingState.revision,
-            });
+        if (!isSameContext()) return true;
+        const hasCommittedMetadata = typeof responseData?.revision === 'string'
+            && typeof responseData?.contentHash === 'string';
+        if (hasCommittedMetadata) {
+            chatPagingState.revision = responseData.revision;
+            chatPagingState.contentHash = responseData.contentHash;
+            if (chatPagingState.active) {
+                setCachedChatPage({
+                    isGroup: false,
+                    chatId: chatPagingState.chatId,
+                    messages,
+                    header,
+                    cursor: chatPagingState.cursor,
+                    messageOffset: chatPagingState.messageOffset,
+                    hasMore: chatPagingState.hasMore,
+                    revision: responseData.revision,
+                    contentHash: responseData.contentHash,
+                });
+            }
+        } else {
+            clearCachedChatPage({ isGroup: false, chatId: fileName });
+            toastr.error(t`Reload the chat before making more changes.`, t`Chat metadata could not be updated`);
         }
-        return;
+        return true;
     }
 
     let errorData = null;
@@ -7752,15 +7863,16 @@ async function saveChatTail(options = {}) {
     } catch {
         // The HTTP status still determines the failure path.
     }
+    if (!isExpectedContext()) return false;
     if (result.status === 409 && errorData?.error === 'revision_conflict') {
         clearCachedChatPage({ isGroup: false });
         toastr.error(t`Chat changed in another tab. Reloading to prevent data loss.`, t`Chat changed`);
         window.location.reload();
-        return;
+        return false;
     }
     if (errorData?.error === 'storage_limit') {
         toastr.error(errorData.message || '存储空间不足，无法保存聊天记录。请删除内容或使用激活码扩容。', '存储空间不足');
-        return;
+        return false;
     }
     const isIntegrityError = errorData?.error === 'integrity' && !force;
     if (!isIntegrityError) {
@@ -7780,10 +7892,10 @@ async function saveChatTail(options = {}) {
     if (!forceSaveConfirmed) {
         console.warn('Chat integrity check failed, and user did not confirm the overwrite. Reloading the page.');
         window.location.reload();
-        return;
+        return false;
     }
 
-    await saveChatTail({ fileName, header, messages, force: true });
+    return await saveChatTail({ fileName, header, messages, force: true, expectedIdentity, signal });
 }
 
 /**
@@ -7793,26 +7905,32 @@ async function saveChatTail(options = {}) {
  * @param {object} [options.withMetadata] Additional metadata to save with the chat
  * @param {number} [options.mesId] The message ID to save the chat up to
  * @param {boolean} [options.force] Force the saving despite the integrity check result
+ * @param {number|null} [options.swipeId] Swipe to apply to the destination's final message
+ * @param {string} [options.expectedIdentity] Chat identity that owns the save
+ * @param {AbortSignal} [options.signal] Cancellation signal for the save request
  *
- * @returns {Promise<void>}
+ * @returns {Promise<boolean>}
  */
-export async function saveChat({ chatName, withMetadata, mesId, force = false } = {}) {
+export async function saveChat({ chatName, withMetadata, mesId, force = false, swipeId = null, expectedIdentity, signal } = {}) {
     if (arguments.length > 0 && typeof arguments[0] !== 'object') {
         console.trace('saveChat called with positional arguments. Please use an object instead.');
-        [chatName, withMetadata, mesId, force] = arguments;
+        [chatName, withMetadata, mesId, force, swipeId] = arguments;
     }
+    const isSameContext = () => expectedIdentity === undefined || getCurrentChatIdentity() === expectedIdentity;
+    const isExpectedContext = () => !signal?.aborted && isSameContext();
+    if (!isExpectedContext()) return false;
 
     const metadata = { ...chat_metadata, ...(withMetadata || {}) };
     const fileName = chatName ?? characters[this_chid]?.chat;
 
     if (!fileName && name2 === neutralCharacterName) {
         // TODO: Do something for a temporary chat with no character.
-        return;
+        return false;
     }
 
     if (!fileName) {
         console.warn('saveChat called without chat_name and no chat file found');
-        return;
+        return false;
     }
 
     characters[this_chid]['date_last_chat'] = Date.now();
@@ -7823,9 +7941,17 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false } 
         }
     });
 
-    const trimmedChat = (mesId !== undefined && mesId >= 0 && mesId < chat.length)
+    let trimmedChat = (mesId !== undefined && mesId >= 0 && mesId < chat.length)
         ? chat.slice(0, Number(mesId) + 1)
         : chat.slice();
+    if (swipeId !== null) {
+        const selectedPrefix = createSwipeSelectedPrefix(chat, Number(mesId), swipeId);
+        if (!selectedPrefix) {
+            console.error('saveChat could not apply the selected swipe to the destination.');
+            return false;
+        }
+        trimmedChat = selectedPrefix;
+    }
 
     const header = {
         user_name: name1,
@@ -7835,13 +7961,18 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false } 
     };
 
     if (chatPagingState.active) {
+        if (fileName !== chatPagingState.chatId) {
+            console.error('Refusing to create a chat from a paged suffix without the atomic branch endpoint.');
+            toastr.error(t`Reload the complete chat before creating this chat.`, t`Chat could not be saved`);
+            return false;
+        }
         try {
-            await saveChatTail({ fileName, header, messages: trimmedChat, force });
-            return;
+            return await saveChatTail({ fileName, header, messages: trimmedChat, force, expectedIdentity, signal });
         } catch (error) {
+            if (!isExpectedContext()) return false;
             console.error(error);
             toastr.error(t`Check the server connection and reload the page to prevent data loss.`, t`Chat could not be saved`);
-            return;
+            return false;
         }
     }
 
@@ -7862,16 +7993,19 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false } 
                 avatar_url: characters[this_chid].avatar,
                 force: force,
             }),
+            ...(signal ? { signal } : {}),
         });
+        if (!isSameContext()) return result.ok;
 
         if (result.ok) {
-            return;
+            return true;
         }
 
         const errorData = await result.json();
+        if (!isExpectedContext()) return false;
         if (errorData?.error === 'storage_limit') {
             toastr.error(errorData.message || '存储空间不足，无法保存聊天记录。请删除内容或使用激活码扩容。', '存储空间不足');
-            return;
+            return false;
         }
         const isIntegrityError = errorData?.error === 'integrity' && !force;
         if (!isIntegrityError) {
@@ -7891,13 +8025,15 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false } 
         if (!forceSaveConfirmed) {
             console.warn('Chat integrity check failed, and user did not confirm the overwrite. Reloading the page.');
             window.location.reload();
-            return;
+            return false;
         }
 
-        await saveChat({ chatName, withMetadata, mesId, force: true });
+        return await saveChat({ chatName, withMetadata, mesId, force: true, swipeId, expectedIdentity, signal });
     } catch (error) {
+        if (!isExpectedContext()) return false;
         console.error(error);
         toastr.error(t`Check the server connection and reload the page to prevent data loss.`, t`Chat could not be saved`);
+        return false;
     }
 }
 
@@ -8114,6 +8250,8 @@ export async function getChat({ signal: parentSignal, isCurrent: parentIsCurrent
                 chatPagingState.cursor = Number.isFinite(cached.cursor) ? cached.cursor : null;
                 chatPagingState.hasMore = Boolean(cached.hasMore);
                 chatPagingState.revision = typeof cached.revision === 'string' ? cached.revision : null;
+                chatPagingState.contentHash = typeof cached.contentHash === 'string' ? cached.contentHash : null;
+                chatPagingState.messageOffset = Number.isFinite(cached.messageOffset) ? cached.messageOffset : null;
                 chatPagingState.active = true;
                 chat.forEach(ensureMessageMediaIsArray);
                 if (!chat_metadata['integrity']) {
@@ -8142,6 +8280,8 @@ export async function getChat({ signal: parentSignal, isCurrent: parentIsCurrent
                 chatPagingState.cursor = Number.isFinite(paged.cursor) ? paged.cursor : null;
                 chatPagingState.hasMore = Boolean(paged.hasMore);
                 chatPagingState.revision = typeof paged.revision === 'string' ? paged.revision : null;
+                chatPagingState.contentHash = typeof paged.contentHash === 'string' ? paged.contentHash : null;
+                chatPagingState.messageOffset = Number.isFinite(paged.messageOffset) ? paged.messageOffset : null;
                 chatPagingState.active = true;
                 usedPaging = true;
                 chat.forEach(ensureMessageMediaIsArray);
@@ -8150,8 +8290,10 @@ export async function getChat({ signal: parentSignal, isCurrent: parentIsCurrent
                     messages: chat,
                     header: paged.header,
                     cursor: chatPagingState.cursor,
+                    messageOffset: chatPagingState.messageOffset,
                     hasMore: chatPagingState.hasMore,
                     revision: chatPagingState.revision,
+                    contentHash: chatPagingState.contentHash,
                 });
             }
         }
@@ -8285,13 +8427,43 @@ function getFirstMessage() {
     return message;
 }
 
-export async function openCharacterChat(file_name) {
+/**
+ * Opens a character chat while preventing deferred work from crossing navigation contexts.
+ * @param {string} file_name Chat file name
+ * @param {object} [options] Context guard options
+ * @param {AbortSignal} [options.signal] Parent navigation signal
+ * @param {string} [options.expectedIdentity] Chat identity that initiated the navigation
+ * @returns {Promise<void>}
+ */
+export async function openCharacterChat(file_name, { signal, expectedIdentity } = {}) {
+    const characterId = this_chid;
+    const character = characters[characterId];
+    const isExpectedContext = () => !signal?.aborted
+        && this_chid === characterId
+        && characters[characterId] === character
+        && (expectedIdentity === undefined || getCurrentChatIdentity() === expectedIdentity);
+    if (!character || !isExpectedContext()) return;
+
     await waitUntilCondition(() => !isChatSaving, debounce_timeout.extended, 10);
+    if (!isExpectedContext()) return;
+
     await clearChat();
-    characters[this_chid]['chat'] = file_name;
+    if (!isExpectedContext()) return;
+
+    character.chat = file_name;
+    const openedIdentity = getCurrentChatIdentity();
+    const isOpenedContext = () => !signal?.aborted
+        && this_chid === characterId
+        && characters[characterId] === character
+        && character.chat === file_name
+        && getCurrentChatIdentity() === openedIdentity;
+    if (!isOpenedContext()) return;
+
     chat.length = 0;
     chat_metadata = {};
-    await getChat();
+    const loaded = await getChat({ signal, isCurrent: isOpenedContext });
+    if (!loaded || !isOpenedContext()) return;
+
     $('#selected_chat_pole').val(file_name);
     await createOrEditCharacter(new CustomEvent('newChat'));
 }
@@ -9719,7 +9891,22 @@ export async function updateSwipeCounter(mesId, { message = undefined, messageEl
 
     const swipeCounterText = formatSwipeCounter((message?.swipe_id + 1), message?.swipes?.length);
     const swipeCounter = messageElement.find('.swipes-counter');
-    swipeCounter.text(swipeCounterText).prop('hidden', false);
+    const swipePickerButton = messageElement.find('.mes_swipe_picker');
+    const canOpenPicker = isSwipePickerAvailable() && canOpenSwipePickerForMessage(mesId);
+    const canJumpToSwipe = canOpenPicker && canJumpToSwipeForMessage(mesId);
+
+    swipeCounter
+        .text(swipeCounterText)
+        .prop('hidden', false)
+        .toggleClass('swipe-picker-enabled interactable', canOpenPicker)
+        .attr('role', canOpenPicker ? 'button' : null)
+        .attr('tabindex', canOpenPicker ? '0' : null)
+        .attr('title', canJumpToSwipe ? t`Click to jump to a swipe` : canOpenPicker ? t`Click to view swipe history` : null);
+    swipePickerButton.toggle(canOpenPicker);
+
+    if (!canOpenPicker) {
+        swipeCounter.removeAttr('tabindex');
+    }
 }
 
 /**
@@ -9841,6 +10028,8 @@ export function refreshSwipeButtons(updateCounters = false, fade = true) {
             const isLastSwipe = (message?.swipes?.length ?? 1) - 1 <= (message?.swipe_id ?? 0);
             const hasSwipes = (message?.swipes?.length > 1);
             const overswipe = getOverswipeBehavior(messageId, message);
+            const swipePickerButton = $(div).find('.mes_swipe_picker');
+            const canOpenPicker = isSwipePickerAvailable() && canOpenSwipePickerForMessage(messageId);
 
             // Chevrons should always be shown on pristine greetings.
             const pristineGreeting = overswipe == OVERSWIPE_BEHAVIOR.PRISTINE_GREETING;
@@ -9853,6 +10042,7 @@ export function refreshSwipeButtons(updateCounters = false, fade = true) {
             div.classList.toggle('last_swipe', isOverswipeable);
             // If there's only one swipe, the left arrow should not be shown.
             div.classList.toggle('swipes_visible', hasSwipes || pristineGreeting);
+            swipePickerButton.toggle(canOpenPicker);
 
             if (updateCounters) {
                 updateSwipeCounter(messageId, { message, messageElement: $(div) });
@@ -9860,6 +10050,7 @@ export function refreshSwipeButtons(updateCounters = false, fade = true) {
         } else {
             // Hide all messages that are not swipeable.
             div.classList.remove('swipes_visible', 'last_swipe');
+            $(div).find('.mes_swipe_picker').toggle(isSwipePickerAvailable() && canOpenSwipePickerForMessage(messageId));
         }
     });
 }
@@ -9887,19 +10078,59 @@ export function hideSwipeButtons({ hideCounters = false } = {}) {
 }
 
 /**
+ * Captures all state mutated by deleteSwipe before persistence is attempted.
+ * @param {ChatMessage} message
+ * @param {object} metadata
+ * @returns {{message: ChatMessage, hadTainted: boolean, tainted: unknown}}
+ */
+export function createSwipeDeleteSnapshot(message, metadata) {
+    return {
+        message: structuredClone(message),
+        hadTainted: Object.hasOwn(metadata, 'tainted'),
+        tainted: structuredClone(metadata.tainted),
+    };
+}
+
+/**
+ * Restores a deleteSwipe snapshot without changing the message object identity.
+ * @param {ChatMessage} message
+ * @param {object} metadata
+ * @param {{message: ChatMessage, hadTainted: boolean, tainted: unknown}} snapshot
+ */
+export function restoreSwipeDeleteSnapshot(message, metadata, snapshot) {
+    for (const key of Reflect.ownKeys(message)) {
+        Reflect.deleteProperty(message, key);
+    }
+    Object.assign(message, structuredClone(snapshot.message));
+
+    if (snapshot.hadTainted) {
+        metadata.tainted = structuredClone(snapshot.tainted);
+    } else {
+        delete metadata.tainted;
+    }
+}
+
+/**
  * Deletes a swipe from the chat.
  *
  * @param {number?} [swipeId = null] - The ID of the swipe to delete. If not provided, the current swipe will be deleted.
  * @param {number?} [messageId = chat.length - 1] - The ID of the message to delete from. If not provided, the last message will be targeted.
+ * @param {{signal?: AbortSignal, message?: ChatMessage}} [options] Context captured by the caller.
  * @returns {Promise<number>|undefined} - The ID of the new swipe after deletion.
  */
-export async function deleteSwipe(swipeId = null, messageId = chat.length - 1) {
-    if (swipeId && (isNaN(swipeId) || swipeId < 0)) {
-        toastr.warning(t`Invalid swipe ID: ${swipeId + 1}`);
-        return;
+export async function deleteSwipe(swipeId = null, messageId = chat.length - 1, { signal, message: expectedMessage } = {}) {
+    if (signal?.aborted) return;
+
+    if (swipeId != null) {
+        swipeId = Number(swipeId);
+        if (!Number.isInteger(swipeId) || swipeId < 0) {
+            toastr.warning(t`Invalid swipe ID.`);
+            return;
+        }
     }
 
     const message = chat[messageId];
+    if (expectedMessage && message !== expectedMessage) return;
     if (!message || !Array.isArray(message.swipes) || !message.swipes.length) {
         toastr.warning(t`No messages to delete swipes from.`);
         return;
@@ -9910,32 +10141,84 @@ export async function deleteSwipe(swipeId = null, messageId = chat.length - 1) {
         return;
     }
 
-    swipeId = swipeId ?? message.swipe_id;
+    swipeId = Number(swipeId ?? message.swipe_id);
+    const currentSwipeId = clamp(Number(message.swipe_id ?? 0), 0, message.swipes.length - 1);
 
     if (swipeId < 0 || swipeId >= message.swipes.length) {
         toastr.warning(t`Invalid swipe ID: ${swipeId + 1}`);
         return;
     }
 
+    const expectedIdentity = getCurrentChatIdentity();
+    const sourceChat = chat.slice();
+    const isSameContext = () => getCurrentChatIdentity() === expectedIdentity && chat[messageId] === message;
+    const isActionCurrent = () => !signal?.aborted && isSameContext();
+    const deleteSnapshot = createSwipeDeleteSnapshot(message, chat_metadata);
+    const rollbackDelete = async () => {
+        cancelDebouncedChatSave();
+        if (isSameContext()) {
+            restoreSwipeDeleteSnapshot(message, chat_metadata, deleteSnapshot);
+            await redisplayChat(sourceChat, messageId);
+        }
+        return undefined;
+    };
     message.swipes.splice(swipeId, 1);
 
     if (Array.isArray(message.swipe_info) && message.swipe_info.length) {
         message.swipe_info.splice(swipeId, 1);
     }
 
-    // Select the next swipe, or the one before if it was the last one
-    const newSwipeId = Math.min(swipeId, message.swipes.length - 1);
+    let newSwipeId;
+    if (swipeId < currentSwipeId) {
+        newSwipeId = currentSwipeId - 1;
+    } else if (swipeId > currentSwipeId) {
+        newSwipeId = currentSwipeId;
+    } else {
+        newSwipeId = Math.min(swipeId, message.swipes.length - 1);
+    }
 
     chat_metadata['tainted'] = true;
 
     messageId = Number(messageId);
     swipeId = Number(swipeId);
-    await eventSource.emit(event_types.MESSAGE_SWIPE_DELETED, { messageId, swipeId, newSwipeId });
-    let direction = (swipeId <= newSwipeId) ? SWIPE_DIRECTION.RIGHT : SWIPE_DIRECTION.LEFT;
-    //Animate swipe and swap dispayed message.
-    await swipe(null, direction, { source: SWIPE_SOURCE.DELETE, repeated: false, forceMesId: messageId, forceSwipeId: newSwipeId });
+    message.swipe_id = newSwipeId;
 
-    await saveChatConditional();
+    const deletedCurrentSwipe = swipeId === currentSwipeId;
+    if (deletedCurrentSwipe) {
+        const direction = (swipeId <= newSwipeId) ? SWIPE_DIRECTION.RIGHT : SWIPE_DIRECTION.LEFT;
+        await swipe(null, direction, {
+            source: SWIPE_SOURCE.DELETE,
+            repeated: false,
+            message,
+            signal,
+            forceMesId: messageId,
+            forceSwipeId: newSwipeId,
+            emitEvent: false,
+            scheduleSave: false,
+        });
+        if (!isActionCurrent()) return await rollbackDelete();
+    } else {
+        await updateSwipeCounter(messageId, { message });
+        if (!isActionCurrent()) return await rollbackDelete();
+        if (messageId !== sourceChat.length - 1) {
+            await updateSwipeCounter(sourceChat.length - 1, { message: sourceChat.at(-1) });
+            if (!isActionCurrent()) return await rollbackDelete();
+        }
+        refreshSwipeButtons();
+    }
+
+    const saved = await saveChatConditional({ signal, expectedIdentity });
+    if (!saved) {
+        return await rollbackDelete();
+    }
+    if (!isSameContext()) return undefined;
+
+    await eventSource.emit(event_types.MESSAGE_SWIPE_DELETED, { messageId, swipeId, newSwipeId });
+    if (!isSameContext()) return undefined;
+    if (deletedCurrentSwipe) {
+        await eventSource.emit(event_types.MESSAGE_SWIPED, messageId);
+        if (!isSameContext()) return undefined;
+    }
 
     return newSwipeId;
 }
@@ -9949,31 +10232,37 @@ export async function saveMetadata() {
     }
 }
 
-export async function saveChatConditional() {
+export async function saveChatConditional({ signal, expectedIdentity } = {}) {
+    const isSameContext = () => expectedIdentity === undefined || getCurrentChatIdentity() === expectedIdentity;
+    const isActionCurrent = () => !signal?.aborted && isSameContext();
+    if (!isActionCurrent()) return false;
+
     try {
-        await waitUntilCondition(() => !isChatSaving, DEFAULT_SAVE_EDIT_TIMEOUT, 100);
+        await waitUntilCondition(() => !isChatSaving || !isActionCurrent(), DEFAULT_SAVE_EDIT_TIMEOUT, 100);
     } catch {
         console.warn('Timeout waiting for chat to save');
-        return;
+        return false;
     }
+    if (!isActionCurrent()) return false;
 
     try {
         cancelDebouncedChatSave();
 
         isChatSaving = true;
 
-        if (selected_group) {
-            await saveGroupChat(selected_group, true);
-        }
-        else {
-            await saveChat();
-        }
+        const saved = selected_group
+            ? await saveGroupChat(selected_group, true, false, { expectedIdentity, signal })
+            : await saveChat({ expectedIdentity, signal });
+        if (!saved) return false;
+        if (!isSameContext()) return true;
 
         // Save token and prompts cache to IndexedDB storage
         saveTokenCache();
         saveItemizedPrompts(getCurrentChatId());
+        return true;
     } catch (error) {
         console.error('Error saving chat', error);
+        return false;
     } finally {
         isChatSaving = false;
     }
@@ -10505,8 +10794,24 @@ function formatSwipeCounter(current, total) {
  * @param {number} [params.forceMesId] The message id to swipe.
  * @param {number} [params.forceSwipeId] The target swipe_id. When out of range, it will be looped or clamped.
  * @param {number} [params.forceDuration] Overwrites the default swipe duration.
+ * @param {AbortSignal} [params.signal] Cancels work when the owning chat context changes.
+ * @param {boolean} [params.emitEvent=true] Emit MESSAGE_SWIPED from this operation.
+ * @param {boolean} [params.scheduleSave=true] Schedule the normal debounced save.
+ * @param {boolean} [params.persistImmediately=false] Save before emitting MESSAGE_SWIPED.
  */
-export async function swipe(event, direction, { source, repeated, message = chat[chat.length - 1], forceMesId, forceSwipeId, forceDuration } = {}) {
+export async function swipe(event, direction, {
+    source,
+    repeated,
+    message = chat[chat.length - 1],
+    forceMesId,
+    forceSwipeId,
+    forceDuration,
+    signal,
+    emitEvent = true,
+    scheduleSave = true,
+    persistImmediately = false,
+} = {}) {
+    if (signal?.aborted) return false;
     if (chat.length === 0) {
         console.warn('Swipe was called on an empty chat.');
         return;
@@ -10524,6 +10829,9 @@ export async function swipe(event, direction, { source, repeated, message = chat
     }
 
     const mesId = Number(forceMesId ?? event?.currentTarget?.closest('.mes')?.getAttribute('mesid') ?? messageIndex ?? chat.length - 1);
+    if (!Number.isSafeInteger(mesId) || mesId < 0 || chat[mesId] !== message) return false;
+    const expectedIdentity = getCurrentChatIdentity();
+    const sourceChat = chat.slice();
 
     if (source === SWIPE_SOURCE.DELETE || source === SWIPE_SOURCE.BACK || source === SWIPE_SOURCE.AUTO_SWIPE) {
         console.info(`The ${direction} swipe source on message #${mesId} is ${source}, Most checks have been bypassed. `);
@@ -10547,7 +10855,6 @@ export async function swipe(event, direction, { source, repeated, message = chat
     // Cancel pending save to prevent accidental swipe_id overwrites.
     cancelDebouncedChatSave();
 
-    swipeState = SWIPE_STATE.SWIPING;
     let generation;
 
     const thisMesDiv = chatElement.children('.mes').filter(`[mesid="${mesId}"]`);
@@ -10556,9 +10863,41 @@ export async function swipe(event, direction, { source, repeated, message = chat
     const thisMesTextHeight = thisMesText[0]?.scrollHeight;
     if (![thisMesDiv.length, thisMesText.length].every(num => num > 0)) {
         console.error(`Message #${mesId}'s DOM element is not valid.`);
-        return;
+        return false;
     }
-    const originalSwipeId = Number(chat[mesId]?.['swipe_id'] ?? 0);
+    const operation = {};
+    activeSwipeOperation = operation;
+    swipeState = SWIPE_STATE.SWIPING;
+    let immediateSaveCommitted = false;
+    const isSameContext = () => getCurrentChatIdentity() === expectedIdentity && chat[mesId] === message;
+    const isOperationCurrent = () => activeSwipeOperation === operation
+        && (!signal?.aborted || immediateSaveCommitted)
+        && isSameContext();
+    const finishSwipeOperation = (showButtons = true) => {
+        if (activeSwipeOperation !== operation) return;
+        activeSwipeOperation = null;
+        swipeState = SWIPE_STATE.NONE;
+        delete document.body.dataset.swiping;
+        if (showButtons && isSameContext()) showSwipeButtons();
+    };
+    const stopIfStale = () => {
+        if (isOperationCurrent()) return false;
+        finishSwipeOperation(false);
+        return true;
+    };
+    let persistenceSnapshot = null;
+    const rollbackImmediateSwipe = async () => {
+        try {
+            if (persistenceSnapshot && activeSwipeOperation === operation && isSameContext()) {
+                restoreSwipeDeleteSnapshot(message, chat_metadata, persistenceSnapshot);
+                await redisplayChat(sourceChat, mesId);
+            }
+        } finally {
+            finishSwipeOperation(false);
+        }
+        return false;
+    };
+    const originalSwipeId = Number(message?.swipe_id ?? 0);
     let newSwipeId = Number(forceSwipeId ?? originalSwipeId);
 
     /**
@@ -10603,14 +10942,17 @@ export async function swipe(event, direction, { source, repeated, message = chat
         catch (error) {
             console.warn(`Swipe failed, Swiping back. ${error}`);
         }
+        if (stopIfStale()) return false;
 
         //Clamp Id between swipes.
-        let clampedId = clamp(chat[mesId]['swipe_id'], 0, Math.max(0, chat[mesId]['swipes'].length - 1));
+        let clampedId = clamp(message.swipe_id, 0, Math.max(0, message.swipes.length - 1));
 
-        await updateSwipeCounter(mesId);
+        await updateSwipeCounter(mesId, { message, messageElement: thisMesDiv });
+        if (stopIfStale()) return false;
         //Fallback.
-        if (mesId != chat.length - 1) {
-            await updateSwipeCounter(chat.length - 1);
+        if (mesId != sourceChat.length - 1) {
+            await updateSwipeCounter(sourceChat.length - 1, { message: sourceChat.at(-1) });
+            if (stopIfStale()) return false;
         }
 
         // If swipe_id has not changed, give the user feedback.
@@ -10624,18 +10966,20 @@ export async function swipe(event, direction, { source, repeated, message = chat
             } catch (error) {
                 console.warn(error);
             }
+            if (stopIfStale()) return false;
         }
 
         //If the id is not within bounds, Swipe back.
-        if (chat[mesId]?.swipe_id !== clampedId || revert) {
+        if (message.swipe_id !== clampedId || revert) {
             // Prevent recursion.
             if (source != SWIPE_SOURCE.BACK) {
                 source = SWIPE_SOURCE.BACK;
-                chat[mesId].swipe_id = clampedId;
+                message.swipe_id = clampedId;
 
                 //Update the chat.
-                await loadFromSwipeId(mesId, chat[mesId].swipe_id);
-                await redisplayChat(chat, mesId);
+                if (!await loadFromSwipeId(mesId, message.swipe_id) || stopIfStale()) return false;
+                await redisplayChat(sourceChat, mesId);
+                if (stopIfStale()) return false;
             }
             else {
                 await Popup.show.confirm(
@@ -10643,30 +10987,54 @@ export async function swipe(event, direction, { source, repeated, message = chat
                     t`<p>After you click OK, the chat will be reloaded to prevent data corruption.</p>`,
                     { okButton: 'OK', cancelButton: false },
                 );
+                if (stopIfStale()) return false;
                 console.trace(`Error! Recursion detected when reverting failed ${direction} swipe on message #${mesId}. Something has broken.`);
                 await reloadCurrentChat();
+                if (stopIfStale()) return false;
             }
             //Out of bounds swipes should not be saved.
-        } else if (source != SWIPE_SOURCE.BACK) {
+        } else if (source != SWIPE_SOURCE.BACK && scheduleSave && !persistImmediately) {
             //Save the chat if swipe_id has changed.
             saveChatDebounced();
         }
 
         //Allow for another swipe.
-        swipeState = SWIPE_STATE.NONE;
-        delete document.body.dataset.swiping;
-        showSwipeButtons();
+        finishSwipeOperation();
+        return true;
     }
 
     async function standardSwipe(newSwipeId) {
         //If swipe_id has changed, or the source is being deleted.
         if (newSwipeId !== originalSwipeId || source == SWIPE_SOURCE.DELETE || source == SWIPE_SOURCE.BACK) {
             //Update the chat.
-            await loadFromSwipeId(mesId, newSwipeId);
+            if (!await loadFromSwipeId(mesId, newSwipeId) || stopIfStale()) {
+                return persistImmediately ? await rollbackImmediateSwipe() : false;
+            }
             //Transition to the new chat.
-            await animateSwipe();
+            if (!await animateSwipe() || stopIfStale()) {
+                return persistImmediately ? await rollbackImmediateSwipe() : false;
+            }
         }
-        await endSwipe();
+        if (persistImmediately) {
+            if (stopIfStale()) return await rollbackImmediateSwipe();
+            const saved = await saveChatConditional({ signal, expectedIdentity });
+            if (!saved) return await rollbackImmediateSwipe();
+            if (activeSwipeOperation !== operation || !isSameContext()) {
+                finishSwipeOperation(false);
+                return false;
+            }
+            immediateSaveCommitted = true;
+            if (emitEvent) {
+                try {
+                    await eventSource.emit(event_types.MESSAGE_SWIPED, mesId);
+                } catch (error) {
+                    finishSwipeOperation(false);
+                    throw error;
+                }
+                if (stopIfStale()) return false;
+            }
+        }
+        return await endSwipe();
     }
 
     /**
@@ -10696,19 +11064,22 @@ export async function swipe(event, direction, { source, repeated, message = chat
      * @param {number} newSwipeId
      */
     async function loadFromSwipeId(mesId, newSwipeId) {
+        if (stopIfStale()) return false;
         //Update the swipe_id.
-        chat[mesId]['swipe_id'] = newSwipeId;
+        message.swipe_id = newSwipeId;
 
-        clearMessageData(chat[mesId]);
+        clearMessageData(message);
 
         //Load from swipes.
         if (syncSwipeToMes(mesId, newSwipeId) == false) {
             let errorMessage = t`When swiping ${direction} on message ${mesId}, syncSwipeToMes has returned false. Attempting to swipe back!`;
             toastr.error(errorMessage);
 
-            chat[mesId].swipe_id = originalSwipeId;
+            message.swipe_id = originalSwipeId;
             await endSwipe(true);
+            return false;
         }
+        if (stopIfStale()) return false;
         return true;
     }
 
@@ -10724,9 +11095,10 @@ export async function swipe(event, direction, { source, repeated, message = chat
      * @returns {Promise<boolean|Function>} endSlide unfreezes the messages from xEnd.
      */
     async function animateSwipeTransition(mesId, { xStart = '0px', xEnd = '0px', duration = animation_duration, classes = '', freeze = false } = {}) {
+        if (stopIfStale()) return false;
         // If the animation_duration is zero, the 'animationend' promise will never resolve.
         //Skip the animation if it's faster than 50ms.
-        if (duration <= 50) return;
+        if (duration <= 50) return true;
 
         //Select MAXIMUM_ANIMATED messages after mesId. Ideally, only visible messages would be animated.
         const MAXIMUM_ANIMATED = 100;
@@ -10774,6 +11146,10 @@ export async function swipe(event, direction, { source, repeated, message = chat
                     await Promise.race([animation?.finished, createTimeout(duration * 2, `The ${duration}ms swipe animation has not ended after ${duration * 2}ms. It has been skipped.`)].filter(Boolean));
                 } catch (error) {
                     console.warn(error);
+                }
+                if (stopIfStale()) {
+                    endSlide();
+                    return false;
                 }
 
                 //If not frozen, end the slide now.
@@ -10826,15 +11202,18 @@ export async function swipe(event, direction, { source, repeated, message = chat
      * @param {boolean} [skipSwipeOut=false]
      */
     async function animateSwipe(run_generate = false, skipSwipeOut = false) {
+        if (stopIfStale()) return false;
 
         if (!skipSwipeOut) {
             //Swipe out.
             await animateSwipeTransition(mesId, { xEnd: `${swipeRange}px`, duration: swipeDuration });
+            if (stopIfStale()) return false;
         }
 
 
         if (run_generate) {
-            await updateSwipeCounter(mesId);
+            await updateSwipeCounter(mesId, { message, messageElement: thisMesDiv });
+            if (stopIfStale()) return false;
             //shows "..." while generating
             thisMesDiv.find('.mes_text').html('...');
             // resets the timer
@@ -10846,29 +11225,41 @@ export async function swipe(event, direction, { source, repeated, message = chat
             //console.log('onclick right swipe calling addOneMessage');
 
             //Only scroll when swiping the last message.
-            const scroll = (mesId == chat.length - 1);
+            const scroll = (mesId == sourceChat.length - 1);
             //The swipe buttons will be refreshed in endSwipe(), refreshing them now will cause flickering.
-            addOneMessage(chat[mesId], { type: 'swipe', forceId: mesId, scroll: scroll, showSwipes: false });
+            addOneMessage(message, { type: 'swipe', forceId: mesId, scroll: scroll, showSwipes: false });
 
             if (power_user.message_token_count_enabled) {
-                if (!chat[mesId].extra) {
-                    chat[mesId].extra = {};
+                if (!message.extra) {
+                    message.extra = {};
                 }
 
-                const tokenCountText = (chat[mesId]?.extra?.reasoning || '') + chat[mesId].mes;
-                const tokenCount = await getTokenCountAsync(tokenCountText, 0);
-                chat[mesId]['extra']['token_count'] = tokenCount;
+                const tokenCountText = (message.extra?.reasoning || '') + message.mes;
+                let tokenCount;
+                try {
+                    tokenCount = await getTokenCountAsync(tokenCountText, 0, { signal });
+                } catch (error) {
+                    if (signal?.aborted) return false;
+                    console.warn('Could not update the swipe token count.', error);
+                    tokenCount = 0;
+                }
+                if (stopIfStale()) return false;
+                message.extra.token_count = tokenCount;
                 thisMesDiv.find('.tokenCounterDisplay').text(`${tokenCount}t`);
             }
         }
+        if (stopIfStale()) return false;
 
         //Animate expanding to the new message height.
         thisMesDiv.css('height', thisMesDivHeight);
         expandNewMessage(thisMesDiv);
 
-        appendMediaToMessage(chat[mesId], thisMesDiv);
+        appendMediaToMessage(message, thisMesDiv);
 
-        await eventSource.emit(event_types.MESSAGE_SWIPED, (mesId));
+        if (emitEvent && !persistImmediately) {
+            await eventSource.emit(event_types.MESSAGE_SWIPED, mesId);
+            if (stopIfStale()) return false;
+        }
 
         if (run_generate && !is_send_press) {
             is_send_press = true;
@@ -10877,8 +11268,11 @@ export async function swipe(event, direction, { source, repeated, message = chat
 
         //Swipe in from the opposite side.
         await animateSwipeTransition(mesId, { xStart: `${-swipeRange}px`, xEnd: `${0}px`, duration: swipeDuration });
+        if (stopIfStale()) return false;
+        return true;
     }
 
+    if (stopIfStale()) return false;
     if (mesId === Number(this_edit_mes_id)) {
         closeMessageEditor();
     }
@@ -10887,6 +11281,7 @@ export async function swipe(event, direction, { source, repeated, message = chat
     }
 
     if (isHordeGenerationNotAllowed()) {
+        finishSwipeOperation(false);
         return unblockGeneration();
     }
 
@@ -10895,29 +11290,29 @@ export async function swipe(event, direction, { source, repeated, message = chat
 
         // Make sure ad-hoc changes to extras are saved before swiping away
         syncMesToSwipe(mesId);
+        if (stopIfStale()) return false;
+        if (persistImmediately) persistenceSnapshot = createSwipeDeleteSnapshot(message, chat_metadata);
 
-        if (chat[mesId]['swipe_id'] === undefined) {              // if there is no swipe-message in the last spot of the chat array
-            chat[mesId]['swipe_id'] = 0;                        // set it to id 0
-            chat[mesId]['swipes'] = [];                         // empty the array
-            chat[mesId]['swipe_info'] = [];
-            chat[mesId]['swipes'][0] = chat[mesId]['mes'];  //assign swipe array with last chat[mesId] from chat
-            chat[mesId]['swipe_info'][0] = {
-                'send_date': chat[mesId]['send_date'],
-                'gen_started': chat[mesId]['gen_started'],
-                'gen_finished': chat[mesId]['gen_finished'],
-                'extra': structuredClone(chat[mesId]['extra']),
+        if (message.swipe_id === undefined) {              // if there is no swipe-message in the last spot of the chat array
+            message.swipe_id = 0;                        // set it to id 0
+            message.swipes = [];                         // empty the array
+            message.swipe_info = [];
+            message.swipes[0] = message.mes;  //assign swipe array with last chat[mesId] from chat
+            message.swipe_info[0] = {
+                'send_date': message.send_date,
+                'gen_started': message.gen_started,
+                'gen_finished': message.gen_finished,
+                'extra': structuredClone(message.extra),
             };
         }
         // If the user is holding down the key and we're at the last or first swipe, don't do anything.
-        let isLastSwipe = (direction === SWIPE_DIRECTION.RIGHT) ? (chat[mesId].swipe_id === Math.max(0, chat[mesId]['swipes'].length - 1)) : chat[mesId].swipe_id === 0;
+        let isLastSwipe = (direction === SWIPE_DIRECTION.RIGHT) ? (message.swipe_id === Math.max(0, message.swipes.length - 1)) : message.swipe_id === 0;
         if (source === SWIPE_SOURCE.KEYBOARD && repeated && isLastSwipe) {
-            await endSwipe();
-            return;
+            return await endSwipe();
         }
     } else if (source == SWIPE_SOURCE.DELETE || source == SWIPE_SOURCE.BACK) {
         //If the swipe is being deleted or reverted.
-        await standardSwipe(newSwipeId);
-        return;
+        return await standardSwipe(newSwipeId);
     }
 
     //If swiping left.
@@ -10925,17 +11320,15 @@ export async function swipe(event, direction, { source, repeated, message = chat
         if (forceSwipeId == null) newSwipeId--;
         //Loop to last swipe if negative.
         if (newSwipeId < 0) {
-            newSwipeId = Math.max(0, chat[mesId]['swipes'].length - 1);
+            newSwipeId = Math.max(0, message.swipes.length - 1);
         }
         //Limit swipe_id to swipes.
-        if (newSwipeId > chat[mesId]['swipes'].length - 1) {
-            toastr.warning(`The swipe_id for message #${mesId} was ${newSwipeId}. It has been reset to ${chat[mesId]['swipes'].length - 1}.`);
-            chat[mesId]['swipe_id'] = chat[mesId]['swipes'].length - 1;
-            await endSwipe();
-            return;
+        if (newSwipeId > message.swipes.length - 1) {
+            toastr.warning(`The swipe_id for message #${mesId} was ${newSwipeId}. It has been reset to ${message.swipes.length - 1}.`);
+            message.swipe_id = message.swipes.length - 1;
+            return await endSwipe();
         }
-        await standardSwipe(newSwipeId);
-        return;
+        return await standardSwipe(newSwipeId);
     }
     //If swiping right.
     else if (direction === SWIPE_DIRECTION.RIGHT) {
@@ -10945,44 +11338,42 @@ export async function swipe(event, direction, { source, repeated, message = chat
         //Minimum of zero.
         if (newSwipeId < 0) {
             toastr.warning(`The swipe_id for message #${mesId} was ${newSwipeId}. It has been reset to zero.`);
-            chat[mesId]['swipe_id'] = 0;
-            await endSwipe();
-            return;
+            message.swipe_id = 0;
+            return await endSwipe();
         }
 
         //If overswiping.
-        if (newSwipeId >= chat[mesId]['swipes'].length) {
-            newSwipeId = chat[mesId]['swipes'].length;
+        if (newSwipeId >= message.swipes.length) {
+            newSwipeId = message.swipes.length;
 
             //Update the swipe_id.
-            chat[mesId]['swipe_id'] = newSwipeId;
+            message.swipe_id = newSwipeId;
 
-            const overswipe = getOverswipeBehavior(mesId);
+            const overswipe = getOverswipeBehavior(mesId, message);
 
             //Cancel the generation.
             if (overswipe == OVERSWIPE_BEHAVIOR.NONE) {
                 //Cancel swipe.
-                chat[mesId]['swipe_id'] = originalSwipeId;
-                await endSwipe();
-                return;
+                message.swipe_id = originalSwipeId;
+                return await endSwipe();
             }
             //Regenerate the message
             else if (overswipe == OVERSWIPE_BEHAVIOR.REGENERATE) {
-                clearMessageData(chat[mesId]);
+                clearMessageData(message);
                 let run_generate = true;
                 //Generate.
-                await animateSwipe(run_generate);
-                await endSwipe();
-                return;
+                if (!await animateSwipe(run_generate)) return false;
+                return await endSwipe();
             }
             // Loop to the first swipe.
             else if (overswipe == OVERSWIPE_BEHAVIOR.LOOP || overswipe == OVERSWIPE_BEHAVIOR.PRISTINE_GREETING) {
                 newSwipeId = 0;
             }
         }
-        await standardSwipe(newSwipeId);
-        return;
+        return await standardSwipe(newSwipeId);
     }
+    finishSwipeOperation(false);
+    return false;
 }
 
 
@@ -11270,6 +11661,10 @@ export async function renameGroupOrCharacterChat({ characterId, groupId, oldFile
         renamed_file: `${newFileName.trim()}.jsonl`,
     };
 
+    if (groupId) {
+        body.group_id = groupId;
+    }
+
     if (body.original_file === body.renamed_file) {
         console.debug('Chat rename cancelled, old and new names are the same');
         return;
@@ -11303,7 +11698,7 @@ export async function renameGroupOrCharacterChat({ characterId, groupId, oldFile
         }
 
         if (groupId) {
-            await renameGroupChat(groupId, oldFileName, newFileName);
+            await renameGroupChat(groupId, oldFileName, newFileName, data.group);
         }
         else if (characterId !== undefined && String(characterId) === String(this_chid) && characters[characterId]?.chat === oldFileName) {
             characters[characterId].chat = newFileName;

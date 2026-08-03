@@ -7,7 +7,15 @@ import sanitize from 'sanitize-filename';
 import { sync as writeFileAtomicSync, default as writeFileAtomic } from 'write-file-atomic';
 
 import { color, tryParse } from '../util.js';
+import {
+    assertChatBranchFamilySafe,
+    createDurableGroupDeleteTransaction,
+    getChatBranchUserLockPath,
+    removeChatBranchFamily,
+    runChatBranchFaultPoint,
+} from '../chat-branch.js';
 import { getFileNameValidationFunction } from '../middleware/validateFileName.js';
+import { ensureChatStorageRecovery, resolveGroupChatPath, runWithChatStorageLocks } from './chats.js';
 
 export const router = express.Router();
 
@@ -25,6 +33,69 @@ function hasDeprecatedGroupMetadata(groupData) {
     }
 
     return DEPRECATED_GROUP_METADATA_KEYS.some(key => Object.hasOwn(groupData, key));
+}
+
+function resolveReferencedGroupChatPaths(request, groupData) {
+    if (!Array.isArray(groupData?.chats)) throw new TypeError('Group chats must be an array.');
+    const chatIds = [...groupData.chats];
+    if (groupData.chat_id !== undefined && groupData.chat_id !== null && !chatIds.includes(groupData.chat_id)) {
+        chatIds.push(groupData.chat_id);
+    }
+    return [...new Set(chatIds.map(chatId => resolveGroupChatPath(request, chatId)))];
+}
+
+function hasCompleteGroupChatArtifactFamily(root, chatPath) {
+    assertChatBranchFamilySafe(root, chatPath);
+    if (!fs.existsSync(chatPath)) return false;
+
+    const indexPath = `${chatPath}.index.json`;
+    const chunkDirectory = `${chatPath}.chunks`;
+    const hasIndex = fs.existsSync(indexPath);
+    const hasChunkDirectory = fs.existsSync(chunkDirectory);
+    if (!hasIndex && !hasChunkDirectory) return true;
+    if (!hasIndex || !hasChunkDirectory) return false;
+
+    const index = tryParse(fs.readFileSync(indexPath, 'utf8'));
+    return Array.isArray(index?.shards) && index.shards.every(shard => {
+        if (typeof shard?.file !== 'string' || !/^\d{6}\.jsonl$/.test(shard.file)) return false;
+        return fs.existsSync(path.join(chunkDirectory, shard.file));
+    });
+}
+
+function reconcileGroupChatReferences(request, root, body, latestGroup) {
+    const bodyChatIds = [...body.chats];
+    const latestChatIds = Array.isArray(latestGroup?.chats) ? latestGroup.chats : [];
+    const latestKeys = new Set(latestChatIds.map(chatId => String(chatId)));
+    const seenKeys = new Set();
+    const reconciled = [];
+    const add = (chatId) => {
+        const key = String(chatId);
+        if (seenKeys.has(key)) return;
+        seenKeys.add(key);
+        reconciled.push(chatId);
+    };
+    const hasArtifact = (chatId) => {
+        const chatPath = resolveGroupChatPath(request, chatId);
+        return hasCompleteGroupChatArtifactFamily(root, chatPath);
+    };
+
+    for (const chatId of bodyChatIds) {
+        if (latestKeys.has(String(chatId)) || hasArtifact(chatId)) add(chatId);
+    }
+    for (const chatId of latestChatIds) {
+        if (!seenKeys.has(String(chatId)) && hasArtifact(chatId)) add(chatId);
+    }
+    body.chats = reconciled;
+
+    const requestedCurrent = body.chats.find(chatId => String(chatId) === String(body.chat_id));
+    if (requestedCurrent !== undefined) {
+        body.chat_id = requestedCurrent;
+        return;
+    }
+    const validChatIds = new Map(body.chats.map(chatId => [String(chatId), chatId]));
+    body.chat_id = [latestGroup?.chat_id, ...bodyChatIds, ...latestChatIds]
+        .map(chatId => validChatIds.get(String(chatId)))
+        .find(chatId => chatId !== undefined) ?? null;
 }
 
 /**
@@ -169,6 +240,19 @@ export async function migrateGroupChatsMetadataFormat(userDirectories) {
     }
 }
 
+router.use(async (request, response, next) => {
+    const root = path.resolve(request.user.directories.root);
+    try {
+        await runWithChatStorageLocks(request, [getChatBranchUserLockPath(root)], async () => {
+            await ensureChatStorageRecovery(request);
+        });
+        next();
+    } catch (error) {
+        console.error('Failed to recover durable group transaction:', error);
+        response.status(500).send({ error: 'chat_recovery_failed' });
+    }
+});
+
 router.post('/all', (request, response) => {
     const groups = [];
 
@@ -218,41 +302,55 @@ router.post('/create', async (request, response) => {
         return response.sendStatus(400);
     }
 
-    const id = String(Date.now());
-    const groupMetadata = {
-        id: id,
-        name: request.body.name ?? 'New Group',
-        members: request.body.members ?? [],
-        avatar_url: request.body.avatar_url,
-        allow_self_responses: !!request.body.allow_self_responses,
-        activation_strategy: request.body.activation_strategy ?? 0,
-        generation_mode: request.body.generation_mode ?? 0,
-        disabled_members: request.body.disabled_members ?? [],
-        fav: request.body.fav,
-        chat_id: request.body.chat_id ?? id,
-        chats: request.body.chats ?? [id],
-        auto_mode_delay: request.body.auto_mode_delay ?? 5,
-        generation_mode_join_prefix: request.body.generation_mode_join_prefix ?? '',
-        generation_mode_join_suffix: request.body.generation_mode_join_suffix ?? '',
-    };
-    for (const key of DEPRECATED_GROUP_METADATA_KEYS) {
-        if (Object.hasOwn(request.body, key)) {
-            groupMetadata[key] = request.body[key];
-        }
-    }
-    const pathToFile = path.join(request.user.directories.groups, sanitize(`${id}.json`));
-    const fileData = JSON.stringify(groupMetadata, null, 4);
+    const root = path.resolve(request.user.directories.root);
+    try {
+        return await runWithChatStorageLocks(request, [getChatBranchUserLockPath(root)], async () => {
+            if (!fs.existsSync(request.user.directories.groups)) {
+                fs.mkdirSync(request.user.directories.groups);
+            }
+            let numericId = Date.now();
+            while (fs.existsSync(path.join(request.user.directories.groups, `${numericId}.json`))) numericId++;
+            const id = String(numericId);
+            const groupMetadata = {
+                id,
+                name: request.body.name ?? 'New Group',
+                members: request.body.members ?? [],
+                avatar_url: request.body.avatar_url,
+                allow_self_responses: !!request.body.allow_self_responses,
+                activation_strategy: request.body.activation_strategy ?? 0,
+                generation_mode: request.body.generation_mode ?? 0,
+                disabled_members: request.body.disabled_members ?? [],
+                fav: request.body.fav,
+                chat_id: request.body.chat_id ?? id,
+                chats: request.body.chats ?? [id],
+                auto_mode_delay: request.body.auto_mode_delay ?? 5,
+                generation_mode_join_prefix: request.body.generation_mode_join_prefix ?? '',
+                generation_mode_join_suffix: request.body.generation_mode_join_suffix ?? '',
+            };
+            for (const key of DEPRECATED_GROUP_METADATA_KEYS) {
+                if (Object.hasOwn(request.body, key)) groupMetadata[key] = request.body[key];
+            }
 
-    if (!fs.existsSync(request.user.directories.groups)) {
-        fs.mkdirSync(request.user.directories.groups);
+            let chatPaths;
+            try {
+                chatPaths = resolveReferencedGroupChatPaths(request, groupMetadata);
+            } catch {
+                return response.sendStatus(400);
+            }
+            const pathToFile = path.join(request.user.directories.groups, `${id}.json`);
+            return await runWithChatStorageLocks(request, [pathToFile, ...chatPaths], async () => {
+                writeFileAtomicSync(pathToFile, JSON.stringify(groupMetadata, null, 4));
+                if (hasDeprecatedGroupMetadata(groupMetadata)) {
+                    await migrateImportedGroupMetadata(request.user.directories, path.basename(pathToFile));
+                    DEPRECATED_GROUP_METADATA_KEYS.forEach(key => delete groupMetadata[key]);
+                }
+                return response.send(groupMetadata);
+            });
+        });
+    } catch (error) {
+        console.error('Could not create group.', error);
+        return response.status(500).send({ error: 'group_create_failed' });
     }
-
-    writeFileAtomicSync(pathToFile, fileData);
-    if (hasDeprecatedGroupMetadata(groupMetadata)) {
-        await migrateImportedGroupMetadata(request.user.directories, path.basename(pathToFile));
-        DEPRECATED_GROUP_METADATA_KEYS.forEach(key => delete groupMetadata[key]);
-    }
-    return response.send(groupMetadata);
 });
 
 router.post('/edit', getFileNameValidationFunction('id'), async (request, response) => {
@@ -260,14 +358,44 @@ router.post('/edit', getFileNameValidationFunction('id'), async (request, respon
         return response.sendStatus(400);
     }
     const id = request.body.id;
+    const root = path.resolve(request.user.directories.root);
     const pathToFile = path.join(request.user.directories.groups, sanitize(`${id}.json`));
-    const fileData = JSON.stringify(request.body, null, 4);
-
-    writeFileAtomicSync(pathToFile, fileData);
-    if (hasDeprecatedGroupMetadata(request.body)) {
-        await migrateImportedGroupMetadata(request.user.directories, path.basename(pathToFile));
+    let bodyChatPaths;
+    try {
+        bodyChatPaths = resolveReferencedGroupChatPaths(request, request.body);
+    } catch {
+        return response.sendStatus(400);
     }
-    return response.send({ ok: true });
+
+    try {
+        return await runWithChatStorageLocks(request, [getChatBranchUserLockPath(root)], async () => {
+            const body = structuredClone(request.body);
+            const latestGroup = fs.existsSync(pathToFile)
+                ? tryParse(fs.readFileSync(pathToFile, 'utf8'))
+                : null;
+            let latestChatPaths = [];
+            if (latestGroup && Array.isArray(latestGroup.chats)) {
+                try {
+                    latestChatPaths = resolveReferencedGroupChatPaths(request, latestGroup);
+                } catch {
+                    return response.sendStatus(400);
+                }
+            }
+
+            return await runWithChatStorageLocks(request, [pathToFile, ...bodyChatPaths, ...latestChatPaths], async () => {
+                reconcileGroupChatReferences(request, root, body, latestGroup);
+
+                writeFileAtomicSync(pathToFile, JSON.stringify(body, null, 4));
+                if (hasDeprecatedGroupMetadata(body)) {
+                    await migrateImportedGroupMetadata(request.user.directories, path.basename(pathToFile));
+                }
+                return response.send({ ok: true });
+            });
+        });
+    } catch (error) {
+        console.error('Could not edit group.', error);
+        return response.status(500).send({ error: 'group_edit_failed' });
+    }
 });
 
 router.post('/delete', getFileNameValidationFunction('id'), async (request, response) => {
@@ -276,29 +404,57 @@ router.post('/delete', getFileNameValidationFunction('id'), async (request, resp
     }
 
     const id = request.body.id;
+    const root = path.resolve(request.user.directories.root);
     const pathToGroup = path.join(request.user.directories.groups, sanitize(`${id}.json`));
+    const userLockPath = getChatBranchUserLockPath(root);
 
     try {
-        // Delete group chats
-        const group = JSON.parse(fs.readFileSync(pathToGroup, 'utf8'));
+        return await runWithChatStorageLocks(request, [userLockPath], async () => {
+            await ensureChatStorageRecovery(request);
+            return await runWithChatStorageLocks(request, [pathToGroup], async () => {
+                if (!fs.existsSync(pathToGroup)) return response.send({ ok: true });
+                const groupStats = fs.lstatSync(pathToGroup);
+                if (!groupStats.isFile() || groupStats.isSymbolicLink()) throw new Error('Unsafe group metadata path.');
+                const group = JSON.parse(fs.readFileSync(pathToGroup, 'utf8'));
+                const chatPaths = Array.isArray(group?.chats)
+                    ? group.chats.map(chatId => resolveGroupChatPath(request, chatId))
+                    : [];
 
-        if (group && Array.isArray(group.chats)) {
-            for (const chat of group.chats) {
-                console.info('Deleting group chat', chat);
-                const pathToFile = path.join(request.user.directories.groupChats, sanitize(`${chat}.jsonl`));
-
-                if (fs.existsSync(pathToFile)) {
-                    fs.unlinkSync(pathToFile);
-                }
-            }
-        }
+                return await runWithChatStorageLocks(request, chatPaths, async () => {
+                    for (const chatPath of chatPaths) assertChatBranchFamilySafe(root, chatPath);
+                    const transaction = createDurableGroupDeleteTransaction({
+                        root,
+                        handle: request.user.profile.handle,
+                        directories: request.user.directories,
+                        groupId: String(id),
+                        groupPath: pathToGroup,
+                        chatPaths,
+                    });
+                    const faultContext = { groupId: String(id), groupPath: pathToGroup, chatPaths };
+                    try {
+                        transaction.markMutating();
+                        await runChatBranchFaultPoint('after-group-delete-journal-mutating', faultContext);
+                        for (const chatPath of chatPaths) {
+                            console.info('Deleting group chat', path.basename(chatPath, '.jsonl'));
+                            removeChatBranchFamily(root, chatPath);
+                            await runChatBranchFaultPoint('after-group-delete-chat-removal', { ...faultContext, chatPath });
+                        }
+                        fs.unlinkSync(pathToGroup);
+                        await runChatBranchFaultPoint('after-group-delete-metadata-removal', faultContext);
+                        await runChatBranchFaultPoint('before-group-delete-commit', faultContext);
+                        transaction.markCommitted();
+                        await runChatBranchFaultPoint('after-group-delete-commit-marker', faultContext);
+                        transaction.cleanup();
+                    } catch (error) {
+                        transaction.rollback();
+                        throw error;
+                    }
+                    return response.send({ ok: true });
+                });
+            });
+        });
     } catch (error) {
-        console.error('Could not delete group chats. Clean them up manually.', error);
+        console.error('Could not delete group and its chat artifacts.', error);
+        return response.status(500).send({ error: 'group_delete_failed' });
     }
-
-    if (fs.existsSync(pathToGroup)) {
-        fs.unlinkSync(pathToGroup);
-    }
-
-    return response.send({ ok: true });
 });

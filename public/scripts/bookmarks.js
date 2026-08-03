@@ -8,12 +8,20 @@ import {
     getRequestHeaders,
     getThumbnailUrl,
     getCharacters,
+    getCurrentChatIdentity,
     chat,
+    clearCachedChatPage,
+    fetchChatRange,
+    getChatPagingState,
+    refreshChatPagingMetadata,
+    reloadCurrentChat,
     saveChatConditional,
     saveItemizedPrompts,
     setActiveGroup,
+    setChatPagingState,
 } from '../script.js';
 import { humanizedDateTime } from './RossAscends-mods.js';
+import { createChatBranchRequest } from './group-chat-paging.js';
 import {
     DEFAULT_AUTO_MODE_DELAY,
     group_activation_strategy,
@@ -157,8 +165,40 @@ async function saveBookmarkMenu() {
     return await createNewBookmark(chat.length - 1);
 }
 
+/** Captures the source identity used by a branch operation. */
+function captureBranchContext() {
+    const groupId = selected_group ?? null;
+    const characterId = groupId === null && this_chid !== undefined ? this_chid : null;
+    const group = groupId === null ? null : groups?.find(item => String(item.id) === String(groupId));
+    const character = characterId === null ? null : characters[characterId];
+    const chatId = groupId === null ? character?.chat ?? null : group?.chat_id ?? null;
+    return Object.freeze({
+        identity: getCurrentChatIdentity(),
+        groupId,
+        characterId,
+        chatId,
+        mainChat: chatId,
+        isGroup: groupId !== null,
+        avatarUrl: character?.avatar,
+    });
+}
+
+function isCurrentBranchContext(context, signal) {
+    return !signal?.aborted && getCurrentChatIdentity() === context.identity;
+}
+
 // Export is used by Timelines extension. Do not remove.
-export async function createBranch(mesId) {
+/**
+ * Creates an atomic or compatibility branch from a message.
+ * @param {number} mesId Message ID
+ * @param {{swipeId?: number|null, absoluteMessageId?: number|null, preferredName?: string|null, signal?: AbortSignal, requireAtomic?: boolean}} [options] Branch options
+ * @returns {Promise<string?>} Branch file name
+ */
+export async function createBranch(mesId, { swipeId = null, absoluteMessageId = null, preferredName = null, signal, sourceContext = null, requireAtomic = false } = {}) {
+    const source = sourceContext ?? captureBranchContext();
+    const isCurrent = () => isCurrentBranchContext(source, signal);
+    if (!isCurrent()) return;
+
     if (!chat.length) {
         toastr.warning('The chat is empty.', 'Branch creation failed');
         return;
@@ -170,26 +210,155 @@ export async function createBranch(mesId) {
     }
 
     const lastMes = chat[mesId];
-    const mainChat = selected_group ? groups?.find(x => x.id == selected_group)?.chat_id : characters[this_chid].chat;
-    const newMetadata = { main_chat: mainChat };
-    let name = `Branch #${mesId} - ${humanizedDateTime()}`;
+    const newMetadata = { main_chat: source.mainChat };
+    const name = preferredName ?? `Branch #${mesId} - ${humanizedDateTime()}`;
+    let pagingState = getChatPagingState();
+    const useAtomicBranch = pagingState.active || requireAtomic;
+    const selectedSwipeId = swipeId ?? lastMes?.swipe_id ?? 0;
 
-    if (selected_group) {
-        if (!await saveGroupBookmarkChat(selected_group, name, newMetadata, mesId)) {
+    if (useAtomicBranch) {
+        if (pagingState.active && (pagingState.chatId !== source.mainChat || pagingState.isGroup !== source.isGroup)) {
+            toastr.error('The active paging context does not match this chat.', 'Branch creation failed');
             return;
         }
-    } else {
-        await saveChat({ chatName: name, withMetadata: newMetadata, mesId });
+
+        if (!pagingState.active) {
+            let range;
+            try {
+                range = await fetchChatRange({ isGroup: source.isGroup, chatId: source.mainChat, limit: 1, signal });
+            } catch (error) {
+                if (signal?.aborted) return;
+                console.error('Could not load authoritative branch metadata.', error);
+            }
+            if (!isCurrent()) return;
+
+            const requestedMessageId = Number.isSafeInteger(absoluteMessageId) && absoluteMessageId >= 0
+                ? absoluteMessageId
+                : mesId;
+            if (typeof range?.revision !== 'string' || !range.revision
+                || typeof range?.contentHash !== 'string' || !range.contentHash
+                || !Number.isSafeInteger(range?.total) || requestedMessageId >= range.total) {
+                toastr.error('Reload the chat before creating this branch.', 'Branch metadata is unavailable');
+                return;
+            }
+            pagingState = {
+                ...pagingState,
+                messageOffset: 0,
+                revision: range.revision,
+                contentHash: range.contentHash,
+            };
+            absoluteMessageId = requestedMessageId;
+        }
+
+        if (!Number.isSafeInteger(pagingState.messageOffset) || pagingState.messageOffset < 0
+            || typeof pagingState.revision !== 'string' || !pagingState.revision
+            || typeof pagingState.contentHash !== 'string' || !pagingState.contentHash) {
+            toastr.error('Reload the chat before creating this branch.', 'Branch metadata is unavailable');
+            return;
+        }
+
+        let branchResult;
+        try {
+            const request = createChatBranchRequest({
+                isGroup: source.isGroup,
+                chatId: source.mainChat,
+                avatarUrl: source.avatarUrl,
+                groupId: source.groupId,
+                localMessageIndex: mesId,
+                messageOffset: pagingState.messageOffset,
+                absoluteMessageIndex: absoluteMessageId,
+                swipeId: selectedSwipeId,
+                expectedRevision: pagingState.revision,
+                contentHash: pagingState.contentHash,
+                idempotencyKey: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`,
+                preferredName: name,
+            });
+            if (!request) {
+                toastr.warning('Could not identify the source message.', 'Branch creation failed');
+                return;
+            }
+
+            const response = await fetch(request.url, {
+                method: 'POST',
+                headers: getRequestHeaders(),
+                body: JSON.stringify(request.body),
+                signal,
+            });
+            let data = null;
+            try {
+                data = await response.json();
+            } catch {
+                // The status still determines the recovery UI.
+            }
+            branchResult = { ok: response.ok, status: response.status, data };
+        } catch (error) {
+            if (signal?.aborted) return;
+            throw error;
+        }
+
+        if (!isCurrent()) return;
+        const { ok, status, data } = branchResult;
+        if (status === 428 || status === 409) {
+            const retry = await Popup.show.confirm(
+                t`Chat changed`,
+                t`The source chat must be reloaded before this branch can be retried. No chat data was changed.`,
+                { okButton: t`Reload to Retry`, cancelButton: t`Cancel` },
+            );
+            if (retry && isCurrent()) {
+                await reloadCurrentChat({ expectedIdentity: source.identity, signal });
+            }
+            return;
+        }
+        if (!ok) {
+            if (isCurrent()) toastr.error(data?.message || 'The branch could not be created.', 'Branch creation failed');
+            return;
+        }
+        if (!isCurrent()) return;
+
+        let refreshed = await refreshChatPagingMetadata({
+            isGroup: source.isGroup,
+            chatId: source.mainChat,
+            expectedRevision: data?.sourceRevision,
+            expectedIdentity: source.identity,
+            signal,
+        });
+        if (!isCurrent()) return;
+        if (!refreshed && typeof data?.sourceRevision === 'string' && typeof data?.sourceContentHash === 'string') {
+            refreshed = { revision: data.sourceRevision, contentHash: data.sourceContentHash };
+            if (isCurrent()) setChatPagingState(refreshed);
+        }
+        if (!isCurrent()) return;
+        clearCachedChatPage({ isGroup: source.isGroup, chatId: source.mainChat });
+        if (!refreshed) {
+            toastr.error('Reload the chat before creating another branch.', 'Branch metadata could not be refreshed');
+        }
+
+        const branchName = data?.fileName ?? data?.name ?? name;
+        if (!isCurrent()) return;
+        if (typeof lastMes.extra !== 'object') lastMes.extra = {};
+        if (!Array.isArray(lastMes.extra.branches)) lastMes.extra.branches = [];
+        if (!lastMes.extra.branches.includes(branchName)) lastMes.extra.branches.push(branchName);
+        if (source.isGroup) {
+            const group = groups?.find(item => String(item.id) === String(source.groupId));
+            if (group && !group.chats.includes(branchName)) group.chats.push(branchName);
+        }
+        return branchName;
     }
-    // append to branches list if it exists
-    // otherwise create it
-    if (typeof lastMes.extra !== 'object') {
-        lastMes.extra = {};
+
+    try {
+        if (source.isGroup) {
+            if (!await saveGroupBookmarkChat(source.groupId, name, newMetadata, mesId, { swipeId: selectedSwipeId, signal })) return;
+        } else {
+            if (!await saveChat({ chatName: name, withMetadata: newMetadata, mesId, swipeId: selectedSwipeId })) return;
+        }
+    } catch (error) {
+        if (signal?.aborted) return;
+        throw error;
     }
-    if (typeof lastMes.extra['branches'] !== 'object') {
-        lastMes.extra['branches'] = [];
-    }
-    lastMes.extra['branches'].push(name);
+    if (!isCurrent()) return;
+    if (typeof lastMes.extra !== 'object') lastMes.extra = {};
+    if (!Array.isArray(lastMes.extra.branches)) lastMes.extra.branches = [];
+    lastMes.extra.branches.push(name);
     return name;
 }
 
@@ -223,7 +392,20 @@ export async function createNewBookmark(mesId, { forceName = null } = {}) {
 
     const isReplace = lastMes.extra.bookmark_link;
 
-    let name = await getBookmarkName({ isReplace: isReplace, forceName: forceName });
+    let name;
+    const pagingState = getChatPagingState();
+    const requestedName = await getBookmarkName({ isReplace: isReplace, forceName: forceName });
+    if (!requestedName) {
+        return null;
+    }
+    if (pagingState.active) {
+        name = await createBranch(mesId, {
+            swipeId: lastMes.swipe_id ?? 0,
+            preferredName: requestedName,
+        });
+    } else {
+        name = requestedName;
+    }
     if (!name) {
         return null;
     }
@@ -232,12 +414,14 @@ export async function createNewBookmark(mesId, { forceName = null } = {}) {
     const newMetadata = { main_chat: mainChat };
     await saveItemizedPrompts(name);
 
-    if (selected_group) {
-        if (!await saveGroupBookmarkChat(selected_group, name, newMetadata, mesId)) {
+    if (!pagingState.active) {
+        if (selected_group) {
+            if (!await saveGroupBookmarkChat(selected_group, name, newMetadata, mesId, { swipeId: lastMes.swipe_id ?? 0 })) {
+                return null;
+            }
+        } else if (!await saveChat({ chatName: name, withMetadata: newMetadata, mesId, swipeId: lastMes.swipe_id ?? 0 })) {
             return null;
         }
-    } else {
-        await saveChat({ chatName: name, withMetadata: newMetadata, mesId });
     }
 
     lastMes.extra['bookmark_link'] = name;
@@ -245,7 +429,9 @@ export async function createNewBookmark(mesId, { forceName = null } = {}) {
     const mes = $(`.mes[mesid="${mesId}"]`);
     updateBookmarkDisplay(mes, name);
 
-    await saveChatConditional();
+    if (!await saveChatConditional()) {
+        return null;
+    }
     toastr.success('Click the flag icon next to the message to open the checkpoint chat.', 'Create Checkpoint', { timeOut: 10000 });
     return name;
 }
@@ -395,23 +581,28 @@ export async function convertSoloToGroupChat() {
 /**
  * Creates a new branch from the message with the given ID
  * @param {number} mesId Message ID
+ * @param {{swipeId?: number|null, absoluteMessageId?: number|null, signal?: AbortSignal, requireAtomic?: boolean}} [options] Branch options
  * @returns {Promise<string?>} Branch file name
  */
-export async function branchChat(mesId) {
-    if (this_chid === undefined && !selected_group) {
+export async function branchChat(mesId, { swipeId = null, absoluteMessageId = null, signal, requireAtomic = false } = {}) {
+    const source = captureBranchContext();
+    const isCurrent = () => isCurrentBranchContext(source, signal);
+    if (source.characterId === null && !source.isGroup) {
         toastr.info('No character selected.', 'Create Branch');
         return null;
     }
+    if (!isCurrent()) return null;
 
-    const fileName = await createBranch(mesId);
+    const fileName = await createBranch(mesId, { swipeId, absoluteMessageId, signal, sourceContext: source, requireAtomic });
+    if (!fileName || !isCurrent()) return null;
     await saveItemizedPrompts(fileName);
+    if (!isCurrent()) return null;
 
-    if (selected_group) {
-        await openGroupChat(selected_group, fileName);
-    } else {
-        await openCharacterChat(fileName);
-    }
-
+    const openBranch = source.isGroup
+        ? () => openGroupChat(source.groupId, fileName, { signal, expectedIdentity: source.identity })
+        : () => openCharacterChat(fileName, { signal, expectedIdentity: source.identity });
+    if (!isCurrent()) return null;
+    await openBranch();
     return fileName;
 }
 

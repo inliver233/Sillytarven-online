@@ -89,6 +89,7 @@ import {
     setCachedChatPage,
     setChatPagingState,
     invalidateCurrentChatContext,
+    getCurrentChatIdentity,
 } from '../script.js';
 import { printTagList, createTagMapFromList, applyTagsOnCharacterSelect, tag_map, applyTagsOnGroupSelect } from './tags.js';
 import { FILTER_TYPES, FilterHelper } from './filters.js';
@@ -97,8 +98,9 @@ import { POPUP_TYPE, Popup, callGenericPopup } from './popup.js';
 import { t } from './i18n.js';
 import { accountStorage } from './util/AccountStorage.js';
 import {
+    createChatBranchRequest,
     createGroupChatSaveRequest,
-    getFullGroupMessageIndex,
+    createSwipeSelectedPrefix,
     normalizeGroupChatPage,
     splitGroupChatFile,
 } from './group-chat-paging.js';
@@ -169,11 +171,14 @@ function setAutoModeWorker() {
  * @param {boolean} reload Whether to reload characters after saving
  */
 async function _save(group, reload = true) {
-    await fetch('/api/groups/edit', {
+    const response = await fetch('/api/groups/edit', {
         method: 'POST',
         headers: getRequestHeaders(),
         body: JSON.stringify(group),
     });
+    if (!response.ok) {
+        throw new Error(`Group save failed: ${response.status}`);
+    }
     if (reload) {
         await getCharacters();
     }
@@ -338,6 +343,7 @@ export async function getGroupChat(groupId, reload = false, { signal: parentSign
                     chatId,
                     messageOffset: page.messageOffset,
                     revision: page.revision,
+                    contentHash: page.contentHash,
                 });
                 usedPaging = true;
                 if (!cached) {
@@ -350,6 +356,7 @@ export async function getGroupChat(groupId, reload = false, { signal: parentSign
                         messageOffset: page.messageOffset,
                         hasMore: page.hasMore,
                         revision: page.revision,
+                        contentHash: page.contentHash,
                     });
                 }
             }
@@ -731,9 +738,14 @@ function resetSelectedGroup() {
  * @param {string} groupId Group ID
  * @param {boolean} shouldSaveGroup Whether to save the group after saving the chat
  * @param {boolean} force Force the saving on integrity error
+ * @param {{expectedIdentity?: string, signal?: AbortSignal}} [options] Context that owns this save
  * @returns {Promise<boolean>} Whether the group chat was saved.
  */
-async function saveGroupChat(groupId, shouldSaveGroup, force = false) {
+async function saveGroupChat(groupId, shouldSaveGroup, force = false, { expectedIdentity, signal } = {}) {
+    const isSameContext = () => expectedIdentity === undefined || getCurrentChatIdentity() === expectedIdentity;
+    const isExpectedContext = () => !signal?.aborted && isSameContext();
+    if (!isExpectedContext()) return false;
+
     const group = groups.find(x => x.id == groupId);
     if (!group) {
         console.warn('Group not found', groupId);
@@ -759,7 +771,9 @@ async function saveGroupChat(groupId, shouldSaveGroup, force = false) {
         method: 'POST',
         headers: getRequestHeaders(),
         body: JSON.stringify(saveRequest.body),
+        ...(signal ? { signal } : {}),
     });
+    if (!isSameContext()) return response.ok;
 
     if (!response.ok) {
         let errorData = null;
@@ -768,6 +782,7 @@ async function saveGroupChat(groupId, shouldSaveGroup, force = false) {
         } catch (error) {
             console.warn('Failed to parse group chat save error:', error);
         }
+        if (!isExpectedContext()) return false;
         if (errorData?.error === 'storage_limit') {
             toastr.error(errorData.message || '存储空间不足，无法保存群聊记录。请删除内容或使用激活码扩容。', '存储空间不足');
             return false;
@@ -801,30 +816,44 @@ async function saveGroupChat(groupId, shouldSaveGroup, force = false) {
             return false;
         }
 
-        return await saveGroupChat(groupId, shouldSaveGroup, true);
+        return await saveGroupChat(groupId, shouldSaveGroup, true, { expectedIdentity, signal });
     }
 
     if (saveRequest.tail) {
-        const responseData = await response.json();
-        if (typeof responseData?.revision !== 'string') {
-            toastr.error(t`Check the server connection and reload the page to prevent data loss.`, t`Group Chat could not be saved`);
-            return false;
+        let responseData = null;
+        try {
+            responseData = await response.json();
+        } catch (error) {
+            console.error('Group chat tail save committed but its metadata response could not be parsed.', error);
         }
-        setChatPagingState({ revision: responseData.revision });
-        const pagingState = getChatPagingState();
-        setCachedChatPage({
-            isGroup: true,
-            chatId,
-            messages,
-            header: chatHeader,
-            cursor: pagingState.cursor,
-            messageOffset: pagingState.messageOffset,
-            hasMore: pagingState.hasMore,
-            revision: pagingState.revision,
-        });
+        if (!isSameContext()) return true;
+        const hasCommittedMetadata = typeof responseData?.revision === 'string'
+            && typeof responseData?.contentHash === 'string';
+        if (hasCommittedMetadata) {
+            setChatPagingState({
+                revision: responseData.revision,
+                contentHash: responseData.contentHash,
+            });
+            const pagingState = getChatPagingState();
+            setCachedChatPage({
+                isGroup: true,
+                chatId,
+                messages,
+                header: chatHeader,
+                cursor: pagingState.cursor,
+                messageOffset: pagingState.messageOffset,
+                hasMore: pagingState.hasMore,
+                revision: responseData.revision,
+                contentHash: responseData.contentHash,
+            });
+        } else {
+            clearCachedChatPage({ isGroup: true, chatId });
+            toastr.error(t`Reload the chat before making more changes.`, t`Group Chat metadata could not be updated`);
+        }
     }
 
     if (shouldSaveGroup) {
+        if (!isExpectedContext()) return true;
         await editGroup(groupId, false, false);
     }
     return true;
@@ -2324,10 +2353,19 @@ export async function getGroupPastChats(groupId) {
  * Opens a specific group chat for the specified group by its ID.
  * @param {string} groupId Group ID
  * @param {string} chatId Chat ID
+ * @param {object} [options] Context guard options
+ * @param {AbortSignal} [options.signal] Parent navigation signal
+ * @param {string} [options.expectedIdentity] Chat identity that initiated the navigation
  * @returns {Promise<void>}
  */
-export async function openGroupChat(groupId, chatId) {
+export async function openGroupChat(groupId, chatId, { signal, expectedIdentity } = {}) {
+    const isExpectedContext = () => !signal?.aborted
+        && (expectedIdentity === undefined || getCurrentChatIdentity() === expectedIdentity);
+    if (!isExpectedContext()) return;
+
     await waitUntilCondition(() => !isChatSaving, debounce_timeout.extended, 10);
+    if (!isExpectedContext()) return;
+
     const group = groups.find(x => x.id === groupId);
 
     if (!group || !group.chats.includes(chatId)) {
@@ -2335,6 +2373,8 @@ export async function openGroupChat(groupId, chatId) {
     }
 
     await clearChat();
+    if (!isExpectedContext()) return;
+
     chat.length = 0;
     group.chat_id = chatId;
     invalidateCurrentChatContext();
@@ -2352,22 +2392,26 @@ export async function openGroupChat(groupId, chatId) {
  * @param {string} newChatId New chat ID
  * @returns {Promise<void>} Promise that resolves when the group chat is renamed
  */
-export async function renameGroupChat(groupId, oldChatId, newChatId) {
+export async function renameGroupChat(groupId, oldChatId, newChatId, updatedGroup = null) {
     const group = groups.find(x => x.id === groupId);
+    const oldChatKey = String(oldChatId);
+    const newChatKey = String(newChatId);
 
-    if (!group || !group.chats.includes(oldChatId)) {
+    if (!group || !group.chats.some(chatId => String(chatId) === oldChatKey)) {
         return;
     }
 
-    if (group.chat_id === oldChatId) {
-        group.chat_id = newChatId;
-        invalidateCurrentChatContext();
+    const wasActive = String(group.chat_id) === oldChatKey;
+    if (updatedGroup && String(updatedGroup.id) === String(groupId) && Array.isArray(updatedGroup.chats)) {
+        Object.assign(group, updatedGroup);
+    } else {
+        group.chats = group.chats.map(chatId => String(chatId) === oldChatKey ? newChatKey : chatId);
+        if (wasActive) group.chat_id = newChatKey;
     }
 
-    group.chats.splice(group.chats.indexOf(oldChatId), 1);
-    group.chats.push(newChatId);
-
-    await editGroup(groupId, true, true);
+    if (wasActive) {
+        invalidateCurrentChatContext();
+    }
 }
 
 /**
@@ -2492,9 +2536,16 @@ export async function importGroupChat(formData, { refresh = true } = {}) {
  * @param {string} name Name of the chat to save
  * @param {ChatMetadata?} metadata New metadata to save with the chat
  * @param {number|undefined} mesId Optional message ID to trim the chat up to
- * @returns {Promise<boolean>} Whether the bookmark chat was saved
+ * @param {{atomicBranch?: boolean, swipeId?: number|null, absoluteMessageIndex?: number|null, preferredName?: string|null, signal?: AbortSignal}} [options] Paged branch options
+ * @returns {Promise<boolean|{ok: boolean, status: number, data: object|null}>} Save result
  */
-export async function saveGroupBookmarkChat(groupId, name, metadata, mesId) {
+export async function saveGroupBookmarkChat(groupId, name, metadata, mesId, {
+    atomicBranch = false,
+    swipeId = null,
+    absoluteMessageIndex = null,
+    preferredName = null,
+    signal,
+} = {}) {
     const group = groups.find(x => x.id === groupId);
 
     if (!group) {
@@ -2509,37 +2560,72 @@ export async function saveGroupBookmarkChat(groupId, name, metadata, mesId) {
     };
 
     /** @type {ChatMessage[]} */
-    let sourceChat = chat.slice();
-    let targetMessageId = mesId;
+    const sourceChat = chat.slice();
     const pagingState = getChatPagingState();
     const isPagedCurrentChat = pagingState.active
         && pagingState.isGroup
         && pagingState.chatId === group.chat_id;
+    if (pagingState.active && !isPagedCurrentChat) {
+        toastr.error(t`The active paging context does not match this group chat.`, t`Chat could not be saved`);
+        return false;
+    }
     if (isPagedCurrentChat) {
-        // Explicit compatibility operation: commit the local suffix, then load the full source once.
-        if (!await saveGroupChat(groupId, false)) {
+        if (!atomicBranch) {
+            toastr.warning(t`Reload the complete chat before creating a checkpoint.`, t`Checkpoint creation unavailable`);
             return false;
         }
-        const fullChat = await loadGroupChat(group.chat_id);
-        if (!fullChat) {
-            toastr.error(t`Check the server connection and reload the page to prevent data loss.`, t`Group chat could not be loaded`);
+        if (!Number.isSafeInteger(pagingState.messageOffset) || pagingState.messageOffset < 0
+            || typeof pagingState.revision !== 'string' || !pagingState.revision
+            || typeof pagingState.contentHash !== 'string' || !pagingState.contentHash) {
+            toastr.error(t`Reload the complete chat before creating a checkpoint.`, t`Checkpoint creation unavailable`);
             return false;
         }
-        const full = splitGroupChatFile(fullChat);
-        if (mesId !== undefined && mesId >= 0 && mesId < chat.length) {
-            targetMessageId = getFullGroupMessageIndex(mesId, pagingState.messageOffset, full.messages, chat);
+
+        const message = chat[mesId];
+        const request = createChatBranchRequest({
+            isGroup: true,
+            groupId: String(groupId),
+            chatId: String(group.chat_id),
+            localMessageIndex: mesId,
+            messageOffset: pagingState.messageOffset,
+            absoluteMessageIndex,
+            swipeId: swipeId ?? message?.swipe_id ?? 0,
+            expectedRevision: pagingState.revision,
+            contentHash: pagingState.contentHash,
+            idempotencyKey: globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`,
+            preferredName: preferredName ?? name,
+        });
+        if (!request) {
+            return { ok: false, status: 400, data: { error: 'invalid_branch_request' } };
         }
-        sourceChat = full.messages;
+
+        const response = await fetch(request.url, {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify(request.body),
+            signal,
+        });
+        let data = null;
+        try {
+            data = await response.json();
+        } catch {
+            // Preserve the response status for caller-owned recovery UI.
+        }
+        return { ok: response.ok, status: response.status, data };
     }
 
-    const trimmedChat = (targetMessageId !== undefined && targetMessageId >= 0 && targetMessageId < sourceChat.length)
-        ? sourceChat.slice(0, Number(targetMessageId) + 1)
-        : sourceChat;
+    const selectedSwipeId = swipeId ?? sourceChat[mesId]?.swipe_id ?? 0;
+    const trimmedChat = createSwipeSelectedPrefix(sourceChat, Number(mesId), selectedSwipeId);
+    if (!trimmedChat) {
+        toastr.error(t`The selected swipe could not be applied to the new chat.`, t`Group chat could not be saved`);
+        return false;
+    }
 
     const response = await fetch('/api/chats/group/save', {
         method: 'POST',
         headers: getRequestHeaders(),
         body: JSON.stringify({ id: name, chat: [chatHeader, ...trimmedChat] }),
+        signal,
     });
 
     if (!response.ok) {
@@ -2557,6 +2643,9 @@ export async function saveGroupBookmarkChat(groupId, name, metadata, mesId) {
         return false;
     }
 
+    if (signal?.aborted) {
+        return false;
+    }
     group.chats.push(name);
     await editGroup(groupId, true, false);
     return true;

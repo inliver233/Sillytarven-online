@@ -7,16 +7,26 @@ import test from 'node:test';
 
 import express from 'express';
 
-import { createExtensionsRouter } from '../src/endpoints/extensions.js';
+import { createExtensionsRouter, sanitizeExtensionUrlForLog } from '../src/endpoints/extensions.js';
+
+test('extension URL logging keeps only a bounded origin', () => {
+    const logged = sanitizeExtensionUrlForLog('https://user:secret@example.com:8443/private/repo.git?token=secret#fragment');
+    assert.equal(logged, 'https://example.com:8443');
+    assert.doesNotMatch(logged, /user|secret|private|repo|token|fragment/u);
+    assert.ok(logged.length <= 256);
+    assert.equal(sanitizeExtensionUrlForLog('not a URL'), '[invalid extension URL]');
+});
 
 async function createFixture() {
     const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'sillytavern-extension-management-'));
-    const localRoot = path.join(root, 'local');
+    const userRoot = path.join(root, 'user');
+    const localRoot = path.join(userRoot, 'extensions');
     const globalRoot = path.join(root, 'global');
     const builtinRoot = path.join(root, 'builtin');
-    await Promise.all([localRoot, globalRoot, builtinRoot]
+    const stagingRoot = path.join(root, 'staging');
+    await Promise.all([localRoot, globalRoot, builtinRoot, stagingRoot]
         .map(directory => fs.promises.mkdir(directory, { recursive: true })));
-    return { root, localRoot, globalRoot, builtinRoot };
+    return { root, userRoot, localRoot, globalRoot, builtinRoot, stagingRoot };
 }
 
 async function startManagementServer(fixture, { admin = true, ...dependencies } = {}) {
@@ -25,7 +35,7 @@ async function startManagementServer(fixture, { admin = true, ...dependencies } 
     app.use((request, _response, next) => {
         request.user = {
             profile: { handle: admin ? 'admin' : 'member', admin },
-            directories: { extensions: fixture.localRoot },
+            directories: { root: fixture.userRoot, extensions: fixture.localRoot },
         };
         next();
     });
@@ -34,6 +44,8 @@ async function startManagementServer(fixture, { admin = true, ...dependencies } 
         builtinRoot: fixture.builtinRoot,
         ...dependencies,
         enabled: dependencies.enabled ?? true,
+        stagingRoot: dependencies.stagingRoot ?? fixture.stagingRoot,
+        canConsumeStorage: dependencies.canConsumeStorage ?? (async () => ({ allowed: true })),
         dnsLookup: dependencies.dnsLookup ?? (async () => [{ address: '93.184.216.34', family: 4 }]),
     }));
     const server = await new Promise((resolve, reject) => {
@@ -55,6 +67,26 @@ async function post(baseUrl, endpoint, body) {
 
 async function closeServer(server) {
     await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+}
+
+function isInside(parentPath, childPath) {
+    const relative = path.relative(path.resolve(parentPath), path.resolve(childPath));
+    return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+function listTransactionDirectories(stagingRoot) {
+    if (!fs.existsSync(stagingRoot)) return [];
+    const transactions = [];
+    for (const namespace of fs.readdirSync(stagingRoot, { withFileTypes: true })) {
+        if (!namespace.isDirectory()) continue;
+        const namespacePath = path.join(stagingRoot, namespace.name);
+        for (const entry of fs.readdirSync(namespacePath, { withFileTypes: true })) {
+            if (entry.isDirectory() && entry.name.startsWith('tx-')) {
+                transactions.push(path.join(namespacePath, entry.name));
+            }
+        }
+    }
+    return transactions;
 }
 
 test('disabled extension routes consistently return not found without side effects', async () => {
@@ -322,38 +354,47 @@ test('incomplete and invalid clones return failure and clean the target director
     }
 });
 
-test('delete failure does not report success or remove resolver-selected content', async () => {
+test('delete reports committed success when transaction cleanup is retried', async () => {
     const fixture = await createFixture();
     const extensionPath = path.join(fixture.localRoot, 'undeletable');
     await fs.promises.mkdir(extensionPath);
     await fs.promises.writeFile(path.join(extensionPath, 'manifest.json'), '{}');
-    const removeDirectory = async () => {
-        throw Object.assign(new Error('injected delete failure'), { code: 'EACCES' });
+    let cleanupCalls = 0;
+    const removeDirectory = async (target, options) => {
+        cleanupCalls += 1;
+        if (cleanupCalls === 1) {
+            throw Object.assign(new Error('injected cleanup failure'), { code: 'EACCES' });
+        }
+        await fs.promises.rm(target, options);
     };
     const { server, baseUrl } = await startManagementServer(fixture, { removeDirectory });
     try {
         const response = await post(baseUrl, 'delete', { extensionName: 'undeletable', global: false });
-        assert.equal(response.status, 500);
-        assert.equal(fs.existsSync(extensionPath), true);
+        assert.equal(response.status, 200);
+        assert.equal(fs.existsSync(extensionPath), false);
+        assert.equal(listTransactionDirectories(fixture.stagingRoot).length, 1);
+
+        const recovery = await fetch(`${baseUrl}/api/extensions/discover`);
+        assert.equal(recovery.status, 200);
+        assert.equal(listTransactionDirectories(fixture.stagingRoot).length, 0);
     } finally {
         await closeServer(server);
         await fs.promises.rm(fixture.root, { recursive: true, force: true });
     }
 });
 
-test('move source-removal failure rolls back the copied destination and returns failure', async () => {
+test('move source publication failure rolls back the copied destination and returns failure', async () => {
     const fixture = await createFixture();
     const sourcePath = path.join(fixture.localRoot, 'moveme');
     const destinationPath = path.join(fixture.globalRoot, 'moveme');
     await fs.promises.mkdir(sourcePath);
     await fs.promises.writeFile(path.join(sourcePath, 'manifest.json'), '{}');
-    const removeDirectorySync = (target, options) => {
-        if (path.resolve(target) === path.resolve(sourcePath)) {
-            throw Object.assign(new Error('injected source removal failure'), { code: 'EACCES' });
+    const transactionHook = async (phase, transaction) => {
+        if (phase === 'before-backup' && transaction.manifest.operation === 'move-source') {
+            throw Object.assign(new Error('injected source publication failure'), { code: 'EACCES' });
         }
-        fs.rmSync(target, options);
     };
-    const { server, baseUrl } = await startManagementServer(fixture, { removeDirectorySync });
+    const { server, baseUrl } = await startManagementServer(fixture, { transactionHook });
     try {
         const response = await post(baseUrl, 'move', {
             extensionName: 'moveme', source: 'local', destination: 'global',
@@ -361,6 +402,7 @@ test('move source-removal failure rolls back the copied destination and returns 
         assert.equal(response.status, 500);
         assert.equal(fs.existsSync(sourcePath), true);
         assert.equal(fs.existsSync(destinationPath), false);
+        assert.equal(listTransactionDirectories(fixture.stagingRoot).length, 0);
     } finally {
         await closeServer(server);
         await fs.promises.rm(fixture.root, { recursive: true, force: true });

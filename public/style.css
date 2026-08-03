@@ -1305,6 +1305,30 @@ body .panelControlBar {
     pointer-events: auto;
 }
 
+.swipes-counter.swipe-picker-enabled {
+    cursor: pointer;
+}
+
+.swipes-counter.swipe-picker-enabled:hover,
+.swipes-counter.swipe-picker-enabled:focus-visible {
+    opacity: 0.7;
+}
+
+.swipe_picker_header {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+}
+
+.swipe_picker_popup .popup-body,
+.swipe_picker_popup .popup-content,
+.swipe_picker_content {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+}
+
 
 body.swipeAllMessages .mes:not(.last_mes) .swipes-counter {
     /* Avoid expensive DOM queries */
@@ -4744,33 +4768,126 @@ h5 {
     cursor: pointer;
 }
 
-#select_chat_div {
+#select_chat_div,
+.swipe_picker_div {
     padding: 0;
     height: 100%;
+    min-height: 0;
     overflow-y: auto;
+    overscroll-behavior: contain;
 }
 
-#select_chat_div hr {
+#select_chat_div hr,
+.swipe_picker_div hr {
     margin: 0;
 }
 
 .select_chat_block_wrapper {
     cursor: pointer;
+    min-width: 0;
 }
 
-.select_chat_block {
+.select_chat_block,
+.swipe_picker_block {
     border-radius: 5px;
     margin-top: 5px;
     border: 1px solid var(--SmartThemeBorderColor);
     padding: 5px 7px;
+    min-width: 0;
 }
 
-.select_chat_block:hover {
+.select_chat_block:hover,
+.swipe_picker_block:hover {
     background-color: var(--white30a);
 }
 
-.select_chat_block[highlight] {
+.select_chat_block[highlight],
+.swipe_picker_block[highlight] {
     background-color: var(--cobalt30a);
+}
+
+.swipe_picker_virtual_spacer,
+.swipe_picker_row {
+    flex: 0 0 auto;
+}
+
+.swipe_picker_row {
+    box-sizing: border-box;
+    height: 110px;
+    min-height: 110px;
+    padding-top: 5px;
+}
+
+.swipe_picker_block {
+    box-sizing: border-box;
+    cursor: pointer;
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
+    height: 105px;
+    margin-top: 0;
+    overflow: hidden;
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+.swipe_picker_block .select_chat_block_mes {
+    min-height: 0;
+    width: 100%;
+    text-align: left;
+    overflow-wrap: anywhere;
+}
+
+.swipe_picker_block[data-expanded="true"] .select_chat_block_mes {
+    display: block;
+    overflow-y: auto;
+    -webkit-line-clamp: unset;
+    line-clamp: unset;
+    white-space: pre-wrap;
+    overscroll-behavior: contain;
+}
+
+.swipe_picker_block .select_chat_actions {
+    align-items: baseline;
+    flex: 0 0 auto;
+}
+
+.swipe_picker_action {
+    width: 20px;
+    min-width: 20px;
+    height: 20px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    font: inherit;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.swipe_picker_action:disabled {
+    cursor: default;
+}
+
+.swipe_picker_expand,
+.swipe_picker_copy,
+.swipe_picker_select {
+    cursor: pointer;
+    opacity: 0.5;
+}
+
+.swipe_picker_expand:hover,
+.swipe_picker_copy:hover,
+.swipe_picker_select:hover,
+.swipe_picker_expand:focus-visible,
+.swipe_picker_copy:focus-visible,
+.swipe_picker_select:focus-visible {
+    opacity: 1;
+}
+
+.swipe_picker_expand[aria-expanded="true"] {
+    transform: rotate(180deg);
 }
 
 .select_chat_block .avatar {
@@ -4808,12 +4925,57 @@ h5 {
     opacity: 0.4;
 }
 
-
-.PastChat_cross:hover {
+.PastChat_cross:not(.disabled):hover {
     color: red;
     filter: drop-shadow(0 0 2px red);
     -webkit-animation: infinite-spinning 1s ease-out 0s infinite normal;
     animation: infinite-spinning 1s ease-out 0s infinite normal;
+}
+
+.swipe_picker_delete.disabled,
+.swipe_picker_delete.disabled:hover {
+    cursor: default !important;
+    color: inherit;
+    filter: none;
+    -webkit-animation: none;
+    animation: none;
+    opacity: 0.2 !important;
+}
+
+@media screen and (max-width: 600px) {
+    .swipe_picker_popup.large_dialogue_popup {
+        width: calc(100vw - 12px);
+        width: calc(100dvw - 12px);
+        max-width: calc(100vw - 12px) !important;
+        max-width: calc(100dvw - 12px) !important;
+        height: calc(100vh - 12px) !important;
+        height: calc(100dvh - 12px) !important;
+        padding: 8px;
+    }
+
+    .swipe_picker_block > div:first-of-type {
+        align-items: flex-start;
+        gap: 4px;
+    }
+
+    .swipe_picker_block > div:first-of-type > div:last-child {
+        align-items: flex-end;
+        flex-direction: column;
+        gap: 4px;
+    }
+
+    .swipe_picker_block .select_chat_info {
+        flex-wrap: wrap;
+        justify-content: flex-end;
+    }
+
+    .swipe_picker_popup .popup-controls {
+        flex-wrap: wrap;
+    }
+
+    .swipe_picker_id_label {
+        min-width: 130px;
+    }
 }
 
 #export_character_div {

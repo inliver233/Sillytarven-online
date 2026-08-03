@@ -14,8 +14,10 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { hashCanonicalJson, sha256 } from '../src/canonical-hash.js';
 import {
     createDurableChatTransaction,
+    ensureDurableChatRecovery,
     getChatJournalNamespace,
     recoverDurableChatTransactions,
+    resetDurableChatRecoveryForTests,
 } from '../src/chat-journal.js';
 import { setConfigFilePath } from '../src/util.js';
 
@@ -24,9 +26,15 @@ const dataRoot = path.join(testRoot, 'data');
 const configPath = path.join(testRoot, 'config.yaml');
 const defaultConfigPath = fileURLToPath(new URL('../default/config.yaml', import.meta.url));
 const childPath = fileURLToPath(new URL('./fixtures/chat-journal-crash-child.mjs', import.meta.url));
+const conversionChildPath = fileURLToPath(new URL('./fixtures/chat-conversion-crash-child.mjs', import.meta.url));
+const conversionConfigPath = path.join(testRoot, 'conversion-config.yaml');
 const config = parseYaml(fs.readFileSync(defaultConfigPath, 'utf8'));
 config.performance.chatChunkingEnabled = false;
 fs.writeFileSync(configPath, stringifyYaml(config));
+const conversionConfig = structuredClone(config);
+conversionConfig.performance.chatChunkingEnabled = true;
+conversionConfig.performance.chatChunkSize = 2;
+fs.writeFileSync(conversionConfigPath, stringifyYaml(conversionConfig));
 setConfigFilePath(configPath);
 globalThis.DATA_ROOT = dataRoot;
 
@@ -101,6 +109,61 @@ function resignManifest(manifestPath, mutate) {
     delete manifest.digest;
     mutate(manifest);
     fs.writeFileSync(manifestPath, JSON.stringify({ ...manifest, digest: hashCanonicalJson(manifest) }));
+}
+
+function injectPartialCleanupFailure(namespace) {
+    const originalRmSync = fs.rmSync;
+    let injected = false;
+    fs.rmSync = function (targetPath, options) {
+        const absolute = path.resolve(String(targetPath));
+        if (!injected && path.dirname(absolute) === path.resolve(namespace)
+            && /^cleanup-[a-f0-9]{32}$/.test(path.basename(absolute))) {
+            injected = true;
+            originalRmSync(path.join(absolute, 'manifest.json'), { force: true });
+            originalRmSync(path.join(absolute, 'snapshot'), { recursive: true, force: true });
+            throw Object.assign(new Error('injected partial cleanup failure'), { code: 'EIO' });
+        }
+        return originalRmSync.call(this, targetPath, options);
+    };
+    return () => { fs.rmSync = originalRmSync; };
+}
+
+function injectCleanupDeletionFailures(namespace, count, partial = false) {
+    const originalRmSync = fs.rmSync;
+    let failuresRemaining = count;
+    fs.rmSync = function (targetPath, options) {
+        const absolute = path.resolve(String(targetPath));
+        if (failuresRemaining > 0 && path.dirname(absolute) === path.resolve(namespace)
+            && /^cleanup-[a-f0-9]{32}$/.test(path.basename(absolute))) {
+            if (partial && failuresRemaining === count) {
+                originalRmSync(path.join(absolute, 'manifest.json'), { force: true });
+                originalRmSync(path.join(absolute, 'snapshot'), { recursive: true, force: true });
+            }
+            failuresRemaining--;
+            throw Object.assign(new Error('injected transient cleanup deletion failure'), { code: 'EIO' });
+        }
+        return originalRmSync.call(this, targetPath, options);
+    };
+    return () => { fs.rmSync = originalRmSync; };
+}
+
+function injectFsyncObserver(observer) {
+    const originalOpenSync = fs.openSync;
+    const originalFsyncSync = fs.fsyncSync;
+    const descriptorPaths = new Map();
+    fs.openSync = function (...args) {
+        const descriptor = originalOpenSync.apply(this, args);
+        descriptorPaths.set(descriptor, path.resolve(String(args[0])));
+        return descriptor;
+    };
+    fs.fsyncSync = function (descriptor) {
+        observer(descriptorPaths.get(descriptor));
+        return originalFsyncSync.call(this, descriptor);
+    };
+    return () => {
+        fs.openSync = originalOpenSync;
+        fs.fsyncSync = originalFsyncSync;
+    };
 }
 
 const { router: chatsRouter } = await import('../src/endpoints/chats.js');
@@ -210,6 +273,84 @@ test('router recovery is isolated by authenticated user and hashed sibling names
     assert.deepEqual(fs.readdirSync(namespaceB), []);
 });
 
+test('lazy group conversion recovers original bytes after a process crash in mutating state', async () => {
+    const id = 'conversion-crash';
+    const filePath = path.join(users.a.directories.groupChats, `${id}.jsonl`);
+    const messages = [
+        { name: 'User', is_user: true, send_date: 1, mes: 'first-headerless' },
+        { name: 'Character', is_user: false, send_date: 2, mes: 'second-headerless' },
+    ];
+    const original = messages.map(message => JSON.stringify(message)).join('\n');
+    fs.writeFileSync(filePath, original);
+    const result = spawnSync(process.execPath, [
+        conversionChildPath,
+        users.a.directories.root,
+        users.a.handle,
+        id,
+        conversionConfigPath,
+    ], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.equal(fs.existsSync(`${filePath}.chunks`), true);
+    assert.equal(fs.readdirSync(getChatJournalNamespace(users.a.directories.root, users.a.handle)).length, 1);
+
+    resetDurableChatRecoveryForTests();
+    const recovered = await getGroup('a', id);
+    assert.equal(recovered.status, 200);
+    assert.deepEqual(await recovered.json(), messages);
+    assert.equal(fs.readFileSync(filePath, 'utf8'), original);
+    assert.equal(fs.existsSync(`${filePath}.chunks`), false);
+    assert.deepEqual(fs.readdirSync(getChatJournalNamespace(users.a.directories.root, users.a.handle)), []);
+});
+
+test('transient rollback failure retains a retryable journal and blocks the next write', async () => {
+    const fixture = writeFivePartChat(users.a, 'transient-rollback', 'old-transient');
+    const transaction = createDurableChatTransaction({
+        filePath: fixture.filePath,
+        artifactPaths: fixture.artifacts,
+        userRoot: users.a.directories.root,
+        handle: users.a.handle,
+    });
+    transaction.markMutating();
+    fs.writeFileSync(fixture.filePath, 'partial-transient');
+
+    const originalCopyFileSync = fs.copyFileSync;
+    let failuresRemaining = 2;
+    fs.copyFileSync = function (source, destination, ...args) {
+        if (failuresRemaining > 0 && String(destination).includes('.recovery-')) {
+            failuresRemaining--;
+            throw Object.assign(new Error('injected transient restore failure'), { code: 'EIO' });
+        }
+        return originalCopyFileSync.call(this, source, destination, ...args);
+    };
+    try {
+        assert.throws(() => transaction.rollback(), /injected transient restore failure/);
+        const namespace = getChatJournalNamespace(users.a.directories.root, users.a.handle);
+        assert.equal(fs.readdirSync(namespace).length, 1);
+
+        const blockedWrite = await fetch(`http://127.0.0.1:${address.port}/api/chats/group/save`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+                id: fixture.id,
+                chat: [fixture.header, { ...fixture.message, mes: 'must-not-publish' }],
+            }),
+        });
+        assert.equal(blockedWrite.status, 500);
+        assert.deepEqual(await blockedWrite.json(), { error: 'chat_recovery_failed' });
+        assert.equal(fs.readdirSync(namespace).length, 1);
+    } finally {
+        fs.copyFileSync = originalCopyFileSync;
+    }
+
+    const recovered = await getGroup('a', fixture.id);
+    assert.equal(recovered.status, 200);
+    assert.deepEqual(await recovered.json(), [fixture.header, fixture.message]);
+    for (const artifact of fixture.artifacts) {
+        assert.deepEqual(fs.readFileSync(artifact), fixture.bytes[artifact]);
+    }
+    assert.deepEqual(fs.readdirSync(getChatJournalNamespace(users.a.directories.root, users.a.handle)), []);
+});
+
 test('prepared state recovery restores the snapshot and removes the journal', () => {
     const fixture = writeFivePartChat(users.a, 'prepared-crash', 'old-prepared');
     runCrash('prepared', users.a, fixture, 'unused');
@@ -275,4 +416,251 @@ test('recovery rejects a malicious artifact path and cross-user root fingerprint
     );
     assert.equal(fs.readFileSync(victim, 'utf8'), 'do-not-touch');
     fs.rmSync(transactionDirectory, { recursive: true, force: true });
+});
+
+test('commit fsyncs target files and directories before the committed marker', () => {
+    const user = createUser('journal-commit-fsync');
+    const fixture = writeFivePartChat(user, 'commit-fsync', 'before-fsync');
+    const transaction = createDurableChatTransaction({
+        filePath: fixture.filePath,
+        artifactPaths: fixture.artifacts,
+        userRoot: user.directories.root,
+        handle: user.handle,
+    });
+    transaction.markMutating();
+    fs.writeFileSync(fixture.filePath, 'committed-fsync-bytes');
+    const manifestPath = path.join(transaction.directory, 'manifest.json');
+    const syncOrder = [];
+    let committedAt = -1;
+    const restoreFsync = injectFsyncObserver(syncedPath => {
+        syncOrder.push(syncedPath);
+        if (committedAt === -1 && fs.existsSync(manifestPath)
+            && JSON.parse(fs.readFileSync(manifestPath, 'utf8')).state === 'committed') {
+            committedAt = syncOrder.length - 1;
+        }
+    });
+    try {
+        transaction.commit();
+    } finally {
+        restoreFsync();
+    }
+
+    const expectedTargets = [
+        ...fixture.artifacts,
+        `${fixture.filePath}.chunks`,
+        path.dirname(fixture.filePath),
+    ].map(filePath => path.resolve(filePath));
+    assert.ok(committedAt >= 0);
+    for (const expected of expectedTargets) {
+        const syncedAt = syncOrder.indexOf(expected);
+        assert.ok(syncedAt >= 0, `missing fsync for ${expected}`);
+        assert.ok(syncedAt < committedAt, `${expected} was fsynced after committed became visible`);
+    }
+});
+
+test('rollback fsyncs restored files and storage roots before the signed rolled-back marker', () => {
+    const user = createUser('journal-rollback-fsync');
+    const fixture = writeFivePartChat(user, 'rollback-fsync', 'before-rollback-fsync');
+    const transaction = createDurableChatTransaction({
+        filePath: fixture.filePath,
+        artifactPaths: fixture.artifacts,
+        userRoot: user.directories.root,
+        handle: user.handle,
+    });
+    transaction.markMutating();
+    for (const artifact of fixture.artifacts) fs.writeFileSync(artifact, 'partial-rollback-fsync');
+
+    const syncOrder = [];
+    let rolledBackAt = -1;
+    const restoreFsync = injectFsyncObserver(syncedPath => {
+        syncOrder.push(syncedPath);
+        if (path.basename(syncedPath ?? '') !== 'manifest.json' || !fs.existsSync(syncedPath)) return;
+        const manifest = JSON.parse(fs.readFileSync(syncedPath, 'utf8'));
+        if (manifest.state === 'rolled-back' && rolledBackAt === -1) rolledBackAt = syncOrder.length - 1;
+    });
+    try {
+        transaction.rollback();
+    } finally {
+        restoreFsync();
+    }
+
+    const expectedBeforeTerminal = [
+        ...fixture.artifacts,
+        `${fixture.filePath}.chunks`,
+        path.dirname(fixture.filePath),
+        user.directories.root,
+    ].map(filePath => path.resolve(filePath));
+    assert.ok(rolledBackAt >= 0, 'the rolled-back manifest must become observable during fsync');
+    for (const expectedPath of expectedBeforeTerminal) {
+        const syncedAt = syncOrder.indexOf(expectedPath);
+        assert.ok(syncedAt >= 0, `missing restored-state fsync for ${expectedPath}`);
+        assert.ok(syncedAt < rolledBackAt, `${expectedPath} was fsynced after rolled-back became visible`);
+    }
+});
+
+test('rollback partial cleanup leaves a safe manifestless tombstone', () => {
+    const user = createUser('journal-rollback-partial-cleanup');
+    const fixture = writeFivePartChat(user, 'rollback-partial-cleanup', 'before-rollback-cleanup');
+    const transaction = createDurableChatTransaction({
+        filePath: fixture.filePath,
+        artifactPaths: fixture.artifacts,
+        userRoot: user.directories.root,
+        handle: user.handle,
+    });
+    transaction.markMutating();
+    fs.writeFileSync(fixture.filePath, 'partial-rollback-cleanup');
+    const namespace = getChatJournalNamespace(user.directories.root, user.handle);
+    const restoreRmSync = injectPartialCleanupFailure(namespace);
+    try {
+        assert.doesNotThrow(() => transaction.rollback());
+    } finally {
+        restoreRmSync();
+    }
+
+    const [entry] = fs.readdirSync(namespace);
+    assert.match(entry, /^cleanup-[a-f0-9]{32}$/);
+    const tombstone = path.join(namespace, entry);
+    assert.equal(fs.existsSync(path.join(tombstone, 'manifest.json')), false);
+    assert.equal(fs.existsSync(path.join(tombstone, 'snapshot')), false);
+    for (const artifact of fixture.artifacts) assert.deepEqual(fs.readFileSync(artifact), fixture.bytes[artifact]);
+    assert.deepEqual(ensureDurableChatRecovery(user.directories.root, user.handle), { restored: 0, cleaned: 1 });
+    assert.deepEqual(fs.readdirSync(namespace), []);
+});
+
+test('cleanup deletion retries in-process before allowing a later chat write', () => {
+    const user = createUser('journal-cleanup-retry');
+    const fixture = writeFivePartChat(user, 'cleanup-retry', 'before-cleanup-retry');
+    const transaction = createDurableChatTransaction({
+        filePath: fixture.filePath,
+        artifactPaths: fixture.artifacts,
+        userRoot: user.directories.root,
+        handle: user.handle,
+    });
+    transaction.markMutating();
+    fs.writeFileSync(fixture.filePath, 'partial-cleanup-retry');
+    const namespace = getChatJournalNamespace(user.directories.root, user.handle);
+    const restoreRmSync = injectCleanupDeletionFailures(namespace, 2, true);
+    try {
+        transaction.rollback();
+        let writeStarted = false;
+        assert.throws(() => {
+            ensureDurableChatRecovery(user.directories.root, user.handle);
+            writeStarted = true;
+            fs.writeFileSync(fixture.filePath, 'must-not-intervene');
+        }, /injected transient cleanup deletion failure/);
+        assert.equal(writeStarted, false);
+        for (const artifact of fixture.artifacts) assert.deepEqual(fs.readFileSync(artifact), fixture.bytes[artifact]);
+        assert.equal(fs.readdirSync(namespace).length, 1);
+    } finally {
+        restoreRmSync();
+    }
+
+    assert.deepEqual(ensureDurableChatRecovery(user.directories.root, user.handle), { restored: 0, cleaned: 1 });
+    assert.deepEqual(fs.readdirSync(namespace), []);
+});
+
+test('committed partial cleanup retries from a manifestless canonical tombstone', () => {
+    const user = createUser('journal-partial-cleanup');
+    const fixture = writeFivePartChat(user, 'partial-cleanup', 'before-cleanup');
+    const transaction = createDurableChatTransaction({
+        filePath: fixture.filePath,
+        artifactPaths: fixture.artifacts,
+        userRoot: user.directories.root,
+        handle: user.handle,
+    });
+    transaction.markMutating();
+    fs.writeFileSync(fixture.filePath, 'committed-cleanup-bytes');
+    const namespace = getChatJournalNamespace(user.directories.root, user.handle);
+    const restoreRmSync = injectPartialCleanupFailure(namespace);
+    try {
+        assert.doesNotThrow(() => transaction.commit());
+    } finally {
+        restoreRmSync();
+    }
+
+    const entries = fs.readdirSync(namespace);
+    assert.equal(entries.length, 1);
+    assert.match(entries[0], /^cleanup-[a-f0-9]{32}$/);
+    const tombstone = path.join(namespace, entries[0]);
+    assert.equal(fs.existsSync(path.join(tombstone, 'manifest.json')), false);
+    assert.equal(fs.existsSync(path.join(tombstone, 'snapshot')), false);
+    assert.deepEqual(recoverDurableChatTransactions(user.directories.root, user.handle), { restored: 0, cleaned: 1 });
+    assert.equal(fs.readFileSync(fixture.filePath, 'utf8'), 'committed-cleanup-bytes');
+    assert.deepEqual(fs.readdirSync(namespace), []);
+});
+
+test('recovery rejects manifestless ordinary transactions and forged cleanup state', () => {
+    const user = createUser('journal-forged-cleanup');
+    const fixture = writeFivePartChat(user, 'forged-cleanup', 'before-forgery');
+    runCrash('mutating', user, fixture, 'partial-forgery');
+    const namespace = getChatJournalNamespace(user.directories.root, user.handle);
+    const transactionName = fs.readdirSync(namespace)[0];
+    const transactionDirectory = path.join(namespace, transactionName);
+    const manifestPath = path.join(transactionDirectory, 'manifest.json');
+    const manifestBytes = fs.readFileSync(manifestPath);
+    fs.rmSync(manifestPath);
+    assert.throws(
+        () => recoverDurableChatTransactions(user.directories.root, user.handle),
+        /transaction manifest is missing/i,
+    );
+    fs.writeFileSync(manifestPath, manifestBytes);
+    const cleanupDirectory = path.join(namespace, `cleanup-${'a'.repeat(32)}`);
+    fs.renameSync(transactionDirectory, cleanupDirectory);
+    assert.throws(
+        () => recoverDurableChatTransactions(user.directories.root, user.handle),
+        /forged|nonterminal/i,
+    );
+    assert.equal(fs.existsSync(cleanupDirectory), true);
+    fs.rmSync(cleanupDirectory, { recursive: true, force: true });
+});
+
+test('cleanup recovery rejects unknown artifacts, symbolic links, and committed manifest tampering', (t) => {
+    const user = createUser('journal-cleanup-structure');
+    const namespace = path.join(path.dirname(user.directories.root), '.migration-journals', sha256(user.handle));
+    fs.mkdirSync(namespace, { recursive: true });
+    const unknownCleanup = path.join(namespace, `cleanup-${'b'.repeat(32)}`);
+    fs.mkdirSync(unknownCleanup);
+    fs.writeFileSync(path.join(unknownCleanup, 'unknown.bin'), 'forged');
+    assert.throws(
+        () => recoverDurableChatTransactions(user.directories.root, user.handle),
+        /unknown chat journal artifact/i,
+    );
+    fs.rmSync(unknownCleanup, { recursive: true, force: true });
+
+    const symlinkCleanup = path.join(namespace, `cleanup-${'c'.repeat(32)}`);
+    fs.mkdirSync(symlinkCleanup);
+    const outside = path.join(testRoot, 'journal-cleanup-symlink-target');
+    fs.mkdirSync(outside, { recursive: true });
+    let symlinkCreated = true;
+    try {
+        fs.symlinkSync(outside, path.join(symlinkCleanup, 'snapshot'), process.platform === 'win32' ? 'junction' : 'dir');
+    } catch (error) {
+        if (['EPERM', 'EACCES'].includes(error.code)) {
+            t.diagnostic(`Symlink assertion skipped: ${error.code}`);
+            symlinkCreated = false;
+        } else {
+            throw error;
+        }
+    }
+    if (symlinkCreated) {
+        assert.throws(
+            () => recoverDurableChatTransactions(user.directories.root, user.handle),
+            /unsafe chat journal artifact/i,
+        );
+    }
+    fs.rmSync(symlinkCleanup, { recursive: true, force: true });
+
+    const fixture = writeFivePartChat(user, 'committed-tamper', 'before-tamper');
+    runCrash('committed', user, fixture, 'committed-tamper-bytes');
+    const committedDirectory = path.join(namespace, fs.readdirSync(namespace)[0]);
+    const committedManifestPath = path.join(committedDirectory, 'manifest.json');
+    const committedManifest = JSON.parse(fs.readFileSync(committedManifestPath, 'utf8'));
+    committedManifest.handleHash = sha256('forged-user');
+    fs.writeFileSync(committedManifestPath, JSON.stringify(committedManifest));
+    assert.throws(
+        () => recoverDurableChatTransactions(user.directories.root, user.handle),
+        /cross-user|checksum|manifest/i,
+    );
+    assert.equal(fs.existsSync(committedDirectory), true);
+    fs.rmSync(committedDirectory, { recursive: true, force: true });
 });

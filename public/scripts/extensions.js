@@ -623,6 +623,31 @@ async function activateExtensions() {
     $('#extensions_details').toggleClass('warning', extensionLoadErrors.size > 0);
 }
 
+/**
+ * Preloads resources passively around activation for one discovery snapshot.
+ * @param {ReturnType<typeof getExtensionActivationPlan>} activationPlan Extension activation plan
+ * @returns {Promise<void>}
+ */
+async function activateDiscoveredExtensions(activationPlan) {
+    let resourcePreloads = null;
+    if (power_user.extension_resource_preload === true) {
+        try {
+            const eligibleExtensions = new Set(activationPlan.filter(entry => entry.eligible).map(entry => entry.name));
+            resourcePreloads = preloadExtensionResources(extensionDescriptors, {
+                eligibleExtensions,
+            });
+        } catch (error) {
+            console.warn('Could not preload extension resources. Continuing with normal activation.', error);
+        }
+    }
+
+    try {
+        await activateExtensions();
+    } finally {
+        resourcePreloads?.dispose();
+    }
+}
+
 async function connectClickHandler() {
     const baseUrl = String($('#extensions_url').val());
     extension_settings.apiUrl = baseUrl;
@@ -1488,7 +1513,7 @@ async function switchExtensionBranch(extensionName, isGlobal, branch) {
  * @returns {Promise<void>}
  */
 export async function installExtension(url, global, branch = '') {
-    console.debug('Extension installation started', url);
+    console.debug('Extension installation started');
 
     toastr.info(t`Please wait...`, t`Installing extension`);
 
@@ -1515,7 +1540,7 @@ export async function installExtension(url, global, branch = '') {
         toastr.success(t`Extension '${response.display_name}' by ${response.author} (version ${response.version}) has been installed successfully!`, t`Extension installation successful`);
     }
     console.debug(`Extension "${response.display_name}" has been installed successfully at ${response.extensionPath}`);
-    await loadExtensionSettings({}, false, false);
+    const activationPlan = await loadExtensionSettings({}, false, false, { activate: !lifecycleEnabled });
     await eventSource.emit(event_types.EXTENSION_SETTINGS_LOADED, response);
 
     if (lifecycleEnabled) {
@@ -1531,6 +1556,7 @@ export async function installExtension(url, global, branch = '') {
             return;
         }
 
+        await activateDiscoveredExtensions(activationPlan);
         toastr.success(t`Extension '${response.display_name}' by ${response.author} (version ${response.version}) has been installed successfully!`, t`Extension installation successful`);
     }
 }
@@ -1540,8 +1566,10 @@ export async function installExtension(url, global, branch = '') {
  * @param {object} settings App Settings
  * @param {boolean} versionChanged Is this a version change?
  * @param {boolean} enableAutoUpdate Enable auto-update
+ * @param {{activate?: boolean}} [options] Loading options
+ * @returns {Promise<ReturnType<typeof getExtensionActivationPlan>>} Current activation plan
  */
-export async function loadExtensionSettings(settings, versionChanged, enableAutoUpdate) {
+export async function loadExtensionSettings(settings, versionChanged, enableAutoUpdate, { activate = true } = {}) {
     if (settings.extension_settings) {
         Object.assign(extension_settings, settings.extension_settings);
     }
@@ -1580,26 +1608,13 @@ export async function loadExtensionSettings(settings, versionChanged, enableAuto
         await autoUpdateExtensions(false);
     }
 
-    let resourcePreloads = null;
-    if (power_user.extension_resource_preload === true) {
-        try {
-            const eligibleExtensions = new Set(activationPlan.filter(entry => entry.eligible).map(entry => entry.name));
-            resourcePreloads = preloadExtensionResources(extensionDescriptors, {
-                eligibleExtensions,
-            });
-        } catch (error) {
-            console.warn('Could not preload extension resources. Continuing with normal activation.', error);
-        }
-    }
-
-    try {
-        await activateExtensions();
-    } finally {
-        resourcePreloads?.dispose();
+    if (activate) {
+        await activateDiscoveredExtensions(activationPlan);
     }
     if (extension_settings.autoConnect && extension_settings.apiUrl) {
         connectToApi(extension_settings.apiUrl);
     }
+    return activationPlan;
 }
 
 export function doDailyExtensionUpdatesCheck() {
