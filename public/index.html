@@ -2896,7 +2896,7 @@
                                 <span>免费渠道</span>
                             </label>
                             <select id="free_gemini_channel_select">
-                                <option value="">正在加载管理员渠道...</option>
+                                <option value="" selected>自动路由（推荐）</option>
                             </select>
                             <label for="model_free_gemini_select">
                                 <span>Gemini 模型</span>
@@ -2904,7 +2904,7 @@
                             <select id="model_free_gemini_select">
                                 <option value="">连接后加载模型</option>
                             </select>
-                            <small class="notes">如果管理员增加或删除了渠道，重新切换到该来源即可刷新列表。</small>
+                            <small class="notes">自动模式会聚合所有可用渠道的模型；明确选择渠道时，该渠道作为首选路由。管理员更新渠道后，重新切换到该来源可强制刷新列表。</small>
                         </div>
                         <div class="inline-drawer wide100p" data-source="openai,claude,mistralai,makersuite,vertexai,deepseek,xai">
                             <div class="inline-drawer-toggle inline-drawer-header">

@@ -60,7 +60,12 @@ import {
     getWebTokenizer,
 } from '../tokenizers.js';
 import { getVertexAIAuth, getProjectIdFromServiceAccount } from '../google.js';
-import { getEnabledFreeGeminiChannel } from '../../free-gemini-channels.js';
+import {
+    getFreeGeminiChannelModels,
+    getFreeGeminiFetchAgent,
+    isFreeGeminiModelAllowed,
+    listEnabledFreeGeminiChannels,
+} from '../../free-gemini-channels.js';
 
 const API_OPENAI = 'https://api.openai.com/v1';
 const API_CLAUDE = 'https://api.anthropic.com/v1';
@@ -90,6 +95,393 @@ const API_OPENROUTER = 'https://openrouter.ai/api/v1';
 function getGeminiVersionBaseUrl(apiUrl, apiVersion) {
     const baseUrl = trimTrailingSlash(apiUrl.toString());
     return /\/v1(?:beta)?$/i.test(baseUrl) ? baseUrl : `${baseUrl}/${apiVersion}`;
+}
+
+function normalizeFreeGeminiModelId(value) {
+    const modelId = String(value ?? '').trim().replace(/^models\//, '');
+    return /^[A-Za-z0-9][A-Za-z0-9._-]{0,511}$/.test(modelId) ? modelId : '';
+}
+
+function sanitizeFreeGeminiUpstreamMessage(value, apiKey) {
+    let message = String(value ?? '').trim().replace(/https?:\/\/\S+/gi, '[redacted-url]');
+    for (const secret of [apiKey, apiKey ? encodeURIComponent(apiKey) : '']) {
+        if (secret) {
+            message = message.replaceAll(secret, '[redacted]');
+        }
+    }
+    return message.replace(/\s+/g, ' ').slice(0, 500) || '上游请求失败。';
+}
+
+function mapFreeGeminiUpstreamStatus(status) {
+    return [400, 422, 429, 502, 503, 504].includes(status) ? status : 502;
+}
+
+function createFreeGeminiRouteError(message, code, status) {
+    const error = new Error(message);
+    error.code = code;
+    error.status = status;
+    return error;
+}
+
+function getFreeGeminiOutputLimit(channel, model) {
+    const limits = [65536];
+    if (Number.isInteger(model?.outputTokenLimit) && model.outputTokenLimit > 0) {
+        limits.push(model.outputTokenLimit);
+    }
+    if (Number.isInteger(channel?.maxOutputTokens) && channel.maxOutputTokens > 0) {
+        limits.push(channel.maxOutputTokens);
+    }
+    return Math.min(...limits);
+}
+
+const FREE_GEMINI_CONTINUATION_TEXT = 'Continue the previous response.';
+const FREE_GEMINI_MODEL_DISCOVERY_MAX_WAIT_MS = 2000;
+const FREE_GEMINI_MINIMUM_CANDIDATE_BUDGET_MS = 1000;
+
+async function waitForFreeGeminiModelDiscovery(promise, deadlineAt) {
+    const remainingMs = Math.floor(deadlineAt - Date.now());
+    if (remainingMs <= 0) {
+        throw createFreeGeminiRouteError(
+            '免费 Gemini 渠道模型发现超时。',
+            'FREE_GEMINI_MODELS_TIMEOUT',
+            504,
+        );
+    }
+
+    let timeout;
+    try {
+        return await Promise.race([
+            promise,
+            new Promise((_, reject) => {
+                timeout = setTimeout(() => reject(createFreeGeminiRouteError(
+                    '免费 Gemini 渠道模型发现超时。',
+                    'FREE_GEMINI_MODELS_TIMEOUT',
+                    504,
+                )), remainingMs);
+            }),
+        ]);
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+function waitForFreeGeminiFirstStreamChunk(body, disconnectSignal) {
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        const cleanup = () => {
+            body.removeListener('data', onData);
+            body.removeListener('error', onError);
+            body.removeListener('end', onEnd);
+            body.removeListener('close', onClose);
+            disconnectSignal.removeEventListener('abort', onDisconnect);
+        };
+        const finish = (callback, value) => {
+            if (settled) {
+                return;
+            }
+            settled = true;
+            cleanup();
+            callback(value);
+        };
+        const createStreamError = (message, cause) => {
+            const error = new Error(message, cause ? { cause } : undefined);
+            error.code = 'FREE_GEMINI_STREAM_FAILED';
+            return error;
+        };
+        const onData = chunk => {
+            const length = typeof chunk === 'string' ? Buffer.byteLength(chunk) : chunk?.byteLength;
+            if (!length) {
+                return;
+            }
+
+            // Stop flowing synchronously and put the only buffered chunk back. The normal
+            // streaming forwarder will resume the body and emit this chunk exactly once.
+            body.pause();
+            body.unshift(chunk);
+            finish(resolve);
+        };
+        const onError = error => finish(reject, createStreamError('免费 Gemini 流式响应在首字节前失败。', error));
+        const onEnd = () => finish(reject, createStreamError('免费 Gemini 流式响应在首字节前结束。'));
+        const onClose = () => finish(reject, createStreamError('免费 Gemini 流式响应在首字节前关闭。'));
+        const onDisconnect = () => finish(reject, createStreamError('客户端已断开连接。'));
+
+        body.on('data', onData);
+        body.once('error', onError);
+        body.once('end', onEnd);
+        body.once('close', onClose);
+        disconnectSignal.addEventListener('abort', onDisconnect, { once: true });
+        if (disconnectSignal.aborted) {
+            onDisconnect();
+        }
+    });
+}
+
+function getFreeGeminiCandidateBudgetMs(channelTimeoutMs, remainingTotalMs, remainingCandidates) {
+    const safeRemainingMs = Math.max(1, Math.floor(remainingTotalMs));
+    const safeRemainingCandidates = Math.max(1, Math.trunc(remainingCandidates));
+    const fairShareMs = Math.max(1, Math.floor(safeRemainingMs / safeRemainingCandidates));
+    const reservePerLaterCandidateMs = Math.min(FREE_GEMINI_MINIMUM_CANDIDATE_BUDGET_MS, fairShareMs);
+    const maximumCurrentBudgetMs = safeRemainingCandidates > 1
+        ? safeRemainingMs - reservePerLaterCandidateMs * (safeRemainingCandidates - 1)
+        : safeRemainingMs;
+    const requestedBudgetMs = Math.max(FREE_GEMINI_MINIMUM_CANDIDATE_BUDGET_MS, fairShareMs);
+
+    return Math.max(1, Math.floor(Math.min(
+        channelTimeoutMs,
+        safeRemainingMs,
+        maximumCurrentBudgetMs,
+        requestedBudgetMs,
+    )));
+}
+
+function hasFreeGeminiContentPart(part) {
+    if (!part || typeof part !== 'object') {
+        return false;
+    }
+    if (typeof part.text === 'string' && part.text.trim().length > 0) {
+        return true;
+    }
+    return Object.entries(part).some(([key, value]) => key !== 'text' && value != null);
+}
+
+function hasObviouslyConvertibleFreeGeminiMessage(messages) {
+    if (!Array.isArray(messages) || messages.length === 0) {
+        return false;
+    }
+
+    return messages.some(message => {
+        if (!message || typeof message !== 'object') {
+            return false;
+        }
+
+        if (!Array.isArray(message.content)) {
+            if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
+                return true;
+            }
+            if (typeof message.tool_call_id === 'string' && message.tool_call_id.trim().length > 0) {
+                return true;
+            }
+            return message.content != null && String(message.content).trim().length > 0;
+        }
+
+        return message.content.some(part => {
+            if (!part || typeof part !== 'object') {
+                return false;
+            }
+            if (part.type === 'text') {
+                return (typeof part.text === 'string' && part.text.trim().length > 0)
+                    || (typeof message.name === 'string' && message.name.trim().length > 0);
+            }
+            if (part.type === 'tool_calls') {
+                return Array.isArray(part.tool_calls) && part.tool_calls.length > 0;
+            }
+            if (part.type === 'tool_call_id') {
+                return typeof part.tool_call_id === 'string' && part.tool_call_id.trim().length > 0;
+            }
+            if (['image_url', 'video_url', 'audio_url'].includes(part.type)) {
+                const mediaUrl = String(part[part.type]?.url ?? '').trim();
+                const separatorIndex = mediaUrl.indexOf(',');
+                return mediaUrl.toLowerCase().startsWith('data:')
+                    && separatorIndex >= 0
+                    && separatorIndex < mediaUrl.length - 1;
+            }
+            return false;
+        });
+    });
+}
+
+function normalizeFreeGeminiGenerationConfig(generationConfig, channel, model) {
+    const requestedTopK = Number(generationConfig.topK);
+    if (generationConfig.topK == null || generationConfig.topK === '' || !Number.isFinite(requestedTopK)) {
+        delete generationConfig.topK;
+    } else {
+        generationConfig.topK = Math.min(64, Math.max(1, Math.trunc(requestedTopK)));
+    }
+
+    const requestedMaxTokens = Number(generationConfig.maxOutputTokens);
+    if (generationConfig.maxOutputTokens == null || generationConfig.maxOutputTokens === '' || !Number.isFinite(requestedMaxTokens)) {
+        delete generationConfig.maxOutputTokens;
+    } else {
+        generationConfig.maxOutputTokens = Math.min(
+            Math.max(1, Math.trunc(requestedMaxTokens)),
+            getFreeGeminiOutputLimit(channel, model),
+        );
+    }
+
+    if (typeof generationConfig.responseMimeType === 'string') {
+        generationConfig.responseMimeType = generationConfig.responseMimeType.trim();
+        if (!generationConfig.responseMimeType) {
+            delete generationConfig.responseMimeType;
+        } else if (generationConfig.responseMimeType.toLowerCase() === 'application/json') {
+            generationConfig.responseMimeType = 'application/json';
+        }
+    }
+    if (generationConfig.responseSchema != null
+        && generationConfig.responseMimeType !== 'application/json') {
+        delete generationConfig.responseSchema;
+    }
+
+    // Optional or incompatible fields must not reach stricter Gemini-compatible proxies.
+    for (const [key, value] of Object.entries(generationConfig)) {
+        if (value == null) {
+            delete generationConfig[key];
+        }
+    }
+}
+
+function normalizeFreeGeminiRequestBody(body, channel, model) {
+    const generationConfig = body.generationConfig ??= {};
+    normalizeFreeGeminiGenerationConfig(generationConfig, channel, model);
+    if (!Array.isArray(body.tools) || body.tools.length === 0) {
+        delete body.tools;
+        delete body.toolConfig;
+    }
+    if (!Array.isArray(body.systemInstruction?.parts)
+        || !body.systemInstruction.parts.some(hasFreeGeminiContentPart)) {
+        delete body.systemInstruction;
+    }
+
+    if (!Array.isArray(body.contents) || body.contents.length === 0) {
+        return false;
+    }
+    const hasContents = body.contents.some(content =>
+        Array.isArray(content?.parts) && content.parts.some(hasFreeGeminiContentPart));
+    const finalTurn = body.contents.at(-1);
+    const finalTurnHasContents = Array.isArray(finalTurn?.parts)
+        && finalTurn.parts.some(hasFreeGeminiContentPart);
+    if (!hasContents || !finalTurnHasContents) {
+        return false;
+    }
+
+    // Keep the model turn intact and append a user turn before the first upstream request.
+    // Calling this normalizer again is idempotent because the new final role is already user.
+    if (finalTurn.role === 'model') {
+        body.contents.push({
+            role: 'user',
+            parts: [{ text: FREE_GEMINI_CONTINUATION_TEXT }],
+        });
+    }
+    return true;
+}
+
+function normalizeFreeGeminiRequest({ modelId, messages, generationConfig, body, channel, model }) {
+    if (!String(modelId ?? '').trim()) {
+        return { code: 'FREE_GEMINI_INVALID_MODEL', message: 'model 不能为空。' };
+    }
+    if (!Array.isArray(messages) || messages.length === 0) {
+        return { code: 'FREE_GEMINI_INVALID_CONTENTS', message: 'contents 不能为空。' };
+    }
+    if (generationConfig) {
+        normalizeFreeGeminiGenerationConfig(generationConfig, channel, model);
+    }
+    if (body && !normalizeFreeGeminiRequestBody(body, channel, model)) {
+        return { code: 'FREE_GEMINI_INVALID_CONTENTS', message: 'contents 不能为空。' };
+    }
+    return null;
+}
+
+function toFreeGeminiStatusModel(channel, model) {
+    return {
+        id: model.id,
+        channel_id: channel.id,
+        channel_name: channel.name,
+        inputTokenLimit: model.inputTokenLimit ?? null,
+        outputTokenLimit: getFreeGeminiOutputLimit(channel, model),
+    };
+}
+
+async function getFreeGeminiStatusModels(channelId, apiVersion) {
+    const channels = await listEnabledFreeGeminiChannels();
+    const requestedId = String(channelId ?? '').trim();
+    if (requestedId && !channels.some(channel => channel.id === requestedId)) {
+        throw createFreeGeminiRouteError(
+            '该免费 Gemini 渠道不存在或已停用。',
+            'FREE_GEMINI_CHANNEL_UNAVAILABLE',
+            404,
+        );
+    }
+    if (channels.length === 0) {
+        return [];
+    }
+
+    const orderedChannels = requestedId
+        ? [...channels.filter(channel => channel.id === requestedId), ...channels.filter(channel => channel.id !== requestedId)]
+        : channels;
+    const discoveryDeadlineAt = Date.now() + FREE_GEMINI_MODEL_DISCOVERY_MAX_WAIT_MS;
+    const results = await Promise.allSettled(orderedChannels.map(async channel => ({
+        channel,
+        models: await waitForFreeGeminiModelDiscovery(
+            getFreeGeminiChannelModels(channel, { apiVersion }),
+            discoveryDeadlineAt,
+        ),
+    })));
+    const models = new Map();
+    let firstError;
+    for (const result of results) {
+        if (result.status === 'rejected') {
+            firstError ??= result.reason;
+            continue;
+        }
+        for (const model of result.value.models) {
+            if (isFreeGeminiModelAllowed(result.value.channel, model.id) && !models.has(model.id)) {
+                models.set(model.id, toFreeGeminiStatusModel(result.value.channel, model));
+            }
+        }
+    }
+    if (models.size === 0 && firstError && results.every(result => result.status === 'rejected')) {
+        throw firstError;
+    }
+    return [...models.values()];
+}
+
+async function resolveFreeGeminiRoutes(modelId, preferredChannelId, apiVersion, requestStartedAt) {
+    const channels = await listEnabledFreeGeminiChannels();
+    const preferredId = String(preferredChannelId ?? '').trim();
+    if (preferredId && !channels.some(channel => channel.id === preferredId)) {
+        throw createFreeGeminiRouteError(
+            '该免费 Gemini 渠道不存在或已停用。',
+            'FREE_GEMINI_CHANNEL_UNAVAILABLE',
+            404,
+        );
+    }
+
+    const ordered = preferredId
+        ? [...channels.filter(channel => channel.id === preferredId), ...channels.filter(channel => channel.id !== preferredId)]
+        : channels;
+    const eligible = ordered.filter(channel => isFreeGeminiModelAllowed(channel, modelId));
+    const maximumTimeoutMs = eligible.length > 0
+        ? Math.max(...eligible.map(channel => channel.timeoutMs))
+        : 0;
+    const requestDeadlineAt = requestStartedAt + maximumTimeoutMs;
+    const discoveryDeadlineAt = Math.min(
+        requestDeadlineAt,
+        Date.now() + FREE_GEMINI_MODEL_DISCOVERY_MAX_WAIT_MS,
+    );
+    const results = await Promise.allSettled(eligible.map(channel => waitForFreeGeminiModelDiscovery(
+        getFreeGeminiChannelModels(channel, { apiVersion }),
+        discoveryDeadlineAt,
+    )));
+    const routes = [];
+    for (let index = 0; index < eligible.length; index++) {
+        const result = results[index];
+        if (result.status === 'rejected') {
+            const detail = result.reason?.code || 'models_unavailable';
+            console.warn(`Free Gemini channel model discovery failed (${detail}).`);
+            continue;
+        }
+        const model = result.value.find(item => item.id === modelId);
+        if (model) {
+            routes.push({ channel: eligible[index], model });
+        }
+    }
+
+    const routedTimeoutMs = routes.length > 0
+        ? Math.max(...routes.map(route => route.channel.timeoutMs))
+        : maximumTimeoutMs;
+    return {
+        routes,
+        deadlineAt: requestStartedAt + routedTimeoutMs,
+    };
 }
 
 /**
@@ -393,6 +785,13 @@ async function sendClaudeRequest(request, response) {
  */
 async function sendMakerSuiteRequest(request, response, options = {}) {
     const freeGeminiChannel = options.freeGeminiChannel;
+    const deferFreeGeminiFailover = Boolean(freeGeminiChannel && options.deferFreeGeminiFailover);
+    const returnFreeGeminiFailure = (status, payload, canFailover = false) => {
+        if (deferFreeGeminiFailover && canFailover) {
+            return { freeGeminiFailover: true, status, payload };
+        }
+        return response.status(status).send(payload);
+    };
     const useVertexAi = request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.VERTEXAI;
     const apiName = freeGeminiChannel?.name || (useVertexAi ? 'Google Vertex AI' : 'Google AI Studio');
     let apiUrl;
@@ -426,14 +825,14 @@ async function sendMakerSuiteRequest(request, response, options = {}) {
         authType = 'api_key';
     }
 
-    const model = String(request.body.model);
+    const model = String(request.body.model ?? '').trim();
     const stream = Boolean(request.body.stream);
     const enableWebSearch = Boolean(request.body.enable_web_search);
     const requestImages = Boolean(request.body.request_images);
     const reasoningEffort = String(request.body.reasoning_effort);
     const includeReasoning = Boolean(request.body.include_reasoning);
-    const aspectRatio = String(request.body.request_image_aspect_ratio);
-    const imageSize = String(request.body.request_image_resolution);
+    const aspectRatio = String(request.body.request_image_aspect_ratio ?? '').trim();
+    const imageSize = String(request.body.request_image_resolution ?? '').trim();
     const isGemma = model.includes('gemma');
     const isLearnLM = model.includes('learnlm');
 
@@ -446,11 +845,23 @@ async function sendMakerSuiteRequest(request, response, options = {}) {
         maxOutputTokens: request.body.max_tokens,
         temperature: request.body.temperature,
         topP: request.body.top_p,
-        topK: request.body.top_k || undefined,
+        topK: freeGeminiChannel ? request.body.top_k : (request.body.top_k || undefined),
         responseMimeType: responseMimeType,
         responseSchema: responseSchema,
         seed: request.body.seed,
     };
+    if (freeGeminiChannel) {
+        const normalizationError = normalizeFreeGeminiRequest({
+            modelId: model,
+            messages: request.body.messages,
+            generationConfig,
+            channel: freeGeminiChannel,
+            model: options.freeGeminiModel,
+        });
+        if (normalizationError) {
+            return response.status(400).send({ error: normalizationError });
+        }
+    }
 
     function getGeminiBody() {
         // #region UGLY MODEL LISTS AREA
@@ -479,17 +890,22 @@ async function sendMakerSuiteRequest(request, response, options = {}) {
         }
 
         const enableImageModality = requestImages && imageGenerationModels.includes(model);
-        const enableImageConfig = enableImageModality && (aspectRatio || imageSize);
         if (enableImageModality) {
             generationConfig.responseModalities = ['text', 'image'];
-            if (enableImageConfig) {
-                generationConfig.imageConfig = {};
-                if (imageSize && isImageSizeModel(model)) {
-                    generationConfig.imageConfig.imageSize = imageSize;
-                }
-                if (aspectRatio) {
-                    generationConfig.imageConfig.aspectRatio = aspectRatio;
-                }
+            // An explicit image request takes precedence over structured JSON output on free channels.
+            if (freeGeminiChannel) {
+                delete generationConfig.responseMimeType;
+                delete generationConfig.responseSchema;
+            }
+            const imageConfig = {};
+            if (imageSize && isImageSizeModel(model)) {
+                imageConfig.imageSize = imageSize;
+            }
+            if (aspectRatio) {
+                imageConfig.aspectRatio = aspectRatio;
+            }
+            if (Object.keys(imageConfig).length > 0) {
+                generationConfig.imageConfig = imageConfig;
             }
         }
 
@@ -598,14 +1014,27 @@ async function sendMakerSuiteRequest(request, response, options = {}) {
     }
 
     const body = getGeminiBody();
-    console.debug(`${apiName} request:`, body);
-
-    try {
-        const controller = new AbortController();
-        response.once('close', function () {
-            controller.abort();
+    if (freeGeminiChannel) {
+        const normalizationError = normalizeFreeGeminiRequest({
+            modelId: model,
+            messages: request.body.messages,
+            body,
+            channel: freeGeminiChannel,
+            model: options.freeGeminiModel,
         });
+        if (normalizationError) {
+            return response.status(400).send({ error: normalizationError });
+        }
+        console.debug(`${apiName} request prepared for model ${model}.`);
+    } else {
+        console.debug(`${apiName} request:`, body);
+    }
 
+    let freeGeminiTimedOut = false;
+    const disconnectController = new AbortController();
+    const abortOnResponseClose = () => disconnectController.abort();
+    response.once('close', abortOnResponseClose);
+    try {
         const apiVersion = getConfigValue('gemini.apiVersion', 'v1beta');
         const responseType = (stream ? 'streamGenerateContent' : 'generateContent');
 
@@ -658,71 +1087,353 @@ async function sendMakerSuiteRequest(request, response, options = {}) {
             }
         } else {
             const versionBaseUrl = getGeminiVersionBaseUrl(apiUrl, apiVersion);
-            url = `${versionBaseUrl}/models/${model}:${responseType}?key=${apiKey}${stream ? '&alt=sse' : ''}`;
+            const requestModel = freeGeminiChannel ? encodeURIComponent(model) : model;
+            const requestKey = freeGeminiChannel ? encodeURIComponent(apiKey) : apiKey;
+            url = `${versionBaseUrl}/models/${requestModel}:${responseType}?key=${requestKey}${stream ? '&alt=sse' : ''}`;
         }
 
-        const generateResponse = await fetch(url, {
-            body: JSON.stringify(body),
-            method: 'POST',
-            headers: headers,
-            signal: controller.signal,
-        });
+        let generateResponse;
+        const maxAttempts = freeGeminiChannel ? freeGeminiChannel.maxRetries + 1 : 1;
+        const retryStatuses = new Set([429, 502, 503, 504]);
+        const transientCodes = new Set([
+            'ECONNRESET', 'ECONNREFUSED', 'ECONNABORTED', 'ETIMEDOUT', 'EPIPE',
+            'ENETRESET', 'EAI_AGAIN', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET',
+        ]);
+        const requestStartedAt = Date.now();
+        const channelDeadlineAt = freeGeminiChannel ? requestStartedAt + freeGeminiChannel.timeoutMs : Number.POSITIVE_INFINITY;
+        const deadlineAt = freeGeminiChannel
+            ? Math.min(channelDeadlineAt, options.freeGeminiDeadlineAt ?? Number.POSITIVE_INFINITY)
+            : Number.POSITIVE_INFINITY;
+        const createTimeoutError = () => {
+            freeGeminiTimedOut = true;
+            const error = new Error('免费 Gemini 渠道请求超时。');
+            error.code = 'FREE_GEMINI_TIMEOUT';
+            error.status = 504;
+            error.freeGeminiFailover = true;
+            return error;
+        };
+        const waitBeforeRetry = async (attempt) => {
+            const remainingMs = deadlineAt - Date.now();
+            if (remainingMs <= 0) {
+                throw createTimeoutError();
+            }
+            const backoffMs = Math.min(1000, 100 * (2 ** attempt)) + Math.floor(Math.random() * 100);
+            const delayMs = Math.min(backoffMs, remainingMs);
+            await new Promise(resolve => {
+                let timer;
+                const finish = () => {
+                    clearTimeout(timer);
+                    disconnectController.signal.removeEventListener('abort', finish);
+                    resolve();
+                };
+                timer = setTimeout(finish, delayMs);
+                disconnectController.signal.addEventListener('abort', finish, { once: true });
+                if (disconnectController.signal.aborted) {
+                    finish();
+                }
+            });
+            if (disconnectController.signal.aborted) {
+                return false;
+            }
+            if (Date.now() >= deadlineAt) {
+                throw createTimeoutError();
+            }
+            return true;
+        };
 
-        if (stream) {
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+            if (disconnectController.signal.aborted) {
+                return;
+            }
+            const remainingTimeoutMs = deadlineAt - Date.now();
+            if (freeGeminiChannel && remainingTimeoutMs <= 0) {
+                throw createTimeoutError();
+            }
+            const attemptController = new AbortController();
+            const abortAttempt = () => attemptController.abort();
+            disconnectController.signal.addEventListener('abort', abortAttempt, { once: true });
+            let timedOut = false;
+            const timeout = freeGeminiChannel ? setTimeout(() => {
+                timedOut = true;
+                freeGeminiTimedOut = true;
+                attemptController.abort();
+            }, remainingTimeoutMs) : null;
+            let activeBody;
+            let cleanedUp = false;
+            const cleanupAttempt = () => {
+                if (cleanedUp) {
+                    return;
+                }
+                cleanedUp = true;
+                if (timeout) {
+                    clearTimeout(timeout);
+                }
+                disconnectController.signal.removeEventListener('abort', abortAttempt);
+                activeBody?.removeListener('end', cleanupAttempt);
+                activeBody?.removeListener('close', cleanupAttempt);
+                activeBody?.removeListener('error', cleanupAttempt);
+            };
+
             try {
-                // Pipe remote SSE stream to Express response
-                forwardFetchResponse(generateResponse, response);
+                generateResponse = await fetch(url, {
+                    body: JSON.stringify(body),
+                    method: 'POST',
+                    headers: headers,
+                    signal: attemptController.signal,
+                    agent: freeGeminiChannel ? getFreeGeminiFetchAgent(freeGeminiChannel) : undefined,
+                    redirect: freeGeminiChannel ? 'error' : 'follow',
+                    size: freeGeminiChannel ? 16 * 1024 * 1024 : 0,
+                });
+            } catch (error) {
+                cleanupAttempt();
+                if (disconnectController.signal.aborted) {
+                    return;
+                }
+                const errorCode = error?.cause?.code || error?.code || error?.name;
+                const retryable = freeGeminiChannel && !timedOut && transientCodes.has(errorCode);
+                if (retryable && attempt + 1 < maxAttempts) {
+                    console.warn(`Free Gemini transient request failure; retrying (${attempt + 1}/${freeGeminiChannel.maxRetries}).`);
+                    if (!await waitBeforeRetry(attempt)) {
+                        return;
+                    }
+                    continue;
+                }
+                if (freeGeminiChannel) {
+                    const wrapped = new Error(timedOut ? '免费 Gemini 渠道请求超时。' : '免费 Gemini 渠道网络请求失败。');
+                    wrapped.code = timedOut ? 'FREE_GEMINI_TIMEOUT' : 'FREE_GEMINI_NETWORK_ERROR';
+                    wrapped.status = timedOut ? 504 : 502;
+                    wrapped.freeGeminiFailover = timedOut || transientCodes.has(errorCode);
+                    throw wrapped;
+                }
+                throw error;
+            }
+
+            if (freeGeminiChannel && retryStatuses.has(generateResponse.status) && attempt + 1 < maxAttempts) {
+                cleanupAttempt();
+                generateResponse.body?.destroy();
+                console.warn(`Free Gemini upstream returned ${generateResponse.status}; retrying (${attempt + 1}/${freeGeminiChannel.maxRetries}).`);
+                if (!await waitBeforeRetry(attempt)) {
+                    return;
+                }
+                continue;
+            }
+            activeBody = generateResponse.body;
+            if (activeBody) {
+                activeBody.once('end', cleanupAttempt);
+                activeBody.once('close', cleanupAttempt);
+                activeBody.once('error', cleanupAttempt);
+            } else {
+                cleanupAttempt();
+            }
+
+            if (freeGeminiChannel && stream && generateResponse.ok) {
+                try {
+                    if (!activeBody) {
+                        const error = new Error('免费 Gemini 流式响应缺少正文。');
+                        error.code = 'FREE_GEMINI_STREAM_FAILED';
+                        throw error;
+                    }
+                    await waitForFreeGeminiFirstStreamChunk(activeBody, disconnectController.signal);
+                } catch (error) {
+                    cleanupAttempt();
+                    activeBody?.destroy();
+                    if (disconnectController.signal.aborted) {
+                        return;
+                    }
+                    if (timedOut || Date.now() >= deadlineAt) {
+                        throw createTimeoutError();
+                    }
+                    const wrapped = new Error('免费 Gemini 流式响应在首字节前失败。', { cause: error });
+                    wrapped.code = 'FREE_GEMINI_STREAM_FAILED';
+                    wrapped.status = 502;
+                    wrapped.freeGeminiFailover = true;
+                    throw wrapped;
+                }
+            }
+            break;
+        }
+
+        if (!generateResponse || disconnectController.signal.aborted) {
+            return;
+        }
+
+        // Preserve the original MakerSuite/Vertex streaming proxy semantics: forward the
+        // upstream status and body verbatim, including non-2xx responses.
+        if (stream && !freeGeminiChannel) {
+            try {
+                return forwardFetchResponse(generateResponse, response);
             } catch (error) {
                 console.error('Error forwarding streaming response:', error);
                 if (!response.headersSent) {
                     return response.status(500).send({ error: true });
                 }
+                return;
             }
-        } else {
-            if (!generateResponse.ok) {
-                const errorText = await generateResponse.text();
-                console.warn(`${apiName} API returned error: ${generateResponse.status} ${generateResponse.statusText} ${errorText}`);
-                const errorJson = tryParse(errorText) ?? { error: true };
-                return response.status(500).send(errorJson);
-            }
-
-            /** @type {any} */
-            const generateResponseJson = await generateResponse.json();
-
-            const candidates = generateResponseJson?.candidates;
-            if (!candidates || candidates.length === 0) {
-                let message = `${apiName} API returned no candidate`;
-                console.warn(message, generateResponseJson);
-                if (generateResponseJson?.promptFeedback?.blockReason) {
-                    message += `\nPrompt was blocked due to : ${generateResponseJson.promptFeedback.blockReason}`;
-                }
-                return response.send({ error: { message } });
-            }
-
-            const responseContent = candidates[0].content ?? candidates[0].output;
-            const functionCall = (candidates?.[0]?.content?.parts ?? []).some(part => part.functionCall);
-            const inlineData = (candidates?.[0]?.content?.parts ?? []).some(part => part.inlineData);
-            console.debug(`${apiName} response:`, util.inspect(generateResponseJson, { depth: 5, colors: true }));
-
-            const responseText = typeof responseContent === 'string' ? responseContent : responseContent?.parts?.filter(part => !part.thought)?.map(part => part.text)?.join('\n\n');
-            if (!responseText && !functionCall && !inlineData) {
-                let message = `${apiName} Candidate text empty`;
-                console.warn(message, generateResponseJson);
-                return response.send({ error: { message } });
-            }
-
-            // Wrap it back to OAI format (responseContent includes thought signatures in parts array)
-            const reply = { choices: [{ 'message': { 'content': responseText } }], responseContent };
-            return response.send(reply);
         }
-    } catch (error) {
-        const errorDetails = freeGeminiChannel
-            ? (error?.cause?.code || error?.code || error?.name || 'request_failed')
-            : error;
-        console.error(`Error communicating with ${apiName} API:`, errorDetails);
-        if (!response.headersSent) {
+
+        if (!generateResponse.ok) {
+            const errorText = await generateResponse.text();
+            const errorJson = tryParse(errorText);
+            console.warn(`${apiName} API returned status ${generateResponse.status}.`);
+            if (freeGeminiChannel) {
+                const upstreamStatus = mapFreeGeminiUpstreamStatus(generateResponse.status);
+                const upstreamMessage = errorJson?.error?.message ?? generateResponse.statusText;
+                const upstreamCode = errorJson?.error?.code ?? errorJson?.error?.status;
+                const payload = {
+                    error: {
+                        code: 'FREE_GEMINI_UPSTREAM_ERROR',
+                        message: sanitizeFreeGeminiUpstreamMessage(upstreamMessage, apiKey),
+                        ...(upstreamCode ? { upstream_code: sanitizeFreeGeminiUpstreamMessage(upstreamCode, apiKey).slice(0, 100) } : {}),
+                    },
+                };
+                if (!disconnectController.signal.aborted && !response.headersSent) {
+                    const canFailover = retryStatuses.has(generateResponse.status);
+                    return returnFreeGeminiFailure(upstreamStatus, payload, canFailover);
+                }
+                return;
+            }
+            return response.status(500).send(errorJson ?? { error: true });
+        }
+
+        if (stream) {
+            try {
+                if (!disconnectController.signal.aborted) {
+                    generateResponse.body?.once('error', () => {
+                        if (!response.writableEnded) {
+                            response.end();
+                        }
+                    });
+                    return forwardFetchResponse(generateResponse, response);
+                }
+                generateResponse.body?.destroy();
+                return;
+            } catch (error) {
+                if (disconnectController.signal.aborted) {
+                    return;
+                }
+                console.error('Error forwarding streaming response:', error?.code || error?.name || 'stream_failed');
+                if (!response.headersSent) {
+                    return response.status(502).send({
+                        error: { code: 'FREE_GEMINI_STREAM_FAILED', message: '免费 Gemini 流式响应转发失败。' },
+                    });
+                }
+                if (!response.writableEnded) {
+                    response.end();
+                }
+                return;
+            }
+        }
+
+        const responseTextBody = await generateResponse.text();
+        const generateResponseJson = tryParse(responseTextBody);
+        if (!generateResponseJson || typeof generateResponseJson !== 'object') {
+            if (freeGeminiChannel) {
+                return returnFreeGeminiFailure(502, {
+                    error: { code: 'FREE_GEMINI_INVALID_RESPONSE', message: '免费 Gemini 渠道返回了无效响应。' },
+                });
+            }
             return response.status(500).send({ error: true });
         }
+
+        const candidates = generateResponseJson?.candidates;
+        const hasPromptFeedback = generateResponseJson.promptFeedback
+            && typeof generateResponseJson.promptFeedback === 'object'
+            && !Array.isArray(generateResponseJson.promptFeedback);
+        if (freeGeminiChannel && (Array.isArray(generateResponseJson)
+            || (!Object.hasOwn(generateResponseJson, 'candidates') && !hasPromptFeedback)
+            || (Object.hasOwn(generateResponseJson, 'candidates') && !Array.isArray(candidates)))) {
+            return returnFreeGeminiFailure(502, {
+                error: { code: 'FREE_GEMINI_INVALID_RESPONSE', message: '免费 Gemini 渠道返回了无效响应。' },
+            });
+        }
+        if (!Array.isArray(candidates) || candidates.length === 0) {
+            const blockReason = generateResponseJson?.promptFeedback?.blockReason;
+            if (freeGeminiChannel) {
+                return response.status(422).send({
+                    error: {
+                        code: blockReason ? 'FREE_GEMINI_SAFETY_BLOCKED' : 'FREE_GEMINI_NO_CANDIDATE',
+                        message: blockReason ? '请求被 Gemini 安全策略阻止。' : 'Gemini 未返回候选结果。',
+                    },
+                });
+            }
+            let message = `${apiName} API returned no candidate`;
+            if (blockReason) {
+                message += `\nPrompt was blocked due to: ${blockReason}`;
+            }
+            return response.send({ error: { message } });
+        }
+
+        const responseContent = candidates[0].content ?? candidates[0].output;
+        const responseParts = candidates[0]?.content?.parts ?? [];
+        const functionCall = responseParts.some(part => part.functionCall);
+        const inlineData = responseParts.some(part => part.inlineData);
+        if (freeGeminiChannel) {
+            console.debug(`${apiName} returned ${candidates.length} candidate(s).`);
+        } else {
+            console.debug(`${apiName} response:`, util.inspect(generateResponseJson, { depth: 5, colors: true }));
+        }
+
+        const responseText = typeof responseContent === 'string'
+            ? responseContent
+            : responseContent?.parts
+                ?.filter(part => !part.thought && typeof part.text === 'string')
+                ?.map(part => part.text)
+                ?.join('\n\n');
+        if (!responseText && !functionCall && !inlineData) {
+            const finishReason = String(candidates[0]?.finishReason ?? '').toUpperCase();
+            const safetyBlocked = ['SAFETY', 'BLOCKLIST', 'PROHIBITED_CONTENT', 'SPII', 'RECITATION'].includes(finishReason);
+            if (freeGeminiChannel) {
+                return response.status(422).send({
+                    error: {
+                        code: safetyBlocked ? 'FREE_GEMINI_SAFETY_BLOCKED' : 'FREE_GEMINI_EMPTY_OUTPUT',
+                        message: safetyBlocked ? '响应被 Gemini 安全策略阻止。' : 'Gemini 返回了空输出。',
+                    },
+                });
+            }
+            return response.send({ error: { message: `${apiName} Candidate text empty` } });
+        }
+
+        const reply = { choices: [{ 'message': { 'content': responseText } }], responseContent };
+        return response.send(reply);
+    } catch (error) {
+        if (freeGeminiChannel && (response.destroyed || response.writableEnded)) {
+            return;
+        }
+        const errorDetails = freeGeminiChannel
+            ? (error?.code || error?.cause?.code || error?.name || 'request_failed')
+            : error;
+        if (freeGeminiChannel && error?.name === 'AbortError' && !freeGeminiTimedOut) {
+            return;
+        }
+        console.error(`Error communicating with ${apiName} API:`, freeGeminiTimedOut ? 'FREE_GEMINI_TIMEOUT' : errorDetails);
+        if (!response.headersSent) {
+            const status = freeGeminiTimedOut
+                ? 504
+                : freeGeminiChannel
+                    ? (Number.isInteger(error?.status) ? error.status : 502)
+                    : 500;
+            const payload = freeGeminiChannel
+                ? {
+                    error: {
+                        code: freeGeminiTimedOut ? 'FREE_GEMINI_TIMEOUT' : (error?.code || 'FREE_GEMINI_REQUEST_FAILED'),
+                        message: freeGeminiTimedOut
+                            ? '免费 Gemini 渠道请求超时。'
+                            : error?.code === 'FREE_GEMINI_NETWORK_ERROR'
+                                ? '免费 Gemini 渠道网络请求失败。'
+                                : '免费 Gemini 请求失败。',
+                    },
+                }
+                : { error: true };
+            if (freeGeminiChannel) {
+                return returnFreeGeminiFailure(status, payload, error?.freeGeminiFailover === true);
+            }
+            return response.status(status).send(payload);
+        }
+        if (!response.writableEnded) {
+            response.end();
+        }
+    } finally {
+        response.removeListener('close', abortOnResponseClose);
     }
 }
 
@@ -1708,26 +2419,32 @@ router.post('/status', async function (request, statusResponse) {
             apiUrl = API_FIREWORKS;
             apiKey = readSecret(request.user.directories, SECRET_KEYS.FIREWORKS);
             headers = {};
-        } else if ([CHAT_COMPLETION_SOURCES.MAKERSUITE, CHAT_COMPLETION_SOURCES.FREE_GEMINI].includes(request.body.chat_completion_source)) {
-            const isFreeGemini = request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.FREE_GEMINI;
-            const freeGeminiChannel = isFreeGemini
-                ? await getEnabledFreeGeminiChannel(request.body.free_gemini_channel_id)
-                : null;
-
-            if (isFreeGemini && !freeGeminiChannel) {
-                return statusResponse.status(404).send({ error: true, message: '该免费 Gemini 渠道不存在或已停用。' });
+        } else if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.FREE_GEMINI) {
+            try {
+                const apiVersion = getConfigValue('gemini.apiVersion', 'v1beta');
+                const models = await getFreeGeminiStatusModels(request.body.free_gemini_channel_id, apiVersion);
+                return statusResponse.send({ data: models });
+            } catch (error) {
+                const status = Number.isInteger(error?.status) ? error.status : 502;
+                const code = error?.code || 'FREE_GEMINI_MODELS_FAILED';
+                console.warn(`Free Gemini status failed (${code}).`);
+                return statusResponse.status(status).send({
+                    error: true,
+                    code,
+                    message: error?.message || '免费 Gemini 渠道连接失败。',
+                });
             }
-
-            apiKey = freeGeminiChannel?.key || (request.body.reverse_proxy ? request.body.proxy_password : readSecret(request.user.directories, SECRET_KEYS.MAKERSUITE));
-            apiUrl = new URL(freeGeminiChannel?.url || request.body.reverse_proxy || API_MAKERSUITE);
+        } else if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.MAKERSUITE) {
+            apiKey = request.body.reverse_proxy ? request.body.proxy_password : readSecret(request.user.directories, SECRET_KEYS.MAKERSUITE);
+            apiUrl = new URL(request.body.reverse_proxy || API_MAKERSUITE);
             const apiVersion = getConfigValue('gemini.apiVersion', 'v1beta');
             const versionBaseUrl = getGeminiVersionBaseUrl(apiUrl, apiVersion);
-            const modelsUrl = !apiKey && request.body.reverse_proxy && !isFreeGemini
+            const modelsUrl = !apiKey && request.body.reverse_proxy
                 ? `${versionBaseUrl}/models`
                 : `${versionBaseUrl}/models?key=${apiKey}`;
 
-            if (!apiKey && (!request.body.reverse_proxy || isFreeGemini)) {
-                console.warn(`${freeGeminiChannel?.name || 'Google AI Studio'} API key is missing.`);
+            if (!apiKey && !request.body.reverse_proxy) {
+                console.warn('Google AI Studio API key is missing.');
                 return statusResponse.status(400).send({ error: true });
             }
 
@@ -1739,29 +2456,16 @@ router.post('/status', async function (request, statusResponse) {
                 if (response.ok) {
                     /** @type {any} */
                     const data = await response.json();
-                    // Transform Google AI Studio models to OpenAI format
                     const models = data.models
                         ?.filter(model => model.supportedGenerationMethods == null
                             || model.supportedGenerationMethods.includes?.('generateContent') === true)
-                        ?.map(model => ({
-                            id: model.name.replace('models/', ''),
-                        })) || [];
-
-                    console.info(`Available ${freeGeminiChannel?.name || 'Google AI Studio'} models:`, models.map(m => m.id));
+                        ?.map(model => ({ id: model.name.replace('models/', '') })) || [];
+                    console.info('Available Google AI Studio model count:', models.length);
                     return statusResponse.send({ data: models });
-                } else {
-                    console.warn(`${freeGeminiChannel?.name || 'Google AI Studio'} models endpoint failed:`, response.status, response.statusText);
-                    if (isFreeGemini) {
-                        return statusResponse.status(response.status).send({ error: true, message: '免费 Gemini 渠道连接失败。' });
-                    }
-                    return statusResponse.send({ error: true, bypass: true, data: { data: [] } });
                 }
+                console.warn('Google AI Studio models endpoint failed:', response.status, response.statusText);
+                return statusResponse.send({ error: true, bypass: true, data: { data: [] } });
             } catch (error) {
-                if (isFreeGemini) {
-                    const errorCode = error?.cause?.code || error?.code || error?.name || 'request_failed';
-                    console.error(`Error fetching ${freeGeminiChannel.name} models:`, errorCode);
-                    return statusResponse.status(502).send({ error: true, message: '免费 Gemini 渠道连接失败。' });
-                }
                 console.error('Error fetching Google AI Studio models:', error);
                 return statusResponse.send({ error: true, bypass: true, data: { data: [] } });
             }
@@ -2050,11 +2754,93 @@ router.post('/generate', async function (request, response) {
             case CHAT_COMPLETION_SOURCES.AI21: return await sendAI21Request(request, response);
             case CHAT_COMPLETION_SOURCES.MAKERSUITE: return await sendMakerSuiteRequest(request, response);
             case CHAT_COMPLETION_SOURCES.FREE_GEMINI: {
-                const freeGeminiChannel = await getEnabledFreeGeminiChannel(request.body.free_gemini_channel_id);
-                if (!freeGeminiChannel) {
-                    return response.status(404).send({ error: true, message: '该免费 Gemini 渠道不存在或已停用。' });
+                const modelId = normalizeFreeGeminiModelId(request.body.model);
+                if (!modelId) {
+                    return response.status(400).send({
+                        error: { code: 'FREE_GEMINI_INVALID_MODEL', message: 'model 不能为空。' },
+                    });
                 }
-                return await sendMakerSuiteRequest(request, response, { freeGeminiChannel });
+                if (!hasObviouslyConvertibleFreeGeminiMessage(request.body.messages)) {
+                    return response.status(400).send({
+                        error: { code: 'FREE_GEMINI_INVALID_CONTENTS', message: 'contents 不能为空。' },
+                    });
+                }
+                const apiVersion = getConfigValue('gemini.apiVersion', 'v1beta');
+                const freeGeminiRequestStartedAt = Date.now();
+                let routes;
+                let freeGeminiDeadlineAt;
+                try {
+                    ({ routes, deadlineAt: freeGeminiDeadlineAt } = await resolveFreeGeminiRoutes(
+                        modelId,
+                        request.body.free_gemini_channel_id,
+                        apiVersion,
+                        freeGeminiRequestStartedAt,
+                    ));
+                } catch (error) {
+                    const status = Number.isInteger(error?.status) ? error.status : 502;
+                    return response.status(status).send({
+                        error: {
+                            code: error?.code || 'FREE_GEMINI_ROUTE_FAILED',
+                            message: error?.code === 'FREE_GEMINI_CHANNEL_UNAVAILABLE'
+                                ? error.message
+                                : '免费 Gemini 渠道路由失败。',
+                        },
+                    });
+                }
+                if (routes.length === 0) {
+                    return response.status(400).send({
+                        error: { code: 'FREE_GEMINI_NO_ROUTE', message: '没有允许该模型的可用免费 Gemini 渠道。' },
+                    });
+                }
+                request.body.model = modelId;
+
+                // Model discovery and generation share one bounded request deadline. Give
+                // each candidate a fair slice of the remaining time while reserving a useful
+                // window for later candidates; retries and backoff consume the same slice.
+                let lastFailure;
+                for (let index = 0; index < routes.length; index++) {
+                    const route = routes[index];
+                    const remainingTotalMs = freeGeminiDeadlineAt - Date.now();
+                    if (remainingTotalMs <= 0) {
+                        break;
+                    }
+                    const remainingCandidates = routes.length - index;
+                    const candidateBudgetMs = getFreeGeminiCandidateBudgetMs(
+                        route.channel.timeoutMs,
+                        remainingTotalMs,
+                        remainingCandidates,
+                    );
+                    const candidateDeadlineAt = Math.min(
+                        freeGeminiDeadlineAt,
+                        Date.now() + candidateBudgetMs,
+                    );
+                    const result = await sendMakerSuiteRequest(request, response, {
+                        freeGeminiChannel: route.channel,
+                        freeGeminiModel: route.model,
+                        deferFreeGeminiFailover: true,
+                        freeGeminiDeadlineAt: candidateDeadlineAt,
+                    });
+                    if (!result?.freeGeminiFailover) {
+                        return result;
+                    }
+
+                    lastFailure = result;
+                    const hasNextRoute = index + 1 < routes.length;
+                    if (!hasNextRoute || Date.now() >= freeGeminiDeadlineAt || response.destroyed || response.writableEnded) {
+                        break;
+                    }
+                    console.warn(`Free Gemini channel failed transiently; trying candidate ${index + 2}/${routes.length}.`);
+                }
+
+                if (!response.headersSent && !response.destroyed && !response.writableEnded) {
+                    if (lastFailure) {
+                        return response.status(lastFailure.status).send(lastFailure.payload);
+                    }
+                    return response.status(504).send({
+                        error: { code: 'FREE_GEMINI_TIMEOUT', message: '免费 Gemini 渠道请求超时。' },
+                    });
+                }
+                return;
             }
             case CHAT_COMPLETION_SOURCES.VERTEXAI: return await sendMakerSuiteRequest(request, response);
             case CHAT_COMPLETION_SOURCES.MISTRALAI: return await sendMistralAIRequest(request, response);

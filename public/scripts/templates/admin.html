@@ -484,6 +484,59 @@
                     <input id="freeGeminiChannelKey" class="text_pole wide100p" type="password" maxlength="8192" placeholder="新建时必填；编辑时留空表示保留原 Key" autocomplete="new-password">
                 </label>
                 <div class="flex-container flexGap10" style="flex-wrap: wrap;">
+                    <label class="flex1" style="min-width: 180px;">
+                        <span style="display: block; margin-bottom: 5px;">路由优先级</span>
+                        <input id="freeGeminiChannelPriority" class="text_pole wide100p" type="number" min="0" max="1000" step="1" value="0">
+                        <small class="notes">数值越高越优先；自动路由仍会在失败时尝试其他可用渠道。</small>
+                    </label>
+                    <label class="flex1" style="min-width: 220px;">
+                        <span style="display: block; margin-bottom: 5px;">模型策略</span>
+                        <select id="freeGeminiChannelModelPolicy" class="text_pole wide100p">
+                            <option value="all">允许全部上游模型</option>
+                            <option value="allowlist">仅允许模型 ID 列表</option>
+                            <option value="denylist">排除模型 ID 列表</option>
+                        </select>
+                    </label>
+                </div>
+                <label>
+                    <span style="display: block; margin-bottom: 5px;">模型 ID 列表</span>
+                    <textarea id="freeGeminiChannelModels" class="text_pole wide100p" rows="5" placeholder="每行一个模型 ID，例如：&#10;gemini-2.5-flash&#10;gemini-2.5-pro"></textarea>
+                    <small class="notes">可手工逐行填写。选择“允许全部”时列表仅作记录，不限制上游模型。</small>
+                </label>
+                <div class="flex-container flexGap10 alignItemsCenter" style="flex-wrap: wrap;">
+                    <button type="button" class="menu_button menu_button_icon" id="refreshFreeGeminiChannelModels">
+                        <i class="fa-fw fa-solid fa-cloud-arrow-down"></i><span>刷新上游模型</span>
+                    </button>
+                    <button type="button" class="menu_button menu_button_icon" id="clearFreeGeminiChannelModels">
+                        <i class="fa-fw fa-solid fa-eraser"></i><span>清空模型列表</span>
+                    </button>
+                    <small id="freeGeminiChannelModelsStatus" class="notes">保存渠道后可刷新并选择上游模型。</small>
+                </div>
+                <label id="freeGeminiUpstreamModelsBlock" style="display: none;">
+                    <span style="display: block; margin-bottom: 5px;">上游可用模型（可多选）</span>
+                    <select id="freeGeminiUpstreamModels" class="text_pole wide100p" multiple size="8"></select>
+                    <small class="notes">按 Ctrl / Command 或 Shift 多选；选择结果会同步到上方每行一个的模型列表。</small>
+                </label>
+                <div class="flex-container flexGap10" style="flex-wrap: wrap;">
+                    <label class="flex1" style="min-width: 160px;">
+                        <span style="display: block; margin-bottom: 5px;">请求超时（毫秒）</span>
+                        <input id="freeGeminiChannelTimeoutMs" class="text_pole wide100p" type="number" min="5000" max="120000" step="1000" value="30000">
+                    </label>
+                    <label class="flex1" style="min-width: 140px;">
+                        <span style="display: block; margin-bottom: 5px;">失败重试次数</span>
+                        <input id="freeGeminiChannelMaxRetries" class="text_pole wide100p" type="number" min="0" max="3" step="1" value="1">
+                    </label>
+                    <label class="flex1" style="min-width: 180px;">
+                        <span style="display: block; margin-bottom: 5px;">模型缓存 TTL（毫秒）</span>
+                        <input id="freeGeminiChannelModelCacheTtlMs" class="text_pole wide100p" type="number" min="30000" max="3600000" step="1000" value="300000">
+                    </label>
+                    <label class="flex1" style="min-width: 170px;">
+                        <span style="display: block; margin-bottom: 5px;">最大输出 Token cap</span>
+                        <input id="freeGeminiChannelMaxOutputTokens" class="text_pole wide100p" type="number" min="0" max="65536" step="1" value="0">
+                        <small class="notes">0 表示按模型上游限制自动适配。</small>
+                    </label>
+                </div>
+                <div class="flex-container flexGap10" style="flex-wrap: wrap;">
                     <button type="button" class="menu_button menu_button_icon" id="saveFreeGeminiChannel">
                         <i class="fa-fw fa-solid fa-plus"></i><span>新增渠道</span>
                     </button>

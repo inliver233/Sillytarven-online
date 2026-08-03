@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title desc">
+  <title id="title">Free Gemini</title>
+  <desc id="desc">A four-point Gemini sparkle in a blue and violet gradient</desc>
+  <defs>
+    <linearGradient id="gemini-gradient" x1="10" y1="54" x2="54" y2="10" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#34a7ff"/>
+      <stop offset="0.52" stop-color="#6e7cff"/>
+      <stop offset="1" stop-color="#b45cff"/>
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="14" fill="#111827"/>
+  <path fill="url(#gemini-gradient)" d="M32 8c2.1 13.2 10.8 21.9 24 24-13.2 2.1-21.9 10.8-24 24-2.1-13.2-10.8-21.9-24-24 13.2-2.1 21.9-10.8 24-24Z"/>
+  <path fill="#fff" fill-opacity=".88" d="M49.5 10.5c.7 4.4 3.6 7.3 8 8-4.4.7-7.3 3.6-8 8-.7-4.4-3.6-7.3-8-8 4.4-.7 7.3-3.6 8-8Z"/>
+</svg>

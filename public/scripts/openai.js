@@ -173,52 +173,92 @@ const textCompletionModels = [
 let biasCache = undefined;
 export let model_list = [];
 let freeGeminiChannels = [];
+let freeGeminiChannelsLoadedAt = 0;
+let freeGeminiChannelsLoadingPromise = null;
+let freeGeminiStatusCheckGeneration = 0;
+const FREE_GEMINI_CHANNELS_TTL_MS = 60 * 1000;
+
+function refreshFreeGeminiSelectUi(select) {
+    if (select.hasClass('select2-hidden-accessible')) {
+        select.trigger('change.select2');
+    }
+}
+
+function renderFreeGeminiChannelSelect(message = '') {
+    const select = $('#free_gemini_channel_select');
+    if (!select.length) return;
+
+    select.empty().append(new Option('自动路由（推荐）', ''));
+    freeGeminiChannels.forEach(channel => select.append(new Option(channel.name, channel.id)));
+    if (message) {
+        select.append(new Option(message, '__free_gemini_status__', false, false));
+        select.find('option[value="__free_gemini_status__"]').prop('disabled', true);
+    } else if (freeGeminiChannels.length === 0) {
+        select.append(new Option('管理员尚未配置可用渠道', '__free_gemini_empty__', false, false));
+        select.find('option[value="__free_gemini_empty__"]').prop('disabled', true);
+    }
+
+    const savedChannelExists = !oai_settings.free_gemini_channel_id
+        || freeGeminiChannels.some(channel => channel.id === oai_settings.free_gemini_channel_id);
+    if (!savedChannelExists) {
+        oai_settings.free_gemini_channel_id = '';
+    }
+    select.val(oai_settings.free_gemini_channel_id || '');
+    refreshFreeGeminiSelectUi(select);
+}
 
 /**
  * Loads the administrator-provided free Gemini channels without exposing their URL or API key.
+ * Results are cached briefly and concurrent callers share the same request.
+ * @param {boolean} force Ignore the 60-second cache
  * @returns {Promise<Array<{id: string, name: string}>>} Available channels
  */
-async function loadFreeGeminiChannels() {
-    const select = $('#free_gemini_channel_select');
-
-    try {
-        const response = await fetch('/api/free-gemini-channels', {
-            method: 'GET',
-            headers: getRequestHeaders(),
-            cache: 'no-cache',
-        });
-
-        if (!response.ok) {
-            throw new Error(`Failed to load free Gemini channels: ${response.status}`);
-        }
-
-        const payload = await response.json();
-        const channels = Array.isArray(payload) ? payload : payload.channels;
-        freeGeminiChannels = Array.isArray(channels)
-            ? channels.filter(channel => channel && typeof channel.id === 'string' && typeof channel.name === 'string')
-            : [];
-
-        select.empty();
-        if (freeGeminiChannels.length === 0) {
-            oai_settings.free_gemini_channel_id = '';
-            select.append(new Option('管理员尚未配置可用渠道', '', true, true));
-            return freeGeminiChannels;
-        }
-
-        freeGeminiChannels.forEach(channel => select.append(new Option(channel.name, channel.id)));
-        const savedChannelExists = freeGeminiChannels.some(channel => channel.id === oai_settings.free_gemini_channel_id);
-        if (!savedChannelExists) {
-            oai_settings.free_gemini_channel_id = freeGeminiChannels[0].id;
-        }
-        select.val(oai_settings.free_gemini_channel_id);
-        return freeGeminiChannels;
-    } catch (error) {
-        console.error('Failed to load free Gemini channels:', error);
-        freeGeminiChannels = [];
-        oai_settings.free_gemini_channel_id = '';
-        select.empty().append(new Option('免费渠道加载失败', '', true, true));
+async function loadFreeGeminiChannels(force = false) {
+    if (!force && freeGeminiChannelsLoadedAt && Date.now() - freeGeminiChannelsLoadedAt < FREE_GEMINI_CHANNELS_TTL_MS) {
+        renderFreeGeminiChannelSelect();
         return freeGeminiChannels;
     }
+    if (freeGeminiChannelsLoadingPromise) {
+        return freeGeminiChannelsLoadingPromise;
+    }
+
+    freeGeminiChannelsLoadingPromise = (async () => {
+        try {
+            const response = await fetch('/api/free-gemini-channels', {
+                method: 'GET',
+                headers: getRequestHeaders(),
+                cache: 'no-cache',
+            });
+
+            if (!response.ok) {
+                throw new Error(`Failed to load free Gemini channels: ${response.status}`);
+            }
+
+            const payload = await response.json();
+            const channels = Array.isArray(payload) ? payload : payload.channels;
+            const seenIds = new Set();
+            freeGeminiChannels = Array.isArray(channels)
+                ? channels
+                    .map(channel => ({
+                        id: typeof channel?.id === 'string' ? channel.id.trim() : '',
+                        name: typeof channel?.name === 'string' ? channel.name.trim() : '',
+                    }))
+                    .filter(channel => channel.id && channel.name && !seenIds.has(channel.id) && seenIds.add(channel.id))
+                : [];
+            freeGeminiChannelsLoadedAt = Date.now();
+            renderFreeGeminiChannelSelect();
+            return freeGeminiChannels;
+        } catch (error) {
+            console.error('Failed to load free Gemini channels:', error);
+            freeGeminiChannelsLoadedAt = 0;
+            renderFreeGeminiChannelSelect(freeGeminiChannels.length > 0 ? '刷新失败，暂用缓存列表' : '渠道列表加载失败');
+            return freeGeminiChannels;
+        } finally {
+            freeGeminiChannelsLoadingPromise = null;
+        }
+    })();
+
+    return freeGeminiChannelsLoadingPromise;
 }
 
 export const chat_completion_sources = {
@@ -2084,17 +2124,31 @@ function saveModelList(data) {
     }
 
     if (oai_settings.chat_completion_source === chat_completion_sources.FREE_GEMINI) {
-        $('#model_free_gemini_select').empty();
-        model_list.forEach(model => {
-            $('#model_free_gemini_select').append(new Option(model.id, model.id));
+        const select = $('#model_free_gemini_select').empty();
+        const availableModels = model_list.filter(model => typeof model?.id === 'string' && model.id.trim());
+        availableModels.forEach(model => {
+            const channelName = model.channel_name
+                || model.channelName
+                || freeGeminiChannels.find(channel => channel.id === model.channel_id)?.name
+                || '';
+            const label = channelName ? `${model.id} · ${channelName}` : model.id;
+            select.append(new Option(label, model.id));
         });
 
-        const selectedModel = model_list.find(model => model.id === oai_settings.free_gemini_model);
-        if (model_list.length > 0 && (!selectedModel || !oai_settings.free_gemini_model)) {
-            oai_settings.free_gemini_model = model_list[0].id;
+        const selectedModel = availableModels.find(model => model.id === oai_settings.free_gemini_model);
+        if (availableModels.length === 0) {
+            oai_settings.free_gemini_model = '';
+            const emptyLabel = freeGeminiChannels.length === 0
+                ? '管理员尚未配置可用渠道'
+                : '当前路由没有可用模型';
+            select.append(new Option(emptyLabel, '', true, true));
+            refreshFreeGeminiSelectUi(select);
+        } else {
+            if (!selectedModel || !oai_settings.free_gemini_model) {
+                oai_settings.free_gemini_model = availableModels[0].id;
+            }
+            select.val(oai_settings.free_gemini_model).trigger('change');
         }
-
-        $('#model_free_gemini_select').val(oai_settings.free_gemini_model).trigger('change');
     }
 
     if (oai_settings.chat_completion_source === chat_completion_sources.MAKERSUITE) {
@@ -2713,7 +2767,7 @@ export async function createGenerationParameters(settings, model, type, messages
         generate_data['top_k'] = Number(settings.top_k_openai);
         generate_data['stop'] = getCustomStoppingStrings(stopStringsLimit).slice(0, stopStringsLimit).filter(x => x.length >= 1 && x.length <= 16);
         generate_data['use_sysprompt'] = settings.use_sysprompt;
-        if (settings.chat_completion_source === chat_completion_sources.FREE_GEMINI) {
+        if (settings.chat_completion_source === chat_completion_sources.FREE_GEMINI && settings.free_gemini_channel_id) {
             generate_data['free_gemini_channel_id'] = settings.free_gemini_channel_id;
         }
         if (settings.chat_completion_source === chat_completion_sources.VERTEXAI) {
@@ -4171,6 +4225,15 @@ function setContinuePostfixControls() {
 }
 
 async function getStatusOpen() {
+    const isFreeGeminiStatusCheck = oai_settings.chat_completion_source === chat_completion_sources.FREE_GEMINI;
+    const freeGeminiStatusCheckId = isFreeGeminiStatusCheck ? ++freeGeminiStatusCheckGeneration : 0;
+    let requestedFreeGeminiChannelId = null;
+    const isStaleFreeGeminiStatusCheck = () => isFreeGeminiStatusCheck && (
+        freeGeminiStatusCheckId !== freeGeminiStatusCheckGeneration
+        || oai_settings.chat_completion_source !== chat_completion_sources.FREE_GEMINI
+        || (requestedFreeGeminiChannelId !== null && requestedFreeGeminiChannelId !== oai_settings.free_gemini_channel_id)
+    );
+
     const noValidateSources = [
         chat_completion_sources.CLAUDE,
         chat_completion_sources.AI21,
@@ -4203,14 +4266,16 @@ async function getStatusOpen() {
         chat_completion_source: oai_settings.chat_completion_source,
     };
 
-    if (oai_settings.chat_completion_source === chat_completion_sources.FREE_GEMINI) {
+    if (isFreeGeminiStatusCheck) {
         await loadFreeGeminiChannels();
-        if (!oai_settings.free_gemini_channel_id) {
-            setOnlineStatus(t`No free Gemini channel is currently available.`);
-            updateFeatureSupportFlags();
-            return resultCheckStatus();
+        if (isStaleFreeGeminiStatusCheck()) {
+            return;
         }
-        data.free_gemini_channel_id = oai_settings.free_gemini_channel_id;
+
+        requestedFreeGeminiChannelId = oai_settings.free_gemini_channel_id;
+        if (requestedFreeGeminiChannelId) {
+            data.free_gemini_channel_id = requestedFreeGeminiChannelId;
+        }
     }
 
     const validateProxySources = [
@@ -4243,12 +4308,13 @@ async function getStatusOpen() {
         setOnlineStatus(t`Status check bypassed`);
     }
 
+    const statusCheckSignal = abortStatusCheck.signal;
     try {
         const response = await fetch('/api/backends/chat-completions/status', {
             method: 'POST',
             headers: getRequestHeaders(),
             body: JSON.stringify(data),
-            signal: abortStatusCheck.signal,
+            signal: statusCheckSignal,
             cache: 'no-cache',
         });
 
@@ -4258,18 +4324,54 @@ async function getStatusOpen() {
 
         const responseData = await response.json();
 
-        if ('data' in responseData && Array.isArray(responseData.data)) {
+        if (isStaleFreeGeminiStatusCheck()) {
+            return;
+        }
+
+        const responseModels = Array.isArray(responseData.data) ? responseData.data : [];
+        if (isFreeGeminiStatusCheck) {
+            // Always render the response-owned list so a successful empty response cannot retain stale models.
+            saveModelList(responseModels);
+        } else if ('data' in responseData && Array.isArray(responseData.data)) {
             saveModelList(responseData.data);
         }
         if (!('error' in responseData)) {
-            setOnlineStatus(t`Valid`);
+            if (isFreeGeminiStatusCheck) {
+                const availableModels = responseModels.filter(model => typeof model?.id === 'string' && model.id.trim());
+                const status = availableModels.length > 0
+                    ? t`Valid`
+                    : freeGeminiChannels.length === 0
+                        ? t`管理员尚未配置可用渠道`
+                        : t`当前路由没有可用模型`;
+                setOnlineStatus(status);
+            } else {
+                setOnlineStatus(t`Valid`);
+            }
         }
         if (responseData.bypass) {
             setOnlineStatus(t`Status check bypassed`);
         }
     } catch (error) {
+        if (isFreeGeminiStatusCheck && statusCheckSignal.aborted) {
+            console.info('Free Gemini status check aborted or superseded.');
+            if (isStaleFreeGeminiStatusCheck()) {
+                return;
+            }
+            return resultCheckStatus();
+        }
+        if (isStaleFreeGeminiStatusCheck()) {
+            return;
+        }
+
         console.error(error);
 
+        if (isFreeGeminiStatusCheck) {
+            model_list = [];
+            oai_settings.free_gemini_model = '';
+            const select = $('#model_free_gemini_select').empty()
+                .append(new Option('模型加载失败，请重试连接', '', true, true));
+            refreshFreeGeminiSelectUi(select);
+        }
         if (!canBypass) {
             setOnlineStatus('no_connection');
         }
@@ -6575,6 +6677,9 @@ export function initOpenAI() {
         oai_settings.chat_completion_source = String($(this).find(':selected').val());
         toggleChatCompletionForms();
         saveSettingsDebounced();
+        if (oai_settings.chat_completion_source === chat_completion_sources.FREE_GEMINI) {
+            loadFreeGeminiChannels(true);
+        }
         reconnectOpenAi();
         forceCharacterEditorTokenize();
         updateFeatureSupportFlags();
@@ -6860,6 +6965,12 @@ export function initOpenAI() {
             templateResult: getNanoGptModelTemplate,
             matcher: textValueMatcher,
         });
+        $('#model_free_gemini_select').select2({
+            placeholder: t`Select a model`,
+            searchInputPlaceholder: t`Search models...`,
+            searchInputCssClass: 'text_pole',
+            width: '100%',
+        });
         $('#completion_prompt_manager_popup_entry_form_injection_trigger').select2({
             placeholder: t`All types (default)`,
             width: '100%',
@@ -6892,10 +7003,16 @@ export function initOpenAI() {
     $('#model_google_select').on('change', onModelChange);
     $('#model_free_gemini_select').on('change', onModelChange);
     $('#free_gemini_channel_select').on('change', async function () {
-        oai_settings.free_gemini_channel_id = String($(this).val() || '');
+        const selectedChannelId = String($(this).val() || '');
+        if (selectedChannelId.startsWith('__free_gemini_')) return;
+
+        cancelStatusCheck('Free Gemini channel changed');
+        oai_settings.free_gemini_channel_id = selectedChannelId;
         oai_settings.free_gemini_model = '';
         model_list = [];
-        $('#model_free_gemini_select').empty().append(new Option('连接后加载模型', '', true, true));
+        const modelSelect = $('#model_free_gemini_select').empty()
+            .append(new Option('正在加载对应模型...', '', true, true));
+        refreshFreeGeminiSelectUi(modelSelect);
         saveSettingsDebounced();
         if (oai_settings.chat_completion_source === chat_completion_sources.FREE_GEMINI) {
             startStatusLoading();
