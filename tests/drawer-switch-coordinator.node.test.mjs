@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { DrawerSwitchCoordinator } from '../public/scripts/util/drawer-switch-coordinator.js';
+import { DrawerSwitchCoordinator, getInlineDrawerDuration } from '../public/scripts/util/drawer-switch-coordinator.js';
 
 function createHarness() {
     let now = 0;
@@ -30,6 +30,23 @@ function createHarness() {
         timerCount: () => timers.size,
     };
 }
+
+test('inliver inline drawers shorten only compact content animations', () => {
+    assert.equal(getInlineDrawerDuration(80, { adaptive: true }), 140);
+    assert.equal(getInlineDrawerDuration(200, { adaptive: true }), 200);
+    assert.equal(getInlineDrawerDuration(600, { adaptive: true }), 400);
+});
+
+test('other themes retain the native slide duration', () => {
+    assert.equal(getInlineDrawerDuration(80), undefined);
+    assert.equal(getInlineDrawerDuration(80, { adaptive: false, fullDuration: 250 }), undefined);
+});
+
+test('inline drawer duration handles reduced motion and invalid measurements', () => {
+    assert.equal(getInlineDrawerDuration(80, { adaptive: true, fullDuration: 0 }), 0);
+    assert.equal(getInlineDrawerDuration(0, { adaptive: true, fullDuration: 250 }), 250);
+    assert.equal(getInlineDrawerDuration(Number.NaN, { adaptive: true }), 400);
+});
 
 test('rapid switches invalidate the previous waiter and only open the latest target', async () => {
     const harness = createHarness();

@@ -282,7 +282,7 @@ import { initAccessibility } from './scripts/a11y.js';
 import { processItemsWithFrameBudget } from './scripts/util/frame-budget.js';
 import { chatRenderOptimizer } from './scripts/util/chat-render-optimizer.js';
 import { scrollCoordinator, ScrollPriority } from './scripts/util/scroll-coordinator.js';
-import { drawerSwitchCoordinator } from './scripts/util/drawer-switch-coordinator.js';
+import { drawerSwitchCoordinator, getInlineDrawerDuration } from './scripts/util/drawer-switch-coordinator.js';
 import { requireSettingsSaveSuccess, SettingsSaveQueue, SettingsSaveTracker } from './scripts/util/settings-save-tracker.js';
 import { applyStreamFadeIn, StreamRenderBuffer } from './scripts/util/stream-fadein.js';
 import { initDomHandlers } from './scripts/dom-handlers.js';
@@ -12925,8 +12925,34 @@ jQuery(async function () {
         icon.toggleClass('down up');
         icon.toggleClass('fa-circle-chevron-down fa-circle-chevron-up');
         drawer.trigger('inline-drawer-toggle');
+        const useAdaptiveDuration = document.body?.dataset?.uiMotion === 'inliver';
+        const contentElement = drawerContent[0];
+        let contentHeight = useAdaptiveDuration ? contentElement?.scrollHeight ?? 0 : 0;
+        if (useAdaptiveDuration && contentElement && contentHeight === 0 && drawerContent.css('display') === 'none') {
+            const previousStyles = {
+                display: contentElement.style.display,
+                position: contentElement.style.position,
+                visibility: contentElement.style.visibility,
+                width: contentElement.style.width,
+            };
+            contentElement.style.display = 'block';
+            contentElement.style.position = 'absolute';
+            contentElement.style.visibility = 'hidden';
+            const drawerWidth = drawer[0]?.clientWidth ?? 0;
+            if (drawerWidth > 0) {
+                contentElement.style.width = `${drawerWidth}px`;
+            }
+            contentHeight = contentElement.scrollHeight;
+            Object.assign(contentElement.style, previousStyles);
+        }
+        const defaultSlideDuration = Number(jQuery.fx?.speeds?._default) || 400;
+        const duration = getInlineDrawerDuration(contentHeight, {
+            adaptive: useAdaptiveDuration,
+            fullDuration: defaultSlideDuration,
+        });
         drawerContent.stop().slideToggle({
-            complete: () => {
+            duration,
+            complete: function () {
                 $(this).css('height', '');
             },
         });

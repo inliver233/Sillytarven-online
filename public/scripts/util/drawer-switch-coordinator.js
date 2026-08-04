@@ -1,6 +1,25 @@
 /**
  * Coordinates rapid drawer switches so only the latest click may update the UI.
  */
+export function getInlineDrawerDuration(contentHeight, {
+    adaptive = false,
+    fullDuration = 400,
+    minimumDuration = 140,
+} = {}) {
+    if (!adaptive) {
+        return undefined;
+    }
+
+    const height = Number(contentHeight);
+    const maximum = Number.isFinite(fullDuration) ? Math.max(0, fullDuration) : 400;
+    const minimum = Number.isFinite(minimumDuration) ? Math.min(maximum, Math.max(0, minimumDuration)) : 140;
+    if (!Number.isFinite(height) || height <= 0 || maximum === 0) {
+        return maximum;
+    }
+
+    return Math.min(maximum, Math.max(minimum, Math.round(90 + height * 0.55)));
+}
+
 export class DrawerSwitchCoordinator {
     #version = 0;
     #settleDeadline = 0;
