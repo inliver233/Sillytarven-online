@@ -9,6 +9,9 @@ import { guardOversizedExtensionSettings } from './extension-settings-guard.js';
 
 const settingsWriteMutex = new KeyedMutex();
 
+export const MAX_SETTINGS_MIGRATION_PAYLOAD_BYTES = 64 * 1024 * 1024;
+export const MAX_COMPACT_SETTINGS_BYTES = 5 * 1024 * 1024;
+
 function getSettingsWriteFailure(error) {
     if (['ENOSPC', 'EDQUOT'].includes(error?.code)) {
         return {
@@ -67,14 +70,26 @@ export function createSettingsSaveHandler({ writeSettings = defaultWriteSettings
                     } catch {
                         // Core settings can still be saved when no previous extension value exists.
                     }
-                    for (const { extensionId } of guarded.failed) {
-                        const existingValue = existingSettings?.extension_settings?.[extensionId];
+                    for (const { source, extensionId } of guarded.failed) {
+                        const isOaiExtension = source === 'oai_settings.extensions';
+                        const existingValue = isOaiExtension
+                            ? existingSettings?.oai_settings?.extensions?.[extensionId]
+                            : existingSettings?.extension_settings?.[extensionId];
                         if (existingValue !== undefined) {
-                            guarded.settingsObject.extension_settings[extensionId] = existingValue;
+                            const target = isOaiExtension
+                                ? guarded.settingsObject.oai_settings?.extensions
+                                : guarded.settingsObject.extension_settings;
+                            if (target) target[extensionId] = existingValue;
                         }
                     }
                 }
                 const serializedSettings = JSON.stringify(guarded.settingsObject, null, 4);
+                if (Buffer.byteLength(serializedSettings, 'utf8') > MAX_COMPACT_SETTINGS_BYTES) {
+                    return response.status(413).json({
+                        error: 'settings_compact_payload_too_large',
+                        message: 'Settings still exceed the 5 MiB limit after extension data migration.',
+                    });
+                }
                 await writeSettings(pathToSettings, serializedSettings);
             } catch (error) {
                 const failure = getSettingsWriteFailure(error);
@@ -91,7 +106,12 @@ export function createSettingsSaveHandler({ writeSettings = defaultWriteSettings
             }
             const result = { result: 'ok' };
             if (guarded.migrated.length > 0) {
-                result.migratedExtensionSettings = guarded.replacements;
+                if (Object.keys(guarded.replacements).length > 0) {
+                    result.migratedExtensionSettings = guarded.replacements;
+                }
+                if (Object.keys(guarded.oaiReplacements).length > 0) {
+                    result.migratedOaiExtensionSettings = guarded.oaiReplacements;
+                }
             }
             if (guarded.failed.length > 0) {
                 result.rejectedExtensionSettings = guarded.failed;

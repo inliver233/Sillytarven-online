@@ -7,7 +7,17 @@ const DEFAULT_MAX_BASELINE_LENGTH = 5 * 1024 * 1024;
  */
 export async function requireSettingsSaveSuccess(response) {
     if (!response?.ok) {
-        throw new Error(`Failed to save settings: HTTP ${response?.status ?? 'unknown'} ${response?.statusText || ''}`.trim());
+        let failure = null;
+        try {
+            failure = await response?.json();
+        } catch {
+            // Fall back to the stable HTTP error below.
+        }
+        const error = new Error(failure?.message
+            || `Failed to save settings: HTTP ${response?.status ?? 'unknown'} ${response?.statusText || ''}`.trim());
+        error.code = failure?.error || 'settings_save_failed';
+        error.status = response?.status;
+        throw error;
     }
 
     let body;
@@ -19,6 +29,7 @@ export async function requireSettingsSaveSuccess(response) {
     const allowedKeys = new Set([
         'result',
         'migratedExtensionSettings',
+        'migratedOaiExtensionSettings',
         'rejectedExtensionSettings',
         'disabledExtensions',
     ]);
@@ -27,6 +38,9 @@ export async function requireSettingsSaveSuccess(response) {
         || (body.migratedExtensionSettings !== undefined
             && (!body.migratedExtensionSettings || typeof body.migratedExtensionSettings !== 'object'
                 || Array.isArray(body.migratedExtensionSettings)))
+        || (body.migratedOaiExtensionSettings !== undefined
+            && (!body.migratedOaiExtensionSettings || typeof body.migratedOaiExtensionSettings !== 'object'
+                || Array.isArray(body.migratedOaiExtensionSettings)))
         || (body.rejectedExtensionSettings !== undefined && !Array.isArray(body.rejectedExtensionSettings))
         || (body.disabledExtensions !== undefined
             && (!Array.isArray(body.disabledExtensions)

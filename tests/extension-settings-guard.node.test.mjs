@@ -86,6 +86,37 @@ test('50 MiB legacy settings are removed from the startup payload without Base64
     });
 });
 
+test('OpenAI extension settings share the inline budget and use a separate archive slot', async () => {
+    await withDirectories(async directories => {
+        const standardValue = { cache: 'a'.repeat(MAX_INLINE_EXTENSION_SETTING_BYTES + 1) };
+        const oaiValue = { cache: 'b'.repeat(MAX_INLINE_EXTENSION_SETTING_BYTES + 1) };
+        const original = JSON.stringify({
+            extension_settings: { helper: standardValue },
+            oai_settings: { extensions: { helper: oaiValue } },
+        });
+        const result = await guardOversizedExtensionSettings(original, directories);
+
+        assert.deepEqual(result.migrated.map(item => item.source).sort(), [
+            'extension_settings',
+            'oai_settings.extensions',
+        ]);
+        assert.equal(result.failed.length, 0);
+        const compact = JSON.parse(result.settingsText);
+        assert.equal(compact.extension_settings.helper.cache, '');
+        assert.equal(compact.oai_settings.extensions.helper.cache, '');
+        assert.equal(
+            compact.oai_settings.extensions._storageReferences.helper.source,
+            'oai_settings.extensions',
+        );
+
+        const legacyDirectory = path.join(directories.extensionData, 'helper', 'legacy');
+        const standardArchive = await gunzipAsync(await fs.promises.readFile(path.join(legacyDirectory, 'settings.json.gz')));
+        const oaiArchive = await gunzipAsync(await fs.promises.readFile(path.join(legacyDirectory, 'oai-settings.json.gz')));
+        assert.deepEqual(JSON.parse(standardArchive.toString('utf8')), standardValue);
+        assert.deepEqual(JSON.parse(oaiArchive.toString('utf8')), oaiValue);
+    });
+});
+
 test('dry-run reports migration but writes no extension data, backup, or settings', async () => {
     await withDirectories(async directories => {
         const original = JSON.stringify({

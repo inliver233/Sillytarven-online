@@ -94,8 +94,6 @@ export function createExtensionsEnabledFeatureGuard(enabled) {
 
 export const extensionsEnabledFeatureGuard = createExtensionsEnabledFeatureGuard();
 
-router.use('/:extensionId/storage', extensionStorageRouter);
-
 /**
  * Identifies requests that must bypass the public static directory and reach
  * the authenticated per-user extension resource route.
@@ -1181,6 +1179,7 @@ export function createExtensionsRouter(dependencies = {}) {
     };
     const extensionsRouter = express.Router();
     extensionsRouter.use(createExtensionsEnabledFeatureGuard(dependencies.enabled));
+    extensionsRouter.use('/:extensionId/storage', extensionStorageRouter);
 
     extensionsRouter.post('/install', async (request, response) => {
         try {

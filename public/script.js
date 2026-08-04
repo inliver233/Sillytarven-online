@@ -8850,8 +8850,15 @@ export async function saveSettings(loopCounter = 0) {
                     cache: 'no-cache',
                 });
                 const saveResult = await requireSettingsSaveSuccess(response);
+                const migratedExtensionData = saveResult.migratedExtensionSettings
+                    || saveResult.migratedOaiExtensionSettings;
                 if (saveResult.migratedExtensionSettings) {
                     Object.assign(extension_settings, saveResult.migratedExtensionSettings);
+                }
+                if (saveResult.migratedOaiExtensionSettings) {
+                    Object.assign(oai_settings.extensions, saveResult.migratedOaiExtensionSettings);
+                }
+                if (migratedExtensionData) {
                     settingsSaveTracker.clear();
                     toastr.warning(t`Oversized extension data was archived. The extension remains enabled with an empty legacy cache.`);
                 } else {
@@ -8873,7 +8880,10 @@ export async function saveSettings(loopCounter = 0) {
         await eventSource.emit(event_types.SETTINGS_UPDATED);
     } catch (error) {
         console.error('Error saving settings:', error);
-        toastr.error(t`Check the server connection and reload the page to prevent data loss.`, t`Settings could not be saved`);
+        const message = error?.code && error.code !== 'settings_save_failed'
+            ? error.message
+            : t`Check the server connection and reload the page to prevent data loss.`;
+        toastr.error(message, t`Settings could not be saved`);
     }
 }
 

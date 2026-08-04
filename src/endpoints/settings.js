@@ -10,7 +10,7 @@ import { getAllUserHandles, getUserDirectories } from '../users.js';
 import { getFileNameValidationFunction } from '../middleware/validateFileName.js';
 import { beginEndpointPerformance } from '../performance-monitor.js';
 import { invalidateSettingsCache, registerSettingsCache, SettingsCache } from '../settings-cache.js';
-import { createSettingsSaveHandler } from '../settings-save.js';
+import { createSettingsSaveHandler, MAX_SETTINGS_MIGRATION_PAYLOAD_BYTES } from '../settings-save.js';
 
 const ENABLE_EXTENSIONS = !!getConfigValue('extensions.enabled', true, 'boolean');
 const ENABLE_EXTENSIONS_AUTO_UPDATE = !!getConfigValue('extensions.autoUpdate', true, 'boolean');
@@ -149,7 +149,7 @@ function getLatestBackup(handle) {
 }
 
 export const router = express.Router();
-const parseSettingsJson = express.json({ limit: '5mb', strict: true });
+const parseSettingsJson = express.json({ limit: MAX_SETTINGS_MIGRATION_PAYLOAD_BYTES, strict: true });
 
 function settingsJsonParser(request, response, next) {
     parseSettingsJson(request, response, (error) => {
@@ -160,7 +160,7 @@ function settingsJsonParser(request, response, next) {
         if (error.type === 'entity.too.large') {
             response.status(413).json({
                 error: 'settings_payload_too_large',
-                message: 'Settings exceed the 5 MiB limit. Store large extension data with the extension storage API.',
+                message: 'Settings exceed the 64 MiB legacy migration limit. Store large extension data with the extension storage API.',
             });
             return;
         }

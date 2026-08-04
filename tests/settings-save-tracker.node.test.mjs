@@ -49,13 +49,23 @@ test('settings save response requires both HTTP success and the exact success co
     assert.deepEqual(await requireSettingsSaveSuccess(response(true, 200, {
         result: 'ok',
         migratedExtensionSettings: { chatu8: { $storage: { quarantined: true } } },
+        migratedOaiExtensionSettings: { tavernHelper: { cache: '' } },
         disabledExtensions: ['third-party/chatu8'],
     })), {
         result: 'ok',
         migratedExtensionSettings: { chatu8: { $storage: { quarantined: true } } },
+        migratedOaiExtensionSettings: { tavernHelper: { cache: '' } },
         disabledExtensions: ['third-party/chatu8'],
     });
-    await assert.rejects(requireSettingsSaveSuccess(response(false, 507, { result: 'ok' })), /HTTP 507/);
+    await assert.rejects(
+        requireSettingsSaveSuccess(response(false, 413, {
+            error: 'settings_compact_payload_too_large',
+            message: 'Settings remain too large.',
+        })),
+        error => error.code === 'settings_compact_payload_too_large'
+            && error.status === 413
+            && error.message === 'Settings remain too large.',
+    );
     await assert.rejects(requireSettingsSaveSuccess(response(true, 200, { error: 'write_failed' })), /invalid success response/i);
     await assert.rejects(requireSettingsSaveSuccess(response(true, 200, { result: 'ok', unexpected: true })), /invalid success response/i);
     await assert.rejects(requireSettingsSaveSuccess({ ok: true, status: 200, json: async () => { throw new Error('invalid JSON'); } }), /invalid success response/i);

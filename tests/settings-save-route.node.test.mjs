@@ -8,11 +8,14 @@ import test from 'node:test';
 import express from 'express';
 import writeFileAtomic from 'write-file-atomic';
 
-import { createSettingsSaveHandler } from '../src/settings-save.js';
+import {
+    createSettingsSaveHandler,
+    MAX_SETTINGS_MIGRATION_PAYLOAD_BYTES,
+} from '../src/settings-save.js';
 
 async function startSettingsServer(root, writer) {
     const app = express();
-    app.use(express.json({ limit: '6mb' }));
+    app.use(express.json({ limit: MAX_SETTINGS_MIGRATION_PAYLOAD_BYTES }));
     app.use((request, _response, next) => {
         request.user = {
             profile: { handle: 'settings-user' },
@@ -152,6 +155,76 @@ test('oversized extension settings migrate while core settings still save', asyn
         assert.equal(saved.extension_settings._storageReferences.chatu8.kind, 'legacy-extension-settings');
         assert.equal(JSON.stringify(saved).includes('x'.repeat(1024)), false);
         assert.equal(fs.existsSync(path.join(root, 'extension-data', 'chatu8', 'legacy', 'settings.json.gz')), true);
+    } finally {
+        await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+        await fs.promises.rm(root, { recursive: true, force: true });
+    }
+});
+
+test('legacy requests larger than 5 MiB reach migration before the compact limit is enforced', async () => {
+    const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'sillytavern-settings-large-migrate-'));
+    const { server, baseUrl } = await startSettingsServer(root);
+    try {
+        const response = await postSettings(baseUrl, {
+            theme: 'dark',
+            extension_settings: {
+                chatu8: { imageIndex: 'x'.repeat(6 * 1024 * 1024) },
+            },
+        });
+        assert.equal(response.status, 200);
+        assert.equal((await response.json()).result, 'ok');
+
+        const savedText = await fs.promises.readFile(path.join(root, 'settings.json'), 'utf8');
+        assert.ok(Buffer.byteLength(savedText) < 5 * 1024 * 1024);
+        assert.equal(JSON.parse(savedText).extension_settings.chatu8.imageIndex, '');
+    } finally {
+        await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+        await fs.promises.rm(root, { recursive: true, force: true });
+    }
+});
+
+test('OpenAI extension data migrates and updates the browser compatibility value', async () => {
+    const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'sillytavern-settings-oai-migrate-'));
+    const { server, baseUrl } = await startSettingsServer(root);
+    try {
+        const response = await postSettings(baseUrl, {
+            oai_settings: {
+                extensions: {
+                    tavernHelper: { cache: 'x'.repeat(600 * 1024) },
+                },
+            },
+        });
+        assert.equal(response.status, 200);
+        const result = await response.json();
+        assert.equal(result.migratedOaiExtensionSettings.tavernHelper.cache, '');
+
+        const saved = JSON.parse(await fs.promises.readFile(path.join(root, 'settings.json'), 'utf8'));
+        assert.equal(saved.oai_settings.extensions.tavernHelper.cache, '');
+        assert.equal(
+            saved.oai_settings.extensions._storageReferences.tavernHelper.source,
+            'oai_settings.extensions',
+        );
+        assert.equal(
+            fs.existsSync(path.join(root, 'extension-data', 'tavernHelper', 'legacy', 'oai-settings.json.gz')),
+            true,
+        );
+    } finally {
+        await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+        await fs.promises.rm(root, { recursive: true, force: true });
+    }
+});
+
+test('non-extension settings still cannot exceed the compact 5 MiB limit', async () => {
+    const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'sillytavern-settings-compact-limit-'));
+    const { server, baseUrl } = await startSettingsServer(root);
+    try {
+        const response = await postSettings(baseUrl, { unrelatedCache: 'x'.repeat(6 * 1024 * 1024) });
+        assert.equal(response.status, 413);
+        assert.deepEqual(await response.json(), {
+            error: 'settings_compact_payload_too_large',
+            message: 'Settings still exceed the 5 MiB limit after extension data migration.',
+        });
+        assert.equal(fs.existsSync(path.join(root, 'settings.json')), false);
     } finally {
         await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
         await fs.promises.rm(root, { recursive: true, force: true });

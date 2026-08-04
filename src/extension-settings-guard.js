@@ -63,13 +63,16 @@ async function directorySize(directory) {
     return sizes.reduce((total, size) => total + size, 0);
 }
 
-async function persistLegacySetting(extensionDataRoot, extensionId, serializedValue, { dryRun }) {
+async function persistLegacySetting(extensionDataRoot, extensionId, serializedValue, { dryRun, slot = 'settings' }) {
+    if (!['settings', 'oai-settings'].includes(slot)) {
+        throw new TypeError('Unsupported extension settings migration slot');
+    }
     const storageId = toStorageId(extensionId);
     const digest = crypto.createHash('sha256').update(serializedValue).digest('hex');
     const extensionDirectory = path.join(extensionDataRoot, storageId);
     const legacyDirectory = path.join(extensionDirectory, 'legacy');
-    const dataPath = path.join(legacyDirectory, 'settings.json.gz');
-    const metadataPath = path.join(legacyDirectory, 'settings.meta.json');
+    const dataPath = path.join(legacyDirectory, `${slot}.json.gz`);
+    const metadataPath = path.join(legacyDirectory, `${slot}.meta.json`);
     let existingMetadata = null;
     try {
         existingMetadata = JSON.parse(await fs.promises.readFile(metadataPath, 'utf8'));
@@ -115,10 +118,11 @@ async function persistLegacySetting(extensionDataRoot, extensionId, serializedVa
     return { storageId, ...metadata };
 }
 
-function createReference(migration) {
+function createReference(migration, source) {
     return {
         schemaVersion: 1,
         kind: 'legacy-extension-settings',
+        source,
         extensionId: migration.storageId,
         format: migration.format,
         sha256: migration.sha256,
@@ -175,63 +179,102 @@ export async function guardOversizedExtensionSettings(settingsText, directories,
     if (typeof settingsText !== 'string') throw new TypeError('settingsText must be a string');
     const settings = JSON.parse(settingsText);
     const extensionSettings = settings?.extension_settings;
-    if (!extensionSettings || typeof extensionSettings !== 'object' || Array.isArray(extensionSettings)) {
-        return { settingsText, settingsObject: settings, migrated: [], failed: [], replacements: {} };
-    }
+    const oaiSettings = settings?.oai_settings;
+    const oaiExtensionSettings = oaiSettings?.extensions;
+    const hasExtensionSettings = extensionSettings && typeof extensionSettings === 'object' && !Array.isArray(extensionSettings);
+    const hasOaiExtensionSettings = oaiExtensionSettings && typeof oaiExtensionSettings === 'object' && !Array.isArray(oaiExtensionSettings);
+    const emptyResult = {
+        settingsText,
+        settingsObject: settings,
+        migrated: [],
+        failed: [],
+        replacements: {},
+        oaiReplacements: {},
+    };
+    if (!hasExtensionSettings && !hasOaiExtensionSettings) return emptyResult;
 
-    const candidates = Object.entries(extensionSettings)
-        .filter(([extensionId]) => !RESERVED_EXTENSION_SETTINGS.has(extensionId))
-        .map(([extensionId, value]) => ({
-            extensionId,
-            value,
-            bytes: byteLength(JSON.stringify(value)),
-        }));
+    const candidates = [
+        ...(hasExtensionSettings ? Object.entries(extensionSettings)
+            .filter(([extensionId]) => !RESERVED_EXTENSION_SETTINGS.has(extensionId))
+            .map(([extensionId, value]) => ({
+                source: 'extension_settings',
+                slot: 'settings',
+                extensionId,
+                value,
+                bytes: byteLength(JSON.stringify(value)),
+            })) : []),
+        ...(hasOaiExtensionSettings ? Object.entries(oaiExtensionSettings)
+            .filter(([extensionId]) => extensionId !== '_storageReferences')
+            .map(([extensionId, value]) => ({
+                source: 'oai_settings.extensions',
+                slot: 'oai-settings',
+                extensionId,
+                value,
+                bytes: byteLength(JSON.stringify(value)),
+            })) : []),
+    ];
     const selected = new Set(candidates
         .filter(item => item.bytes > MAX_INLINE_EXTENSION_SETTING_BYTES)
-        .map(item => item.extensionId));
+        .map(item => `${item.source}:${item.extensionId}`));
     let remainingInlineBytes = candidates
-        .filter(item => !selected.has(item.extensionId))
+        .filter(item => !selected.has(`${item.source}:${item.extensionId}`))
         .reduce((total, item) => total + item.bytes, 0);
     for (const item of [...candidates].sort((left, right) => right.bytes - left.bytes)) {
         if (remainingInlineBytes <= MAX_TOTAL_INLINE_EXTENSION_SETTINGS_BYTES) break;
-        if (selected.has(item.extensionId)) continue;
-        selected.add(item.extensionId);
+        const candidateKey = `${item.source}:${item.extensionId}`;
+        if (selected.has(candidateKey)) continue;
+        selected.add(candidateKey);
         remainingInlineBytes -= item.bytes;
     }
-    if (selected.size === 0) {
-        return { settingsText, settingsObject: settings, migrated: [], failed: [], replacements: {} };
-    }
+    if (selected.size === 0) return emptyResult;
 
     return await migrationMutex.runExclusive(String(directories.root), async () => {
-        const compactSettings = { ...settings, extension_settings: { ...extensionSettings } };
-        const compactExtensionSettings = compactSettings.extension_settings;
+        const compactSettings = { ...settings };
+        const compactExtensionSettings = hasExtensionSettings ? { ...extensionSettings } : null;
+        const compactOaiExtensionSettings = hasOaiExtensionSettings ? { ...oaiExtensionSettings } : null;
+        if (compactExtensionSettings) compactSettings.extension_settings = compactExtensionSettings;
+        if (compactOaiExtensionSettings) {
+            compactSettings.oai_settings = { ...oaiSettings, extensions: compactOaiExtensionSettings };
+        }
         const migrated = [];
         const failed = [];
         const replacements = {};
-        const storageReferences = {
-            ...(compactExtensionSettings._storageReferences
+        const oaiReplacements = {};
+        const extensionStorageReferences = {
+            ...(compactExtensionSettings?._storageReferences
                 && typeof compactExtensionSettings._storageReferences === 'object'
                 && !Array.isArray(compactExtensionSettings._storageReferences)
                 ? compactExtensionSettings._storageReferences
                 : {}),
         };
+        const oaiStorageReferences = {
+            ...(compactOaiExtensionSettings?._storageReferences
+                && typeof compactOaiExtensionSettings._storageReferences === 'object'
+                && !Array.isArray(compactOaiExtensionSettings._storageReferences)
+                ? compactOaiExtensionSettings._storageReferences
+                : {}),
+        };
 
-        for (const { extensionId, value } of candidates) {
-            if (!selected.has(extensionId)) continue;
+        for (const { source, slot, extensionId, value } of candidates) {
+            if (!selected.has(`${source}:${extensionId}`)) continue;
             const serializedValue = JSON.stringify(value);
+            const target = source === 'extension_settings' ? compactExtensionSettings : compactOaiExtensionSettings;
+            const targetReplacements = source === 'extension_settings' ? replacements : oaiReplacements;
+            const targetReferences = source === 'extension_settings' ? extensionStorageReferences : oaiStorageReferences;
 
             try {
                 const migration = await persistLegacySetting(
                     directories.extensionData,
                     extensionId,
                     serializedValue,
-                    { dryRun },
+                    { dryRun, slot },
                 );
                 const projection = createCompatibilityProjection(value);
-                compactExtensionSettings[extensionId] = projection;
-                replacements[extensionId] = projection;
-                storageReferences[extensionId] = createReference(migration);
+                target[extensionId] = projection;
+                targetReplacements[extensionId] = projection;
+                targetReferences[extensionId] = createReference(migration, source);
                 migrated.push({
+                    source,
                     extensionId,
                     storageId: migration.storageId,
                     sha256: migration.sha256,
@@ -239,9 +282,10 @@ export async function guardOversizedExtensionSettings(settingsText, directories,
                     compressedBytes: migration.compressedBytes,
                 });
             } catch (error) {
-                compactExtensionSettings[extensionId] = createCompatibilityProjection(value);
-                failed.push({ extensionId, code: error?.code || 'migration_failed' });
+                target[extensionId] = createCompatibilityProjection(value);
+                failed.push({ source, extensionId, code: error?.code || 'migration_failed' });
                 console.error('Oversized extension settings migration failed', {
+                    source,
                     extensionId,
                     code: error?.code || 'UNKNOWN',
                 });
@@ -249,11 +293,15 @@ export async function guardOversizedExtensionSettings(settingsText, directories,
         }
 
         if (!migrated.length && !failed.length) {
-            return { settingsText, settingsObject: settings, migrated, failed, replacements };
+            return { settingsText, settingsObject: settings, migrated, failed, replacements, oaiReplacements };
         }
-        if (migrated.length > 0) {
-            compactExtensionSettings._storageReferences = storageReferences;
-            replacements._storageReferences = storageReferences;
+        if (migrated.some(item => item.source === 'extension_settings')) {
+            compactExtensionSettings._storageReferences = extensionStorageReferences;
+            replacements._storageReferences = extensionStorageReferences;
+        }
+        if (migrated.some(item => item.source === 'oai_settings.extensions')) {
+            compactOaiExtensionSettings._storageReferences = oaiStorageReferences;
+            oaiReplacements._storageReferences = oaiStorageReferences;
         }
         const compactText = JSON.stringify(compactSettings, null, 4);
 
@@ -271,6 +319,7 @@ export async function guardOversizedExtensionSettings(settingsText, directories,
             migrated,
             failed,
             replacements,
+            oaiReplacements,
         };
     });
 }
