@@ -1,5 +1,8 @@
 # SillyTavern MOD (STC-MOD) - 酒馆社区专属版
 
+> [!IMPORTANT]
+> `online` 分支是多人云酒馆的稳定回退版本，包含 Free Gemini、插件安装修复、前端关键样式修复，以及旧版扩展设置引用的迁移和在线兼容保护。部署、迁移、验证和回退步骤见 [Online 稳定分支部署指南](docs/ONLINE_STABLE_DEPLOYMENT.md)。
+
 > ⚠️ **重要公告：旧版仓库迁移说明**
 > 
 > 原仓库 [`zhaiiker/SillyTavernchat`](https://github.com/zhaiiker/SillyTavernchat)（基于 1.15.0）现已**正式停止维护**。
