@@ -8849,8 +8849,21 @@ export async function saveSettings(loopCounter = 0) {
                     body: serializedPayload,
                     cache: 'no-cache',
                 });
-                await requireSettingsSaveSuccess(response);
-                settingsSaveTracker.commit(serializedPayload);
+                const saveResult = await requireSettingsSaveSuccess(response);
+                if (saveResult.migratedExtensionSettings) {
+                    Object.assign(extension_settings, saveResult.migratedExtensionSettings);
+                    settingsSaveTracker.clear();
+                    toastr.warning(t`Oversized extension data was archived. The extension remains enabled with an empty legacy cache.`);
+                } else {
+                    settingsSaveTracker.commit(serializedPayload);
+                }
+                if (saveResult.disabledExtensions) {
+                    extension_settings.disabledExtensions = saveResult.disabledExtensions;
+                }
+                if (saveResult.rejectedExtensionSettings?.length) {
+                    settingsSaveTracker.clear();
+                    toastr.error(t`Oversized extension data could not be migrated. Core settings were saved without overwriting the previous extension data.`);
+                }
             });
         } finally {
             settingsSaveRequestsInFlight--;

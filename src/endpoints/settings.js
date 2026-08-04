@@ -149,8 +149,29 @@ function getLatestBackup(handle) {
 }
 
 export const router = express.Router();
+const parseSettingsJson = express.json({ limit: '5mb', strict: true });
 
-router.post('/save', createSettingsSaveHandler({
+function settingsJsonParser(request, response, next) {
+    parseSettingsJson(request, response, (error) => {
+        if (!error) {
+            next();
+            return;
+        }
+        if (error.type === 'entity.too.large') {
+            response.status(413).json({
+                error: 'settings_payload_too_large',
+                message: 'Settings exceed the 5 MiB limit. Store large extension data with the extension storage API.',
+            });
+            return;
+        }
+        response.status(400).json({
+            error: 'invalid_settings_payload',
+            message: 'Settings must be a valid JSON object.',
+        });
+    });
+}
+
+router.post('/save', settingsJsonParser, createSettingsSaveHandler({
     onSuccess: (request) => {
         invalidateSettingsCache(request.user.profile.handle);
         triggerAutoSave(request.user.profile.handle);

@@ -1,9 +1,11 @@
+import fs from 'node:fs';
 import path from 'node:path';
 
 import writeFileAtomic from 'write-file-atomic';
 
 import { SETTINGS_FILE } from './constants.js';
 import { KeyedMutex } from './keyed-mutex.js';
+import { guardOversizedExtensionSettings } from './extension-settings-guard.js';
 
 const settingsWriteMutex = new KeyedMutex();
 
@@ -52,8 +54,27 @@ export function createSettingsSaveHandler({ writeSettings = defaultWriteSettings
 
         return await settingsWriteMutex.runExclusive(handle, async () => {
             const pathToSettings = path.join(request.user.directories.root, SETTINGS_FILE);
+            let guarded;
             try {
-                const serializedSettings = JSON.stringify(request.body, null, 4);
+                const requestedSettings = JSON.stringify(request.body, null, 4);
+                guarded = await guardOversizedExtensionSettings(requestedSettings, request.user.directories, {
+                    updateSettingsFile: false,
+                });
+                if (guarded.failed.length > 0) {
+                    let existingSettings = {};
+                    try {
+                        existingSettings = JSON.parse(await fs.promises.readFile(pathToSettings, 'utf8'));
+                    } catch {
+                        // Core settings can still be saved when no previous extension value exists.
+                    }
+                    for (const { extensionId } of guarded.failed) {
+                        const existingValue = existingSettings?.extension_settings?.[extensionId];
+                        if (existingValue !== undefined) {
+                            guarded.settingsObject.extension_settings[extensionId] = existingValue;
+                        }
+                    }
+                }
+                const serializedSettings = JSON.stringify(guarded.settingsObject, null, 4);
                 await writeSettings(pathToSettings, serializedSettings);
             } catch (error) {
                 const failure = getSettingsWriteFailure(error);
@@ -68,7 +89,14 @@ export function createSettingsSaveHandler({ writeSettings = defaultWriteSettings
                 // that successful write into a retryable client failure.
                 console.error('Settings post-save work failed', { handle, code: error?.code || 'UNKNOWN' });
             }
-            return response.json({ result: 'ok' });
+            const result = { result: 'ok' };
+            if (guarded.migrated.length > 0) {
+                result.migratedExtensionSettings = guarded.replacements;
+            }
+            if (guarded.failed.length > 0) {
+                result.rejectedExtensionSettings = guarded.failed;
+            }
+            return response.json(result);
         });
     };
 }

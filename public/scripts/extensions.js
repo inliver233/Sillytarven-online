@@ -6,7 +6,7 @@ import { POPUP_RESULT, POPUP_TYPE, Popup, callGenericPopup } from './popup.js';
 import { renderTemplate, renderTemplateAsync } from './templates.js';
 import { delay, equalsIgnoreCaseAndAccents, sanitizeSelector, setValueByPath } from './utils.js';
 import { getContext } from './st-context.js';
-import { isAdmin } from './user.js';
+import { getCurrentUserHandle, isAdmin } from './user.js';
 import { addLocaleData, getCurrentLocale, t } from './i18n.js';
 import { debounce_timeout } from './constants.js';
 import { accountStorage } from './util/AccountStorage.js';
@@ -17,6 +17,7 @@ import { createExtensionAssetLoader, createExtensionLifecycle, EXTENSION_LIFECYC
 import { isExtensionLifecycleEnabled } from './extensions/feature-gate.js';
 import { SimpleMutex } from './util/SimpleMutex.js';
 import { power_user } from './power-user.js';
+import { ExtensionStartupGuard } from './util/extension-startup-guard.js';
 
 export {
     getContext,
@@ -67,7 +68,7 @@ let extensionResolver = createExtensionResolver([]);
 const extensionLifecycle = createExtensionLifecycle();
 const extensionAssetLoader = createExtensionAssetLoader({
     document,
-    fetch: (...args) => fetch(...args),
+    fetch: (...args) => extensionFetch(...args),
     sanitizeSelector,
     getCurrentLocale: () => getCurrentLocale(),
     addLocaleData: (...args) => addLocaleData(...args),
@@ -82,6 +83,11 @@ const defaultUrl = 'http://localhost:5100';
 let requiresReload = false;
 let stateChanged = false;
 let saveMetadataTimeout = null;
+const EXTENSION_LOAD_TIMEOUT_MS = 5000;
+const EXTENSION_ERROR_LIMIT = 3;
+const extensionRuntimeErrors = new Map();
+let extensionStartupGuard = null;
+let extensionErrorMonitorInstalled = false;
 
 export function cancelDebouncedMetadataSave() {
     if (saveMetadataTimeout) {
@@ -287,6 +293,120 @@ function getExtensionType(externalId) {
 
     const id = Object.keys(extensionTypes).find(id => id === externalId || (id.startsWith('third-party') && id.endsWith(externalId)));
     return id ? extensionTypes[id] : '';
+}
+
+function getExtensionStorageUrl(extensionId, key = '') {
+    const rawId = String(extensionId);
+    // Express route parameters cannot contain a decoded slash. Keep the
+    // external namespace while mapping it to one validated path segment.
+    const normalizedId = rawId.startsWith('third-party/')
+        ? `third-party-${rawId.slice('third-party/'.length)}`
+        : rawId;
+    const id = encodeURIComponent(normalizedId);
+    return `/api/extensions/${id}/storage${key ? `/${encodeURIComponent(String(key))}` : ''}`;
+}
+
+async function requireExtensionStorageResponse(response) {
+    if (response.ok) {
+        return response.status === 204 ? null : await response.json();
+    }
+    let error = null;
+    try {
+        error = await response.json();
+    } catch {
+        // Use the stable HTTP fallback below.
+    }
+    const storageError = new Error(error?.message || `Extension storage HTTP ${response.status}`);
+    storageError.code = error?.error || 'extension_storage_failed';
+    storageError.status = response.status;
+    throw storageError;
+}
+
+/** List extension storage keys without loading their values. */
+export async function listExtensionStorage(extensionId, { offset = 0, limit = 25 } = {}) {
+    const query = new URLSearchParams({ offset: String(offset), limit: String(limit) });
+    const response = await fetch(`${getExtensionStorageUrl(extensionId)}?${query}`, {
+        headers: getRequestHeaders(),
+        cache: 'no-store',
+    });
+    return await requireExtensionStorageResponse(response);
+}
+
+/** Load one bounded extension storage value. */
+export async function getExtensionStorage(extensionId, key) {
+    const response = await fetch(getExtensionStorageUrl(extensionId, key), {
+        headers: getRequestHeaders(),
+        cache: 'no-store',
+    });
+    return await requireExtensionStorageResponse(response);
+}
+
+/** Atomically write one extension storage value with optional optimistic concurrency. */
+export async function putExtensionStorage(extensionId, key, value, { schemaVersion = 1, expectedVersion } = {}) {
+    const body = { schemaVersion, value };
+    if (expectedVersion !== undefined) body.expectedVersion = expectedVersion;
+    const response = await fetch(getExtensionStorageUrl(extensionId, key), {
+        method: 'PUT',
+        headers: getRequestHeaders(),
+        body: JSON.stringify(body),
+        cache: 'no-store',
+    });
+    return await requireExtensionStorageResponse(response);
+}
+
+/** Delete one extension storage value with optional optimistic concurrency. */
+export async function deleteExtensionStorage(extensionId, key, { expectedVersion } = {}) {
+    const headers = getRequestHeaders();
+    if (expectedVersion !== undefined) headers['If-Match'] = `"${expectedVersion}"`;
+    const response = await fetch(getExtensionStorageUrl(extensionId, key), {
+        method: 'DELETE',
+        headers,
+        cache: 'no-store',
+    });
+    return await requireExtensionStorageResponse(response);
+}
+
+function extensionFetch(url) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), EXTENSION_LOAD_TIMEOUT_MS);
+    return fetch(url, { signal: controller.signal }).finally(() => clearTimeout(timeout));
+}
+
+function getRuntimeExtensionId(value) {
+    const match = String(value || '').match(/\/scripts\/extensions\/(third-party\/[^/\s?#]+)/);
+    return match?.[1] || null;
+}
+
+function recordExtensionRuntimeError(value) {
+    const extensionId = getRuntimeExtensionId(value);
+    if (!extensionId || extension_settings.disabledExtensions.includes(extensionId)) return;
+    const count = (extensionRuntimeErrors.get(extensionId) || 0) + 1;
+    extensionRuntimeErrors.set(extensionId, count);
+    if (count < EXTENSION_ERROR_LIMIT) return;
+
+    extension_settings.disabledExtensions.push(extensionId);
+    activeExtensions.delete(extensionId);
+    extensionStartupGuard?.settle(extensionId);
+    document.getElementById(sanitizeSelector(`${extensionId}-js`))?.remove();
+    document.getElementById(sanitizeSelector(`${extensionId}-css`))?.remove();
+    extensionLoadErrors.add(t`Extension "${extensionId}" was quarantined after repeated errors.`);
+    $('#extensions_details').addClass('warning');
+    window.dispatchEvent(new CustomEvent('sillytavern:extension-quarantined', {
+        detail: { extensionId, reason: 'repeated-errors' },
+    }));
+    saveSettingsDebounced();
+    toastr.error(t`A repeatedly failing extension was disabled. Reload the page to finish releasing its resources.`);
+}
+
+function installExtensionErrorMonitor() {
+    if (extensionErrorMonitorInstalled) return;
+    extensionErrorMonitorInstalled = true;
+    window.addEventListener('error', event => {
+        recordExtensionRuntimeError(`${event.filename || ''}\n${event.error?.stack || event.message || ''}`);
+    });
+    window.addEventListener('unhandledrejection', event => {
+        recordExtensionRuntimeError(event.reason?.stack || event.reason);
+    });
 }
 
 /**
@@ -506,9 +626,12 @@ async function getManifests(names) {
 
     for (const name of names) {
         const promise = new Promise((resolve, reject) => {
-            fetch(`/scripts/extensions/${name}/manifest.json`).then(async response => {
+            extensionFetch(`/scripts/extensions/${name}/manifest.json`).then(async response => {
                 if (response.ok) {
-                    const json = await response.json();
+                    const text = await response.text();
+                    if (text.length > 64 * 1024) throw new Error('Extension manifest exceeds 64 KiB');
+                    const json = JSON.parse(text);
+                    if (!json || typeof json !== 'object' || Array.isArray(json)) throw new Error('Invalid extension manifest');
                     obj[name] = json;
                     resolve();
                 } else {
@@ -574,29 +697,36 @@ async function activateExtensions() {
         if (eligible) {
             try {
                 console.debug('Activating extension', name);
-                if (isExtensionLifecycleEnabled()) {
-                    const descriptor = extensionResolver.resolve(name);
-                    if (!descriptor) {
-                        throw new Error(`No descriptor was resolved for extension "${name}".`);
-                    }
+                const startupTracked = extensionStartupGuard?.begin(name) === true;
+                try {
+                    if (isExtensionLifecycleEnabled()) {
+                        const descriptor = extensionResolver.resolve(name);
+                        if (!descriptor) {
+                            throw new Error(`No descriptor was resolved for extension "${name}".`);
+                        }
 
-                    await Promise.all([addExtensionLocale(name, manifest), addExtensionStyle(name, manifest)]);
-                    const result = await extensionLifecycle.activate(descriptor);
-                    if (result.status !== EXTENSION_LIFECYCLE_STATE.ACTIVE) {
-                        throw new Error(result.error?.message || `Lifecycle activation ended in state "${result.status}".`);
+                        await Promise.all([addExtensionLocale(name, manifest), addExtensionStyle(name, manifest)]);
+                        const result = await extensionLifecycle.activate(descriptor);
+                        if (result.status !== EXTENSION_LIFECYCLE_STATE.ACTIVE) {
+                            throw new Error(result.error?.message || `Lifecycle activation ended in state "${result.status}".`);
+                        }
+                        activeExtensions.add(name);
+                    } else {
+                        const promise = addExtensionLocale(name, manifest).finally(() =>
+                            Promise.all([addExtensionScript(name, manifest), addExtensionStyle(name, manifest)]),
+                        );
+                        await promise
+                            .then(() => activeExtensions.add(name))
+                            .catch(err => {
+                                console.log('Could not activate extension', name, err);
+                                extensionLoadErrors.add(t`Extension "${displayName}" failed to load: ${err}`);
+                            });
+                        promises.push(promise);
                     }
-                    activeExtensions.add(name);
-                } else {
-                    const promise = addExtensionLocale(name, manifest).finally(() =>
-                        Promise.all([addExtensionScript(name, manifest), addExtensionStyle(name, manifest)]),
-                    );
-                    await promise
-                        .then(() => activeExtensions.add(name))
-                        .catch(err => {
-                            console.log('Could not activate extension', name, err);
-                            extensionLoadErrors.add(t`Extension "${displayName}" failed to load: ${err}`);
-                        });
-                    promises.push(promise);
+                } finally {
+                    if (startupTracked) {
+                        extensionStartupGuard.scheduleSettle(name);
+                    }
                 }
             } catch (error) {
                 console.error('Could not activate extension', name, error);
@@ -784,20 +914,28 @@ function addExtensionScript(name, manifest) {
 
         if ($(`script[id="${id}"]`).length === 0) {
             const script = document.createElement('script');
+            const timeout = setTimeout(() => {
+                script.remove();
+                reject(new Error(`Extension script timed out after ${EXTENSION_LOAD_TIMEOUT_MS} ms`));
+            }, EXTENSION_LOAD_TIMEOUT_MS);
             script.id = id;
             script.type = 'module';
             script.src = url;
             script.async = true;
             script.onerror = function (err) {
+                clearTimeout(timeout);
                 reject(err);
             };
             script.onload = function () {
                 if (!ready) {
                     ready = true;
+                    clearTimeout(timeout);
                     resolve();
                 }
             };
             document.body.appendChild(script);
+        } else {
+            resolve();
         }
     });
 }
@@ -1583,6 +1721,24 @@ export async function loadExtensionSettings(settings, versionChanged, enableAuto
     const extensions = await discoverExtensions();
     extensionNames = extensions.map(x => x.name);
     extensionTypes = Object.fromEntries(extensions.map(x => [x.name, x.type]));
+    if (!extensionStartupGuard) {
+        extensionStartupGuard = new ExtensionStartupGuard({
+            storage: globalThis.localStorage,
+            userId: getCurrentUserHandle(),
+        });
+        const interruptedExtensions = extensionStartupGuard.recover()
+            .filter(name => extensionNames.includes(name));
+        if (interruptedExtensions.length > 0) {
+            extension_settings.disabledExtensions = [...new Set([
+                ...extension_settings.disabledExtensions,
+                ...interruptedExtensions,
+            ])];
+            stateChanged = true;
+            saveSettingsDebounced();
+            console.warn('Quarantined extensions from an interrupted startup', interruptedExtensions);
+            toastr.warning(t`Extensions active during an interrupted startup were disabled. Core chat will continue loading.`);
+        }
+    }
     manifests = await getManifests(extensionNames);
     extensionDescriptors = createExtensionDescriptors(extensions, manifests, {
         disabledExtensions: extension_settings.disabledExtensions,
@@ -1926,6 +2082,7 @@ export async function openThirdPartyExtensionMenu(suggestUrl = '') {
 }
 
 export async function initExtensions() {
+    installExtensionErrorMonitor();
     await addExtensionsButtonAndMenu();
     $('#extensionsMenuButton').css('display', 'flex');
 

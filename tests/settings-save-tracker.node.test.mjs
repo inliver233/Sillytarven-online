@@ -46,8 +46,18 @@ test('settings save response requires both HTTP success and the exact success co
     });
 
     assert.deepEqual(await requireSettingsSaveSuccess(response(true, 200, { result: 'ok' })), { result: 'ok' });
+    assert.deepEqual(await requireSettingsSaveSuccess(response(true, 200, {
+        result: 'ok',
+        migratedExtensionSettings: { chatu8: { $storage: { quarantined: true } } },
+        disabledExtensions: ['third-party/chatu8'],
+    })), {
+        result: 'ok',
+        migratedExtensionSettings: { chatu8: { $storage: { quarantined: true } } },
+        disabledExtensions: ['third-party/chatu8'],
+    });
     await assert.rejects(requireSettingsSaveSuccess(response(false, 507, { result: 'ok' })), /HTTP 507/);
     await assert.rejects(requireSettingsSaveSuccess(response(true, 200, { error: 'write_failed' })), /invalid success response/i);
+    await assert.rejects(requireSettingsSaveSuccess(response(true, 200, { result: 'ok', unexpected: true })), /invalid success response/i);
     await assert.rejects(requireSettingsSaveSuccess({ ok: true, status: 200, json: async () => { throw new Error('invalid JSON'); } }), /invalid success response/i);
 });
 

@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 
 import express from 'express';
 
-import { isClientTelemetryJsonPath } from '../src/body-parser-routing.js';
+import { isBoundedJsonPath, isClientTelemetryJsonPath } from '../src/body-parser-routing.js';
 import { setConfigFilePath } from '../src/util.js';
 
 setConfigFilePath(fileURLToPath(new URL('../config.yaml', import.meta.url)));
@@ -29,6 +29,11 @@ test('client telemetry path variants bypass the global JSON parser', () => {
     assert.equal(isClientTelemetryJsonPath('/api/performance/client/'), true);
     assert.equal(isClientTelemetryJsonPath('/api/performance/client/not-client'), false);
     assert.equal(isClientTelemetryJsonPath('/api/settings/save'), false);
+    assert.equal(isBoundedJsonPath('/api/performance/client'), true);
+    assert.equal(isBoundedJsonPath('/api/settings/save'), true);
+    assert.equal(isBoundedJsonPath('/api/extensions/gallery/storage/page-1'), true);
+    assert.equal(isBoundedJsonPath('/api/extensions/gallery/storage'), false);
+    assert.equal(isBoundedJsonPath('/api/chats/save'), false);
 });
 
 after(() => {

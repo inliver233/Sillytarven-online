@@ -10,6 +10,7 @@ import { CheckRepoActions, default as simpleGit } from 'simple-git';
 
 import { PUBLIC_DIRECTORIES } from '../constants.js';
 import { canonicalJsonStringify, hashCanonicalJson, sha256 } from '../canonical-hash.js';
+import { extensionStorageRouter } from '../extension-storage.js';
 import { KeyedMutex } from '../keyed-mutex.js';
 import { canConsumeStorage } from '../storage-quota.js';
 import { getConfigValue } from '../util.js';
@@ -92,6 +93,8 @@ export function createExtensionsEnabledFeatureGuard(enabled) {
 }
 
 export const extensionsEnabledFeatureGuard = createExtensionsEnabledFeatureGuard();
+
+router.use('/:extensionId/storage', extensionStorageRouter);
 
 /**
  * Identifies requests that must bypass the public static directory and reach

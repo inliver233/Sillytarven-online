@@ -5,6 +5,7 @@ import { performance } from 'node:perf_hooks';
 
 import { BoundedCache } from './bounded-cache.js';
 import { createConcurrencyLimiter } from './concurrency.js';
+import { guardOversizedExtensionSettings } from './extension-settings-guard.js';
 
 const DIRECTORY_DEFINITIONS = [
     ['koboldAI_Settings', 'kobold'],
@@ -80,7 +81,7 @@ export class SettingsCache {
         const runtimeSignature = JSON.stringify(runtimeConfig);
         const result = await this.cache.getOrLoad(trustedKey, {
             signature: `${signature.value}:${runtimeSignature}`,
-            load: () => this.#buildPayload(directories, runtimeConfig, signature.files, onMetric),
+            load: () => this.#buildPayload(trustedKey, directories, runtimeConfig, signature.files, onMetric),
             sizeOf: value => Buffer.byteLength(JSON.stringify(value.payload), 'utf8'),
         });
         return { ...result.value, state: result.state };
@@ -111,10 +112,10 @@ export class SettingsCache {
         return { ...this.cache.getStatus(), signatures: this.signatures.size };
     }
 
-    async #buildPayload(directories, runtimeConfig, files, onMetric) {
+    async #buildPayload(userKey, directories, runtimeConfig, files, onMetric) {
         const metrics = { directories: DIRECTORY_DEFINITIONS.length + 1, filesRead: 0, invalidFiles: 0, readBytes: 0, readMs: 0, parseMs: 0 };
         const [
-            settings,
+            rawSettings,
             kobold,
             novelai,
             openai,
@@ -141,9 +142,21 @@ export class SettingsCache {
             this.#readParsedFiles(directories.reasoning, files.reasoning, metrics, onMetric),
         ]);
 
+        const guardStartedAt = performance.now();
+        const guardedSettings = await guardOversizedExtensionSettings(rawSettings, directories, {
+            backupFilePrefix: `settings_${userKey}_extension_migration_`,
+        });
+        metrics.parseMs += performance.now() - guardStartedAt;
+        if (guardedSettings.migrated.length > 0) {
+            console.warn('Migrated oversized extension settings', {
+                count: guardedSettings.migrated.length,
+                bytes: guardedSettings.migrated.reduce((total, item) => total + item.originalBytes, 0),
+            });
+        }
+
         return {
             payload: {
-                settings,
+                settings: guardedSettings.settingsText,
                 koboldai_settings: kobold.fileContents,
                 koboldai_setting_names: kobold.fileNames,
                 world_names: files.worlds.map(item => path.parse(item).name),

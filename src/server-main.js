@@ -43,7 +43,7 @@ import getWhitelistMiddleware from './middleware/whitelist.js';
 import accessLoggerMiddleware, { getAccessLogPath, migrateAccessLog } from './middleware/accessLogWriter.js';
 import multerMonkeyPatch from './middleware/multerMonkeyPatch.js';
 import { createUploadMiddleware } from './upload-middleware.js';
-import { isClientTelemetryJsonPath } from './body-parser-routing.js';
+import { isBoundedJsonPath } from './body-parser-routing.js';
 import initRequestProxy from './request-proxy.js';
 import cacheBuster from './middleware/cacheBuster.js';
 import corsProxyMiddleware from './middleware/corsProxy.js';
@@ -113,7 +113,7 @@ app.use(performanceRequestStartMiddleware);
 
 const globalJsonParser = bodyParser.json({ limit: '500mb' });
 app.use((request, response, next) => {
-    if (isClientTelemetryJsonPath(request.path)) {
+    if (isBoundedJsonPath(request.path)) {
         next();
         return;
     }

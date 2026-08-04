@@ -60,6 +60,9 @@ function cloneRecord(record) {
  * @param {() => string} dependencies.getCurrentLocale Current locale getter
  * @param {(locale: string, data: object) => void} dependencies.addLocaleData Locale registration callback
  * @param {Pick<Console, 'log'>} [dependencies.logger] Logger
+ * @param {number} [dependencies.assetTimeout] Asset load timeout in milliseconds
+ * @param {typeof setTimeout} [dependencies.setTimeoutImpl] Timer implementation
+ * @param {typeof clearTimeout} [dependencies.clearTimeoutImpl] Timer cleanup implementation
  * @returns {{addStyle: (name: string, manifest: object) => Promise<void>, addLocale: (name: string, manifest: object) => Promise<void>}}
  */
 export function createExtensionAssetLoader({
@@ -69,6 +72,9 @@ export function createExtensionAssetLoader({
     getCurrentLocale,
     addLocaleData,
     logger = console,
+    assetTimeout = 5000,
+    setTimeoutImpl = globalThis.setTimeout.bind(globalThis),
+    clearTimeoutImpl = globalThis.clearTimeout.bind(globalThis),
 }) {
     const loadedStyles = new Set();
     const styleLoads = new Map();
@@ -99,11 +105,18 @@ export function createExtensionAssetLoader({
         let load;
         load = new Promise((resolve, reject) => {
             const link = existingLink ?? document.createElement('link');
+            const timer = setTimeoutImpl(() => {
+                loadedStyles.delete(id);
+                link.remove();
+                reject(new Error(`Extension stylesheet timed out after ${assetTimeout}ms.`));
+            }, assetTimeout);
             link.onload = () => {
+                clearTimeoutImpl(timer);
                 loadedStyles.add(id);
                 resolve();
             };
             link.onerror = error => {
+                clearTimeoutImpl(timer);
                 loadedStyles.delete(id);
                 if (styleLoads.get(id) === load) {
                     styleLoads.delete(id);
@@ -117,7 +130,12 @@ export function createExtensionAssetLoader({
                 link.rel = 'stylesheet';
                 link.type = 'text/css';
                 link.href = `/scripts/extensions/${name}/${manifest.css}`;
-                document.head.appendChild(link);
+                try {
+                    document.head.appendChild(link);
+                } catch (error) {
+                    clearTimeoutImpl(timer);
+                    throw error;
+                }
             }
         }).finally(() => {
             if (styleLoads.get(id) === load) {

@@ -35,6 +35,7 @@ export const USER_DIRECTORY_TEMPLATE = Object.freeze({
     themes: 'themes',
     movingUI: 'movingUI',
     extensions: 'extensions',
+    extensionData: 'user/extension-data',
     instruct: 'instruct',
     context: 'context',
     quickreplies: 'QuickReplies',

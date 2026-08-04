@@ -12,9 +12,16 @@ import { createSettingsSaveHandler } from '../src/settings-save.js';
 
 async function startSettingsServer(root, writer) {
     const app = express();
-    app.use(express.json());
+    app.use(express.json({ limit: '6mb' }));
     app.use((request, _response, next) => {
-        request.user = { profile: { handle: 'settings-user' }, directories: { root } };
+        request.user = {
+            profile: { handle: 'settings-user' },
+            directories: {
+                root,
+                backups: path.join(root, 'backups'),
+                extensionData: path.join(root, 'extension-data'),
+            },
+        };
         next();
     });
     app.post('/api/settings/save', createSettingsSaveHandler({ writeSettings: writer }));
@@ -118,6 +125,58 @@ test('overlapping settings saves serialize per user and leave the newest payload
         assert.deepEqual(responses.map(response => response.status), [200, 200]);
         assert.equal(maxActive, 1);
         assert.deepEqual(JSON.parse(await fs.promises.readFile(path.join(root, 'settings.json'), 'utf8')), { revision: 2 });
+    } finally {
+        await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+        await fs.promises.rm(root, { recursive: true, force: true });
+    }
+});
+
+test('oversized extension settings migrate while core settings still save', async () => {
+    const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'sillytavern-settings-migrate-'));
+    const { server, baseUrl } = await startSettingsServer(root);
+    try {
+        const response = await postSettings(baseUrl, {
+            theme: 'dark',
+            extension_settings: {
+                disabledExtensions: [],
+                chatu8: { cache: 'x'.repeat(600 * 1024) },
+            },
+        });
+        assert.equal(response.status, 200);
+        const result = await response.json();
+        assert.equal(result.result, 'ok');
+        assert.equal(result.migratedExtensionSettings.chatu8.cache, '');
+
+        const saved = JSON.parse(await fs.promises.readFile(path.join(root, 'settings.json'), 'utf8'));
+        assert.equal(saved.theme, 'dark');
+        assert.equal(saved.extension_settings._storageReferences.chatu8.kind, 'legacy-extension-settings');
+        assert.equal(JSON.stringify(saved).includes('x'.repeat(1024)), false);
+        assert.equal(fs.existsSync(path.join(root, 'extension-data', 'chatu8', 'legacy', 'settings.json.gz')), true);
+    } finally {
+        await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+        await fs.promises.rm(root, { recursive: true, force: true });
+    }
+});
+
+test('migration failure preserves the previous extension value while saving core settings', async () => {
+    const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'sillytavern-settings-migrate-failure-'));
+    await fs.promises.writeFile(path.join(root, 'extension-data'), 'not-a-directory');
+    await fs.promises.writeFile(path.join(root, 'settings.json'), JSON.stringify({
+        theme: 'old',
+        extension_settings: { chatu8: { preserved: true } },
+    }));
+    const { server, baseUrl } = await startSettingsServer(root);
+    try {
+        const response = await postSettings(baseUrl, {
+            theme: 'new',
+            extension_settings: { chatu8: { cache: 'x'.repeat(600 * 1024) } },
+        });
+        assert.equal(response.status, 200);
+        const result = await response.json();
+        assert.equal(result.rejectedExtensionSettings[0].extensionId, 'chatu8');
+        const saved = JSON.parse(await fs.promises.readFile(path.join(root, 'settings.json'), 'utf8'));
+        assert.equal(saved.theme, 'new');
+        assert.deepEqual(saved.extension_settings.chatu8, { preserved: true });
     } finally {
         await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
         await fs.promises.rm(root, { recursive: true, force: true });

@@ -3,7 +3,7 @@ const DEFAULT_MAX_BASELINE_LENGTH = 5 * 1024 * 1024;
 /**
  * Requires the server's complete settings-save success contract.
  * @param {Response|{ok: boolean, status: number, statusText?: string, json: () => Promise<unknown>}} response Fetch response
- * @returns {Promise<{result: 'ok'}>}
+ * @returns {Promise<object>}
  */
 export async function requireSettingsSaveSuccess(response) {
     if (!response?.ok) {
@@ -16,7 +16,21 @@ export async function requireSettingsSaveSuccess(response) {
     } catch {
         throw new Error('Settings server returned an invalid success response.');
     }
-    if (!body || typeof body !== 'object' || body.result !== 'ok' || Object.keys(body).length !== 1) {
+    const allowedKeys = new Set([
+        'result',
+        'migratedExtensionSettings',
+        'rejectedExtensionSettings',
+        'disabledExtensions',
+    ]);
+    if (!body || typeof body !== 'object' || Array.isArray(body) || body.result !== 'ok'
+        || Object.keys(body).some(key => !allowedKeys.has(key))
+        || (body.migratedExtensionSettings !== undefined
+            && (!body.migratedExtensionSettings || typeof body.migratedExtensionSettings !== 'object'
+                || Array.isArray(body.migratedExtensionSettings)))
+        || (body.rejectedExtensionSettings !== undefined && !Array.isArray(body.rejectedExtensionSettings))
+        || (body.disabledExtensions !== undefined
+            && (!Array.isArray(body.disabledExtensions)
+                || body.disabledExtensions.some(value => typeof value !== 'string')))) {
         throw new Error('Settings server returned an invalid success response.');
     }
     return body;

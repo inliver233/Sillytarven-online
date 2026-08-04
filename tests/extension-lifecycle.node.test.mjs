@@ -461,6 +461,36 @@ test('existing stylesheet nodes without a sheet wait for their load event', asyn
     assert.equal(settled, true);
 });
 
+test('stylesheet loading times out and removes the incomplete node', async () => {
+    let appendedLink;
+    let timeoutCallback;
+    let removals = 0;
+    const loader = createExtensionAssetLoader({
+        document: {
+            getElementById: () => null,
+            createElement: () => ({ remove() { removals++; } }),
+            head: { appendChild(link) { appendedLink = link; } },
+        },
+        fetch: async () => ({ ok: true, json: async () => ({}) }),
+        sanitizeSelector: value => value,
+        getCurrentLocale: () => 'en',
+        addLocaleData() {},
+        assetTimeout: 1234,
+        setTimeoutImpl(callback, delay) {
+            assert.equal(delay, 1234);
+            timeoutCallback = callback;
+            return 1;
+        },
+        clearTimeoutImpl() {},
+    });
+
+    const load = loader.addStyle('third-party/demo', { css: 'style.css' });
+    assert.ok(appendedLink);
+    timeoutCallback();
+    await assert.rejects(load, /timed out after 1234ms/);
+    assert.equal(removals, 1);
+});
+
 test('deactivate records reload requirement when its hook is missing', async () => {
     const item = descriptor({ hooks: {} });
     const lifecycle = createExtensionLifecycle({ importModule: async () => ({}) });
