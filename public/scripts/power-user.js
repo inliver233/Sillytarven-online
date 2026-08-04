@@ -68,6 +68,7 @@ import { IMAGE_OVERSWIPE, MEDIA_DISPLAY } from './constants.js';
 import { t } from './i18n.js';
 import { cancelWelcomeMotion } from './welcome-motion.js';
 import { INLIVER_THEME_NAME, resolveThemeCustomCss } from './util/theme-css-resolver.js';
+import { EXTENSION_RESOURCE_PRELOAD_MIGRATION_VERSION, migrateExtensionResourcePreloadSettings } from './util/extension-resource-preload.js';
 
 export const toastPositionClasses = [
     'toast-top-left',
@@ -313,7 +314,8 @@ export const power_user = {
     experimental_macro_engine: false,
     prompt_manager_background_tokens: false,
     settings_save_noop: false,
-    extension_resource_preload: false,
+    extension_resource_preload: true,
+    extension_resource_preload_migration_version: EXTENSION_RESOURCE_PRELOAD_MIGRATION_VERSION,
     servers: [],
     bogus_folders: false,
     zoomed_avatar_magnification: false,
@@ -1613,6 +1615,7 @@ export async function loadPowerUserSettings(settings, data) {
     const defaultStscript = JSON.parse(JSON.stringify(power_user.stscript));
     // Load from settings.json
     if (settings.power_user !== undefined) {
+        migrateExtensionResourcePreloadSettings(settings.power_user);
         // Migrate old preference to a new setting
         if (settings.power_user.click_to_edit === undefined && settings.power_user.chat_display === chat_styles.DOCUMENT) {
             settings.power_user.click_to_edit = true;

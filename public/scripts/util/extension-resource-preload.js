@@ -1,4 +1,27 @@
 const DEFAULT_MAX_PRELOADS = 64;
+export const EXTENSION_RESOURCE_PRELOAD_MIGRATION_VERSION = 1;
+
+/**
+ * Enables resource preloading once for settings created before it became the default.
+ * The migration marker preserves later user opt-outs.
+ *
+ * @param {object} powerUserSettings Saved power user settings.
+ * @returns {boolean} Whether the settings were migrated.
+ */
+export function migrateExtensionResourcePreloadSettings(powerUserSettings) {
+    if (!powerUserSettings || typeof powerUserSettings !== 'object' || Array.isArray(powerUserSettings)) {
+        return false;
+    }
+
+    const migrationVersion = Number(powerUserSettings.extension_resource_preload_migration_version) || 0;
+    if (migrationVersion >= EXTENSION_RESOURCE_PRELOAD_MIGRATION_VERSION) {
+        return false;
+    }
+
+    powerUserSettings.extension_resource_preload = true;
+    powerUserSettings.extension_resource_preload_migration_version = EXTENSION_RESOURCE_PRELOAD_MIGRATION_VERSION;
+    return true;
+}
 
 function createDisposer(links) {
     let disposed = false;

@@ -97,6 +97,8 @@
         "markdown_escape_strings": "",
         "fast_ui_mode": false,
         "inliver_ui_motion": true,
+        "extension_resource_preload": true,
+        "extension_resource_preload_migration_version": 1,
         "avatar_style": 0,
         "chat_display": 0,
         "chat_width": 50,

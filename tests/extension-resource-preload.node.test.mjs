@@ -2,7 +2,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { getExtensionActivationPlan } from '../public/scripts/util/extension-eligibility.js';
-import { preloadExtensionResources } from '../public/scripts/util/extension-resource-preload.js';
+import {
+    EXTENSION_RESOURCE_PRELOAD_MIGRATION_VERSION,
+    migrateExtensionResourcePreloadSettings,
+    preloadExtensionResources,
+} from '../public/scripts/util/extension-resource-preload.js';
 
 function createFakeDocument({ failAt = Number.POSITIVE_INFINITY } = {}) {
     const appended = [];
@@ -29,6 +33,30 @@ function createFakeDocument({ failAt = Number.POSITIVE_INFINITY } = {}) {
         },
     };
 }
+
+test('legacy extension preload settings migrate to enabled exactly once', () => {
+    const settings = { extension_resource_preload: false };
+
+    assert.equal(migrateExtensionResourcePreloadSettings(settings), true);
+    assert.equal(settings.extension_resource_preload, true);
+    assert.equal(settings.extension_resource_preload_migration_version, EXTENSION_RESOURCE_PRELOAD_MIGRATION_VERSION);
+
+    settings.extension_resource_preload = false;
+    assert.equal(migrateExtensionResourcePreloadSettings(settings), false);
+    assert.equal(settings.extension_resource_preload, false);
+});
+
+test('missing extension preload settings migrate to enabled', () => {
+    const settings = {};
+
+    assert.equal(migrateExtensionResourcePreloadSettings(settings), true);
+    assert.equal(settings.extension_resource_preload, true);
+});
+
+test('extension preload settings migration ignores invalid saved settings', () => {
+    assert.equal(migrateExtensionResourcePreloadSettings(null), false);
+    assert.equal(migrateExtensionResourcePreloadSettings([]), false);
+});
 
 test('extension resource preloads use passive module and style hints', () => {
     const documentRef = createFakeDocument();
