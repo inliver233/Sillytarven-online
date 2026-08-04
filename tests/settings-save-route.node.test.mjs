@@ -1,9 +1,11 @@
 /* eslint-disable playwright/expect-expect -- Node test runner uses assert instead of Playwright expect. */
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { gzipSync } from 'node:zlib';
 
 import express from 'express';
 import writeFileAtomic from 'write-file-atomic';
@@ -33,6 +35,22 @@ async function postSettings(baseUrl, payload) {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(payload),
     });
+}
+
+function createLegacyReference(value, source = 'extension_settings') {
+    const serialized = Buffer.from(JSON.stringify(value), 'utf8');
+    return {
+        reference: {
+            schemaVersion: 1,
+            kind: 'legacy-extension-settings',
+            source,
+            extensionId: 'tavern_helper',
+            format: 'gzip-json',
+            sha256: crypto.createHash('sha256').update(serialized).digest('hex'),
+            uncompressedBytes: serialized.byteLength,
+        },
+        serialized,
+    };
 }
 
 test('failed settings write returns 507 and the identical payload retries after storage recovers', async () => {
@@ -118,6 +136,95 @@ test('overlapping settings saves serialize per user and leave the newest payload
         assert.deepEqual(responses.map(response => response.status), [200, 200]);
         assert.equal(maxActive, 1);
         assert.deepEqual(JSON.parse(await fs.promises.readFile(path.join(root, 'settings.json'), 'utf8')), { revision: 2 });
+    } finally {
+        await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+        await fs.promises.rm(root, { recursive: true, force: true });
+    }
+});
+
+test('stale clients cannot replace current inline extension settings with a legacy reference', async () => {
+    const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'sillytavern-settings-legacy-current-'));
+    const currentValue = { history: ['preserved'], nested: { enabled: true } };
+    const { reference } = createLegacyReference(currentValue);
+    await fs.promises.writeFile(path.join(root, 'settings.json'), JSON.stringify({
+        theme: 'old',
+        extension_settings: { tavern_helper: currentValue },
+    }));
+    const { server, baseUrl } = await startSettingsServer(root, writeFileAtomic);
+    try {
+        const response = await postSettings(baseUrl, {
+            theme: 'new',
+            extension_settings: {
+                tavern_helper: { history: [] },
+                _storageReferences: { tavern_helper: reference },
+            },
+        });
+        assert.equal(response.status, 200);
+        assert.deepEqual(await response.json(), { result: 'ok' });
+        const saved = JSON.parse(await fs.promises.readFile(path.join(root, 'settings.json'), 'utf8'));
+        assert.equal(saved.theme, 'new');
+        assert.deepEqual(saved.extension_settings.tavern_helper, currentValue);
+        assert.equal(saved.extension_settings._storageReferences, undefined);
+    } finally {
+        await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+        await fs.promises.rm(root, { recursive: true, force: true });
+    }
+});
+
+test('legacy reference recovery falls back to its validated migration blob', async () => {
+    const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'sillytavern-settings-legacy-blob-'));
+    const restoredValue = { history: ['from-blob'], nested: { enabled: true } };
+    const { reference, serialized } = createLegacyReference(restoredValue);
+    const legacyRoot = path.join(root, 'user', 'extension-data', 'tavern_helper', 'legacy');
+    await fs.promises.mkdir(legacyRoot, { recursive: true });
+    await fs.promises.writeFile(path.join(legacyRoot, 'settings.json.gz'), gzipSync(serialized));
+    await fs.promises.writeFile(path.join(legacyRoot, 'settings.meta.json'), JSON.stringify({
+        schemaVersion: 1,
+        format: 'gzip-json',
+        originalExtensionId: 'tavern_helper',
+        sha256: reference.sha256,
+        uncompressedBytes: reference.uncompressedBytes,
+    }));
+    const { server, baseUrl } = await startSettingsServer(root, writeFileAtomic);
+    try {
+        const response = await postSettings(baseUrl, {
+            extension_settings: {
+                tavern_helper: {},
+                _storageReferences: { tavern_helper: reference },
+            },
+        });
+        assert.equal(response.status, 200);
+        assert.deepEqual(await response.json(), { result: 'ok' });
+        const saved = JSON.parse(await fs.promises.readFile(path.join(root, 'settings.json'), 'utf8'));
+        assert.deepEqual(saved.extension_settings.tavern_helper, restoredValue);
+        assert.equal(saved.extension_settings._storageReferences, undefined);
+    } finally {
+        await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+        await fs.promises.rm(root, { recursive: true, force: true });
+    }
+});
+
+test('invalid legacy references fail closed without replacing current settings', async () => {
+    const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'sillytavern-settings-legacy-invalid-'));
+    const settingsPath = path.join(root, 'settings.json');
+    const original = JSON.stringify({ theme: 'preserved' });
+    await fs.promises.writeFile(settingsPath, original);
+    const { reference } = createLegacyReference({ value: true });
+    reference.extensionId = '../outside';
+    const { server, baseUrl } = await startSettingsServer(root, writeFileAtomic);
+    try {
+        const response = await postSettings(baseUrl, {
+            theme: 'replacement',
+            extension_settings: {
+                _storageReferences: { tavern_helper: reference },
+            },
+        });
+        assert.equal(response.status, 409);
+        assert.deepEqual(await response.json(), {
+            error: 'legacy_extension_settings_recovery_failed',
+            message: 'Legacy extension settings could not be recovered. Reload the page before saving again.',
+        });
+        assert.equal(await fs.promises.readFile(settingsPath, 'utf8'), original);
     } finally {
         await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
         await fs.promises.rm(root, { recursive: true, force: true });

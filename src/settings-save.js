@@ -1,13 +1,26 @@
+import fs from 'node:fs';
 import path from 'node:path';
 
 import writeFileAtomic from 'write-file-atomic';
 
 import { SETTINGS_FILE } from './constants.js';
 import { KeyedMutex } from './keyed-mutex.js';
+import {
+    hasLegacyExtensionSettingsReferences,
+    LegacyExtensionSettingsReferenceError,
+    restoreLegacyExtensionSettingsReferences,
+} from './legacy-extension-settings.js';
 
 const settingsWriteMutex = new KeyedMutex();
 
 function getSettingsWriteFailure(error) {
+    if (error instanceof LegacyExtensionSettingsReferenceError) {
+        return {
+            status: 409,
+            error: 'legacy_extension_settings_recovery_failed',
+            message: 'Legacy extension settings could not be recovered. Reload the page before saving again.',
+        };
+    }
     if (['ENOSPC', 'EDQUOT'].includes(error?.code)) {
         return {
             status: 507,
@@ -52,8 +65,27 @@ export function createSettingsSaveHandler({ writeSettings = defaultWriteSettings
 
         return await settingsWriteMutex.runExclusive(handle, async () => {
             const pathToSettings = path.join(request.user.directories.root, SETTINGS_FILE);
+            let restoredLegacySettings = [];
             try {
-                const serializedSettings = JSON.stringify(request.body, null, 4);
+                let settings = request.body;
+                if (hasLegacyExtensionSettingsReferences(settings)) {
+                    let currentSettings = null;
+                    try {
+                        currentSettings = JSON.parse(await fs.promises.readFile(pathToSettings, 'utf8'));
+                    } catch (error) {
+                        if (error?.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error;
+                    }
+                    const requestedSettings = JSON.parse(JSON.stringify(settings));
+                    const recovery = await restoreLegacyExtensionSettingsReferences(requestedSettings, {
+                        currentSettings,
+                        extensionDataRoot: request.user.directories.extensionData
+                            ?? path.join(request.user.directories.root, 'user', 'extension-data'),
+                        context: handle,
+                    });
+                    settings = recovery.settings;
+                    restoredLegacySettings = recovery.restored;
+                }
+                const serializedSettings = JSON.stringify(settings, null, 4);
                 await writeSettings(pathToSettings, serializedSettings);
             } catch (error) {
                 const failure = getSettingsWriteFailure(error);
@@ -67,6 +99,12 @@ export function createSettingsSaveHandler({ writeSettings = defaultWriteSettings
                 // The settings file is already durable. Ancillary work must not turn
                 // that successful write into a retryable client failure.
                 console.error('Settings post-save work failed', { handle, code: error?.code || 'UNKNOWN' });
+            }
+            if (restoredLegacySettings.length > 0) {
+                console.warn('Recovered legacy extension settings during save', {
+                    handle,
+                    references: restoredLegacySettings.map(item => `${item.source}:${item.extensionId}`),
+                });
             }
             return response.json({ result: 'ok' });
         });

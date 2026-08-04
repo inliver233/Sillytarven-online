@@ -4,116 +4,11 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { promisify } from 'node:util';
-import { gunzip } from 'node:zlib';
 
-const gunzipAsync = promisify(gunzip);
-const STORAGE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u;
-const SHA256_PATTERN = /^[a-f0-9]{64}$/u;
-const MAX_RESTORED_VALUE_BYTES = 64 * 1024 * 1024;
-const REFERENCE_KIND = 'legacy-extension-settings';
-const REFERENCE_FORMAT = 'gzip-json';
-
-const SLOTS = Object.freeze([
-    {
-        source: 'extension_settings',
-        suffix: 'settings',
-        getTarget: settings => settings?.extension_settings,
-    },
-    {
-        source: 'oai_settings.extensions',
-        suffix: 'oai-settings',
-        getTarget: settings => settings?.oai_settings?.extensions,
-    },
-]);
-
-function isPlainObject(value) {
-    return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
-}
+import { restoreLegacyExtensionSettingsReferences } from '../src/legacy-extension-settings.js';
 
 function sha256(value) {
     return crypto.createHash('sha256').update(value).digest('hex');
-}
-
-function formatReferenceError(user, source, key, message) {
-    return new Error(`Invalid extension storage reference for ${user}/${source}/${key}: ${message}`);
-}
-
-async function readStoredValue({ dataRoot, user, source, suffix, key, reference }) {
-    if (!isPlainObject(reference)) {
-        throw formatReferenceError(user, source, key, 'reference must be an object');
-    }
-    const isOriginalSettingsReference = source === 'extension_settings' && reference.source === undefined;
-    if (reference.schemaVersion !== 1
-        || reference.kind !== REFERENCE_KIND
-        || (reference.source !== source && !isOriginalSettingsReference)
-        || reference.format !== REFERENCE_FORMAT) {
-        throw formatReferenceError(user, source, key, 'unsupported reference metadata');
-    }
-    if (typeof reference.extensionId !== 'string' || !STORAGE_ID_PATTERN.test(reference.extensionId)) {
-        throw formatReferenceError(user, source, key, 'invalid storage ID');
-    }
-    if (typeof reference.sha256 !== 'string' || !SHA256_PATTERN.test(reference.sha256)) {
-        throw formatReferenceError(user, source, key, 'invalid SHA-256 digest');
-    }
-    if (!Number.isSafeInteger(reference.uncompressedBytes)
-        || reference.uncompressedBytes < 0
-        || reference.uncompressedBytes > MAX_RESTORED_VALUE_BYTES) {
-        throw formatReferenceError(user, source, key, 'invalid uncompressed size');
-    }
-
-    const extensionDataRoot = path.resolve(dataRoot, user, 'user', 'extension-data');
-    const legacyRoot = path.resolve(extensionDataRoot, reference.extensionId, 'legacy');
-    if (!legacyRoot.startsWith(`${extensionDataRoot}${path.sep}`)) {
-        throw formatReferenceError(user, source, key, 'storage path escapes the user data root');
-    }
-    const dataPath = path.join(legacyRoot, `${suffix}.json.gz`);
-    const metadataPath = path.join(legacyRoot, `${suffix}.meta.json`);
-
-    let compressed;
-    let metadata;
-    try {
-        [compressed, metadata] = await Promise.all([
-            fs.promises.readFile(dataPath),
-            fs.promises.readFile(metadataPath, 'utf8').then(JSON.parse),
-        ]);
-    } catch (error) {
-        throw formatReferenceError(user, source, key, `stored data is unavailable (${error?.code || error?.name || 'read_failed'})`);
-    }
-    if (!isPlainObject(metadata)
-        || metadata.schemaVersion !== 1
-        || metadata.format !== REFERENCE_FORMAT
-        || metadata.originalExtensionId !== key
-        || metadata.sha256 !== reference.sha256
-        || metadata.uncompressedBytes !== reference.uncompressedBytes) {
-        throw formatReferenceError(user, source, key, 'stored metadata does not match the active reference');
-    }
-
-    let restored;
-    try {
-        restored = await gunzipAsync(compressed, { maxOutputLength: MAX_RESTORED_VALUE_BYTES + 1 });
-    } catch (error) {
-        throw formatReferenceError(user, source, key, `gzip data is invalid (${error?.code || error?.name || 'decompression_failed'})`);
-    }
-    if (restored.byteLength !== reference.uncompressedBytes) {
-        throw formatReferenceError(user, source, key, 'uncompressed size does not match');
-    }
-    if (sha256(restored) !== reference.sha256) {
-        throw formatReferenceError(user, source, key, 'SHA-256 digest does not match');
-    }
-
-    let value;
-    try {
-        value = JSON.parse(restored.toString('utf8'));
-    } catch {
-        throw formatReferenceError(user, source, key, 'stored value is not valid JSON');
-    }
-    return {
-        value,
-        restoredBytes: restored.byteLength,
-        storageId: reference.extensionId,
-        sha256: reference.sha256,
-    };
 }
 
 async function listSettingsFiles(dataRoot) {
@@ -150,40 +45,14 @@ export async function planExtensionSettingsRehydration({ dataRoot }) {
             throw new Error(`Settings file is not valid JSON: ${item.settingsPath}`);
         }
 
-        const restoredReferences = [];
-        for (const slot of SLOTS) {
-            const target = slot.getTarget(settings);
-            if (!isPlainObject(target) || target._storageReferences === undefined) continue;
-            if (!isPlainObject(target._storageReferences)) {
-                throw formatReferenceError(item.user, slot.source, '_storageReferences', 'reference map must be an object');
-            }
-
-            for (const [key, reference] of Object.entries(target._storageReferences)) {
-                const restored = await readStoredValue({
-                    dataRoot: resolvedDataRoot,
-                    user: item.user,
-                    source: slot.source,
-                    suffix: slot.suffix,
-                    key,
-                    reference,
-                });
-                target[key] = restored.value;
-                delete target._storageReferences[key];
-                restoredReferences.push({
-                    source: slot.source,
-                    extensionId: key,
-                    storageId: restored.storageId,
-                    sha256: restored.sha256,
-                    restoredBytes: restored.restoredBytes,
-                });
-            }
-            if (Object.keys(target._storageReferences).length === 0) {
-                delete target._storageReferences;
-            }
-        }
+        const recovery = await restoreLegacyExtensionSettingsReferences(settings, {
+            extensionDataRoot: path.join(resolvedDataRoot, item.user, 'user', 'extension-data'),
+            context: item.user,
+        });
+        const restoredReferences = recovery.restored;
 
         if (restoredReferences.length === 0) continue;
-        const replacement = Buffer.from(JSON.stringify(settings, null, 4), 'utf8');
+        const replacement = Buffer.from(JSON.stringify(recovery.settings, null, 4), 'utf8');
         files.push({
             ...item,
             original,
