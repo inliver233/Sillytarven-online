@@ -84,7 +84,7 @@
 .welcomeCharacterAvatar {
     position: relative;
     width: 100%;
-    padding-top: 177.78%; /* 9:16 比例 = 16/9 = 1.7778 */
+    aspect-ratio: 2 / 3;
     overflow: hidden;
     background: linear-gradient(135deg, #2d2d30 0%, #1e1e20 100%);
 }

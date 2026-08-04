@@ -37,6 +37,7 @@ import { renderTemplateAsync } from './templates.js';
 import { accountStorage } from './util/AccountStorage.js';
 import { sortMoments, timestampToMoment } from './utils.js';
 import { cleanupLegacyWelcomeImageCache, loadWelcomeCharacterImage } from './welcome-image-loader.js';
+import { cancelWelcomeMotion, runRecentChatTransition, runShowMoreTransition } from './welcome-motion.js';
 
 const assistantAvatarKey = 'assistant';
 const defaultAssistantAvatar = 'default_Assistant.png';
@@ -73,6 +74,7 @@ export function getPermanentAssistantAvatar() {
  * @returns {Promise<void>}
  */
 export async function openWelcomeScreen({ force = false, expand = false } = {}) {
+    cancelWelcomeMotion();
     const currentChatId = getCurrentChatId();
     if (currentChatId !== undefined || (chat.length > 0 && !force)) {
         return;
@@ -232,6 +234,11 @@ function renderCharactersGridOnly() {
             const img = document.createElement('img');
             img.className = 'characterImage lazy-load';
             img.setAttribute('data-src', char.avatarUrl);
+            img.loading = 'lazy';
+            img.decoding = 'async';
+            img.fetchPriority = 'low';
+            img.width = 96;
+            img.height = 144;
             img.alt = char.name;
             img.src = '/img/default-expressions/neutral.png';
             img.onerror = function () { this.onerror = null; this.src = '/img/default-expressions/neutral.png'; };
@@ -326,12 +333,16 @@ async function sendWelcomePanel(chats, expand = false) {
                 const avatarId = item.getAttribute('data-avatar');
                 const groupId = item.getAttribute('data-group');
                 const fileName = item.getAttribute('data-file');
-                if (avatarId && fileName) {
-                    void openRecentCharacterChat(avatarId, fileName);
+                if (!fileName || (!avatarId && !groupId)) {
+                    return;
                 }
-                if (groupId && fileName) {
-                    void openRecentGroupChat(groupId, fileName);
-                }
+                void runRecentChatTransition({
+                    card: item,
+                    openChat: () => avatarId
+                        ? openRecentCharacterChat(avatarId, fileName)
+                        : openRecentGroupChat(groupId, fileName),
+                    getTarget: getRecentChatMotionTarget,
+                });
             });
         });
         const hiddenChats = fragment.querySelectorAll('.recentChat.hidden');
@@ -341,12 +352,10 @@ async function sendWelcomePanel(chats, expand = false) {
 
             button.setAttribute('title', showRecentChatsTitle);
             button.addEventListener('click', () => {
-                const rotate = button.classList.contains('rotated');
-                hiddenChats.forEach((chatItem) => {
-                    chatItem.classList.toggle('hidden', rotate);
-                });
-                button.classList.toggle('rotated', !rotate);
-                button.setAttribute('title', rotate ? showRecentChatsTitle : hideRecentChatsTitle);
+                const expanded = !button.classList.contains('rotated');
+                button.classList.toggle('rotated', expanded);
+                button.setAttribute('title', expanded ? hideRecentChatsTitle : showRecentChatsTitle);
+                void runShowMoreTransition({ items: hiddenChats, expanded });
             });
         });
         fragment.querySelectorAll('button.openTemporaryChat').forEach((button) => {
@@ -449,6 +458,18 @@ async function sendWelcomePanel(chats, expand = false) {
     } catch (error) {
         console.error('Welcome screen error:', error);
     }
+}
+
+function getRecentChatMotionTarget() {
+    const messages = [...document.querySelectorAll('#chat > .mes')];
+    const targetMessage = messages.reverse().find(message => message.getAttribute('is_user') !== 'true');
+    if (!targetMessage) {
+        return null;
+    }
+    return {
+        avatar: targetMessage.querySelector('.avatar'),
+        name: targetMessage.querySelector('.name_text'),
+    };
 }
 
 /**
@@ -838,6 +859,15 @@ function initLazyLoadCharacters(fragment) {
         return;
     }
 
+    if (typeof IntersectionObserver !== 'function') {
+        lazyImages.forEach((img) => {
+            if (img instanceof HTMLImageElement) {
+                loadWelcomeCharacterImage(img, img.getAttribute('data-src'));
+            }
+        });
+        return;
+    }
+
     // 使用 Intersection Observer API 实现延迟加载
     const imageObserver = new IntersectionObserver((entries, observer) => {
         entries.forEach((entry) => {
@@ -855,8 +885,8 @@ function initLazyLoadCharacters(fragment) {
             }
         });
     }, {
-        // 提前200px开始加载
-        rootMargin: '200px',
+        // 提前一小段视口加载，兼顾移动端滚动与网络预算。
+        rootMargin: '400px 0px 600px 0px',
         threshold: 0.01,
     });
 

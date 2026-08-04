@@ -1,0 +1,97 @@
+/* Runtime-only motion for the built-in inliver theme. */
+body[data-ui-motion="inliver"] .st-welcome-motion-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 2147483000;
+    pointer-events: none;
+    contain: layout paint style;
+}
+
+body[data-ui-motion="inliver"] .st-welcome-motion-identity {
+    position: fixed;
+    margin: 0;
+    pointer-events: none;
+    transform-origin: top left;
+    will-change: transform, opacity;
+}
+
+body[data-ui-motion="inliver"] .st-welcome-motion-avatar {
+    overflow: hidden;
+    border: 1px solid var(--il-border, rgba(169, 194, 218, 0.14));
+    border-radius: 10px;
+    box-shadow: var(--il-glow-hover, 0 6px 26px rgba(0, 0, 0, 0.42));
+}
+
+body[data-ui-motion="inliver"] .st-welcome-motion-avatar > .avatar,
+body[data-ui-motion="inliver"] .st-welcome-motion-avatar img {
+    width: 100% !important;
+    height: 100% !important;
+    margin: 0 !important;
+    object-fit: cover;
+    animation: none !important;
+    transform: none !important;
+}
+
+body[data-ui-motion="inliver"] .st-welcome-motion-name {
+    display: flex;
+    align-items: center;
+    overflow: hidden;
+    color: var(--il-t95, #e3eef7);
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+}
+
+body[data-ui-motion="inliver"] .recentChat.st-motion-running {
+    animation: none !important;
+    will-change: transform, opacity;
+}
+
+body[data-ui-motion="inliver"] #chat > .mes {
+    animation: none !important;
+}
+
+body[data-ui-motion="inliver"] #chat > .mes.st-new-message {
+    animation: il-rise var(--il-dur-slow, 0.5s) var(--il-spring, cubic-bezier(0.16, 1, 0.3, 1)) both !important;
+}
+
+body[data-ui-motion="inliver"] #show_more_messages {
+    width: fit-content;
+    max-width: calc(100% - 24px);
+    margin: 8px auto;
+    padding: 6px 12px;
+    color: var(--il-t80, #a9cbe8);
+    background: var(--il-glass-card, rgba(29, 38, 50, 0.55));
+    border: 1px solid var(--il-border, rgba(169, 194, 218, 0.14));
+    border-radius: 999px;
+    animation: il-pop 180ms var(--il-spring, cubic-bezier(0.16, 1, 0.3, 1)) both;
+}
+
+body[data-ui-motion="inliver"] .welcomeCharacterAvatar img.st-image-ready {
+    animation: st-inliver-image-ready 120ms var(--il-ease-out, ease-out) both;
+}
+
+@keyframes st-inliver-image-ready {
+    from { opacity: 0; transform: translate3d(0, 2px, 0); }
+    to { opacity: 1; transform: translate3d(0, 0, 0); }
+}
+
+/* The legacy Toastr icon is a background image. Keep it singular in the inliver theme. */
+body[data-ui-theme="inliver"] #toast-container > .toast {
+    background-repeat: no-repeat !important;
+    background-position: 15px center !important;
+    background-size: 24px 24px !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    body[data-ui-motion="inliver"] .st-welcome-motion-overlay {
+        display: none !important;
+    }
+
+    body[data-ui-motion="inliver"] .recentChat.st-motion-running,
+    body[data-ui-motion="inliver"] #chat > .mes.st-new-message,
+    body[data-ui-motion="inliver"] #show_more_messages,
+    body[data-ui-motion="inliver"] .welcomeCharacterAvatar img.st-image-ready {
+        animation: none !important;
+        transition: none !important;
+        will-change: auto;
+    }
+}

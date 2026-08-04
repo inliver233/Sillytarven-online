@@ -280,6 +280,8 @@ import { getSystemMessageByType, initSystemMessages, SAFETY_CHAT, sendSystemMess
 import { event_types, eventSource } from './scripts/events.js';
 import { initAccessibility } from './scripts/a11y.js';
 import { processItemsWithFrameBudget } from './scripts/util/frame-budget.js';
+import { chatRenderOptimizer } from './scripts/util/chat-render-optimizer.js';
+import { scrollCoordinator, ScrollPriority } from './scripts/util/scroll-coordinator.js';
 import { requireSettingsSaveSuccess, SettingsSaveQueue, SettingsSaveTracker } from './scripts/util/settings-save-tracker.js';
 import { applyStreamFadeIn, StreamRenderBuffer } from './scripts/util/stream-fadein.js';
 import { initDomHandlers } from './scripts/dom-handlers.js';
@@ -422,6 +424,7 @@ const CHAT_PAGE_SIZE_DEFAULT = 20;
 const CHAT_PAGING_MAX_RENDER = isMobile() ? 200 : 400;
 const CHAT_LOAD_MORE_FRAME_BUDGET_MS = 8;
 const CHAT_PAGING_ENABLED = false;
+const CHAT_RENDER_OPTIMIZATION_ENABLED = true;
 const CHAT_CACHE_TTL_MS = 20_000;
 const CHAT_CACHE_MAX_ENTRIES = 50;
 const chatPagingState = {
@@ -438,6 +441,7 @@ const chatPagingState = {
 };
 const chatPageCache = new Map();
 let chatPagingLoadGeneration = 0;
+let chatPagingLoadController = null;
 let characterChatLoadGeneration = 0;
 let characterChatLoadController = null;
 let chatHistoryInsertionToken = null;
@@ -624,6 +628,8 @@ export function setChatPagingState(nextState = {}) {
 
 export function resetChatPagingState({ isGroup = false, chatId = null } = {}) {
     chatPagingLoadGeneration++;
+    chatPagingLoadController?.abort();
+    chatPagingLoadController = null;
     chatHistoryInsertionToken = null;
     chatPagingState.active = false;
     chatPagingState.cursor = null;
@@ -633,6 +639,18 @@ export function resetChatPagingState({ isGroup = false, chatId = null } = {}) {
     chatPagingState.messageOffset = null;
     chatPagingState.revision = null;
     chatPagingState.loading = false;
+}
+
+function scheduleChatRenderOptimization() {
+    chatRenderOptimizer.setChatContext(getCurrentChatIdentity());
+    chatRenderOptimizer.scheduleRefresh(chatElement[0], chat, {
+        streamingActive: Boolean(streamingProcessor),
+    });
+}
+
+export function invalidateChatRenderLayout() {
+    chatRenderOptimizer.invalidateLayout();
+    scheduleChatRenderOptimization();
 }
 
 function getChatCacheKey({ isGroup = false, chatId = null } = {}) {
@@ -1651,6 +1669,9 @@ async function insertChatMessagesWithFrameBudget(messages, insertMessage, {
     const chatScrollElement = chatElement[0];
     const canPreserveViewport = preserveViewport && chatScrollElement instanceof HTMLElement;
     const previousOverflowAnchor = canPreserveViewport ? chatScrollElement.style.overflowAnchor : null;
+    const scrollToken = canPreserveViewport
+        ? scrollCoordinator.claim('chat-history-hydration', ScrollPriority.HYDRATION)
+        : null;
 
     if (canPreserveViewport) {
         chatScrollElement.style.overflowAnchor = 'none';
@@ -1661,13 +1682,19 @@ async function insertChatMessagesWithFrameBudget(messages, insertMessage, {
             frameBudgetMs: CHAT_LOAD_MORE_FRAME_BUDGET_MS,
             shouldContinue,
             beforeFrame: canPreserveViewport
-                ? () => chatScrollElement.scrollHeight
+                ? () => ({
+                    height: chatScrollElement.scrollHeight,
+                    top: chatScrollElement.scrollTop,
+                })
                 : undefined,
             afterFrame: canPreserveViewport
-                ? (previousHeight) => {
-                    const heightDelta = chatScrollElement.scrollHeight - previousHeight;
-                    if (heightDelta) {
-                        chatScrollElement.scrollTop += heightDelta;
+                ? (viewport) => {
+                    if (!scrollToken || !scrollCoordinator.isActive(scrollToken)) {
+                        return;
+                    }
+                    const heightDelta = chatScrollElement.scrollHeight - viewport.height;
+                    if (heightDelta !== 0) {
+                        chatScrollElement.scrollTop = viewport.top + heightDelta;
                     }
                 }
                 : undefined,
@@ -1675,6 +1702,9 @@ async function insertChatMessagesWithFrameBudget(messages, insertMessage, {
     } finally {
         if (canPreserveViewport) {
             chatScrollElement.style.overflowAnchor = previousOverflowAnchor;
+        }
+        if (scrollToken) {
+            scrollCoordinator.release(scrollToken);
         }
     }
 }
@@ -1702,6 +1732,12 @@ async function loadMoreChatMessages(messagesToLoad = null) {
 
     const loadGeneration = ++chatPagingLoadGeneration;
     const requestedChatId = chatPagingState.isGroup ? chatPagingState.chatId : getCurrentChatId();
+    const hydrationStartedAt = performance.now();
+    let hydratedMessages = 0;
+    let cancelled = false;
+    chatPagingLoadController?.abort();
+    const controller = new AbortController();
+    chatPagingLoadController = controller;
     chatPagingState.loading = true;
 
     try {
@@ -1710,9 +1746,11 @@ async function loadMoreChatMessages(messagesToLoad = null) {
             limit: messagesToLoad ?? chatPagingState.pageSize,
             isGroup: chatPagingState.isGroup,
             chatId: requestedChatId,
+            signal: controller.signal,
         });
 
         if (loadGeneration !== chatPagingLoadGeneration || getCurrentChatId() !== requestedChatId) {
+            cancelled = true;
             return;
         }
 
@@ -1730,6 +1768,7 @@ async function loadMoreChatMessages(messagesToLoad = null) {
         }
 
         const newMessages = data.messages;
+        hydratedMessages = newMessages.length;
         const offset = newMessages.length;
         chat.unshift(...newMessages);
         shiftDisplayedMessageIds(offset);
@@ -1746,6 +1785,7 @@ async function loadMoreChatMessages(messagesToLoad = null) {
         );
         recordChatLoadMoreFrames(insertionResult);
         if (!insertionResult.completed) {
+            cancelled = true;
             return;
         }
 
@@ -1780,7 +1820,21 @@ async function loadMoreChatMessages(messagesToLoad = null) {
         });
 
         await eventSource.emit(event_types.MORE_MESSAGES_LOADED);
+        scheduleChatRenderOptimization();
+    } catch (error) {
+        if (error?.name === 'AbortError') {
+            cancelled = true;
+            return;
+        }
+        throw error;
     } finally {
+        recordPerformanceSample('chat-hydration', performance.now() - hydrationStartedAt, {
+            messages: hydratedMessages,
+            cancelled: Number(cancelled || loadGeneration !== chatPagingLoadGeneration),
+        });
+        if (chatPagingLoadController === controller) {
+            chatPagingLoadController = null;
+        }
         if (loadGeneration === chatPagingLoadGeneration) {
             chatPagingState.loading = false;
         }
@@ -1853,6 +1907,7 @@ export async function showMoreMessages(messagesToLoad = null) {
             chatHistoryInsertionToken = null;
         }
         await eventSource.emit(event_types.MORE_MESSAGES_LOADED);
+        scheduleChatRenderOptimization();
     } finally {
         if (chatHistoryInsertionToken === insertionToken) {
             chatHistoryInsertionToken = null;
@@ -1861,6 +1916,8 @@ export async function showMoreMessages(messagesToLoad = null) {
 }
 
 export async function printMessages() {
+    const renderStartedAt = performance.now();
+    const renderIdentity = getCurrentChatIdentity();
     let startIndex = 0;
     let count = power_user.chat_truncation || Number.MAX_SAFE_INTEGER;
     const pagingActive = chatPagingState.active;
@@ -1877,9 +1934,27 @@ export async function printMessages() {
         chatElement.append('<div id="show_more_messages">加载更多消息</div>');
     }
 
-    for (let i = startIndex; i < chat.length; i++) {
-        const item = chat[i];
-        addOneMessage(item, { scroll: false, forceId: i, showSwipes: false });
+    const renderItems = chat.slice(startIndex).map((message, offset) => ({
+        message,
+        messageId: startIndex + offset,
+    }));
+    const renderResult = await insertChatMessagesWithFrameBudget(
+        renderItems,
+        ({ message, messageId }) => addOneMessage(message, {
+            scroll: false,
+            forceId: messageId,
+            showSwipes: false,
+        }),
+        { shouldContinue: () => getCurrentChatIdentity() === renderIdentity },
+    );
+
+    if (!renderResult.completed) {
+        recordPerformanceSample('chat-initial-render', performance.now() - renderStartedAt, {
+            messages: renderResult.inserted,
+            frames: renderResult.frames,
+            yields: Math.max(0, renderResult.frames - 1),
+        });
+        return;
     }
 
     chatElement.find('.mes').removeClass('last_mes');
@@ -1888,6 +1963,12 @@ export async function printMessages() {
     applyStylePins();
     scrollChatToBottom();
     delay(debounce_timeout.short).then(() => scrollOnMediaLoad());
+    scheduleChatRenderOptimization();
+    recordPerformanceSample('chat-initial-render', performance.now() - renderStartedAt, {
+        messages: renderResult.inserted,
+        frames: renderResult.frames,
+        yields: Math.max(0, renderResult.frames - 1),
+    });
 }
 
 export function scrollOnMediaLoad() {
@@ -1941,6 +2022,8 @@ export async function clearChat() {
     cancelDebouncedChatSave();
     cancelDebouncedMetadataSave();
     closeMessageEditor();
+    chatRenderOptimizer.dispose();
+    scrollCoordinator.cancelForUserInput();
     extension_prompts = {};
     if (is_delete_mode) {
         $('#dialogue_del_mes_cancel').trigger('click');
@@ -3020,6 +3103,11 @@ export function addOneMessage(mes, { type = 'normal', insertAfter = null, scroll
 
     applyCharacterTagsToMessageDivs({ mesIds: newMessageId });
     updateEditArrowClasses();
+
+    if (type !== 'swipe' && scroll && !insertAfter && !insertBefore) {
+        newMessage.addClass('st-new-message');
+        setTimeout(() => newMessage.removeClass('st-new-message'), 600);
+    }
 }
 
 /**
@@ -3082,6 +3170,59 @@ function formatGenerationTimer(gen_started, gen_finished, tokenCount, reasoningD
 }
 
 let requestId = null;
+let scrollRequestToken = null;
+
+function addTemporaryBottomAnchor(token) {
+    const element = chatElement[0];
+    if (!(element instanceof HTMLElement)) {
+        return;
+    }
+
+    const distanceFromBottom = element.scrollHeight - element.clientHeight - element.scrollTop;
+    if (distanceFromBottom > 5) {
+        return;
+    }
+
+    const anchor = document.createElement('div');
+    anchor.className = 'st-bottom-scroll-anchor';
+    anchor.setAttribute('aria-hidden', 'true');
+    element.classList.add('st-bottom-scroll-anchored');
+    element.append(anchor);
+    token.addCleanup(() => {
+        anchor.remove();
+        element.classList.remove('st-bottom-scroll-anchored');
+    });
+}
+
+function releaseScrollAfterSettle(token) {
+    const element = chatElement[0];
+    if (!(element instanceof HTMLElement)) {
+        scrollCoordinator.release(token);
+        return;
+    }
+
+    let frameId = null;
+    let stableFrames = 0;
+    const startedAt = performance.now();
+    const check = () => {
+        if (!scrollCoordinator.isActive(token)) {
+            return;
+        }
+        const distance = Math.abs(element.scrollHeight - element.clientHeight - element.scrollTop);
+        stableFrames = distance <= 2 ? stableFrames + 1 : 0;
+        if (stableFrames >= 6 || performance.now() - startedAt >= 900) {
+            scrollCoordinator.release(token);
+            return;
+        }
+        frameId = requestAnimationFrame(check);
+    };
+    token.addCleanup(() => {
+        if (frameId !== null) {
+            cancelAnimationFrame(frameId);
+        }
+    });
+    frameId = requestAnimationFrame(check);
+}
 
 /**
  * Scrolls the chat to the bottom if configured to do so.
@@ -3093,7 +3234,11 @@ export function scrollChatToBottom({ waitForFrame } = {}) {
         return;
     }
 
-    const doScroll = () => {
+    const doScroll = (token) => {
+        if (!scrollCoordinator.isActive(token)) {
+            requestId = null;
+            return;
+        }
         let position = chatElement[0].scrollHeight;
 
         if (power_user.waifuMode) {
@@ -3106,22 +3251,38 @@ export function scrollChatToBottom({ waitForFrame } = {}) {
 
         chatElement.scrollTop(position);
         requestId = null;
+        releaseScrollAfterSettle(token);
     };
 
     // Do not check truthiness. requestId can loop to zero.
     if (requestId !== null) {
         cancelAnimationFrame(requestId);
     }
+    if (scrollRequestToken) {
+        scrollCoordinator.release(scrollRequestToken);
+    }
+    scrollRequestToken = scrollCoordinator.claim('chat-scroll-to-bottom', ScrollPriority.STREAMING);
+    if (!scrollRequestToken) {
+        return;
+    }
+    addTemporaryBottomAnchor(scrollRequestToken);
 
     if (!waitForFrame) {
-        doScroll();
+        doScroll(scrollRequestToken);
         return;
     }
 
     // This prevents layout thrashing.
     // https://developer.mozilla.org/en-US/docs/Web/API/Window/requestAnimationFrame#return_value
     // https://gist.github.com/paulirish/5d52fb081b3570c81e3a#file-what-forces-layout-md
-    requestId = requestAnimationFrame(() => doScroll());
+    const token = scrollRequestToken;
+    token.addCleanup(() => {
+        if (requestId !== null) {
+            cancelAnimationFrame(requestId);
+            requestId = null;
+        }
+    });
+    requestId = requestAnimationFrame(() => doScroll(token));
 }
 
 /**
@@ -8440,6 +8601,7 @@ export async function getSettings() {
     const data = await response.json();
     initializePerformanceTelemetry(() => getRequestHeaders(), Boolean(data.telemetry_enabled));
     chatPagingState.enabled = Boolean(data.chat_paging_enabled);
+    chatRenderOptimizer.setEnabled(data.long_chat_dom_render_optimization_enabled ?? CHAT_RENDER_OPTIMIZATION_ENABLED);
     if (data.result != 'file not find' && data.settings) {
         settings = JSON.parse(data.settings);
         if (settings.username !== undefined && settings.username !== '') {
@@ -11769,6 +11931,18 @@ jQuery(async function () {
     }
 
     const chatElementScroll = document.getElementById('chat');
+    for (const eventName of ['wheel', 'touchstart', 'pointerdown']) {
+        chatElementScroll.addEventListener(eventName, () => scrollCoordinator.cancelForUserInput(), { passive: true });
+    }
+    for (const eventName of [
+        event_types.MESSAGE_UPDATED,
+        event_types.MESSAGE_EDITED,
+        event_types.MESSAGE_DELETED,
+        event_types.USER_MESSAGE_RENDERED,
+        event_types.CHARACTER_MESSAGE_RENDERED,
+    ]) {
+        eventSource.on(eventName, scheduleChatRenderOptimization);
+    }
     const chatScrollHandler = function () {
         if (power_user.waifuMode) {
             scrollLock = true;

@@ -27,7 +27,7 @@
             {{#with this}}
             <div class="recentChat {{#if hidden}}hidden{{/if}} {{#if is_group}}group{{/if}}" data-file="{{chat_name}}" data-avatar="{{avatar}}" data-group="{{group}}">
                 <div class="avatar" title="[Character] {{char_name}}&#10;File: {{avatar}}">
-                    <img src="{{char_thumbnail}}" alt="{{char_name}}" onerror="this.onerror=null; this.src='/img/default-expressions/neutral.png';">
+                    <img src="{{char_thumbnail}}" alt="{{char_name}}" loading="lazy" decoding="async" fetchpriority="low" width="96" height="144" onerror="this.onerror=null; this.src='/img/default-expressions/neutral.png';">
                 </div>
                 <div class="recentChatInfo">
                     <div class="chatNameContainer">
@@ -91,7 +91,7 @@
             <div class="welcomeCharacterCard" data-chid="{{this.index}}" data-avatar="{{this.avatar}}" title="{{this.name}}">
                 <div class="welcomeCharacterAvatar">
                     <!-- 所有图片都通过浏览器私有 HTTP 缓存延迟加载 -->
-                    <img data-src="{{this.avatarUrl}}" alt="{{this.name}}" class="characterImage lazy-load" src="/img/default-expressions/neutral.png" onerror="this.onerror=null; this.src='/img/default-expressions/neutral.png';">
+                    <img data-src="{{this.avatarUrl}}" alt="{{this.name}}" class="characterImage lazy-load" src="/img/default-expressions/neutral.png" loading="lazy" decoding="async" fetchpriority="low" width="96" height="144" onerror="this.onerror=null; this.src='/img/default-expressions/neutral.png';">
                     <div class="imagePlaceholder">
                         <i class="fa-solid fa-image"></i>
                     </div>

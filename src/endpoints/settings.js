@@ -16,6 +16,7 @@ const ENABLE_EXTENSIONS = !!getConfigValue('extensions.enabled', true, 'boolean'
 const ENABLE_EXTENSIONS_AUTO_UPDATE = !!getConfigValue('extensions.autoUpdate', true, 'boolean');
 const ENABLE_ACCOUNTS = !!getConfigValue('enableUserAccounts', false, 'boolean');
 const ENABLE_CHAT_PAGING = !!getConfigValue('performance.chatPaging.enabled', false, 'boolean');
+const ENABLE_LONG_CHAT_DOM_RENDER_OPTIMIZATION = !!getConfigValue('performance.longChatDomRenderOptimization.enabled', true, 'boolean');
 const ENABLE_TELEMETRY = !!getConfigValue('performance.telemetry.enabled', true, 'boolean');
 const settingsCache = new SettingsCache({
     enabled: getConfigValue('performance.settingsCache.enabled', true, 'boolean'),
@@ -169,6 +170,7 @@ router.post('/get', async (request, response) => {
                 enable_extensions_auto_update: ENABLE_EXTENSIONS_AUTO_UPDATE,
                 enable_accounts: ENABLE_ACCOUNTS,
                 chat_paging_enabled: ENABLE_CHAT_PAGING,
+                long_chat_dom_render_optimization_enabled: ENABLE_LONG_CHAT_DOM_RENDER_OPTIMIZATION,
                 telemetry_enabled: ENABLE_TELEMETRY,
             },
         }));

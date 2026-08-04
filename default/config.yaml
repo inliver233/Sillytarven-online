@@ -209,6 +209,9 @@ performance:
   # Versioned range/tail-save protocol. Disabled by default for existing deployments until clients reload with revision support.
   chatPaging:
     enabled: false
+  # Skip layout/paint for distant messages only after conservative long-chat thresholds are met.
+  longChatDomRenderOptimization:
+    enabled: true
   # Memoize the complete /version payload while package.json and Git HEAD/ref stay unchanged.
   versionMemo:
     enabled: true

@@ -96,6 +96,7 @@
         "show_user_prompt_bias": true,
         "markdown_escape_strings": "",
         "fast_ui_mode": false,
+        "inliver_ui_motion": true,
         "avatar_style": 0,
         "chat_display": 0,
         "chat_width": 50,

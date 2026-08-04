@@ -1,6 +1,7 @@
 const LEGACY_CACHE_NAME = 'character-avatars-cache';
 const LEGACY_MIGRATION_MARKER = 'character_avatar_http_cache_v1';
 const LEGACY_STORAGE_PREFIXES = ['char_img_time_', 'char_img_cache_'];
+const loadingImages = new WeakSet();
 
 function hidePlaceholder(img, setTimeoutFn) {
     const placeholder = img.parentElement?.querySelector('.imagePlaceholder');
@@ -11,7 +12,7 @@ function hidePlaceholder(img, setTimeoutFn) {
     placeholder.style.opacity = '0';
     setTimeoutFn(() => {
         placeholder.style.display = 'none';
-    }, 300);
+    }, 140);
 }
 
 /**
@@ -22,24 +23,40 @@ function hidePlaceholder(img, setTimeoutFn) {
  * @param {typeof setTimeout} [options.setTimeoutFn] Placeholder transition scheduler
  * @returns {boolean} Whether this call started the image load
  */
-export function loadWelcomeCharacterImage(img, src, { setTimeoutFn = globalThis.setTimeout } = {}) {
-    if (!img?.classList?.contains('lazy-load') || typeof img.addEventListener !== 'function' || !src) {
+export function loadWelcomeCharacterImage(img, src, { setTimeoutFn = (...args) => globalThis.setTimeout(...args) } = {}) {
+    if (!img?.classList?.contains('lazy-load') || typeof img.addEventListener !== 'function' || !src || loadingImages.has(img)) {
         return false;
     }
 
+    loadingImages.add(img);
     let settled = false;
-    const settle = () => {
+    const settle = (imageReady = false) => {
         if (settled) {
             return;
         }
         settled = true;
+        loadingImages.delete(img);
+        img.classList.remove('lazy-load');
+        if (imageReady) {
+            img.classList.add?.('st-image-ready');
+        }
         hidePlaceholder(img, setTimeoutFn);
     };
 
+    const settleLoadedImage = () => {
+        if (typeof img.decode !== 'function') {
+            settle(true);
+            return;
+        }
+        Promise.resolve()
+            .then(() => img.decode())
+            .catch(() => {})
+            .finally(() => settle(true));
+    };
+
     // Register before assigning src so a memory-cache hit cannot race the handlers.
-    img.addEventListener('load', settle, { once: true });
-    img.addEventListener('error', settle, { once: true });
-    img.classList.remove('lazy-load');
+    img.addEventListener('load', settleLoadedImage, { once: true });
+    img.addEventListener('error', () => settle(false), { once: true });
     img.src = src;
     return true;
 }

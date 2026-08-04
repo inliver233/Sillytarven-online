@@ -3979,6 +3979,26 @@ button.toast-close-button {
     display: none;
 }
 
+/* Preserve full message DOM semantics while allowing large off-screen history to skip paint work. */
+#chat > .mes.st-chat-content-culled {
+    content-visibility: auto;
+    contain: layout paint;
+    contain-intrinsic-size: auto var(--st-cull-height, 180px);
+}
+
+#chat > .st-bottom-scroll-anchor {
+    display: block;
+    width: 1px;
+    height: 1px;
+    flex: 0 0 auto;
+    overflow-anchor: auto;
+    pointer-events: none;
+}
+
+#chat.st-bottom-scroll-anchored > :not(.st-bottom-scroll-anchor) {
+    overflow-anchor: none;
+}
+
 .for_checkbox {
     display: block;
 }

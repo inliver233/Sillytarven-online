@@ -30,6 +30,7 @@ import {
     extension_prompt_types,
     extension_prompt_roles,
     deleteMessage,
+    invalidateChatRenderLayout,
 } from '../script.js';
 import { isMobile, initMovingUI, favsToHotswap } from './RossAscends-mods.js';
 import {
@@ -65,6 +66,7 @@ import { DEFAULT_REASONING_TEMPLATE, loadReasoningTemplates } from './reasoning.
 import { bindModelTemplates } from './chat-templates.js';
 import { IMAGE_OVERSWIPE, MEDIA_DISPLAY } from './constants.js';
 import { t } from './i18n.js';
+import { cancelWelcomeMotion } from './welcome-motion.js';
 
 export const toastPositionClasses = [
     'toast-top-left',
@@ -87,6 +89,8 @@ const defaultStoryString = '{{#if system}}{{system}}\n{{/if}}{{#if description}}
 const defaultExampleSeparator = '***';
 const defaultChatStart = '***';
 const defaultToastPosition = 'toast-top-center';
+const INLIVER_THEME_NAME = 'inliver';
+let inliverMotionPreferenceListenerInstalled = false;
 
 const avatar_styles = {
     ROUND: 0,
@@ -144,6 +148,7 @@ export const power_user = {
     stream_fade_in: false,
 
     fast_ui_mode: true,
+    inliver_ui_motion: true,
     avatar_style: avatar_styles.ROUND,
     chat_display: chat_styles.DEFAULT,
     toastr_position: defaultToastPosition,
@@ -499,6 +504,7 @@ function switchMesIDDisplay() {
 function switchHideChatAvatars() {
     $('body').toggleClass('hideChatAvatars', power_user.hideChatAvatars_enabled);
     $('#hideChatAvatarsEnabled').prop('checked', power_user.hideChatAvatars_enabled);
+    invalidateChatRenderLayout();
 }
 
 function switchMessageActions() {
@@ -513,6 +519,46 @@ function switchReducedMotion() {
     setAnimationDuration(overrideDuration);
     $('#reduced_motion').prop('checked', power_user.reduced_motion);
     $('body').toggleClass('reduced-motion', power_user.reduced_motion);
+    syncInliverMotionState();
+}
+
+/** Synchronize the explicit theme-name motion policy and clean active transitions on downgrade. */
+export function syncInliverMotionState() {
+    const body = document.body;
+    if (!body) {
+        return;
+    }
+
+    const isInliverTheme = power_user.theme === INLIVER_THEME_NAME;
+    let systemPrefersReducedMotion = false;
+    try {
+        systemPrefersReducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
+    } catch {
+        systemPrefersReducedMotion = true;
+    }
+
+    const allowed = isInliverTheme
+        && power_user.inliver_ui_motion !== false
+        && !power_user.reduced_motion
+        && !power_user.fast_ui_mode
+        && !systemPrefersReducedMotion;
+
+    body.dataset.uiTheme = power_user.theme || '';
+    if (allowed) {
+        body.dataset.uiMotion = INLIVER_THEME_NAME;
+    } else {
+        delete body.dataset.uiMotion;
+        cancelWelcomeMotion();
+    }
+
+    $('#inliver_ui_motion').prop('checked', power_user.inliver_ui_motion !== false);
+    $('#inliver_ui_motion_block').prop('hidden', !isInliverTheme);
+
+    if (!inliverMotionPreferenceListenerInstalled) {
+        const mediaQuery = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+        mediaQuery?.addEventListener?.('change', syncInliverMotionState);
+        inliverMotionPreferenceListenerInstalled = Boolean(mediaQuery);
+    }
 }
 
 function switchCompactInputArea() {
@@ -968,6 +1014,7 @@ function switchUiMode() {
         $('#blur-strength-block').css('opacity', '1');
         $('#blur_strength').prop('disabled', false);
     }
+    syncInliverMotionState();
 }
 
 function toggleWaifu() {
@@ -1040,6 +1087,7 @@ function applyAvatarStyle() {
     $('body').toggleClass('square-avatars', power_user.avatar_style === avatar_styles.SQUARE);
     $('body').toggleClass('rounded-avatars', power_user.avatar_style === avatar_styles.ROUNDED);
     $('#avatar_style').val(power_user.avatar_style).prop('selected', true);
+    invalidateChatRenderLayout();
 }
 
 function applyChatDisplay() {
@@ -1070,6 +1118,7 @@ function applyChatDisplay() {
             break;
         }
     }
+    invalidateChatRenderLayout();
 }
 
 function applyToastrPosition() {
@@ -1097,6 +1146,7 @@ function applyChatWidth(type) {
             // Otherwise it takes the incorrect slider position with the new value AFTER the resizing.
             await delay(1);
             document.documentElement.style.setProperty('--sheldWidth', `${power_user.chat_width}vw`);
+            invalidateChatRenderLayout();
             await delay(1);
         });
     }
@@ -1181,6 +1231,7 @@ function applyFontScale(type) {
         //this is to prevent the slider from updating page in real time
         $('#font_scale').off('mouseup touchend').on('mouseup touchend', () => {
             document.documentElement.style.setProperty('--fontScale', String(power_user.font_scale));
+            invalidateChatRenderLayout();
         });
     }
 
@@ -1441,6 +1492,8 @@ function applyTheme(name) {
         }
     }
 
+    invalidateChatRenderLayout();
+    syncInliverMotionState();
     console.log('theme applied: ' + name);
 }
 
@@ -1695,6 +1748,7 @@ export async function loadPowerUserSettings(settings, data) {
     $('#disable_group_trimming').prop('checked', power_user.disable_group_trimming);
     $('#markdown_escape_strings').val(power_user.markdown_escape_strings);
     $('#fast_ui_mode').prop('checked', power_user.fast_ui_mode);
+    $('#inliver_ui_motion').prop('checked', power_user.inliver_ui_motion !== false);
     $('#waifuMode').prop('checked', power_user.waifuMode);
     $('#movingUImode').prop('checked', power_user.movingUI);
     $('#noShadowsmode').prop('checked', power_user.noShadows);
@@ -3485,6 +3539,12 @@ jQuery(() => {
     $('#fast_ui_mode').on('change', function () {
         power_user.fast_ui_mode = $(this).prop('checked');
         switchUiMode();
+        saveSettingsDebounced();
+    });
+
+    $('#inliver_ui_motion').on('change', function () {
+        power_user.inliver_ui_motion = $(this).prop('checked');
+        syncInliverMotionState();
         saveSettingsDebounced();
     });
 

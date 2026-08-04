@@ -71,7 +71,15 @@ test('welcome image loader registers handlers before assigning the direct URL', 
     assert.equal(image.classList.contains('lazy-load'), false);
     assert.equal(placeholder.style.opacity, '0');
     assert.equal(placeholder.style.display, 'none');
-    assert.deepEqual(delays, [300]);
+    assert.deepEqual(delays, [140]);
+});
+
+test('welcome image loader settles when decode rejects', async () => {
+    const { image, placeholder } = createFakeImage((target) => target.dispatchEvent(new Event('load')));
+    image.decode = async () => { throw new Error('decode failed'); };
+    loadWelcomeCharacterImage(image, '/characters/Alice.png', { setTimeoutFn: callback => callback() });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(placeholder.style.display, 'none');
 });
 
 test('welcome image loader hides the placeholder on errors and ignores duplicate loads', () => {

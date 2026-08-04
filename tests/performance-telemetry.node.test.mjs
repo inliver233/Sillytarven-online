@@ -52,6 +52,10 @@ test('browser telemetry records shared operations and consumes accepted/rejected
     assert.doesNotThrow(() => recordPerformanceSample('regex-chat-refresh', 12, { requests: 3, merged: 2 }));
     assert.doesNotThrow(() => recordPerformanceSample('prompt-token-dry-run', 25, { requests: 4, merged: 3 }));
     assert.doesNotThrow(() => recordPerformanceSample('settings-save-serialize', 1, { characters: 30_000, noop: 1 }));
+    assert.doesNotThrow(() => recordPerformanceSample('chat-initial-render', 18, { messages: 20, frames: 2, yields: 1 }));
+    assert.doesNotThrow(() => recordPerformanceSample('chat-hydration', 35, { messages: 20, cancelled: 0 }));
+    assert.doesNotThrow(() => recordPerformanceSample('welcome-recent-chat-transition', 240, { cancelled: 0 }));
+    assert.doesNotThrow(() => recordPerformanceSample('welcome-show-more-transition', 180, { items: 8, cancelled: 0 }));
     recordStartupMilestone('settings-ready');
     recordStartupMilestone('settings-ready');
     recordStartupMilestone('not-allowed');
