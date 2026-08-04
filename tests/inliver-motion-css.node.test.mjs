@@ -19,6 +19,8 @@ test('inliver enhancements preserve top-bar feedback and the singular toast icon
     assert.match(css, /#top-settings-holder \.drawer-icon\.openIcon/);
     assert.match(css, /#top-settings-holder \.drawer-icon:active/);
     assert.match(css, /background-repeat:\s*no-repeat\s*!important/);
+    assert.match(css, /\.drawer-content\s*\{[^}]*transition-duration:\s*var\(--il-dur-fast/is);
+    assert.match(css, /\.drawer-content\.openDrawer\s*>\s*\*\s*\{[^}]*animation-duration:\s*var\(--il-dur-fast/is);
 });
 
 test('the built-in preset stays synchronized and highlights the actual open drawer icon', () => {

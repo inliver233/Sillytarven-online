@@ -282,6 +282,7 @@ import { initAccessibility } from './scripts/a11y.js';
 import { processItemsWithFrameBudget } from './scripts/util/frame-budget.js';
 import { chatRenderOptimizer } from './scripts/util/chat-render-optimizer.js';
 import { scrollCoordinator, ScrollPriority } from './scripts/util/scroll-coordinator.js';
+import { drawerSwitchCoordinator } from './scripts/util/drawer-switch-coordinator.js';
 import { requireSettingsSaveSuccess, SettingsSaveQueue, SettingsSaveTracker } from './scripts/util/settings-save-tracker.js';
 import { applyStreamFadeIn, StreamRenderBuffer } from './scripts/util/stream-fadein.js';
 import { initDomHandlers } from './scripts/dom-handlers.js';
@@ -11658,23 +11659,29 @@ export async function doNavbarIconClick() {
     const drawer = $(this).parent().find('.drawer-content');
     const drawerWasOpenAlready = $(this).parent().find('.drawer-content').hasClass('openDrawer');
     const targetDrawerID = $(this).parent().find('.drawer-content').attr('id');
+    const $openDrawers = $('.openDrawer:not(.pinnedOpen)');
+    const switchingDrawers = !drawerWasOpenAlready && $openDrawers.length > 0;
+    const transitionToken = drawerSwitchCoordinator.begin({
+        closing: drawerWasOpenAlready || switchingDrawers,
+        settleMs: animation_duration,
+    });
 
     if (!drawerWasOpenAlready) {
-        const $openDrawers = $('.openDrawer:not(.pinnedOpen)');
         const $openIcons = $('.openIcon:not(.drawerPinnedOpen)');
         for (const iconEl of $openIcons) {
-            $(iconEl).toggleClass('closedIcon openIcon');
+            $(iconEl).removeClass('openIcon').addClass('closedIcon');
         }
         for (const el of $openDrawers) {
             const openDrawer = $(el);
-            openDrawer.toggleClass('closedDrawer openDrawer');
+            openDrawer.removeClass('openDrawer').addClass('closedDrawer');
             notifyDrawerStateChanged(openDrawer, false);
         }
-        if ($openDrawers.length && animation_duration) {
-            await delay(animation_duration);
+        const immediateSwitch = document.body?.dataset?.uiMotion === 'inliver';
+        if (!await drawerSwitchCoordinator.waitForSettle(transitionToken, { immediate: immediateSwitch })) {
+            return;
         }
-        icon.toggleClass('openIcon closedIcon');
-        drawer.toggleClass('openDrawer closedDrawer');
+        icon.removeClass('closedIcon').addClass('openIcon');
+        drawer.removeClass('closedDrawer').addClass('openDrawer');
         notifyDrawerStateChanged(drawer, true);
 
         if (targetDrawerID === 'right-nav-panel') {
@@ -11690,8 +11697,8 @@ export async function doNavbarIconClick() {
             }
         }
     } else if (drawerWasOpenAlready) {
-        icon.toggleClass('closedIcon openIcon');
-        drawer.toggleClass('closedDrawer openDrawer');
+        icon.removeClass('openIcon').addClass('closedIcon');
+        drawer.removeClass('openDrawer').addClass('closedDrawer');
         notifyDrawerStateChanged(drawer, false);
     }
 }
@@ -12897,11 +12904,12 @@ jQuery(async function () {
         // This autocloses open drawers that are not pinned if a click happens inside the app which does not target them.
         const targetParentHasOpenDrawer = clickTarget.parents('.openDrawer').length;
         if (!clickTarget.hasClass('drawer-icon') && !clickTarget.hasClass('openDrawer')) {
+            drawerSwitchCoordinator.cancel();
             const $openDrawers = $('.openDrawer').not('.pinnedOpen');
             if ($openDrawers.length && targetParentHasOpenDrawer === 0) {
                 // Toggle icon and drawer classes
-                $('.openIcon').not('.drawerPinnedOpen').toggleClass('closedIcon openIcon');
-                $openDrawers.toggleClass('closedDrawer openDrawer');
+                $('.openIcon').not('.drawerPinnedOpen').removeClass('openIcon').addClass('closedIcon');
+                $openDrawers.removeClass('openDrawer').addClass('closedDrawer');
                 $openDrawers.each((_, drawer) => notifyDrawerStateChanged($(drawer), false));
             }
         }

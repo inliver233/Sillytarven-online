@@ -57,6 +57,14 @@ body[data-ui-motion="inliver"] #top-settings-holder .drawer-icon:active {
     transition-duration: var(--il-dur-fast, 0.18s) !important;
 }
 
+body[data-ui-motion="inliver"] .drawer-content {
+    transition-duration: var(--il-dur-fast, 0.18s);
+}
+
+body[data-ui-motion="inliver"] .drawer-content.openDrawer > * {
+    animation-duration: var(--il-dur-fast, 0.18s);
+}
+
 body[data-ui-motion="inliver"] #chat > .mes.st-new-message {
     will-change: transform, opacity;
     backface-visibility: hidden;

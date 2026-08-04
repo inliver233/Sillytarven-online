@@ -35,6 +35,7 @@ import {
     getSessionCookieAge,
     verifySecuritySettings,
     loginPageMiddleware,
+    shouldRedirectToLogin,
 } from './users.js';
 
 import getWebpackServeMiddleware from './middleware/webpack-serve.js';
@@ -259,6 +260,9 @@ app.get('/welcome', (request, response) => {
 // Keep original app at /app
 app.get('/app', cacheBuster.middleware, (request, response) => {
     setPrivateNoStoreHeaders(response);
+    if (shouldRedirectToLogin(request)) {
+        return response.redirect(302, '/login');
+    }
     return response.sendFile('index.html', { root: path.join(serverDirectory, 'public') });
 });
 
