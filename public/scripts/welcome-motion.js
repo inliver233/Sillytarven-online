@@ -2,8 +2,11 @@ import { recordPerformanceSample } from './performance-telemetry.js';
 
 const RECENT_TRANSITION_DURATION_MS = 240;
 const RECENT_TRANSITION_TIMEOUT_MS = 340;
-const SHOW_MORE_TIMEOUT_MS = 250;
+const SHOW_MORE_TIMEOUT_MS = 700;
 const MAX_ANIMATED_RECENT_CHATS = 8;
+const SHOW_MORE_EXPAND_DURATION_MS = 450;
+const SHOW_MORE_COLLAPSE_DURATION_MS = 320;
+const SHOW_MORE_STAGGER_MS = 20;
 
 let activeRecentTransition = null;
 let activeShowMoreTransition = null;
@@ -276,6 +279,8 @@ export async function runShowMoreTransition({ items, expanded, dependencies = {}
     const animations = [];
     const animatedNodes = nodes.slice(0, MAX_ANIMATED_RECENT_CHATS);
     nodes.forEach(node => node.classList.remove('hidden'));
+    const easing = globalThis.getComputedStyle?.(documentRef?.documentElement)
+        ?.getPropertyValue('--il-spring')?.trim() || 'cubic-bezier(0.16, 1, 0.3, 1)';
 
     const cleanup = () => {
         if (cleaned) return;
@@ -298,18 +303,18 @@ export async function runShowMoreTransition({ items, expanded, dependencies = {}
             if (typeof node.animate !== 'function') return;
             const keyframes = expanded
                 ? [
-                    { opacity: 0, transform: 'translate3d(0, 6px, 0) scale(0.99)' },
+                    { opacity: 0, transform: 'translate3d(0, 12px, 0) scale(0.99)' },
                     { opacity: 1, transform: 'translate3d(0, 0, 0) scale(1)' },
                 ]
                 : [
                     { opacity: 1, transform: 'translate3d(0, 0, 0) scale(1)' },
-                    { opacity: 0, transform: 'translate3d(0, 4px, 0) scale(0.99)' },
+                    { opacity: 0, transform: 'translate3d(0, 12px, 0) scale(0.99)' },
                 ];
             try {
                 animations.push(node.animate(keyframes, {
-                    duration: expanded ? 180 : 160,
-                    delay: index * 18,
-                    easing: 'cubic-bezier(0.16, 1, 0.3, 1)',
+                    duration: expanded ? SHOW_MORE_EXPAND_DURATION_MS : SHOW_MORE_COLLAPSE_DURATION_MS,
+                    delay: index * SHOW_MORE_STAGGER_MS,
+                    easing,
                     fill: 'both',
                 }));
             } catch {

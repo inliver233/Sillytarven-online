@@ -67,6 +67,7 @@ import { bindModelTemplates } from './chat-templates.js';
 import { IMAGE_OVERSWIPE, MEDIA_DISPLAY } from './constants.js';
 import { t } from './i18n.js';
 import { cancelWelcomeMotion } from './welcome-motion.js';
+import { INLIVER_THEME_NAME, resolveThemeCustomCss } from './util/theme-css-resolver.js';
 
 export const toastPositionClasses = [
     'toast-top-left',
@@ -89,7 +90,6 @@ const defaultStoryString = '{{#if system}}{{system}}\n{{/if}}{{#if description}}
 const defaultExampleSeparator = '***';
 const defaultChatStart = '***';
 const defaultToastPosition = 'toast-top-center';
-const INLIVER_THEME_NAME = 'inliver';
 let inliverMotionPreferenceListenerInstalled = false;
 
 const avatar_styles = {
@@ -1199,6 +1199,7 @@ function applyThemeColor(type) {
 
 function applyCustomCSS() {
     $('#customCSS').val(power_user.custom_css);
+    const runtimeCss = resolveThemeCustomCss(power_user.theme, power_user.custom_css, themes);
     var styleId = 'custom-style';
     var style = document.getElementById(styleId);
     if (!style) {
@@ -1207,7 +1208,7 @@ function applyCustomCSS() {
         style.setAttribute('id', styleId);
         document.head.appendChild(style);
     }
-    style.innerHTML = power_user.custom_css;
+    style.textContent = runtimeCss;
 }
 
 function applyBlurStrength() {

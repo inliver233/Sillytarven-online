@@ -181,9 +181,13 @@ body {
 }
 
 /* 顶栏抽屉打开时的联动高亮 */
-.drawer-icon:has(+ .drawer-content.openDrawer) .fa-solid,
+#top-settings-holder .drawer-icon.openIcon,
+#top-settings-holder .drawer-icon:has(+ .drawer-content.openDrawer) {
+    color: var(--il-primary) !important;
+    opacity: 1 !important;
+}
 .drawer-toggle.fa-circle-chevron-down {
-    color: var(--il-primary);
+    color: var(--il-primary) !important;
 }
 
 /* ==========================================================================

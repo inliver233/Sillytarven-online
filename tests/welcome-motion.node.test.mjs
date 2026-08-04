@@ -42,8 +42,8 @@ class FakeElement {
     removeAttribute() {}
     setAttribute() {}
     querySelector(selector) { return this.queryResults?.get(selector) ?? null; }
-    animate() {
-        const animation = { finished: Promise.resolve(), cancel() { this.cancelled = true; } };
+    animate(keyframes, options) {
+        const animation = { keyframes, options, finished: Promise.resolve(), cancel() { this.cancelled = true; } };
         this.animations.push(animation);
         return animation;
     }
@@ -118,6 +118,12 @@ test('show-more transition animates at most eight items and commits all visibili
     assert.equal(nodes.every(node => !node.classList.contains('hidden')), true);
     assert.equal(nodes.slice(0, 8).filter(node => node.animations.length > 0).length, 8);
     assert.equal(nodes.slice(8).every(node => node.animations.length === 0), true);
+    assert.deepEqual(nodes[0].animations[0].keyframes[0], {
+        opacity: 0,
+        transform: 'translate3d(0, 12px, 0) scale(0.99)',
+    });
+    assert.equal(nodes[0].animations[0].options.duration, 450);
+    assert.equal(nodes[1].animations[0].options.delay, 20);
 
     await runShowMoreTransition({
         items: nodes,
@@ -125,5 +131,6 @@ test('show-more transition animates at most eight items and commits all visibili
         dependencies: { documentRef, matchMedia: noReduce, setTimeoutFn: callback => { callback(); return 1; }, clearTimeoutFn: () => {} },
     });
     assert.equal(nodes.every(node => node.classList.contains('hidden')), true);
+    assert.equal(nodes[0].animations[1].options.duration, 320);
     cancelWelcomeMotion();
 });

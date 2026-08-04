@@ -41,16 +41,25 @@ body[data-ui-motion="inliver"] .st-welcome-motion-name {
 }
 
 body[data-ui-motion="inliver"] .recentChat.st-motion-running {
-    animation: none !important;
     will-change: transform, opacity;
+    backface-visibility: hidden;
 }
 
-body[data-ui-motion="inliver"] #chat > .mes {
-    animation: none !important;
+body[data-ui-motion="inliver"] #top-settings-holder .drawer-icon.openIcon {
+    color: var(--il-primary, #a9cbe8) !important;
+    opacity: 1 !important;
+}
+
+body[data-ui-motion="inliver"] #top-settings-holder .drawer-icon:active {
+    color: var(--il-primary, #a9cbe8) !important;
+    filter: drop-shadow(0 0 7px rgba(169, 194, 218, 0.55));
+    transform: scale(0.96) rotate(-2deg) !important;
+    transition-duration: var(--il-dur-fast, 0.18s) !important;
 }
 
 body[data-ui-motion="inliver"] #chat > .mes.st-new-message {
-    animation: il-rise var(--il-dur-slow, 0.5s) var(--il-spring, cubic-bezier(0.16, 1, 0.3, 1)) both !important;
+    will-change: transform, opacity;
+    backface-visibility: hidden;
 }
 
 body[data-ui-motion="inliver"] #show_more_messages {
