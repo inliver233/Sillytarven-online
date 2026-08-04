@@ -324,7 +324,7 @@ test('OAuth registration intent is blocked while the login entry remains availab
     assert.match(loginResponse.headers.get('location') || '', /^https:\/\/github\.com\/login\/oauth\/authorize\?/);
 });
 
-test('Discord registration requests guild membership scope without changing normal login scope', async () => {
+test('Discord OAuth requests only the minimum scopes for login and registration', async () => {
     assert.deepEqual(getDiscordGuildMembershipConfig(), {
         enabled: true,
         guildId: '123456789012345678',
@@ -345,12 +345,36 @@ test('Discord registration requests guild membership scope without changing norm
     });
     const registrationLocation = new URL(registrationResponse.headers.get('location'));
     assert.equal(registrationResponse.status, 302);
-    assert.match(registrationLocation.searchParams.get('scope'), /guilds\.members\.read/);
+    assert.deepEqual(
+        registrationLocation.searchParams.get('scope')?.split(' '),
+        ['identify', 'guilds.members.read'],
+    );
 
     const loginResponse = await fetch(`${baseUrl}/api/oauth/discord`, { redirect: 'manual' });
     const loginLocation = new URL(loginResponse.headers.get('location'));
     assert.equal(loginResponse.status, 302);
-    assert.doesNotMatch(loginLocation.searchParams.get('scope'), /guilds\.members\.read/);
+    assert.equal(loginLocation.searchParams.get('scope'), 'identify');
+});
+
+test('Discord OAuth does not collect an email returned unexpectedly by the profile endpoint', async () => {
+    const oauthSession = {};
+    const oauthResponse = createRedirectResponse();
+    await handleOAuthLogin(
+        { session: oauthSession },
+        oauthResponse,
+        'discord',
+        { id: 89, username: 'privacy-discord-user', email: 'private@example.com' },
+        'register',
+        {
+            discordGuildMembership: {
+                eligible: true,
+                reason: 'eligible',
+            },
+        },
+    );
+
+    assert.equal(oauthResponse.location, '/login?oauth_pending=true');
+    assert.equal(oauthSession.oauthPendingUser.email, '');
 });
 
 test('Discord guild rule blocks unverified new users but not already-bound logins', async () => {

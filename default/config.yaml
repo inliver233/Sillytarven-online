@@ -406,6 +406,8 @@ oauth:
     callbackUrl: "http://localhost:8000/api/oauth/github/callback"
 
   # Discord OAuth Configuration
+  # Login requests only `identify`. Registration additionally requests
+  # `guilds.members.read` when the guild-membership rule is enabled. Email is not requested.
   discord:
     enabled: false
     clientId: ""

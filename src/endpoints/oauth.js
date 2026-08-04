@@ -412,7 +412,9 @@ router.get('/discord', async (request, response) => {
             return response.status(403).json({ error: 'Discord 新用户注册当前未开放' });
         }
         const discordGuildMembership = getDiscordGuildMembershipConfig();
-        const scopes = ['identify', 'email'];
+        // Basic Discord login only needs the stable user ID and public profile.
+        // Do not request email access; registration adds guild membership access only when required.
+        const scopes = ['identify'];
         if (intent === 'register' && discordGuildMembership.enabled) {
             scopes.push('guilds.members.read');
         }
@@ -781,7 +783,8 @@ export async function handleOAuthLogin(request, response, provider, userData, in
                 }
                 userId = `discord_${userData.id}`;
                 username = userData.username || `discord_user_${userData.id}`;
-                email = userData.email;
+                // Discord email is intentionally neither requested nor collected.
+                email = '';
                 avatar = userData.avatar
                     ? `https://cdn.discordapp.com/avatars/${userData.id}/${userData.avatar}.png`
                     : null;

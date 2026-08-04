@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import path from 'node:path';
 import fs from 'node:fs';
 
@@ -11,6 +12,61 @@ import { PUBLIC_DIRECTORIES } from '../constants.js';
  * @type {Partial<import('simple-git').SimpleGitOptions>}
  */
 const OPTIONS = Object.freeze({ timeout: { block: 5 * 60 * 1000 } });
+const INSTALL_GIT_OPTIONS = Object.freeze({ config: ['http.followRedirects=false'] });
+const activeExtensionInstalls = new Set();
+
+/**
+ * GitLab redirects repository URLs without the canonical suffix. Resolve that
+ * known redirect locally while keeping arbitrary Git redirects disabled.
+ * @param {unknown} value Requested clone URL
+ * @returns {unknown} Canonical clone URL when the input is a GitLab HTTPS repository
+ */
+export function normalizeExtensionCloneUrl(value) {
+    if (typeof value !== 'string') return value;
+
+    const trimmed = value.trim();
+    try {
+        const parsed = new URL(trimmed);
+        const pathname = parsed.pathname.replace(/\/+$/u, '');
+        const pathSegments = pathname.split('/').filter(Boolean);
+        const isCanonicalizableGitLabUrl = parsed.protocol === 'https:'
+            && parsed.hostname.toLowerCase() === 'gitlab.com'
+            && !parsed.port
+            && !parsed.username
+            && !parsed.password
+            && !parsed.search
+            && !parsed.hash
+            && !pathname.includes('/-/')
+            && pathSegments.length >= 2;
+        if (!isCanonicalizableGitLabUrl || pathname.toLowerCase().endsWith('.git')) {
+            return trimmed;
+        }
+
+        parsed.pathname = `${pathname}.git`;
+        return parsed.href;
+    } catch {
+        return trimmed;
+    }
+}
+
+function getExtensionDirectoryName(url) {
+    let repositoryPath = url;
+    try {
+        repositoryPath = decodeURIComponent(new URL(url).pathname);
+    } catch {
+        // SCP-style and local Git URLs are handled by path.basename below.
+    }
+    const name = sanitize(path.basename(String(repositoryPath).replace(/\/+$/u, ''), '.git'));
+    if (!name || name === '.' || name === '..') {
+        throw new TypeError('The repository URL does not contain a valid extension name.');
+    }
+    return name;
+}
+
+function isRedirectError(error) {
+    const message = String(error?.message || error || '');
+    return /redirect|\b30[12378]\b/iu.test(message);
+}
 
 /**
  * This function extracts the extension information from the manifest file.
@@ -71,21 +127,22 @@ export const router = express.Router();
  * @returns {void}
  */
 router.post('/install', async (request, response) => {
-    if (!request.body.url) {
+    if (typeof request.body.url !== 'string' || !request.body.url.trim()) {
         return response.status(400).send('Bad Request: URL is required in the request body.');
     }
 
+    let stagingPath = null;
+    let installKey = null;
     try {
-        // No timeout for cloning, as it may take a while depending on the repo size
-        const git = simpleGit();
+        const git = simpleGit(INSTALL_GIT_OPTIONS);
 
         // make sure the third-party directory exists
         if (!fs.existsSync(path.join(request.user.directories.extensions))) {
-            fs.mkdirSync(path.join(request.user.directories.extensions));
+            fs.mkdirSync(path.join(request.user.directories.extensions), { recursive: true });
         }
 
         if (!fs.existsSync(PUBLIC_DIRECTORIES.globalExtensions)) {
-            fs.mkdirSync(PUBLIC_DIRECTORIES.globalExtensions);
+            fs.mkdirSync(PUBLIC_DIRECTORIES.globalExtensions, { recursive: true });
         }
 
         const { url, global, branch } = request.body;
@@ -96,25 +153,55 @@ router.post('/install', async (request, response) => {
         }
 
         const basePath = global ? PUBLIC_DIRECTORIES.globalExtensions : request.user.directories.extensions;
-        const extensionPath = path.join(basePath, sanitize(path.basename(url, '.git')));
+        const cloneUrl = normalizeExtensionCloneUrl(url);
+        const extensionName = getExtensionDirectoryName(cloneUrl);
+        const extensionPath = path.join(basePath, extensionName);
 
         if (fs.existsSync(extensionPath)) {
             return response.status(409).send(`Directory already exists at ${extensionPath}`);
         }
+        installKey = path.resolve(extensionPath);
+        if (activeExtensionInstalls.has(installKey)) {
+            return response.status(409).send(`An extension install is already in progress at ${extensionPath}`);
+        }
+        activeExtensionInstalls.add(installKey);
 
+        stagingPath = path.join(
+            path.dirname(basePath),
+            `.${path.basename(basePath)}-${extensionName}.install-${crypto.randomUUID()}`,
+        );
         const cloneOptions = { '--depth': 1 };
         if (branch) {
             cloneOptions['--branch'] = branch;
         }
-        await git.clone(url, extensionPath, cloneOptions);
-        console.info(`Extension has been cloned to ${extensionPath} from ${url} at ${branch || '(default)'} branch`);
+        await git.clone(cloneUrl, stagingPath, cloneOptions);
+        const { version, author, display_name } = await getManifest(stagingPath);
 
-        const { version, author, display_name } = await getManifest(extensionPath);
+        if (fs.existsSync(extensionPath)) {
+            await fs.promises.rm(stagingPath, { recursive: true, force: true });
+            stagingPath = null;
+            return response.status(409).send(`Directory already exists at ${extensionPath}`);
+        }
+        await fs.promises.rename(stagingPath, extensionPath);
+        stagingPath = null;
+        console.info(`Extension has been installed at ${extensionPath} from the ${branch || '(default)'} branch`);
 
         return response.send({ version, author, display_name, extensionPath });
     } catch (error) {
+        if (stagingPath) {
+            try {
+                await fs.promises.rm(stagingPath, { recursive: true, force: true });
+            } catch (cleanupError) {
+                console.error('Failed to clean extension install staging directory', cleanupError);
+            }
+        }
         console.error('Importing custom content failed', error);
+        if (isRedirectError(error)) {
+            return response.status(400).send('Bad Request: Repository redirects are disabled. Use the canonical clone URL (for GitLab, append .git).');
+        }
         return response.status(500).send(`Server Error: ${error.message}`);
+    } finally {
+        if (installKey) activeExtensionInstalls.delete(installKey);
     }
 });
 
