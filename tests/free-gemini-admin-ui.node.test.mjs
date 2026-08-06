@@ -8,6 +8,7 @@ const adminTemplate = read('public/scripts/templates/admin.html');
 const adminStyles = read('public/css/admin-extensions.css');
 const autoConnectScript = read('public/scripts/RossAscends-mods.js');
 const indexTemplate = read('public/index.html');
+const openaiScript = read('public/scripts/openai.js');
 const userScript = read('public/scripts/user.js');
 
 function extractFunction(source, name) {
@@ -85,4 +86,9 @@ test('automatic Free Gemini mode auto-connects and visible UI uses the branded a
     assert.doesNotMatch(autoConnectScript, /free_gemini_channel_id\s*&&\s*oai_settings\.chat_completion_source\s*==\s*chat_completion_sources\.FREE_GEMINI/);
     assert.match(adminTemplate, /src="\/img\/free-gemini\.svg"/);
     assert.match(indexTemplate, /data-source="free-gemini"[\s\S]*?src="\/img\/free-gemini\.svg"/);
+});
+
+test('free Gemini exposes and forwards additional request body parameters', () => {
+    assert.match(indexTemplate, /data-source="custom,free-gemini"[^>]+id="customize_additional_parameters"/);
+    assert.match(openaiScript, /\[chat_completion_sources\.CUSTOM, chat_completion_sources\.FREE_GEMINI\]\.includes\(settings\.chat_completion_source\)[\s\S]*?custom_include_body[\s\S]*?custom_exclude_body/);
 });

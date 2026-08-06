@@ -792,7 +792,7 @@ export function getTokenizerModel() {
  * @deprecated Use countTokensOpenAIAsync instead.
  */
 export function countTokensOpenAI(messages, full = false) {
-    const tokenizerEndpoint = `/api/tokenizers/openai/count?model=${getTokenizerModel()}`;
+    const model = getTokenizerModel();
     const cacheObject = getTokenCacheObject();
 
     if (!Array.isArray(messages)) {
@@ -801,34 +801,22 @@ export function countTokensOpenAI(messages, full = false) {
 
     let token_count = -1;
 
+    if (model === 'claude') {
+        full = true;
+    }
+
     for (const message of messages) {
-        const model = getTokenizerModel();
-
-        if (model === 'claude') {
-            full = true;
-        }
-
-        const hash = getStringHash(JSON.stringify(message));
+        const serializedMessage = JSON.stringify(message);
+        const hash = getStringHash(serializedMessage);
         const cacheKey = `${model}-${hash}`;
         const cachedCount = cacheObject[cacheKey];
 
-        if (typeof cachedCount === 'number') {
+        if (Number.isFinite(cachedCount) && cachedCount >= 0) {
             token_count += cachedCount;
-        }
-
-        else {
-            jQuery.ajax({
-                async: false,
-                type: 'POST', //
-                url: tokenizerEndpoint,
-                data: JSON.stringify([message]),
-                dataType: 'json',
-                contentType: 'application/json',
-                success: function (data) {
-                    token_count += Number(data.token_count);
-                    cacheObject[cacheKey] = Number(data.token_count);
-                },
-            });
+        } else {
+            const messageTokenCount = estimateOpenAIMessageTokens(JSON.stringify([message]));
+            token_count += messageTokenCount;
+            cacheObject[cacheKey] = messageTokenCount;
         }
     }
 
@@ -845,8 +833,6 @@ export function countTokensOpenAI(messages, full = false) {
  */
 export async function countTokensOpenAIAsync(messages, full = false) {
     const model = getTokenizerModel();
-    const tokenizerQuery = new URLSearchParams({ model });
-    const tokenizerEndpoint = `/api/tokenizers/openai/count?${tokenizerQuery.toString()}`;
     const cacheObject = getTokenCacheObject();
 
     if (!Array.isArray(messages)) {
@@ -868,37 +854,8 @@ export async function countTokensOpenAIAsync(messages, full = false) {
 
         if (Number.isFinite(cachedCount) && cachedCount >= 0) {
             token_count += cachedCount;
-        }
-
-        else {
-            // Keep synchronous setup/programming failures outside the transport fallback.
-            const request = jQuery.ajax({
-                async: true,
-                type: 'POST', //
-                url: tokenizerEndpoint,
-                data: requestBody,
-                dataType: 'json',
-                contentType: 'application/json',
-            });
-
-            let data;
-            try {
-                data = await request;
-            } catch (error) {
-                const status = Number(error?.status);
-                const statusLabel = Number.isInteger(status) && status > 0 ? `HTTP ${status}` : 'network error';
-                console.warn(`OpenAI token count failed (${statusLabel}); using local estimate.`);
-                token_count += estimateOpenAIMessageTokens(requestBody);
-                continue;
-            }
-
-            const messageTokenCount = getValidOpenAITokenCount(data);
-            if (messageTokenCount === null) {
-                console.warn('OpenAI token count failed (invalid response); using local estimate.');
-                token_count += estimateOpenAIMessageTokens(requestBody);
-                continue;
-            }
-
+        } else {
+            const messageTokenCount = estimateOpenAIMessageTokens(requestBody);
             token_count += messageTokenCount;
             cacheObject[cacheKey] = messageTokenCount;
         }
@@ -910,24 +867,18 @@ export async function countTokensOpenAIAsync(messages, full = false) {
 }
 
 /**
- * Gets a validated token count from an OpenAI tokenizer response.
- * @param {object} data Tokenizer response.
- * @returns {number|null} Valid token count, or null for a malformed response.
- */
-function getValidOpenAITokenCount(data) {
-    const tokenCount = data?.token_count;
-    return typeof tokenCount === 'number' && Number.isFinite(tokenCount) && tokenCount >= 0 ? tokenCount : null;
-}
-
-/**
- * Conservatively estimates one serialized chat message when remote tokenization is unavailable.
+ * Estimates one serialized chat message locally to avoid a tokenizer network round trip.
  * @param {string} serializedMessage Serialized single-message request body.
  * @returns {number} Estimated token count.
  */
 function estimateOpenAIMessageTokens(serializedMessage) {
-    const nonAsciiCharacters = serializedMessage.match(/[^\x00-\x7F]/g)?.length ?? 0;
-    const asciiCharacters = serializedMessage.length - nonAsciiCharacters;
-    return Math.max(1, Math.ceil(asciiCharacters / CHARACTERS_PER_TOKEN_RATIO + nonAsciiCharacters) + 3);
+    let utf8Bytes = 0;
+    for (const character of serializedMessage) {
+        const codePoint = character.codePointAt(0);
+        utf8Bytes += codePoint <= 0x7F ? 1 : codePoint <= 0x7FF ? 2 : codePoint <= 0xFFFF ? 3 : 4;
+    }
+
+    return Math.max(1, Math.ceil(utf8Bytes / 3.75) + 3);
 }
 
 /**

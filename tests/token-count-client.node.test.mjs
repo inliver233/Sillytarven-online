@@ -33,69 +33,48 @@ function extractFunction(source, name) {
 }
 
 function createTokenCounter(dependencies) {
-    const validatorSource = extractFunction(tokenizerSource, 'getValidOpenAITokenCount');
     const estimatorSource = extractFunction(tokenizerSource, 'estimateOpenAIMessageTokens');
     const counterSource = extractFunction(tokenizerSource, 'countTokensOpenAIAsync').replace(/^export\s+/, '');
 
     return Function('dependencies', `
         const {
-            CHARACTERS_PER_TOKEN_RATIO,
-            URLSearchParams,
             getStringHash,
             getTokenCacheObject,
             getTokenizerModel,
-            jQuery,
         } = dependencies;
-        ${validatorSource}
         ${estimatorSource}
         ${counterSource}
         return countTokensOpenAIAsync;
     `)(dependencies);
 }
 
-test('OpenAI token counting snapshots and URL-encodes one tokenizer model', async () => {
+test('OpenAI token counting estimates cache misses locally and reuses the chat cache', async () => {
     const model = 'provider/model & revision=latest';
     const cache = {};
-    const requests = [];
     let modelReads = 0;
     const countTokens = createTokenCounter({
-        CHARACTERS_PER_TOKEN_RATIO: 3.35,
-        URLSearchParams,
         getStringHash: value => value,
         getTokenCacheObject: () => cache,
-        getTokenizerModel: () => (++modelReads === 1 ? model : 'changed-model'),
-        jQuery: {
-            ajax(options) {
-                requests.push(options);
-                return Promise.resolve({ token_count: 7 });
-            },
+        getTokenizerModel: () => {
+            modelReads++;
+            return model;
         },
     });
 
-    assert.equal(await countTokens([{ role: 'user', content: 'one' }, { role: 'user', content: 'two' }], true), 13);
-    assert.equal(modelReads, 1);
-    assert.equal(requests.length, 2);
-    const expectedQuery = new URLSearchParams({ model }).toString();
-    assert.ok(requests.every(request => request.url === `/api/tokenizers/openai/count?${expectedQuery}`));
+    const messages = [{ role: 'user', content: 'one' }, { role: 'user', content: 'two' }];
+    const firstCount = await countTokens(messages, true);
+    const secondCount = await countTokens(messages, true);
+
+    assert.ok(firstCount > 0);
+    assert.equal(secondCount, firstCount);
+    assert.equal(modelReads, 2);
+    assert.equal(Object.keys(cache).length, 2);
     assert.ok(Object.keys(cache).every(key => key.startsWith(`${model}-`)));
-});
-
-test('OpenAI token response validation accepts only finite nonnegative numbers', () => {
-    const validatorSource = extractFunction(tokenizerSource, 'getValidOpenAITokenCount');
-    const validate = Function(`${validatorSource}\nreturn getValidOpenAITokenCount;`)();
-
-    assert.equal(validate({ token_count: 0 }), 0);
-    assert.equal(validate({ token_count: 42 }), 42);
-    assert.equal(validate({ token_count: -1 }), null);
-    assert.equal(validate({ token_count: Number.NaN }), null);
-    assert.equal(validate({ token_count: Number.POSITIVE_INFINITY }), null);
-    assert.equal(validate({ token_count: '42' }), null);
-    assert.equal(validate(null), null);
 });
 
 test('OpenAI local estimates stay conservative for ASCII and multibyte content', () => {
     const estimatorSource = extractFunction(tokenizerSource, 'estimateOpenAIMessageTokens');
-    const estimate = Function('CHARACTERS_PER_TOKEN_RATIO', `${estimatorSource}\nreturn estimateOpenAIMessageTokens;`)(3.35);
+    const estimate = Function(`${estimatorSource}\nreturn estimateOpenAIMessageTokens;`)();
     const asciiBody = JSON.stringify([{ role: 'user', content: 'plain text' }]);
     const multibyteBody = JSON.stringify([{ role: 'user', content: '格式错误' }]);
 
@@ -103,55 +82,12 @@ test('OpenAI local estimates stay conservative for ASCII and multibyte content',
     assert.ok(estimate(multibyteBody) >= 4 + 3);
 });
 
-test('OpenAI token request and malformed-response failures use uncached local estimates', async t => {
-    const cache = {};
-    const warnings = [];
-    const responses = [
-        Promise.reject({ status: 503 }),
-        Promise.resolve({ token_count: Number.NaN }),
-        Promise.resolve({ token_count: 5 }),
-    ];
-    const originalWarn = console.warn;
-    console.warn = message => warnings.push(message);
-    t.after(() => { console.warn = originalWarn; });
+test('OpenAI counters no longer issue tokenizer network requests', () => {
+    const syncCounterSource = extractFunction(tokenizerSource, 'countTokensOpenAI');
+    const asyncCounterSource = extractFunction(tokenizerSource, 'countTokensOpenAIAsync');
 
-    const countTokens = createTokenCounter({
-        CHARACTERS_PER_TOKEN_RATIO: 3.35,
-        URLSearchParams,
-        getStringHash: value => value,
-        getTokenCacheObject: () => cache,
-        getTokenizerModel: () => 'gpt-4o',
-        jQuery: { ajax: () => responses.shift() },
-    });
-
-    const messages = [
-        { role: 'user', content: 'temporary outage' },
-        { role: 'assistant', content: '格式错误' },
-        { role: 'user', content: 'valid' },
-    ];
-    const tokenCount = await countTokens(messages, true);
-
-    assert.ok(Number.isFinite(tokenCount) && tokenCount > 5);
-    assert.equal(Object.keys(cache).length, 1);
-    assert.ok(Object.keys(cache)[0].includes('"valid"'));
-    assert.deepEqual(warnings, [
-        'OpenAI token count failed (HTTP 503); using local estimate.',
-        'OpenAI token count failed (invalid response); using local estimate.',
-    ]);
-});
-
-test('OpenAI token counter preserves synchronous programming errors', async () => {
-    const expectedError = new TypeError('ajax setup failed');
-    const countTokens = createTokenCounter({
-        CHARACTERS_PER_TOKEN_RATIO: 3.35,
-        URLSearchParams,
-        getStringHash: value => value,
-        getTokenCacheObject: () => ({}),
-        getTokenizerModel: () => 'gpt-4o',
-        jQuery: { ajax: () => { throw expectedError; } },
-    });
-
-    await assert.rejects(countTokens({ role: 'user', content: 'hello' }, true), error => error === expectedError);
+    assert.doesNotMatch(syncCounterSource, /jQuery\.ajax|api\/tokenizers/);
+    assert.doesNotMatch(asyncCounterSource, /jQuery\.ajax|api\/tokenizers/);
 });
 
 test('prompt preparation reports accurate deduplicated errors and records failed state', () => {

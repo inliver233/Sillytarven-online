@@ -30,7 +30,7 @@ import { invalidateRecentChatsCache, RecentChatsCache, registerRecentChatsCache 
 
 const isBackupEnabled = !!getConfigValue('backups.chat.enabled', true, 'boolean');
 const maxTotalChatBackups = Number(getConfigValue('backups.chat.maxTotalBackups', -1, 'number'));
-const throttleInterval = Number(getConfigValue('backups.chat.throttleInterval', 10_000, 'number'));
+const throttleInterval = Number(getConfigValue('backups.chat.throttleInterval', 900_000, 'number'));
 const checkIntegrity = !!getConfigValue('backups.chat.checkIntegrity', true, 'boolean');
 const chatInfoCacheLimit = Number(getConfigValue('performance.chatInfoCacheLimit', 2000, 'number'));
 const chatChunkingEnabled = !!getConfigValue('performance.chatChunkingEnabled', true, 'boolean');

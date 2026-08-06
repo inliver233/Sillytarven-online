@@ -1125,6 +1125,11 @@ async function sendMakerSuiteRequest(request, response, options = {}) {
             }
         }
 
+        if (freeGeminiChannel) {
+            mergeObjectWithYaml(body, request.body.custom_include_body);
+            excludeKeysByYaml(body, request.body.custom_exclude_body);
+        }
+
         return body;
     }
 

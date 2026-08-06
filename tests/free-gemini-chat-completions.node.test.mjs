@@ -164,6 +164,8 @@ test('free Gemini uses server-side credentials and normalizes the first upstream
                 top_k: 100,
                 seed: null,
                 stream: false,
+                custom_include_body: 'generationConfig:\n  topK: 32\n  maxOutputTokens: 70\n  temperature: 0.25',
+                custom_exclude_body: '- safetySettings',
             }),
         });
         assert.equal(generateResponse.status, 200);
@@ -171,7 +173,9 @@ test('free Gemini uses server-side credentials and normalizes the first upstream
         assert.equal(generated.choices[0].message.content, '福利渠道可用');
         assert.equal(generationBodies.length, 1);
         assert.equal(generationBodies[0].generationConfig.maxOutputTokens, 40);
-        assert.equal(generationBodies[0].generationConfig.topK, 64);
+        assert.equal(generationBodies[0].generationConfig.topK, 32);
+        assert.equal(generationBodies[0].generationConfig.temperature, 0.25);
+        assert.equal(Object.hasOwn(generationBodies[0], 'safetySettings'), false);
         assert.equal(Object.hasOwn(generationBodies[0].generationConfig, 'seed'), false);
         assert.equal(generationBodies[0].contents.at(-2).role, 'model');
         assert.equal(generationBodies[0].contents.at(-2).parts[0].text, '上次回答');
