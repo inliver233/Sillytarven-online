@@ -11,7 +11,10 @@ import { setConfigFilePath } from '../src/util.js';
 
 const testRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sillytavern-chat-kill-switch-'));
 const defaultConfigPath = fileURLToPath(new URL('../default/config.yaml', import.meta.url));
-setConfigFilePath(defaultConfigPath);
+const killSwitchConfigPath = path.join(testRoot, 'config.yaml');
+const defaultConfig = fs.readFileSync(defaultConfigPath, 'utf8');
+fs.writeFileSync(killSwitchConfigPath, defaultConfig.replace('  chatPaging:\n    enabled: true', '  chatPaging:\n    enabled: false'));
+setConfigFilePath(killSwitchConfigPath);
 globalThis.DATA_ROOT = path.join(testRoot, 'data');
 fs.mkdirSync(globalThis.DATA_ROOT, { recursive: true });
 
@@ -62,7 +65,7 @@ async function post(route, body) {
     });
 }
 
-test('chat paging protocol is disabled by default while full saves remain compatible', async () => {
+test('chat paging protocol can be disabled explicitly while full saves remain compatible', async () => {
     const header = {
         user_name: 'unused',
         character_name: 'unused',

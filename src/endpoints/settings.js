@@ -15,7 +15,7 @@ import { createSettingsSaveHandler } from '../settings-save.js';
 const ENABLE_EXTENSIONS = !!getConfigValue('extensions.enabled', true, 'boolean');
 const ENABLE_EXTENSIONS_AUTO_UPDATE = !!getConfigValue('extensions.autoUpdate', true, 'boolean');
 const ENABLE_ACCOUNTS = !!getConfigValue('enableUserAccounts', false, 'boolean');
-const ENABLE_CHAT_PAGING = !!getConfigValue('performance.chatPaging.enabled', false, 'boolean');
+const ENABLE_CHAT_PAGING = !!getConfigValue('performance.chatPaging.enabled', true, 'boolean');
 const ENABLE_LONG_CHAT_DOM_RENDER_OPTIMIZATION = !!getConfigValue('performance.longChatDomRenderOptimization.enabled', true, 'boolean');
 const ENABLE_TELEMETRY = !!getConfigValue('performance.telemetry.enabled', true, 'boolean');
 const settingsCache = new SettingsCache({
