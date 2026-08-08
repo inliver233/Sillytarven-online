@@ -227,6 +227,67 @@ test('a stale managed page remains readable but cannot write', async () => {
     }
 });
 
+test('a durable data fault gate blocks only writes with a machine-readable reason', async () => {
+    const previousDataRoot = globalThis.DATA_ROOT;
+    const previousEnabled = process.env.SILLYTAVERN_STCONTROL_ENABLED;
+    const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sillytavern-stcontrol-data-fault-'));
+    globalThis.DATA_ROOT = dataRoot;
+    process.env.SILLYTAVERN_STCONTROL_ENABLED = 'true';
+    resetStcontrolStateForTests();
+    try {
+        const state = getStcontrolState();
+        state.gates.alice = {
+            kind: 'data_fault',
+            faultId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+            activityEpoch: 7,
+            createdAt: Date.now(),
+        };
+        fs.mkdirSync(path.join(dataRoot, '_stcontrol'), { recursive: true });
+        fs.writeFileSync(path.join(dataRoot, '_stcontrol', 'adapter-state.json'), JSON.stringify(state));
+        resetStcontrolStateForTests();
+
+        const makeRequest = method => ({
+            method,
+            path: '/api/chats/save',
+            user: { profile: { handle: 'alice' } },
+            session: { stcontrol: {
+                sessionId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+                loginMode: STCONTROL_MODES.MANAGED,
+                activityEpoch: 7,
+                controllerGeneration: 1,
+            } },
+        });
+        const makeResponse = () => {
+            const response = new EventEmitter();
+            response.status = status => { response.statusCode = status; return response; };
+            response.set = (name, value) => { response.headers = { ...response.headers, [name]: value }; return response; };
+            response.json = body => { response.body = body; return response; };
+            return response;
+        };
+
+        const readResponse = makeResponse();
+        let reads = 0;
+        await stcontrolRequestTracker(makeRequest('GET'), readResponse, () => reads++);
+        assert.equal(reads, 1);
+        readResponse.emit('finish');
+
+        const writeResponse = makeResponse();
+        let writes = 0;
+        await stcontrolRequestTracker(makeRequest('POST'), writeResponse, () => writes++);
+        assert.equal(writes, 0);
+        assert.equal(writeResponse.statusCode, 423);
+        assert.equal(writeResponse.body.code, 'user_data_frozen');
+        assert.equal(writeResponse.headers['Retry-After'], '2');
+    } finally {
+        await new Promise(resolve => setTimeout(resolve, 20));
+        resetStcontrolStateForTests();
+        globalThis.DATA_ROOT = previousDataRoot;
+        if (previousEnabled === undefined) delete process.env.SILLYTAVERN_STCONTROL_ENABLED;
+        else process.env.SILLYTAVERN_STCONTROL_ENABLED = previousEnabled;
+        fs.rmSync(dataRoot, { recursive: true, force: true });
+    }
+});
+
 test('independent reconciliation requires the exact durable marker and a drained session', async () => {
     const previousDataRoot = globalThis.DATA_ROOT;
     const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sillytavern-stcontrol-sync-'));
@@ -330,6 +391,7 @@ test('stcontrol adapter is wired through authenticated, CSRF-safe integration po
         '/api/stcontrol/internal/admin/check',
         '/api/stcontrol/internal/snapshots/quiesce',
         '/api/stcontrol/internal/snapshots/release',
+        '/api/stcontrol/internal/data-faults/freeze',
     ]) {
         assert.match(endpoint, new RegExp(route.replaceAll('/', '\\/')));
     }

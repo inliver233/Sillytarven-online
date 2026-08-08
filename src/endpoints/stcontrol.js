@@ -14,6 +14,8 @@ import {
     STCONTROL_MODES,
     applyStcontrolMode,
     encodeStcontrolRequestBody,
+    establishSnapshotWriteGate,
+    establishUserDataFaultGate,
     getStcontrolControllerUrl,
     getStcontrolModeStatus,
     getStcontrolPendingSyncUsers,
@@ -313,18 +315,16 @@ router.post('/api/stcontrol/internal/admin/check', async (request, response) => 
 router.post('/api/stcontrol/internal/snapshots/quiesce', async (request, response) => {
     try {
         const input = validateSnapshotRequest(request.body);
-        const current = getUserWriteGate(input.handle);
-        if (current && (current.workflowId !== input.workflow_id || current.snapshotId !== input.snapshot_id)) {
+        const established = await establishSnapshotWriteGate(
+            input.handle,
+            input.workflow_id,
+            input.snapshot_id,
+            input.activity_epoch,
+        );
+        if (established.status === 'write_gate_conflict') {
             throw new AdapterRequestError(409, 'user_already_quiescing');
         }
-        const gate = current || {
-            workflowId: input.workflow_id,
-            snapshotId: input.snapshot_id,
-            activityEpoch: input.activity_epoch,
-            freezeToken: crypto.randomBytes(32).toString('base64url'),
-            createdAt: Date.now(),
-        };
-        await setUserWriteGate(input.handle, gate);
+        const gate = established.gate;
         const deadline = Date.now() + QUIESCE_TIMEOUT_MS;
         while (Date.now() < deadline) {
             const active = getStcontrolSessionTelemetry().filter(user => user.handle === input.handle);
@@ -354,6 +354,36 @@ router.post('/api/stcontrol/internal/snapshots/release', async (request, respons
         }
         await setUserWriteGate(input.handle, null);
         return response.json({ ok: true });
+    } catch (error) {
+        return adapterError(response, error);
+    }
+});
+
+router.post('/api/stcontrol/internal/data-faults/freeze', async (request, response) => {
+    try {
+        const input = validateDataFaultRequest(request.body);
+        const established = await establishUserDataFaultGate(input.handle, input.fault_id, input.activity_epoch);
+        if (established.status === 'fault_id_conflict') {
+            throw new AdapterRequestError(409, 'data_fault_scope_mismatch');
+        }
+        if (established.status === 'write_gate_conflict') {
+            throw new AdapterRequestError(409, 'user_write_gate_conflict');
+        }
+
+        const deadline = Date.now() + QUIESCE_TIMEOUT_MS;
+        while (Date.now() < deadline) {
+            const active = getStcontrolSessionTelemetry().filter(user => user.handle === input.handle);
+            const inFlight = active.reduce((total, user) => total + user.in_flight_reads + user.in_flight_writes, 0);
+            if (inFlight === 0) {
+                return response.json({ ok: true, frozen: true, drained: true });
+            }
+            await new Promise(resolve => setTimeout(resolve, 50));
+        }
+
+        // Unlike a snapshot gate, a fault gate must remain closed after a
+        // drain timeout. A later idempotent command observes the same gate and
+        // retries the drain without reopening a potentially corrupt home.
+        throw new AdapterRequestError(409, 'write_drain_timeout');
     } catch (error) {
         return adapterError(response, error);
     }
@@ -528,6 +558,16 @@ function validateSnapshotRequest(raw) {
     const input = raw && typeof raw === 'object' ? raw : {};
     requireUUID(input.workflow_id, 'invalid_workflow_id');
     requireUUID(input.snapshot_id, 'invalid_snapshot_id');
+    input.handle = requireHandle(input.handle);
+    if (!Number.isSafeInteger(input.activity_epoch) || input.activity_epoch < 0) {
+        throw new AdapterRequestError(400, 'invalid_activity_epoch');
+    }
+    return input;
+}
+
+function validateDataFaultRequest(raw) {
+    const input = raw && typeof raw === 'object' ? raw : {};
+    requireUUID(input.fault_id, 'invalid_fault_id');
     input.handle = requireHandle(input.handle);
     if (!Number.isSafeInteger(input.activity_epoch) || input.activity_epoch < 0) {
         throw new AdapterRequestError(400, 'invalid_activity_epoch');

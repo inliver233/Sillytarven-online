@@ -333,3 +333,42 @@ test('snapshot write gate drains one user and requires the exact release token',
     assert.equal(releaseResponse.status, 200);
     assert.equal(adapter.getUserWriteGate('alice'), null);
 });
+
+test('authoritative data fault gate is durable, scoped and idempotent', async () => {
+    const request = {
+        fault_id: '88888888-8888-4888-8888-888888888888',
+        handle: 'alice',
+        activity_epoch: 8,
+    };
+    const firstResponse = await signedPost('/api/stcontrol/internal/data-faults/freeze', request);
+    assert.equal(firstResponse.status, 200, await firstResponse.text());
+    assert.deepEqual(adapter.getUserWriteGate('alice'), {
+        kind: 'data_fault',
+        faultId: request.fault_id,
+        activityEpoch: 8,
+        createdAt: adapter.getUserWriteGate('alice').createdAt,
+    });
+
+    const replayResponse = await signedPost('/api/stcontrol/internal/data-faults/freeze', request);
+    assert.equal(replayResponse.status, 200, await replayResponse.text());
+
+    const mismatchResponse = await signedPost('/api/stcontrol/internal/data-faults/freeze', {
+        ...request,
+        activity_epoch: 9,
+    });
+    assert.equal(mismatchResponse.status, 409);
+    assert.equal((await mismatchResponse.json()).code, 'data_fault_scope_mismatch');
+
+    adapter.resetStcontrolStateForTests();
+    assert.equal(adapter.getUserWriteGate('alice').faultId, request.fault_id);
+
+    const snapshotConflict = await signedPost('/api/stcontrol/internal/snapshots/quiesce', {
+        workflow_id: '99999999-9999-4999-8999-999999999999',
+        snapshot_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        handle: 'alice',
+        activity_epoch: 8,
+    });
+    assert.equal(snapshotConflict.status, 409);
+    assert.equal(adapter.getUserWriteGate('alice').kind, 'data_fault');
+    await adapter.setUserWriteGate('alice', null);
+});

@@ -547,6 +547,9 @@ export async function stcontrolRequestTracker(request, response, next) {
     const gate = state.gates[handle];
     if (gate && isWrite && !request.path.startsWith(INTERNAL_PATH_PREFIX)) {
         response.set('Retry-After', '2');
+        if (gate.kind === 'data_fault') {
+            return response.status(423).json({ error: '检测到用户数据异常，写入已冻结，请从控制面板恢复', code: 'user_data_frozen' });
+        }
         return response.status(423).json({ error: '用户数据正在生成一致性快照，请稍后重试', code: 'user_quiescing' });
     }
     const knownSession = state.sessions[envelope.sessionId];
@@ -640,6 +643,59 @@ export async function setUserWriteGate(handle, gate) {
     return mutateState(state => {
         if (gate) state.gates[handle] = gate;
         else delete state.gates[handle];
+    });
+}
+
+/** Establish a snapshot gate without racing a concurrent data-fault freeze. */
+export async function establishSnapshotWriteGate(handle, workflowId, snapshotId, activityEpoch) {
+    return mutateState(state => {
+        const current = state.gates[handle];
+        if (current) {
+            const snapshotGate = current.kind === undefined || current.kind === 'snapshot';
+            if (snapshotGate && current.workflowId === workflowId && current.snapshotId === snapshotId &&
+                current.activityEpoch === activityEpoch) {
+                return { status: 'existing', gate: clone(current) };
+            }
+            return { status: 'write_gate_conflict' };
+        }
+        const gate = {
+            kind: 'snapshot',
+            workflowId,
+            snapshotId,
+            activityEpoch,
+            freezeToken: crypto.randomBytes(32).toString('base64url'),
+            createdAt: Date.now(),
+        };
+        state.gates[handle] = gate;
+        return { status: 'created', gate: clone(gate) };
+    });
+}
+
+/**
+ * Atomically establish the non-releasable local half of an authoritative
+ * data-fault freeze. A fault id is globally bound to one handle and activity
+ * epoch so a retried signed Agent command cannot silently change its scope.
+ */
+export async function establishUserDataFaultGate(handle, faultId, activityEpoch) {
+    return mutateState(state => {
+        for (const [boundHandle, gate] of Object.entries(state.gates)) {
+            if (gate?.kind !== 'data_fault' || gate.faultId !== faultId) continue;
+            if (boundHandle !== handle || gate.activityEpoch !== activityEpoch) {
+                return { status: 'fault_id_conflict' };
+            }
+            return { status: 'existing', gate: clone(gate) };
+        }
+
+        const current = state.gates[handle];
+        if (current) return { status: 'write_gate_conflict' };
+        const gate = {
+            kind: 'data_fault',
+            faultId,
+            activityEpoch,
+            createdAt: Date.now(),
+        };
+        state.gates[handle] = gate;
+        return { status: 'created', gate: clone(gate) };
     });
 }
 
