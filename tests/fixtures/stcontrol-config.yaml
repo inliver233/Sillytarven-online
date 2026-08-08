@@ -1,0 +1,239 @@
+stcontrol:
+  enabled: true
+  nodeId: 7
+  agentPsk: test-agent-psk
+  controllerUrl: ""
+  controllerGeneration: 0
+dataRoot: ./data
+listen: true
+listenAddress:
+  ipv4: 0.0.0.0
+  ipv6: "[::]"
+protocol:
+  ipv4: true
+  ipv6: false
+dnsPreferIPv6: false
+browserLaunch:
+  enabled: true
+  browser: default
+  hostname: auto
+  port: -1
+  avoidLocalhost: false
+port: 8000
+ssl:
+  enabled: false
+  certPath: ./certs/cert.pem
+  keyPath: ./certs/privkey.pem
+  keyPassphrase: ""
+whitelistMode: false
+enableForwardedWhitelist: false
+whitelist:
+  - ::1
+  - 127.0.0.1
+whitelistDockerHosts: true
+basicAuthMode: false
+basicAuthUser:
+  username: user
+  password: password
+enableCorsProxy: false
+requestProxy:
+  enabled: false
+  url: socks5://username:password@example.com:1080
+  bypass:
+    - localhost
+    - 127.0.0.1
+enableUserAccounts: true
+enableDiscreetLogin: true
+perUserBasicAuth: false
+sso:
+  autheliaAuth: false
+  authentikAuth: false
+hostWhitelist:
+  enabled: false
+  scan: false
+  hosts: []
+sessionTimeout: -1
+disableCsrfProtection: false
+securityOverride: false
+logging:
+  enableAccessLog: true
+  minLogLevel: 1
+uploads:
+  maxFileBytes: 524288000
+  maxFieldBytes: 524288000
+  backgrounds:
+    maxFileBytes: 67108864
+    maxPixels: 100000000
+imports:
+  archive:
+    maxEntries: 1024
+    maxEntryBytes: 134217728
+    maxTotalBytes: 268435456
+    maxCompressionRatio: 200
+rateLimiting:
+  preferRealIpHeader: true
+backups:
+  common:
+    numberOfBackups: 50
+  chat:
+    enabled: true
+    checkIntegrity: true
+    maxTotalBackups: -1
+    throttleInterval: 900000
+thumbnails:
+  enabled: true
+  format: jpg
+  quality: 95
+  dimensions:
+    bg:
+      - 160
+      - 90
+    avatar:
+      - 96
+      - 144
+    persona:
+      - 96
+      - 144
+performance:
+  lazyLoadCharacters: false
+  memoryCacheCapacity: 100mb
+  useDiskCache: true
+  telemetry:
+    enabled: true
+    samplesPerOperation: 200
+    bytesPerOperation: 262144
+    clientSamplesPerMinute: 120
+  chatPaging:
+    enabled: true
+  longChatDomRenderOptimization:
+    enabled: true
+  versionMemo:
+    enabled: true
+    ttlMs: 30000
+  characterListCache:
+    enabled: true
+    concurrency: 6
+    ttlMs: 30000
+    signatureTtlMs: 5000
+    maxEntries: 100
+    maxBytes: 104857600
+  settingsCache:
+    enabled: true
+    ioConcurrency: 8
+    ttlMs: 30000
+    signatureTtlMs: 5000
+    maxEntries: 100
+    maxBytes: 104857600
+  recentChatsCache:
+    enabled: true
+    ttlMs: 15000
+    signatureTtlMs: 2000
+    maxEntries: 300
+    maxVariantsPerUser: 8
+    maxBytes: 52428800
+cacheBuster:
+  enabled: false
+  userAgentPattern: ""
+allowKeysExposure: false
+skipContentCheck: false
+whitelistImportDomains:
+  - localhost
+  - cdn.discordapp.com
+  - files.catbox.moe
+  - raw.githubusercontent.com
+  - char-archive.evulid.cc
+requestOverrides: []
+extensions:
+  enabled: true
+  autoUpdate: true
+  models:
+    autoDownload: true
+    classification: Cohee/distilbert-base-uncased-go-emotions-onnx
+    captioning: Xenova/vit-gpt2-image-captioning
+    embedding: Cohee/jina-embeddings-v2-base-en
+    speechToText: Xenova/whisper-small
+    textToSpeech: Xenova/speecht5_tts
+enableDownloadableTokenizers: true
+promptPlaceholder: "[Start a new chat]"
+openai:
+  randomizeUserId: false
+  captionSystemPrompt: ""
+deepl:
+  formality: default
+mistral:
+  enablePrefix: false
+ollama:
+  keepAlive: -1
+  batchSize: -1
+claude:
+  enableSystemPromptCache: false
+  cachingAtDepth: -1
+  extendedTTL: false
+gemini:
+  apiVersion: v1beta
+  enableSystemPromptCache: false
+  image:
+    personGeneration: allow_adult
+enableServerPlugins: false
+enableServerPluginsAutoUpdate: true
+enableInvitationCodes: false
+registration:
+  password:
+    enabled: true
+    requireInvitationCode: null
+  github:
+    enabled: true
+    requireInvitationCode: null
+  discord:
+    enabled: true
+    requireInvitationCode: null
+    guildMembership:
+      enabled: false
+      guildId: ""
+      guildName: ""
+      minimumDays: 14
+  linuxdo:
+    enabled: true
+    requireInvitationCode: null
+userStorage:
+  enabled: false
+  defaultLimitMiB: 50
+  checkInRewardMiB: 1
+oauth:
+  github:
+    enabled: false
+    clientId: ""
+    clientSecret: ""
+    callbackUrl: http://localhost:8000/api/oauth/github/callback
+  discord:
+    enabled: false
+    clientId: ""
+    clientSecret: ""
+    callbackUrl: http://localhost:8000/api/oauth/discord/callback
+  linuxdo:
+    enabled: false
+    clientId: ""
+    clientSecret: ""
+    callbackUrl: http://localhost:8000/api/oauth/linuxdo/callback
+    wellKnownEndpoint: ""
+    authUrl: https://connect.linux.do/oauth2/authorize
+    tokenUrl: https://connect.linux.do/oauth2/token
+    userInfoUrl: https://connect.linux.do/api/user
+enablePublicCharacters: true
+enableForum: true
+email:
+  enabled: false
+  smtp:
+    host: smtp.exmail.qq.com
+    port: 465
+    secure: true
+    user: your-email@example.com
+    password: password
+  from: your-email@example.com
+  fromName: SillyTavern
+scheduledTasks:
+  clearAllBackups:
+    enabled: true
+    cronExpression: 0 */1 * * *
+autheliaAuth: false
+authentikAuth: false

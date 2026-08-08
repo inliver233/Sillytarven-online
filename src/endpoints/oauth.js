@@ -25,8 +25,10 @@ import {
 } from '../discord-registration-policy.js';
 import { checkForNewContent, CONTENT_TYPES } from './content-manager.js';
 import { applyDefaultTemplateToUser } from '../default-template.js';
+import { stcontrolOAuthGuard } from '../stcontrol.js';
 
 export const router = express.Router();
+router.use(stcontrolOAuthGuard);
 const USER_STORAGE_ENABLED = getConfigValue('userStorage.enabled', false, 'boolean');
 const USER_STORAGE_DEFAULT_LIMIT_MIB = getConfigValue('userStorage.defaultLimitMiB', 0, 'number');
 const oauthRegistrationLocks = new Set();

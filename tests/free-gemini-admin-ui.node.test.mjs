@@ -23,20 +23,24 @@ function extractFunction(source, name) {
     throw new Error(`Could not extract ${name}`);
 }
 
-test('admin template uses a searchable checkbox model list with a sticky responsive action row', () => {
+test('admin template uses a searchable per-model policy and request-format list', () => {
     const channelBlock = adminTemplate.match(/<!-- 全局免费 Gemini 渠道管理 -->([\s\S]*?)<!-- 旧管理员邀请码管理选项卡 -->/)?.[1] || '';
 
     assert.match(channelBlock, /id="freeGeminiModelSearch"[^>]+type="search"/);
     assert.match(channelBlock, /id="freeGeminiModelSelectionCount"/);
     assert.match(channelBlock, /<div id="freeGeminiUpstreamModels"[^>]+role="group"/);
     assert.doesNotMatch(channelBlock, /<select id="freeGeminiUpstreamModels"[^>]*multiple/);
-    assert.match(channelBlock, /勾选始终表示启用该模型/);
+    assert.match(channelBlock, /每个模型可独立选择“原生 Gemini”或“OpenAI 兼容”请求格式/);
     assert.match(channelBlock, /class="freeGeminiChannelActions[^>]*">\s*<button type="button"[^>]+id="saveFreeGeminiChannel"/);
     assert.match(adminScript, /\.addClass\('freeGeminiModelEnabled'\)[\s\S]*?\.data\('model', model\)/);
     assert.match(adminScript, /\$\('<span>'\)\.text\(model\)/);
     assert.doesNotMatch(adminScript, /data-model="\$\{escapeHtml\(model\)\}"/);
     assert.match(adminScript, /freeGeminiModelEnabledState\.set\(model, \$\(this\)\.prop\('checked'\)\)/);
+    assert.match(adminScript, /\.addClass\('text_pole freeGeminiModelRequestFormat'\)/);
+    assert.match(adminScript, /freeGeminiModelRequestFormats\.set\(model, format\)/);
+    assert.match(adminScript, /modelRequestFormats: serializeFreeGeminiModelRequestFormats\(\)/);
     assert.match(adminStyles, /\.freeGeminiModelList\s*{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\)/);
+    assert.match(adminStyles, /\.freeGeminiModelRow\s*{[\s\S]*?grid-template-columns:\s*auto minmax\(0, 1fr\) minmax\(130px, auto\)/);
     assert.match(adminStyles, /\.freeGeminiChannelActions\s*{[\s\S]*?position:\s*sticky/);
     assert.match(adminStyles, /@media \(max-width: 768px\)[\s\S]*?\.freeGeminiChannelActions \.menu_button/);
 });
@@ -91,4 +95,5 @@ test('automatic Free Gemini mode auto-connects and visible UI uses the branded a
 test('free Gemini exposes and forwards additional request body parameters', () => {
     assert.match(indexTemplate, /data-source="custom,free-gemini"[^>]+id="customize_additional_parameters"/);
     assert.match(openaiScript, /\[chat_completion_sources\.CUSTOM, chat_completion_sources\.FREE_GEMINI\]\.includes\(settings\.chat_completion_source\)[\s\S]*?custom_include_body[\s\S]*?custom_exclude_body/);
+    assert.match(openaiScript, /chat_completion_source === chat_completion_sources\.FREE_GEMINI && Array\.isArray\(data\?\.choices\)[\s\S]*?data\.choices\?\.\[0\]\?\.delta\?\.content/);
 });

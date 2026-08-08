@@ -13,6 +13,8 @@ import { applyDefaultTemplateToUser } from '../default-template.js';
 import systemMonitor from '../system-monitor.js';
 import { isEmailServiceAvailable, sendVerificationCode, sendPasswordRecoveryCode } from '../email-service.js';
 import { getRegistrationConfig, getRegistrationMethodConfig } from '../registration-policy.js';
+import { isStcontrolEnabled, noteStcontrolLogout, noteStcontrolPageHeartbeat, registerIndependentSession, stcontrolPublicAccountGuard } from '../stcontrol.js';
+import { stcontrolHandoffHandler } from './stcontrol.js';
 
 const DISCREET_LOGIN = getConfigValue('enableDiscreetLogin', false, 'boolean');
 const PREFER_REAL_IP_HEADER = getConfigValue('rateLimiting.preferRealIpHeader', false, 'boolean');
@@ -25,6 +27,8 @@ const registrationLocks = new Set();
 const getIpAddress = (request) => PREFER_REAL_IP_HEADER ? getRealIpFromHeader(request) : getIpFromRequest(request);
 
 export const router = express.Router();
+router.use(stcontrolPublicAccountGuard);
+router.post('/me', stcontrolHandoffHandler);
 const loginLimiter = new RateLimiterMemory({
     points: 5,
     duration: 60,
@@ -173,6 +177,10 @@ router.post('/login', async (request, response) => {
         request.session.handle = user.handle;
         request.session.userId = user.id || user.handle;
 
+        if (request.stcontrolIndependentLogin) {
+            await registerIndependentSession(request, user.handle);
+        }
+
         systemMonitor.recordUserLogin(user.handle, { userName: user.name });
 
         systemMonitor.updateUserActivity(user.handle, {
@@ -201,6 +209,7 @@ router.post('/logout', async (request, response) => {
         }
 
         const userHandle = request.session.handle;
+        await noteStcontrolLogout(request);
         if (userHandle) {
             // 记录用户登出到系统监控器
             systemMonitor.recordUserLogout(userHandle);
@@ -237,6 +246,7 @@ router.post('/heartbeat', async (request, response) => {
 
         // 更新session的最后活动时间
         request.session.lastActivity = Date.now();
+        await noteStcontrolPageHeartbeat(request);
 
         return response.json({ status: 'ok', timestamp: Date.now() });
     } catch (error) {
@@ -648,6 +658,7 @@ router.get('/me', async (request, response) => {
             password: !!user.password,
             expiresAt: user.expiresAt || null,
             email: user.email || null,
+            stcontrolEnabled: isStcontrolEnabled(),
         });
     } catch (error) {
         console.error('Get current user failed:', error);

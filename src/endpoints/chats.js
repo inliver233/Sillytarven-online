@@ -37,6 +37,7 @@ const chatChunkingEnabled = !!getConfigValue('performance.chatChunkingEnabled', 
 const chatPagingProtocolEnabled = !!getConfigValue('performance.chatPaging.enabled', true, 'boolean');
 const chatChunkSizeConfigured = Number(getConfigValue('performance.chatChunkSize', 300, 'number'));
 const chatTailCompareLimit = Number(getConfigValue('performance.chatTailCompareLimit', 200, 'number'));
+const CHAT_RANGE_LIMIT_MAX = 1000;
 const recentChatsCache = new RecentChatsCache({
     enabled: getConfigValue('performance.recentChatsCache.enabled', true, 'boolean'),
     ttlMs: getConfigValue('performance.recentChatsCache.ttlMs', 15_000, 'number'),
@@ -2017,7 +2018,7 @@ router.post('/get-range', validateAvatarUrlMiddleware, async function (request, 
         }
 
         return await chatStorageMutex.runExclusive(getChatStorageLockKey(request, filePath), async () => {
-            const limit = Math.max(1, Math.min(Number(request.body.limit ?? 20), 200));
+            const limit = Math.max(1, Math.min(Number(request.body.limit ?? 20), CHAT_RANGE_LIMIT_MAX));
             const before = request.body.before;
             const beforeOffset = Number.isFinite(before) ? before : Number.isFinite(Number(before)) ? Number(before) : null;
             performanceTimer.setCounter('requested', limit);
@@ -2494,7 +2495,7 @@ router.post('/group/get-range', async (request, response) => {
         }
 
         return await chatStorageMutex.runExclusive(getChatStorageLockKey(request, filePath), async () => {
-            const limit = Math.max(1, Math.min(Number(request.body.limit ?? 20), 200));
+            const limit = Math.max(1, Math.min(Number(request.body.limit ?? 20), CHAT_RANGE_LIMIT_MAX));
             const before = request.body.before;
             const beforeOffset = Number.isFinite(before) ? before : Number.isFinite(Number(before)) ? Number(before) : null;
             performanceTimer.setCounter('requested', limit);

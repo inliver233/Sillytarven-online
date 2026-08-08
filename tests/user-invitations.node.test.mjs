@@ -76,6 +76,40 @@ test('configuration uses an allow-list and finite integer bounds', () => {
     assert.equal(Object.hasOwn(config, 'injected'), false);
 });
 
+test('invitation claims replay only for the same durable registration', async () => {
+    const code = 'A1B2C3D4E5F60708';
+    await storage.setItem(`invitation:${code}`, {
+        code,
+        createdBy: 'admin',
+        createdAt: Date.now(),
+        used: false,
+        usedBy: null,
+        usedAt: null,
+        durationType: 'permanent',
+        durationDays: null,
+        userExpiresAt: null,
+    });
+
+    const first = await invitationCodes.useInvitationCode(code, 'alice', null, {
+        required: true,
+        claimId: '11111111-1111-4111-8111-111111111111',
+    });
+    const replay = await invitationCodes.useInvitationCode(code, 'alice', null, {
+        required: true,
+        claimId: '11111111-1111-4111-8111-111111111111',
+    });
+    const differentClaim = await invitationCodes.useInvitationCode(code, 'alice', null, {
+        required: true,
+        claimId: '22222222-2222-4222-8222-222222222222',
+    });
+
+    assert.equal(first.success, true);
+    assert.equal(replay.success, true);
+    assert.equal(replay.replayed, true);
+    assert.equal(differentClaim.success, false);
+    assert.match(differentClaim.reason, /已被使用/);
+});
+
 test('quota requires consumption and returns a rolling-window countdown', () => {
     const now = 2_000_000_000_000;
     const createdAt = now - 60_000;

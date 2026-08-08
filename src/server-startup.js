@@ -65,6 +65,8 @@ import { router as performanceRouter } from './endpoints/performance.js';
 import { getConfigValue } from './util.js';
 import { settingsCacheInvalidationMiddleware } from './settings-cache.js';
 import { recentChatsCacheInvalidationMiddleware } from './recent-chats-cache.js';
+import { router as stcontrolRouter } from './endpoints/stcontrol.js';
+import { stcontrolRequestTracker } from './stcontrol.js';
 
 /**
  * @typedef {object} ServerStartupResult
@@ -150,6 +152,8 @@ export function redirectDeprecatedEndpoints(app) {
  * @param {import('express').Express} app The Express app to use
  */
 export function setupPrivateEndpoints(app) {
+    app.use(stcontrolRouter);
+    app.use(stcontrolRequestTracker);
     app.use(settingsCacheInvalidationMiddleware);
     app.use(recentChatsCacheInvalidationMiddleware);
     app.use('/', userDataRouter);

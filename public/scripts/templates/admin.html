@@ -496,7 +496,7 @@
                 <label>
                     <span style="display: block; margin-bottom: 5px;">Gemini API Base URL</span>
                     <input id="freeGeminiChannelUrl" class="text_pole wide100p" type="url" maxlength="2048" placeholder="https://generativelanguage.googleapis.com" autocomplete="off" required>
-                    <small class="notes">填写 Gemini 原生 API 的基础地址；系统会自动追加 API 版本、models 和 generateContent 路径。</small>
+                    <small class="notes">填写渠道基础地址；系统会按每个模型的选择自动使用原生 Gemini 或 OpenAI 兼容路径。</small>
                 </label>
                 <label>
                     <span style="display: block; margin-bottom: 5px;">API Key</span>
@@ -541,7 +541,7 @@
                         <input id="freeGeminiModelSearch" class="text_pole wide100p" type="search" placeholder="输入模型 ID 筛选" autocomplete="off">
                     </label>
                     <div id="freeGeminiUpstreamModels" class="freeGeminiModelList" role="group" aria-label="上游可用模型"></div>
-                    <small class="notes">勾选始终表示启用该模型；在排除列表策略下，未勾选的模型会被排除。</small>
+                    <small class="notes">勾选始终表示启用该模型；每个模型可独立选择“原生 Gemini”或“OpenAI 兼容”请求格式。</small>
                 </div>
                 <div class="flex-container flexGap10" style="flex-wrap: wrap;">
                     <label class="flex1" style="min-width: 160px;">

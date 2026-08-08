@@ -1,6 +1,5 @@
 import path from 'node:path';
 import { promises as fsPromises } from 'node:fs';
-import crypto from 'node:crypto';
 
 import storage from 'node-persist';
 import express from 'express';
@@ -8,15 +7,16 @@ import express from 'express';
 import { getUserAvatar, toKey, getPasswordHash, getPasswordSalt, createBackupArchive, ensurePublicDirectoriesExist, toAvatarKey, normalizeHandle, getUserDirectories } from '../users.js';
 import { SETTINGS_FILE } from '../constants.js';
 import { checkForNewContent, CONTENT_TYPES } from './content-manager.js';
-import { color, Cache } from '../util.js';
 import { BackupJobError, UserBackupManager } from '../user-backup-manager.js';
+import { matchesAccountResetUsername } from '../account-reset.js';
+import { noteStcontrolLogout, stcontrolPrivateAccountGuard } from '../stcontrol.js';
 
-const RESET_CACHE = new Cache(5 * 60 * 1000);
 const userBackupManager = new UserBackupManager({
     directory: path.join(globalThis.DATA_ROOT, '_exports'),
 });
 
 export const router = express.Router();
+router.use(stcontrolPrivateAccountGuard);
 
 router.post('/logout', async (request, response) => {
     try {
@@ -25,6 +25,7 @@ router.post('/logout', async (request, response) => {
             return response.sendStatus(500);
         }
 
+        await noteStcontrolLogout(request);
         request.session = null;
         return response.sendStatus(204);
     } catch (error) {
@@ -325,37 +326,17 @@ router.post('/change-name', async (request, response) => {
     }
 });
 
-router.post('/reset-step1', async (request, response) => {
-    try {
-        const resetCode = String(crypto.randomInt(1000, 9999));
-        console.log();
-        console.log(color.magenta(`${request.user.profile.name}, your account reset code is: `) + color.red(resetCode));
-        console.log();
-        RESET_CACHE.set(request.user.profile.handle, resetCode);
-        return response.sendStatus(204);
-    } catch (error) {
-        console.error('Recover step 1 failed:', error);
-        return response.sendStatus(500);
-    }
-});
-
 router.post('/reset-step2', async (request, response) => {
     try {
-        if (!request.body.code) {
-            console.warn('Recover step 2 failed: Missing required fields');
+        if (typeof request.body.username !== 'string' || !request.body.username.trim()) {
+            console.warn('Reset account failed: Missing username');
             return response.status(400).json({ error: 'Missing required fields' });
         }
 
-        if (request.user.profile.password && request.user.profile.password !== getPasswordHash(request.body.password, request.user.profile.salt)) {
-            console.warn('Recover step 2 failed: Incorrect password');
-            return response.status(400).json({ error: 'Incorrect password' });
-        }
-
-        const code = RESET_CACHE.get(request.user.profile.handle);
-
-        if (!code || code !== request.body.code) {
-            console.warn('Recover step 2 failed: Incorrect code');
-            return response.status(400).json({ error: 'Incorrect code' });
+        const normalizedUsername = normalizeHandle(request.body.username);
+        if (!matchesAccountResetUsername(normalizedUsername, request.user.profile.handle)) {
+            console.warn('Reset account failed: Incorrect username');
+            return response.status(403).json({ error: 'Incorrect username' });
         }
 
         console.info('Resetting account data:', request.user.profile.handle);
@@ -364,10 +345,9 @@ router.post('/reset-step2', async (request, response) => {
         await ensurePublicDirectoriesExist();
         await checkForNewContent([request.user.directories]);
 
-        RESET_CACHE.remove(request.user.profile.handle);
         return response.sendStatus(204);
     } catch (error) {
-        console.error('Recover step 2 failed:', error);
+        console.error('Reset account failed:', error);
         return response.sendStatus(500);
     }
 });

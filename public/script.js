@@ -97,6 +97,7 @@ import {
     generatedTextFiltered,
     applyStylePins,
 } from './scripts/power-user.js';
+import { CHAT_PAGE_SIZE_DEFAULT, resolveChatPagingPageSize } from './scripts/chat-paging-settings.js';
 
 import {
     setOpenAIMessageExamples,
@@ -421,7 +422,6 @@ export let name2 = systemUserName;
 /** @type {ChatMessage[]} */
 export let chat = [];
 export let swipeState = SWIPE_STATE.NONE;
-const CHAT_PAGE_SIZE_DEFAULT = 20;
 const CHAT_PAGING_MAX_RENDER = isMobile() ? 200 : 400;
 const CHAT_LOAD_MORE_FRAME_BUDGET_MS = 8;
 const CHAT_PAGING_ENABLED = false;
@@ -608,7 +608,7 @@ export function invalidateCurrentChatContext() {
 }
 
 export function isChatPagingEnabled() {
-    return chatPagingState.enabled;
+    return chatPagingState.enabled && resolveChatPagingPageSize(power_user.chat_truncation) !== null;
 }
 
 export function isChatPagingActive() {
@@ -616,7 +616,7 @@ export function isChatPagingActive() {
 }
 
 export function getChatPagingPageSize() {
-    return chatPagingState.pageSize;
+    return resolveChatPagingPageSize(power_user.chat_truncation) ?? CHAT_PAGE_SIZE_DEFAULT;
 }
 
 export function getChatPagingState() {
@@ -633,6 +633,7 @@ export function resetChatPagingState({ isGroup = false, chatId = null } = {}) {
     chatPagingLoadController = null;
     chatHistoryInsertionToken = null;
     chatPagingState.active = false;
+    chatPagingState.pageSize = getChatPagingPageSize();
     chatPagingState.cursor = null;
     chatPagingState.hasMore = false;
     chatPagingState.isGroup = isGroup;
@@ -655,14 +656,15 @@ export function invalidateChatRenderLayout() {
 }
 
 function getChatCacheKey({ isGroup = false, chatId = null } = {}) {
+    const pageSize = getChatPagingPageSize();
     if (isGroup) {
         const groupId = chatId ?? getCurrentChatId();
-        return groupId ? `group:${groupId}` : null;
+        return groupId ? `group:${groupId}:page:${pageSize}` : null;
     }
     const avatar = characters[this_chid]?.avatar ?? '';
     const chatName = characters[this_chid]?.chat ?? '';
     if (!avatar || !chatName) return null;
-    return `char:${avatar}:${chatName}`;
+    return `char:${avatar}:${chatName}:page:${pageSize}`;
 }
 
 /**
@@ -1634,7 +1636,7 @@ export async function fetchChatRange({ before = null, limit = null, isGroup = fa
     if (isGroup && !payload.id) {
         return null;
     }
-    payload.limit = Number(limit ?? chatPagingState.pageSize);
+    payload.limit = Number(limit ?? getChatPagingPageSize());
     if (before !== null && before !== undefined) {
         payload.before = before;
     }
@@ -1744,7 +1746,7 @@ async function loadMoreChatMessages(messagesToLoad = null) {
     try {
         const data = await fetchChatRange({
             before: chatPagingState.cursor,
-            limit: messagesToLoad ?? chatPagingState.pageSize,
+            limit: messagesToLoad ?? getChatPagingPageSize(),
             isGroup: chatPagingState.isGroup,
             chatId: requestedChatId,
             signal: controller.signal,
@@ -8210,7 +8212,7 @@ export async function getChat({ signal: parentSignal, isCurrent: parentIsCurrent
         resetChatPagingState({ isGroup: false, chatId: characterChat });
         let usedPaging = false;
 
-        if (chatPagingState.enabled) {
+        if (isChatPagingEnabled()) {
             const cached = getCachedChatPage({ isGroup: false });
             if (cached && Array.isArray(cached.messages) && !isStale()) {
                 chat.splice(0, chat.length, ...cached.messages);
@@ -8233,10 +8235,10 @@ export async function getChat({ signal: parentSignal, isCurrent: parentIsCurrent
             }
         }
 
-        if (chatPagingState.enabled) {
+        if (isChatPagingEnabled()) {
             const paged = await fetchChatRange({
                 isGroup: false,
-                limit: chatPagingState.pageSize,
+                limit: getChatPagingPageSize(),
                 signal: controller.signal,
             });
             if (isStale()) return false;

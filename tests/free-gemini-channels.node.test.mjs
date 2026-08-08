@@ -12,6 +12,7 @@ import {
     deleteFreeGeminiChannel,
     getEnabledFreeGeminiChannel,
     getFreeGeminiChannelModels,
+    getFreeGeminiModelRequestFormat,
     listAdminFreeGeminiChannels,
     listPublicFreeGeminiChannels,
     migrateLegacyFreeGeminiChannels,
@@ -195,6 +196,10 @@ test('channel routing settings are normalized, returned to admins, and validated
             priority: 900,
             modelPolicy: 'allowlist',
             models: ['models/gemini-b', 'gemini-a', 'gemini-a'],
+            modelRequestFormats: {
+                'gemini-a': 'openai',
+                'models/gemini-b': 'gemini',
+            },
             timeoutMs: 5000,
             maxRetries: 3,
             modelCacheTtlMs: 30000,
@@ -205,6 +210,7 @@ test('channel routing settings are normalized, returned to admins, and validated
             priority: created.priority,
             modelPolicy: created.modelPolicy,
             models: created.models,
+            modelRequestFormats: created.modelRequestFormats,
             timeoutMs: created.timeoutMs,
             maxRetries: created.maxRetries,
             modelCacheTtlMs: created.modelCacheTtlMs,
@@ -213,6 +219,7 @@ test('channel routing settings are normalized, returned to admins, and validated
             priority: 900,
             modelPolicy: 'allowlist',
             models: ['gemini-b', 'gemini-a'],
+            modelRequestFormats: { 'gemini-a': 'openai', 'gemini-b': 'gemini' },
             timeoutMs: 5000,
             maxRetries: 3,
             modelCacheTtlMs: 30000,
@@ -227,6 +234,13 @@ test('channel routing settings are normalized, returned to admins, and validated
         await assert.rejects(updateFreeGeminiChannel(created.id, { maxOutputTokens: -1 }), /0 或 1\.\.65536/);
         await assert.rejects(updateFreeGeminiChannel(created.id, { models: ['ok', 123] }), /模型 ID/);
         await assert.rejects(updateFreeGeminiChannel(created.id, { models: ['../models?key=leak'] }), /模型 ID/);
+        await assert.rejects(updateFreeGeminiChannel(created.id, { modelRequestFormats: [] }), /必须是模型 ID 到请求格式的对象/);
+        await assert.rejects(updateFreeGeminiChannel(created.id, { modelRequestFormats: { 'gemini-a': 'anthropic' } }), /gemini 或 openai/);
+
+        const resolved = await getEnabledFreeGeminiChannel(created.id);
+        assert.equal(getFreeGeminiModelRequestFormat(resolved, 'gemini-a'), 'openai');
+        assert.equal(getFreeGeminiModelRequestFormat(resolved, 'gemini-b'), 'gemini');
+        assert.equal(getFreeGeminiModelRequestFormat(resolved, 'gemini-unconfigured'), 'gemini');
     });
 });
 
@@ -250,6 +264,7 @@ test('legacy channels receive backward-compatible routing defaults', async () =>
             priority: channel.priority,
             modelPolicy: channel.modelPolicy,
             models: channel.models,
+            modelRequestFormats: channel.modelRequestFormats,
             timeoutMs: channel.timeoutMs,
             maxRetries: channel.maxRetries,
             modelCacheTtlMs: channel.modelCacheTtlMs,
@@ -258,6 +273,7 @@ test('legacy channels receive backward-compatible routing defaults', async () =>
             priority: 0,
             modelPolicy: 'all',
             models: [],
+            modelRequestFormats: {},
             timeoutMs: 30000,
             maxRetries: 1,
             modelCacheTtlMs: 300000,

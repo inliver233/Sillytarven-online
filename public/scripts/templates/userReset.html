@@ -4,16 +4,12 @@
         Make sure you have a backup before proceeding.
     </h3>
     <hr>
-    <div data-i18n="Account reset code has been posted to the server console.">
-        Account reset code has been posted to the server console.
+    <div data-i18n="Enter your username to confirm this destructive action.">
+        Enter your username to confirm this destructive action.
     </div>
     <br>
-    <div class="currentPasswordBlock">
-        <label data-i18n="Current Password:" for="user">Current Password:</label>
-        <input type="password" name="password" class="text_pole" placeholder="[ No password ]" autocomplete="current-password">
-    </div>
-    <div class="resetCodeBlock">
-        <label data-i18n="Reset Code:" for="password">Reset Code:</label>
-        <input type="text" name="code" class="text_pole" placeholder="XXXX">
+    <div class="resetUsernameBlock">
+        <label data-i18n="Username:" for="resetUsername">Username:</label>
+        <input id="resetUsername" type="text" name="username" class="text_pole" autocomplete="username" required>
     </div>
 </form>

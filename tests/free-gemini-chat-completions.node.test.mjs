@@ -267,6 +267,114 @@ test('free Gemini uses server-side credentials and normalizes the first upstream
     }
 });
 
+test('free Gemini sends each model with its configured request format', async () => {
+    const previousDataRoot = globalThis.DATA_ROOT;
+    const dataRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'st-free-gemini-formats-'));
+    globalThis.DATA_ROOT = dataRoot;
+
+    const generationRequests = [];
+    const upstream = http.createServer(async (request, response) => {
+        response.setHeader('Content-Type', 'application/json');
+        if (request.method === 'GET' && request.url === '/v1beta/models?key=format-secret') {
+            response.end(JSON.stringify({
+                models: [
+                    { name: 'models/native-model', supportedGenerationMethods: ['generateContent'], outputTokenLimit: 100 },
+                    { name: 'models/openai-model', supportedGenerationMethods: ['generateContent'], outputTokenLimit: 80 },
+                ],
+            }));
+            return;
+        }
+        if (request.method === 'POST') {
+            const body = await readRequestJson(request);
+            generationRequests.push({ url: request.url, authorization: request.headers.authorization, body });
+            if (request.url === '/v1beta/models/native-model:generateContent?key=format-secret') {
+                response.end(JSON.stringify({ candidates: [{ content: { parts: [{ text: 'native' }] } }] }));
+                return;
+            }
+            if (request.url === '/v1/chat/completions') {
+                if (body.stream) {
+                    response.setHeader('Content-Type', 'text/event-stream');
+                    response.end('data: {"choices":[{"delta":{"content":"streamed"}}]}\n\ndata: [DONE]\n\n');
+                    return;
+                }
+                response.end(JSON.stringify({ choices: [{ message: { content: 'openai' } }] }));
+                return;
+            }
+        }
+        response.statusCode = 404;
+        response.end(JSON.stringify({ error: 'unexpected request' }));
+    });
+    const appServer = await createChatAppServer();
+
+    try {
+        const upstreamUrl = await listen(upstream);
+        const appUrl = await listen(appServer);
+        const channel = await createFreeGeminiChannel({
+            name: 'per-model-formats',
+            url: upstreamUrl,
+            key: 'format-secret',
+            maxOutputTokens: 50,
+            modelRequestFormats: {
+                'native-model': 'gemini',
+                'openai-model': 'openai',
+            },
+        });
+
+        const generate = async model => {
+            const result = await fetch(`${appUrl}/api/backends/chat-completions/generate`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    chat_completion_source: 'free-gemini',
+                    free_gemini_channel_id: channel.id,
+                    model,
+                    messages: [{ role: 'user', content: `use ${model}` }],
+                    max_tokens: 70,
+                    stream: false,
+                    ...(model === 'openai-model' ? {
+                        custom_include_body: 'model: policy-bypass\nmax_tokens: 99999\nstream: true',
+                    } : {}),
+                }),
+            });
+            assert.equal(result.status, 200);
+            return await result.json();
+        };
+
+        assert.equal((await generate('native-model')).choices[0].message.content, 'native');
+        assert.equal((await generate('openai-model')).choices[0].message.content, 'openai');
+        assert.equal(generationRequests[0].url, '/v1beta/models/native-model:generateContent?key=format-secret');
+        assert.equal(generationRequests[0].authorization, undefined);
+        assert.equal(generationRequests[0].body.generationConfig.maxOutputTokens, 50);
+        assert.equal(generationRequests[1].url, '/v1/chat/completions');
+        assert.equal(generationRequests[1].authorization, 'Bearer format-secret');
+        assert.equal(generationRequests[1].body.model, 'openai-model');
+        assert.deepEqual(generationRequests[1].body.messages, [{ role: 'user', content: 'use openai-model' }]);
+        assert.equal(generationRequests[1].body.max_tokens, 50);
+        assert.equal(generationRequests[1].body.stream, false);
+        assert.equal(Object.hasOwn(generationRequests[1].body, 'contents'), false);
+
+        const streamResponse = await fetch(`${appUrl}/api/backends/chat-completions/generate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                chat_completion_source: 'free-gemini',
+                free_gemini_channel_id: channel.id,
+                model: 'openai-model',
+                messages: [{ role: 'user', content: 'stream' }],
+                stream: true,
+            }),
+        });
+        assert.equal(streamResponse.status, 200);
+        assert.match(await streamResponse.text(), /"choices":\[\{"delta":\{"content":"streamed"\}/);
+        assert.equal(generationRequests[2].url, '/v1/chat/completions');
+        assert.equal(generationRequests[2].body.stream, true);
+    } finally {
+        await Promise.allSettled([close(appServer), close(upstream)]);
+        globalThis.DATA_ROOT = previousDataRoot;
+        await fs.promises.rm(dataRoot, { recursive: true, force: true });
+    }
+});
+
 test('free Gemini aggregates by priority while an explicit channel gates model policy', async () => {
     const previousDataRoot = globalThis.DATA_ROOT;
     const dataRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'st-free-gemini-routing-'));

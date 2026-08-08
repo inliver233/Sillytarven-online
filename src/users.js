@@ -1063,6 +1063,12 @@ export async function setUserDataMiddleware(request, response, next) {
  * @param {import('express').NextFunction} next Next function
  */
 export function requireLoginMiddleware(request, response, next) {
+    // The loopback-only adapter authenticates every request with the Agent's
+    // HMAC after this global authentication boundary.
+    if (getConfigValue('stcontrol.enabled', false, 'boolean') &&
+        (request.path === '/api/stcontrol/internal' || request.path.startsWith('/api/stcontrol/internal/'))) {
+        return next();
+    }
     if (!request.user) {
         return response.sendStatus(403);
     }

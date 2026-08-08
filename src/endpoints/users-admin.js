@@ -4,6 +4,7 @@ import path from 'node:path';
 
 import storage from 'node-persist';
 import express from 'express';
+import { stcontrolAdminAccountGuard } from '../stcontrol.js';
 import lodash from 'lodash';
 import { checkForNewContent, CONTENT_TYPES } from './content-manager.js';
 import {
@@ -26,6 +27,7 @@ import { Cache, getConfigValue } from '../util.js';
 
 
 export const router = express.Router();
+router.use(stcontrolAdminAccountGuard);
 const USER_STORAGE_ENABLED = getConfigValue('userStorage.enabled', false, 'boolean');
 const USER_STORAGE_DEFAULT_LIMIT_MIB = getConfigValue('userStorage.defaultLimitMiB', 0, 'number');
 const DIRECTORY_SIZE_CACHE = new Cache(60 * 1000);
@@ -362,6 +364,9 @@ router.post('/promote', requireAdminMiddleware, async (request, response) => {
             return response.status(404).json({ error: 'User not found' });
         }
 
+        if (!user.admin) {
+            user.stcontrolPermissionVersion = Math.max(0, Number(user.stcontrolPermissionVersion) || 0) + 1;
+        }
         user.admin = true;
         await storage.setItem(toKey(normalizedHandle), user);
         return response.sendStatus(204);
@@ -399,6 +404,9 @@ router.post('/demote', requireAdminMiddleware, async (request, response) => {
             return response.status(404).json({ error: 'User not found' });
         }
 
+        if (user.admin) {
+            user.stcontrolPermissionVersion = Math.max(0, Number(user.stcontrolPermissionVersion) || 0) + 1;
+        }
         user.admin = false;
         await storage.setItem(toKey(normalizedHandle), user);
         return response.sendStatus(204);
@@ -439,6 +447,7 @@ router.post('/create', requireAdminMiddleware, async (request, response) => {
             password: password,
             salt: salt,
             admin: !!request.body.admin,
+            stcontrolPermissionVersion: request.body.admin ? 1 : undefined,
             enabled: true,
             expiresAt: null, // 管理员创建的用户默认为永久账户
         };

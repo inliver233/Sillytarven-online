@@ -3040,6 +3040,11 @@ export function getStreamingReply(data, state, { chatCompletionSource = null, ov
             state.reasoning += data?.delta?.thinking || '';
         }
         return data?.delta?.text || '';
+    } else if (chat_completion_source === chat_completion_sources.FREE_GEMINI && Array.isArray(data?.choices)) {
+        if (show_thoughts) {
+            state.reasoning += data.choices?.[0]?.delta?.reasoning_content ?? data.choices?.[0]?.delta?.reasoning ?? '';
+        }
+        return data.choices?.[0]?.delta?.content ?? data.choices?.[0]?.message?.content ?? data.choices?.[0]?.text ?? '';
     } else if ([chat_completion_sources.MAKERSUITE, chat_completion_sources.FREE_GEMINI, chat_completion_sources.VERTEXAI].includes(chat_completion_source)) {
         const inlineData = data?.candidates?.[0]?.content?.parts?.filter(x => x.inlineData && !x.thought)?.map(x => x.inlineData) || [];
         if (Array.isArray(inlineData) && inlineData.length > 0) {

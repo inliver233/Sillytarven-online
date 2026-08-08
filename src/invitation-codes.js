@@ -85,7 +85,7 @@ export async function createInvitationCode(createdBy, durationType = 'permanent'
 /**
  * 验证邀请码
  * @param {string} code 邀请码
- * @param {{required?: boolean}} [options] Whether this operation requires a code
+ * @param {{required?: boolean, claimId?: string}} [options] Whether this operation requires a code and an optional durable claim identifier
  * @returns {Promise<{valid: boolean, reason?: string, invitation?: InvitationCode}>} 验证结果
  */
 export async function validateInvitationCode(code, { required = isInvitationCodesEnabled() } = {}) {
@@ -120,13 +120,19 @@ export async function validateInvitationCode(code, { required = isInvitationCode
  * @param {{required?: boolean}} [options] Whether this operation requires a code
  * @returns {Promise<{success: boolean, reason?: string, invitation?: InvitationCode}>} 使用结果及邀请码信息
  */
-export async function useInvitationCode(code, usedBy, userExpiresAt = null, { required = isInvitationCodesEnabled() } = {}) {
+export async function useInvitationCode(code, usedBy, userExpiresAt = null, {
+    required = isInvitationCodesEnabled(),
+    claimId,
+} = {}) {
     if (!required) {
         return { success: true }; // 如果功能未启用，则认为成功
     }
 
     if (!code || typeof code !== 'string') {
         return { success: false, reason: '邀请码格式无效' };
+    }
+    if (claimId !== undefined && (typeof claimId !== 'string' || !claimId || claimId.length > 128)) {
+        throw new TypeError('Invalid invitation claim id');
     }
 
     const normalizedCode = code.toUpperCase();
@@ -137,19 +143,24 @@ export async function useInvitationCode(code, usedBy, userExpiresAt = null, { re
     invitationUseLocks.add(normalizedCode);
     try {
         // 在锁内重新读取，避免两个并发注册同时消费同一个邀请码。
-        const validation = await validateInvitationCode(normalizedCode, { required });
-        if (!validation.valid) {
-            return { success: false, reason: validation.reason || '邀请码无效' };
-        }
-
-        const invitation = validation.invitation;
+        const invitation = await storage.getItem(toInvitationKey(normalizedCode));
         if (!invitation) {
-            return { success: false, reason: '邀请码无效' };
+            return { success: false, reason: '邀请码不存在' };
+        }
+        if (invitation.used) {
+            // stcontrol registration may be interrupted after this durable
+            // write. The same registration claim can resume, but another
+            // registration (even for the same handle) can never reuse it.
+            if (claimId && invitation.claimId === claimId && invitation.usedBy === usedBy) {
+                return { success: true, invitation, replayed: true };
+            }
+            return { success: false, reason: '邀请码已被使用' };
         }
         invitation.used = true;
         invitation.usedBy = usedBy;
         invitation.usedAt = Date.now();
         invitation.userExpiresAt = userExpiresAt; // 记录用户的到期时间
+        if (claimId) invitation.claimId = claimId;
 
         await storage.setItem(toInvitationKey(normalizedCode), invitation);
         console.log(`Invitation code used by ${usedBy}, duration: ${invitation.durationType}, user expires: ${userExpiresAt ? new Date(userExpiresAt).toLocaleString() : 'permanent'}`);

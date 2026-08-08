@@ -214,6 +214,18 @@ test('group paging frontend helpers reject malformed pages and preserve compatib
     assert.equal(getFullGroupMessageIndex(1, null, fullMessages, loaded), 7);
 });
 
+test('group range accepts the user-configured initial page size above the old 200-message cap', async () => {
+    const id = 'user-configured-page-size';
+    const messages = makeMessages(250, 'configured-page');
+    assert.equal((await post('/group/save', { id, chat: [makeHeader('configured-page'), ...messages] })).response.status, 200);
+
+    const page = await post('/group/get-range', { id, limit: 225 });
+    assert.equal(page.response.status, 200);
+    assert.equal(page.data.messages.length, 225);
+    assert.deepEqual(page.data.messages, messages.slice(25));
+    assert.equal(page.data.messageOffset, 25);
+});
+
 test('group range reads return header and bounded pages while tail saves append and edit safely', async () => {
     const id = 'paged-main';
     const header = makeHeader('integrity-a', { custom: 'initial' });

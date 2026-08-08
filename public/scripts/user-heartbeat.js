@@ -11,6 +11,7 @@ class UserHeartbeat {
         this.heartbeatIntervalMs = 2 * 60 * 1000; // 2分钟（页面可见时）
         this.hiddenHeartbeatIntervalMs = 5 * 60 * 1000; // 5分钟（页面隐藏时）
         this.inactivityThreshold = 5 * 60 * 1000; // 5分钟无活动则暂停心跳
+        this.stcontrolEnabled = false;
 
         // 绑定页面活动监听器
         this.bindActivityListeners();
@@ -79,7 +80,7 @@ class UserHeartbeat {
         const timeSinceLastActivity = now - this.lastActivity;
 
         // 如果用户长时间无活动，暂停心跳（但页面隐藏时仍然发送，因为用户可能只是切换了应用）
-        if (!document.hidden && timeSinceLastActivity > this.inactivityThreshold) {
+        if (!this.stcontrolEnabled && !document.hidden && timeSinceLastActivity > this.inactivityThreshold) {
             console.log('User inactive, skipping heartbeat');
             return;
         }
@@ -98,12 +99,12 @@ class UserHeartbeat {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    ...this.getRequestHeaders()
+                    ...this.getRequestHeaders(),
                 },
                 body: JSON.stringify({
                     timestamp: Date.now(),
-                    userAgent: navigator.userAgent
-                })
+                    userAgent: navigator.userAgent,
+                }),
             });
 
             if (response.ok) {
@@ -173,12 +174,21 @@ class UserHeartbeat {
     }
 
     /**
+     * Keep a low-frequency page-presence signal while stcontrol owns the
+     * activity lease. Standalone nodes retain their historical idle behavior.
+     * @param {boolean} enabled Whether the managed adapter is enabled
+     */
+    setStcontrolEnabled(enabled) {
+        this.stcontrolEnabled = Boolean(enabled);
+    }
+
+    /**
      * 绑定用户活动监听器
      */
     bindActivityListeners() {
         const activityEvents = [
             'click', 'keydown', 'keyup', 'mousemove', 'mousedown',
-            'mouseup', 'scroll', 'touchstart', 'touchend'
+            'mouseup', 'scroll', 'touchstart', 'touchend',
         ];
 
         // 使用节流来避免过于频繁的活动记录
@@ -255,9 +265,9 @@ function initUserHeartbeat() {
     return userHeartbeat;
 }
 
-    /**
-     * 启动用户心跳（仅在用户已登录时）
-     */
+/**
+ * 启动用户心跳（仅在用户已登录时）
+ */
 function startUserHeartbeat() {
     // 检查用户是否已登录 - 多种方式检测
     const checkLoginStatus = () => {
@@ -317,6 +327,7 @@ if (typeof window !== 'undefined') {
         init: initUserHeartbeat,
         start: startUserHeartbeat,
         stop: stopUserHeartbeat,
+        setStcontrolEnabled: enabled => initUserHeartbeat().setStcontrolEnabled(enabled),
         instance: () => userHeartbeat,
         forceStart: () => {
             console.log('Force starting user heartbeat...');

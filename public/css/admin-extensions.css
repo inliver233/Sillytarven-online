@@ -470,13 +470,12 @@
 
 .freeGeminiModelRow {
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-columns: auto minmax(0, 1fr) minmax(130px, auto);
     align-items: center;
     gap: 10px;
     min-width: 0;
     padding: 8px 10px;
     border-bottom: 1px solid var(--SmartThemeBorderColor);
-    cursor: pointer;
 }
 
 .freeGeminiModelRow:last-child {
@@ -486,6 +485,22 @@
 .freeGeminiModelRow > span {
     min-width: 0;
     overflow-wrap: anywhere;
+}
+
+.freeGeminiModelRequestFormat {
+    width: auto;
+    min-width: 130px;
+}
+
+@media (max-width: 520px) {
+    .freeGeminiModelRow {
+        grid-template-columns: auto minmax(0, 1fr);
+    }
+
+    .freeGeminiModelRequestFormat {
+        grid-column: 2;
+        width: 100%;
+    }
 }
 
 .freeGeminiModelEmpty {

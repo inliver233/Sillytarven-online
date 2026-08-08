@@ -7,6 +7,7 @@ let currentPerformanceData = null;
 let currentFreeGeminiChannels = [];
 let currentFreeGeminiUpstreamModels = [];
 let freeGeminiModelEnabledState = new Map();
+let freeGeminiModelRequestFormats = new Map();
 let freeGeminiChannelFormDirty = false;
 let suppressFreeGeminiChannelDirtyTracking = false;
 let freeGeminiChannelSaveInProgress = false;
@@ -31,6 +32,7 @@ function resetFreeGeminiChannelRuntimeState() {
     currentFreeGeminiChannels = [];
     currentFreeGeminiUpstreamModels = [];
     freeGeminiModelEnabledState = new Map();
+    freeGeminiModelRequestFormats = new Map();
     freeGeminiChannelFormDirty = false;
     suppressFreeGeminiChannelDirtyTracking = false;
     freeGeminiChannelSaveInProgress = false;
@@ -98,6 +100,14 @@ function bindFreeGeminiChannelEvents(root = document) {
             freeGeminiModelEnabledState.set(model, $(this).prop('checked'));
             syncFreeGeminiModelsFromCheckboxes();
             updateFreeGeminiModelSelectionCount();
+            setFreeGeminiChannelFormDirty(true);
+        })
+        .on('change.freeGeminiChannels', '.freeGeminiModelRequestFormat', function () {
+            if (freeGeminiChannelSaveInProgress) return;
+            const model = String($(this).data('model') || '');
+            const format = String($(this).val() || 'gemini');
+            if (!model || !['gemini', 'openai'].includes(format)) return;
+            freeGeminiModelRequestFormats.set(model, format);
             setFreeGeminiChannelFormDirty(true);
         });
     findInScope('#freeGeminiChannelModelPolicy')
@@ -170,6 +180,20 @@ function normalizeFreeGeminiModels(value) {
         .map(item => typeof item === 'object' && item ? item.id : item)
         .map(item => String(item || '').trim())
         .filter(Boolean))];
+}
+
+function normalizeFreeGeminiModelRequestFormats(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+    return Object.fromEntries(Object.entries(value)
+        .map(([model, format]) => [String(model || '').trim(), String(format || '').trim().toLowerCase()])
+        .filter(([model, format]) => model && ['gemini', 'openai'].includes(format)));
+}
+
+function serializeFreeGeminiModelRequestFormats() {
+    return Object.fromEntries(currentFreeGeminiUpstreamModels.map(model => [
+        model,
+        freeGeminiModelRequestFormats.get(model) === 'openai' ? 'openai' : 'gemini',
+    ]));
 }
 
 function serializeFreeGeminiModelPolicy(policy, models, enabledModels, preservedModels = []) {
@@ -263,9 +287,16 @@ function renderFreeGeminiUpstreamModels() {
             .data('model', model)
             .prop('checked', checked)
             .prop('disabled', disabled);
-        const row = $('<label>')
+        const requestFormat = $('<select>')
+            .addClass('text_pole freeGeminiModelRequestFormat')
+            .attr('aria-label', `${model} 请求格式`)
+            .data('model', model)
+            .append(new Option('原生 Gemini', 'gemini'), new Option('OpenAI 兼容', 'openai'))
+            .val(freeGeminiModelRequestFormats.get(model) === 'openai' ? 'openai' : 'gemini')
+            .prop('disabled', freeGeminiChannelSaveInProgress);
+        const row = $('<div>')
             .addClass('freeGeminiModelRow')
-            .append(checkbox, $('<span>').text(model));
+            .append(checkbox, $('<span>').text(model), requestFormat);
         container.append(row);
     });
     if (visibleModels.length === 0) {
@@ -282,6 +313,7 @@ function resetFreeGeminiModelEnabledState() {
     currentFreeGeminiUpstreamModels = normalizeFreeGeminiModels([
         ...currentFreeGeminiUpstreamModels,
         ...configuredModels,
+        ...freeGeminiModelRequestFormats.keys(),
     ]).sort((a, b) => a.localeCompare(b));
     freeGeminiModelEnabledState = new Map(currentFreeGeminiUpstreamModels.map(model => [
         model,
@@ -305,6 +337,9 @@ function mergeFreeGeminiUpstreamModels(models, replaceUpstream = false) {
         nextEnabledState.set(model, freeGeminiModelEnabledState.has(model)
             ? freeGeminiModelEnabledState.get(model)
             : defaultEnabled);
+        if (!freeGeminiModelRequestFormats.has(model)) {
+            freeGeminiModelRequestFormats.set(model, 'gemini');
+        }
     });
     currentFreeGeminiUpstreamModels = mergedModels;
     freeGeminiModelEnabledState = nextEnabledState;
@@ -351,6 +386,7 @@ function resetFreeGeminiChannelForm() {
     freeGeminiChannelModelsRequestId++;
     currentFreeGeminiUpstreamModels = [];
     freeGeminiModelEnabledState = new Map();
+    freeGeminiModelRequestFormats = new Map();
     setFreeGeminiChannelModelsLoading(false);
     suppressFreeGeminiChannelDirtyTracking = true;
     try {
@@ -381,6 +417,7 @@ function beginFreeGeminiChannelEdit(channel) {
     freeGeminiChannelModelsRequestId++;
     currentFreeGeminiUpstreamModels = [];
     freeGeminiModelEnabledState = new Map();
+    freeGeminiModelRequestFormats = new Map(Object.entries(normalizeFreeGeminiModelRequestFormats(channel.modelRequestFormats)));
     setFreeGeminiChannelModelsLoading(false);
     suppressFreeGeminiChannelDirtyTracking = true;
     try {
@@ -523,6 +560,8 @@ function renderFreeGeminiChannelsAdmin() {
                 ? '排除列表'
                 : '全部上游模型');
         const modelSummary = models.length > 0 ? `${models.length} 个：${models.slice(0, 4).join('、')}${models.length > 4 ? '…' : ''}` : '未指定';
+        const openAIFormatCount = Object.values(normalizeFreeGeminiModelRequestFormats(channel.modelRequestFormats))
+            .filter(format => format === 'openai').length;
         const priority = getFreeGeminiNumber(channel.priority, freeGeminiChannelDefaults.priority);
         const timeoutMs = getFreeGeminiNumber(channel.timeoutMs, freeGeminiChannelDefaults.timeoutMs);
         const maxRetries = getFreeGeminiNumber(channel.maxRetries, freeGeminiChannelDefaults.maxRetries);
@@ -540,6 +579,7 @@ function renderFreeGeminiChannelsAdmin() {
                     </div>
                     <div class="notes" style="word-break:break-all;margin-top:5px;">URL：${escapeHtml(channel.url || '')}</div>
                     <div class="notes">模型策略：${escapeHtml(modelPolicyText)} · ${escapeHtml(modelSummary)}</div>
+                    <div class="notes">请求格式：逐模型配置 · OpenAI 兼容 ${escapeHtml(openAIFormatCount)} 个 · 其余原生 Gemini</div>
                     <div class="notes">超时：${escapeHtml(timeoutMs)} ms · 重试：${escapeHtml(maxRetries)} 次 · 模型缓存：${escapeHtml(modelCacheTtlMs)} ms · 输出 cap：${escapeHtml(maxOutputTokensText)}</div>
                     <div class="notes">API Key：${escapeHtml(keyText)} · 最后更新：${escapeHtml(updatedAt)}</div>
                 </div>
@@ -584,6 +624,7 @@ async function saveFreeGeminiChannel(event) {
         priority: getFreeGeminiNumber($('#freeGeminiChannelPriority').val(), freeGeminiChannelDefaults.priority),
         modelPolicy: String($('#freeGeminiChannelModelPolicy').val() || freeGeminiChannelDefaults.modelPolicy),
         models: normalizeFreeGeminiModels($('#freeGeminiChannelModels').val()),
+        modelRequestFormats: serializeFreeGeminiModelRequestFormats(),
         timeoutMs: getFreeGeminiNumber($('#freeGeminiChannelTimeoutMs').val(), freeGeminiChannelDefaults.timeoutMs),
         maxRetries: getFreeGeminiNumber($('#freeGeminiChannelMaxRetries').val(), freeGeminiChannelDefaults.maxRetries),
         modelCacheTtlMs: getFreeGeminiNumber($('#freeGeminiChannelModelCacheTtlMs').val(), freeGeminiChannelDefaults.modelCacheTtlMs),

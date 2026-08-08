@@ -435,6 +435,14 @@ oauth:
 enablePublicCharacters: true
 # Enable forum/community page
 enableForum: true
+stcontrol:
+  # Enable only after the local stcontrol Agent has enrolled successfully.
+  enabled: false
+  controllerUrl: ""
+  nodeId: 0
+  # Prefer the STCONTROL_AGENT_PSK environment variable in production.
+  agentPsk: ""
+  controllerGeneration: 0
 email:
   enabled: false
   smtp:

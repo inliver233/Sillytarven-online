@@ -81,6 +81,7 @@ async function getCurrentUser() {
 
         currentUser = await response.json();
         $('#admin_button').toggle(accountsEnabled && isAdmin());
+        window.userHeartbeat?.setStcontrolEnabled?.(Boolean(currentUser.stcontrolEnabled));
 
         // 启动用户心跳
         if (typeof window.userHeartbeat !== 'undefined' && window.userHeartbeat.forceStart) {
@@ -974,26 +975,11 @@ async function viewSettingsSnapshots() {
  */
 async function resetEverything(callback) {
     try {
-        const step1Response = await fetch('/api/users/reset-step1', {
-            method: 'POST',
-            headers: getRequestHeaders(),
-        });
-
-        if (!step1Response.ok) {
-            const data = await step1Response.json();
-            toastr.error(data.error || 'Unknown error', 'Failed to reset');
-            throw new Error('Failed to reset everything');
-        }
-
-        let password = '';
-        let code = '';
+        let username = '';
 
         const template = $(await renderTemplateAsync('userReset'));
-        template.find('input[name="password"]').on('input', function () {
-            password = String($(this).val());
-        });
-        template.find('input[name="code"]').on('input', function () {
-            code = String($(this).val());
+        template.find('input[name="username"]').on('input', function () {
+            username = String($(this).val());
         });
         const confirm = await callGenericPopup(
             template,
@@ -1009,7 +995,7 @@ async function resetEverything(callback) {
         const step2Response = await fetch('/api/users/reset-step2', {
             method: 'POST',
             headers: getRequestHeaders(),
-            body: JSON.stringify({ password, code }),
+            body: JSON.stringify({ username }),
         });
 
         if (!step2Response.ok) {

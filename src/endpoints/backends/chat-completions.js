@@ -63,6 +63,7 @@ import { getVertexAIAuth, getProjectIdFromServiceAccount } from '../google.js';
 import {
     getFreeGeminiChannelModels,
     getFreeGeminiFetchAgent,
+    getFreeGeminiModelRequestFormat,
     isFreeGeminiModelAllowed,
     listEnabledFreeGeminiChannels,
 } from '../../free-gemini-channels.js';
@@ -95,6 +96,21 @@ const API_OPENROUTER = 'https://openrouter.ai/api/v1';
 function getGeminiVersionBaseUrl(apiUrl, apiVersion) {
     const baseUrl = trimTrailingSlash(apiUrl.toString());
     return /\/v1(?:beta)?$/i.test(baseUrl) ? baseUrl : `${baseUrl}/${apiVersion}`;
+}
+
+function getFreeGeminiOpenAIChatCompletionsUrl(apiUrl, apiVersion) {
+    const parsed = new URL(apiUrl);
+    const baseUrl = trimTrailingSlash(parsed.toString());
+    if (/\/v1(?:beta)?\/openai$/i.test(baseUrl) || /\/v1$/i.test(baseUrl)) {
+        return `${baseUrl}/chat/completions`;
+    }
+    if (/\/v1beta$/i.test(baseUrl)) {
+        return `${baseUrl}/openai/chat/completions`;
+    }
+    if (parsed.hostname.toLowerCase() === 'generativelanguage.googleapis.com') {
+        return `${baseUrl}/${apiVersion}/openai/chat/completions`;
+    }
+    return `${baseUrl}/v1/chat/completions`;
 }
 
 function normalizeFreeGeminiModelId(value) {
@@ -483,6 +499,57 @@ function normalizeFreeGeminiRequest({ modelId, messages, generationConfig, body,
     return null;
 }
 
+function getFreeGeminiOpenAIRequestBody(request, channel, model) {
+    const body = {
+        model: request.body.model,
+        messages: request.body.messages,
+        temperature: request.body.temperature,
+        max_tokens: request.body.max_tokens ?? request.body.max_completion_tokens,
+        stream: Boolean(request.body.stream),
+        presence_penalty: request.body.presence_penalty,
+        frequency_penalty: request.body.frequency_penalty,
+        top_p: request.body.top_p,
+        stop: request.body.stop,
+        seed: request.body.seed,
+        n: request.body.n,
+    };
+    if (Array.isArray(request.body.tools) && request.body.tools.length > 0) {
+        body.tools = request.body.tools;
+        body.tool_choice = request.body.tool_choice;
+    }
+    if (request.body.json_schema) {
+        body.response_format = {
+            type: 'json_schema',
+            json_schema: {
+                name: request.body.json_schema.name,
+                strict: request.body.json_schema.strict ?? true,
+                schema: request.body.json_schema.value,
+            },
+        };
+    }
+    mergeObjectWithYaml(body, request.body.custom_include_body);
+    excludeKeysByYaml(body, request.body.custom_exclude_body);
+    body.model = request.body.model;
+    body.stream = Boolean(request.body.stream);
+    if (!hasObviouslyConvertibleFreeGeminiMessage(body.messages)) {
+        return null;
+    }
+
+    const requestedMaxTokens = Number(body.max_tokens ?? body.max_completion_tokens);
+    if (Number.isFinite(requestedMaxTokens)) {
+        body.max_tokens = Math.min(
+            Math.max(1, Math.trunc(requestedMaxTokens)),
+            getFreeGeminiOutputLimit(channel, model),
+        );
+    } else if (Number.isInteger(channel.maxOutputTokens) && channel.maxOutputTokens > 0) {
+        body.max_tokens = getFreeGeminiOutputLimit(channel, model);
+    } else {
+        delete body.max_tokens;
+    }
+    delete body.max_completion_tokens;
+    return body;
+}
+
 function toFreeGeminiStatusModel(channel, model) {
     return {
         id: model.id,
@@ -583,7 +650,11 @@ async function resolveFreeGeminiRoutes(modelId, preferredChannelId, apiVersion, 
         }
         const model = result.value.find(item => item.id === modelId);
         if (model) {
-            routes.push({ channel: eligible[index], model });
+            routes.push({
+                channel: eligible[index],
+                model,
+                requestFormat: getFreeGeminiModelRequestFormat(eligible[index], modelId),
+            });
         }
     }
     if (routes.length === 0 && firstError) {
@@ -900,6 +971,7 @@ async function sendClaudeRequest(request, response) {
  */
 async function sendMakerSuiteRequest(request, response, options = {}) {
     const freeGeminiChannel = options.freeGeminiChannel;
+    const useFreeGeminiOpenAI = Boolean(freeGeminiChannel && options.freeGeminiRequestFormat === 'openai');
     const deferFreeGeminiFailover = Boolean(freeGeminiChannel && options.deferFreeGeminiFailover);
     const returnFreeGeminiFailure = (status, payload, canFailover = false) => {
         if (deferFreeGeminiFailover && canFailover) {
@@ -965,7 +1037,7 @@ async function sendMakerSuiteRequest(request, response, options = {}) {
         responseSchema: responseSchema,
         seed: request.body.seed,
     };
-    if (freeGeminiChannel) {
+    if (freeGeminiChannel && !useFreeGeminiOpenAI) {
         const normalizationError = normalizeFreeGeminiRequest({
             modelId: model,
             messages: request.body.messages,
@@ -1133,19 +1205,28 @@ async function sendMakerSuiteRequest(request, response, options = {}) {
         return body;
     }
 
-    const body = getGeminiBody();
+    const body = useFreeGeminiOpenAI
+        ? getFreeGeminiOpenAIRequestBody(request, freeGeminiChannel, options.freeGeminiModel)
+        : getGeminiBody();
     if (freeGeminiChannel) {
-        const normalizationError = normalizeFreeGeminiRequest({
-            modelId: model,
-            messages: request.body.messages,
-            body,
-            channel: freeGeminiChannel,
-            model: options.freeGeminiModel,
-        });
-        if (normalizationError) {
-            return response.status(400).send({ error: normalizationError });
+        if (useFreeGeminiOpenAI && !body) {
+            return response.status(400).send({
+                error: { code: 'FREE_GEMINI_INVALID_CONTENTS', message: 'contents 不能为空。' },
+            });
         }
-        console.debug(`${apiName} request prepared for model ${model}.`);
+        if (!useFreeGeminiOpenAI) {
+            const normalizationError = normalizeFreeGeminiRequest({
+                modelId: model,
+                messages: request.body.messages,
+                body,
+                channel: freeGeminiChannel,
+                model: options.freeGeminiModel,
+            });
+            if (normalizationError) {
+                return response.status(400).send({ error: normalizationError });
+            }
+        }
+        console.debug(`${apiName} request prepared for model ${model} using ${useFreeGeminiOpenAI ? 'OpenAI-compatible' : 'Gemini'} format.`);
     } else {
         console.debug(`${apiName} request:`, body);
     }
@@ -1205,6 +1286,9 @@ async function sendMakerSuiteRequest(request, response, options = {}) {
                 url = `${apiUrl.toString().replace(/\/$/, '')}/v1/publishers/google/models/${model}:${responseType}${stream ? '?alt=sse' : ''}`;
                 headers['Authorization'] = authHeader;
             }
+        } else if (useFreeGeminiOpenAI) {
+            url = getFreeGeminiOpenAIChatCompletionsUrl(apiUrl, apiVersion);
+            headers['Authorization'] = authHeader;
         } else {
             const versionBaseUrl = getGeminiVersionBaseUrl(apiUrl, apiVersion);
             const requestModel = freeGeminiChannel ? encodeURIComponent(model) : model;
@@ -1455,6 +1539,17 @@ async function sendMakerSuiteRequest(request, response, options = {}) {
                 });
             }
             return response.status(500).send({ error: true });
+        }
+
+        if (useFreeGeminiOpenAI) {
+            const choices = generateResponseJson?.choices;
+            if (!Array.isArray(choices) || choices.length === 0) {
+                return returnFreeGeminiFailure(502, {
+                    error: { code: 'FREE_GEMINI_INVALID_RESPONSE', message: '免费 Gemini 渠道返回了无效的 OpenAI 兼容响应。' },
+                });
+            }
+            console.debug(`${apiName} returned ${choices.length} OpenAI-compatible choice(s).`);
+            return response.send(generateResponseJson);
         }
 
         const candidates = generateResponseJson?.candidates;
@@ -2939,6 +3034,7 @@ router.post('/generate', async function (request, response) {
                     const result = await sendMakerSuiteRequest(request, response, {
                         freeGeminiChannel: route.channel,
                         freeGeminiModel: route.model,
+                        freeGeminiRequestFormat: route.requestFormat,
                         deferFreeGeminiFailover: true,
                         freeGeminiDeadlineAt: candidateDeadlineAt,
                     });

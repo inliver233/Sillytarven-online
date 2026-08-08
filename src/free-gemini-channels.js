@@ -13,7 +13,7 @@ import { trimTrailingSlash, uuidv4 } from './util.js';
 const STORAGE_DIRECTORY = '_global';
 const LEGACY_STORAGE_DIRECTORY = '_storage';
 const STORAGE_FILE = 'free-gemini-channels.json';
-const STORAGE_VERSION = 2;
+const STORAGE_VERSION = 3;
 const MAX_NAME_LENGTH = 80;
 const MAX_URL_LENGTH = 2048;
 const MAX_KEY_LENGTH = 8192;
@@ -31,6 +31,8 @@ const DEFAULTS = Object.freeze({
     maxOutputTokens: 0,
 });
 const MODEL_POLICIES = new Set(['all', 'allowlist', 'denylist']);
+const MODEL_REQUEST_FORMATS = new Set(['gemini', 'openai']);
+const DEFAULT_MODEL_REQUEST_FORMAT = 'gemini';
 const storageMutex = new KeyedMutex();
 const modelCache = new Map();
 const modelCacheRevisions = new Map();
@@ -274,11 +276,46 @@ function normalizeModels(value, { stored = false } = {}) {
     return models;
 }
 
+function normalizeModelRequestFormats(value, { stored = false } = {}) {
+    if (value === undefined) {
+        return {};
+    }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        if (stored) {
+            return {};
+        }
+        throw createValidationError('modelRequestFormats 必须是模型 ID 到请求格式的对象');
+    }
+
+    const entries = Object.entries(value);
+    if (entries.length > MAX_MODELS) {
+        if (stored) {
+            return {};
+        }
+        throw createValidationError(`modelRequestFormats 不能超过 ${MAX_MODELS} 项`);
+    }
+
+    const formats = {};
+    for (const [rawModelId, rawFormat] of entries) {
+        const modelId = normalizeModelId(rawModelId);
+        const format = typeof rawFormat === 'string' ? rawFormat.trim().toLowerCase() : '';
+        if (!modelId || !MODEL_REQUEST_FORMATS.has(format)) {
+            if (stored) {
+                continue;
+            }
+            throw createValidationError('modelRequestFormats 仅接受有效模型 ID，以及 gemini 或 openai 格式');
+        }
+        formats[modelId] = format;
+    }
+    return formats;
+}
+
 function normalizeSettings(channel, { stored = false } = {}) {
     return {
         priority: normalizeInteger(channel?.priority, DEFAULTS.priority, 0, 1000, 'priority', { stored }),
         modelPolicy: normalizeModelPolicy(channel?.modelPolicy, { stored }),
         models: normalizeModels(channel?.models, { stored }),
+        modelRequestFormats: normalizeModelRequestFormats(channel?.modelRequestFormats, { stored }),
         timeoutMs: normalizeInteger(channel?.timeoutMs, DEFAULTS.timeoutMs, 5000, 120000, 'timeoutMs', { stored }),
         maxRetries: normalizeInteger(channel?.maxRetries, DEFAULTS.maxRetries, 0, 3, 'maxRetries', { stored }),
         modelCacheTtlMs: normalizeInteger(channel?.modelCacheTtlMs, DEFAULTS.modelCacheTtlMs, 30000, 3600000, 'modelCacheTtlMs', { stored }),
@@ -364,6 +401,7 @@ function toAdminChannel(channel) {
         priority: channel.priority,
         modelPolicy: channel.modelPolicy,
         models: [...channel.models],
+        modelRequestFormats: { ...channel.modelRequestFormats },
         timeoutMs: channel.timeoutMs,
         maxRetries: channel.maxRetries,
         modelCacheTtlMs: channel.modelCacheTtlMs,
@@ -397,6 +435,7 @@ function getChannelModelCacheSignature(channel) {
         channel.priority,
         channel.modelPolicy,
         channel.models,
+        channel.modelRequestFormats,
         channel.timeoutMs,
         channel.maxRetries,
         channel.modelCacheTtlMs,
@@ -560,6 +599,15 @@ export function isFreeGeminiModelAllowed(channel, model) {
     return true;
 }
 
+export function getFreeGeminiModelRequestFormat(channel, model) {
+    const modelId = normalizeModelId(model);
+    if (!modelId) {
+        return DEFAULT_MODEL_REQUEST_FORMAT;
+    }
+    const format = channel?.modelRequestFormats?.[modelId];
+    return MODEL_REQUEST_FORMATS.has(format) ? format : DEFAULT_MODEL_REQUEST_FORMAT;
+}
+
 export async function listPublicFreeGeminiChannels() {
     const store = await readStore();
     return sortChannels(store.channels.filter(channel => channel.enabled && channel.key)).map(toPublicChannel);
@@ -703,7 +751,7 @@ export async function updateFreeGeminiChannel(id, input) {
         if (Object.hasOwn(input ?? {}, 'enabled')) {
             channel.enabled = Boolean(input.enabled);
         }
-        for (const property of ['priority', 'modelPolicy', 'models', 'timeoutMs', 'maxRetries', 'modelCacheTtlMs', 'maxOutputTokens']) {
+        for (const property of ['priority', 'modelPolicy', 'models', 'modelRequestFormats', 'timeoutMs', 'maxRetries', 'modelCacheTtlMs', 'maxOutputTokens']) {
             if (Object.hasOwn(input ?? {}, property)) {
                 Object.assign(channel, normalizeSettings({ ...channel, [property]: input[property] }));
             }
