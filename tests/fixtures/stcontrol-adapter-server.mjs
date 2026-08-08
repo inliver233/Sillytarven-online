@@ -17,18 +17,21 @@ const configPath = process.env.STCONTROL_E2E_CONFIG_PATH
 setConfigFilePath(configPath);
 await storage.init({ dir: path.join(dataRoot, '_storage'), ttl: false, expiredInterval: 0 });
 const { router, stcontrolHandoffHandler } = await import('../../src/endpoints/stcontrol.js');
+const usersPublic = await import('../../src/endpoints/users-public.js');
 const systemMonitor = (await import('../../src/system-monitor.js')).default;
 
 const app = express();
 app.use(express.json());
+const sharedSession = {};
+app.use((request, _response, next) => {
+    request.session = sharedSession;
+    next();
+});
 // The fixture intentionally executes the production public handoff handler.
-// A fresh session object is sufficient for acceptance assertions because the
-// credential redemption and managed-session registration happen before the
-// normal SillyTavern session store serializes the response.
 app.post('/api/users/me', (request, response) => {
-    request.session = {};
     return stcontrolHandoffHandler(request, response);
 });
+app.use('/api/users', usersPublic.router);
 app.use(router);
 const server = app.listen(0, '127.0.0.1', () => {
     const address = server.address();
