@@ -27,6 +27,7 @@ export const STCONTROL_CAPABILITIES = Object.freeze([
     'password_update',
     'registration_policy',
     'snapshot_boundary',
+    'user_data_fault_freeze',
     'user_provision',
     'write_gate',
 ]);

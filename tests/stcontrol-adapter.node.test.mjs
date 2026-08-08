@@ -6,6 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import {
+	STCONTROL_CAPABILITIES,
     STCONTROL_MODES,
     applyStcontrolMode,
     encodeStcontrolRequestBody,
@@ -401,4 +402,5 @@ test('stcontrol adapter is wired through authenticated, CSRF-safe integration po
     assert.match(loginBoundary, /request\.path\.startsWith\('\/api\/stcontrol\/internal\/'\)/);
     assert.match(endpoint, /stcontrol_handoff/);
     assert.doesNotMatch(endpoint, /request\.query\.(?:ticket|code)/);
+	assert.ok(STCONTROL_CAPABILITIES.includes('user_data_fault_freeze'));
 });
