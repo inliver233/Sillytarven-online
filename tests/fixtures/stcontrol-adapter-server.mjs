@@ -11,7 +11,10 @@ if (!portFile) throw new Error('STCONTROL_E2E_PORT_FILE is required');
 globalThis.DATA_ROOT = dataRoot;
 
 const { setConfigFilePath } = await import('../../src/util.js');
-setConfigFilePath(fileURLToPath(new URL('./stcontrol-config.yaml', import.meta.url)));
+const configPath = process.env.STCONTROL_E2E_CONFIG_PATH
+    ? path.resolve(process.env.STCONTROL_E2E_CONFIG_PATH)
+    : fileURLToPath(new URL('./stcontrol-config.yaml', import.meta.url));
+setConfigFilePath(configPath);
 await storage.init({ dir: path.join(dataRoot, '_storage'), ttl: false, expiredInterval: 0 });
 const { router } = await import('../../src/endpoints/stcontrol.js');
 const systemMonitor = (await import('../../src/system-monitor.js')).default;
