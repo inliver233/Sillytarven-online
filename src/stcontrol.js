@@ -15,6 +15,7 @@ export const STCONTROL_MODES = Object.freeze({
 });
 
 export const STCONTROL_CAPABILITIES = Object.freeze([
+    'account_inventory_paging',
     'account_restore',
     'activity_leases',
     'control_mode',
@@ -50,6 +51,17 @@ function getNodeId() {
 
 function getAgentPsk() {
     return String(process.env.STCONTROL_AGENT_PSK || getConfigValue('stcontrol.agentPsk', '', 'string'));
+}
+
+// Returns a node-keyed revision fence without exposing a reusable digest of
+// local account or OAuth subject facts to the Controller.
+export function stcontrolInventoryRevision(material) {
+    const psk = getAgentPsk();
+    if (!psk) throw new Error('stcontrol agent credential is unavailable');
+    return crypto.createHmac('sha256', psk)
+        .update('stcontrol-account-inventory:v1\n')
+        .update(material)
+        .digest('hex');
 }
 
 export function isStcontrolEnabled() {

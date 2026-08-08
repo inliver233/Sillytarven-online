@@ -105,6 +105,73 @@ test('actual adapter route resumes provisioning after a lost idempotency receipt
     assert.equal((await conflictResponse.json()).code, 'user_already_exists');
 });
 
+test('account inventory pages beyond 500 users without gaps and fences revision drift', async () => {
+    const keys = Array.from({ length: 620 }, (_, index) => `user:inventory-${String(index).padStart(4, '0')}`);
+    try {
+        for (let offset = 0; offset < keys.length; offset += 100) {
+            await Promise.all(keys.slice(offset, offset + 100).map(async (key, index) => {
+                const ordinal = offset + index;
+                const handle = key.slice('user:'.length);
+                await storage.setItem(key, {
+                    id: `local-${String(ordinal).padStart(4, '0')}`,
+                    handle,
+                    enabled: true,
+                    password: 'hash',
+                    salt: 'salt',
+                });
+            }));
+        }
+
+        let cursor = 0;
+        let revision = '';
+        let total = 0;
+        const localUserIds = [];
+        do {
+            const response = await signedPost('/api/stcontrol/internal/users/scan', {
+                cursor,
+                inventory_revision: revision,
+                limit: 250,
+            });
+            const page = await response.json();
+            assert.equal(response.status, 200, JSON.stringify(page));
+            assert.ok(page.users.length <= 250);
+            if (!revision) revision = page.inventory_revision;
+            assert.equal(page.inventory_revision, revision);
+            total = page.total_users;
+            localUserIds.push(...page.users.map(user => user.local_user_id));
+            cursor = page.next_cursor;
+            if (!page.has_more) break;
+        } while (true);
+
+        assert.ok(total > 500);
+        assert.equal(localUserIds.length, total);
+        assert.equal(new Set(localUserIds).size, total);
+        assert.deepEqual(localUserIds, [...localUserIds].sort());
+
+        const changed = await storage.getItem(keys[0]);
+        changed.admin = true;
+        await storage.setItem(keys[0], changed);
+        const stale = await signedPost('/api/stcontrol/internal/users/scan', {
+            cursor: 250,
+            inventory_revision: revision,
+            limit: 250,
+        });
+        assert.equal(stale.status, 409);
+        assert.equal((await stale.json()).code, 'inventory_changed');
+
+        const unboundContinuation = await signedPost('/api/stcontrol/internal/users/scan', {
+            cursor: 250,
+            limit: 250,
+        });
+        assert.equal(unboundContinuation.status, 400);
+        assert.equal((await unboundContinuation.json()).code, 'invalid_inventory_page');
+    } finally {
+        for (let offset = 0; offset < keys.length; offset += 100) {
+            await Promise.all(keys.slice(offset, offset + 100).map(key => storage.removeItem(key)));
+        }
+    }
+});
+
 test('browser handoff keeps the one-use secret in POST body and establishes a fenced session', async () => {
     const previousControllerUrl = process.env.SILLYTAVERN_STCONTROL_CONTROLLERURL;
     const code = 'opaque-one-use-browser-secret';

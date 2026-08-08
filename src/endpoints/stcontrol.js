@@ -26,6 +26,7 @@ import {
     runIdempotentStcontrolOperation,
     setUserWriteGate,
     signStcontrolRequest,
+    stcontrolInventoryRevision,
 } from '../stcontrol.js';
 import systemMonitor from '../system-monitor.js';
 import {
@@ -40,7 +41,9 @@ import { getConfigValue, getVersion } from '../util.js';
 import { checkForNewContent, CONTENT_TYPES } from './content-manager.js';
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const MAX_INVENTORY_USERS = 500;
+const MAX_INVENTORY_USERS = 10_000;
+const MAX_INVENTORY_PAGE_USERS = 250;
+const INVENTORY_LOAD_BATCH = 100;
 const MAX_HANDOFF_CODE_LENGTH = 512;
 const MAX_CONTROLLER_RESPONSE_BYTES = 64 * 1024;
 const QUIESCE_TIMEOUT_MS = 15_000;
@@ -233,30 +236,40 @@ router.post('/api/stcontrol/internal/users/verify', async (request, response) =>
     }
 });
 
-router.post('/api/stcontrol/internal/users/scan', async (_request, response) => {
+router.post('/api/stcontrol/internal/users/scan', async (request, response) => {
     try {
-        const handles = (await getAllUserHandles()).filter(handle => handle !== 'default-user').sort();
-        if (handles.length > MAX_INVENTORY_USERS) throw new AdapterRequestError(409, 'inventory_requires_pagination');
+        const input = validateInventoryPageRequest(request.body);
+        const accounts = await loadInventoryAccounts();
+        if (accounts.length > MAX_INVENTORY_USERS) throw new AdapterRequestError(409, 'inventory_capacity_exceeded');
+        const revision = inventoryRevision(accounts);
+        if (input.inventory_revision && !safeTextEqual(input.inventory_revision, revision)) {
+            throw new AdapterRequestError(409, 'inventory_changed');
+        }
+        if (input.cursor > accounts.length) throw new AdapterRequestError(409, 'inventory_changed');
+        const end = Math.min(input.cursor + input.limit, accounts.length);
         const users = [];
-        for (const handle of handles) {
-            const user = await storage.getItem(toKey(handle));
-            if (!user) continue;
-            const inventory = await inventoryDirectory(getUserDirectories(handle).root);
-            const identities = [];
-            if (ALLOWED_OAUTH_PROVIDERS.has(user.oauthProvider) && typeof user.oauthUserId === 'string' && user.oauthUserId) {
-                identities.push({ provider: user.oauthProvider, subject: user.oauthUserId });
-            }
+        for (const account of accounts.slice(input.cursor, end)) {
+            const inventory = await inventoryDirectory(getUserDirectories(account.handle).root);
             users.push({
-                local_user_id: String(user.id || handle),
-                handle,
+                local_user_id: account.localUserId,
+                handle: account.handle,
                 size_bytes: inventory.size,
                 directory_fingerprint: inventory.digest,
-                has_password: Boolean(user.password && user.salt),
-                oauth_identities: identities,
-                is_admin: Boolean(user.admin),
+                has_password: account.hasPassword,
+                oauth_identities: account.oauthIdentities,
+                is_admin: account.isAdmin,
             });
         }
-        return response.json({ ok: true, users });
+        const hasMore = end < accounts.length;
+        return response.json({
+            ok: true,
+            users,
+            cursor: input.cursor,
+            next_cursor: hasMore ? end : 0,
+            total_users: accounts.length,
+            inventory_revision: revision,
+            has_more: hasMore,
+        });
     } catch (error) {
         return adapterError(response, error);
     }
@@ -526,6 +539,70 @@ function safeTextEqual(left, right) {
     const leftBytes = Buffer.from(String(left));
     const rightBytes = Buffer.from(String(right));
     return leftBytes.length === rightBytes.length && crypto.timingSafeEqual(leftBytes, rightBytes);
+}
+
+function validateInventoryPageRequest(raw) {
+    const input = raw && typeof raw === 'object' ? raw : {};
+    const cursor = input.cursor === undefined ? 0 : input.cursor;
+    const limit = input.limit === undefined ? MAX_INVENTORY_PAGE_USERS : input.limit;
+    const revision = input.inventory_revision === undefined ? '' : input.inventory_revision;
+    if (!Number.isSafeInteger(cursor) || cursor < 0 || cursor > MAX_INVENTORY_USERS ||
+        !Number.isSafeInteger(limit) || limit <= 0 || limit > MAX_INVENTORY_PAGE_USERS ||
+        typeof revision !== 'string' || (revision && !/^[0-9a-f]{64}$/.test(revision)) ||
+        (cursor > 0 && !revision)) {
+        throw new AdapterRequestError(400, 'invalid_inventory_page');
+    }
+    return { cursor, limit, inventory_revision: revision };
+}
+
+async function loadInventoryAccounts() {
+    const handles = (await getAllUserHandles()).filter(handle => handle !== 'default-user');
+    if (handles.length > MAX_INVENTORY_USERS) throw new AdapterRequestError(409, 'inventory_capacity_exceeded');
+    const accounts = [];
+    for (let index = 0; index < handles.length; index += INVENTORY_LOAD_BATCH) {
+        const batch = await Promise.all(handles.slice(index, index + INVENTORY_LOAD_BATCH).map(async (handle) => {
+            const user = await storage.getItem(toKey(handle));
+            if (!user) return null;
+            if (!handle || handle.length > 128 || normalizeHandle(handle) !== handle) {
+                throw new AdapterRequestError(409, 'inventory_invalid_handle');
+            }
+            const localUserId = String(user.id || handle);
+            if (!localUserId || localUserId.length > 256 || localUserId.trim() !== localUserId || /[\x00-\x1f\x7f]/.test(localUserId)) {
+                throw new AdapterRequestError(409, 'inventory_invalid_local_user_id');
+            }
+            const oauthIdentities = [];
+            if (ALLOWED_OAUTH_PROVIDERS.has(user.oauthProvider) && typeof user.oauthUserId === 'string' && user.oauthUserId) {
+                if (user.oauthUserId.length > 512 || user.oauthUserId.trim() !== user.oauthUserId || /[\x00-\x1f\x7f]/.test(user.oauthUserId)) {
+                    throw new AdapterRequestError(409, 'inventory_invalid_oauth_subject');
+                }
+                oauthIdentities.push({ provider: user.oauthProvider, subject: user.oauthUserId });
+            }
+            return {
+                localUserId,
+                handle,
+                hasPassword: Boolean(user.password && user.salt),
+                oauthIdentities,
+                isAdmin: Boolean(user.admin),
+            };
+        }));
+        accounts.push(...batch.filter(Boolean));
+    }
+    accounts.sort((left, right) => compareInventoryText(left.localUserId, right.localUserId) ||
+        compareInventoryText(left.handle, right.handle));
+    for (let index = 1; index < accounts.length; index++) {
+        if (accounts[index - 1].localUserId === accounts[index].localUserId) {
+            throw new AdapterRequestError(409, 'inventory_duplicate_local_user_id');
+        }
+    }
+    return accounts;
+}
+
+function compareInventoryText(left, right) {
+    return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function inventoryRevision(accounts) {
+    return stcontrolInventoryRevision(JSON.stringify(accounts));
 }
 
 async function inventoryDirectory(root) {
