@@ -172,19 +172,19 @@ test('account inventory pages beyond 500 users without gaps and fences revision 
     }
 });
 
-test('browser handoff keeps the one-use secret in POST body and establishes a fenced session', async () => {
-    const previousControllerUrl = process.env.SILLYTAVERN_STCONTROL_CONTROLLERURL;
+test('browser handoff uses the local Agent proxy and establishes a fenced session', async () => {
+    const previousAgentUrl = process.env.SILLYTAVERN_STCONTROL_AGENTURL;
     const code = 'opaque-one-use-browser-secret';
     let consumed = false;
-    let controllerRequest;
-    const controller = express();
-    controller.use(express.json());
-    controller.post('/api/tickets/redeem', (request, response) => {
-        controllerRequest = request;
+    let agentRequest;
+    const agent = express();
+    agent.use(express.json());
+    agent.post('/agent/tickets/redeem', (request, response) => {
+        agentRequest = request;
         const timestamp = request.get('X-Timestamp');
         const nonce = request.get('X-Nonce');
         const expected = adapter.signStcontrolRequest(
-            'test-agent-psk', 'POST', '/api/tickets/redeem', timestamp, nonce, request.body,
+            'test-agent-psk', 'POST', '/agent/tickets/redeem', timestamp, nonce, request.body,
         );
         if (request.get('X-Agent-Id') !== '7' || request.get('X-Signature') !== expected) {
             return response.sendStatus(401);
@@ -200,14 +200,14 @@ test('browser handoff keeps the one-use secret in POST body and establishes a fe
             controller_generation: 1,
         });
     });
-    const controllerServer = await new Promise((resolve, reject) => {
-        const listener = controller.listen(0, '127.0.0.1', () => resolve(listener));
+    const agentServer = await new Promise((resolve, reject) => {
+        const listener = agent.listen(0, '127.0.0.1', () => resolve(listener));
         listener.once('error', reject);
     });
     try {
-        const address = controllerServer.address();
+        const address = agentServer.address();
         assert.ok(address && typeof address !== 'string');
-        process.env.SILLYTAVERN_STCONTROL_CONTROLLERURL = `http://127.0.0.1:${address.port}`;
+        process.env.SILLYTAVERN_STCONTROL_AGENTURL = `http://127.0.0.1:${address.port}`;
         const response = await fetch(`${baseUrl}/api/users/me?stcontrol_handoff=user`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -223,8 +223,8 @@ test('browser handoff keeps the one-use secret in POST body and establishes a fe
             activityEpoch: 8,
             controllerGeneration: 1,
         });
-        assert.equal(controllerRequest.originalUrl, '/api/tickets/redeem');
-        assert.equal(controllerRequest.originalUrl.includes(code), false);
+        assert.equal(agentRequest.originalUrl, '/agent/tickets/redeem');
+        assert.equal(agentRequest.originalUrl.includes(code), false);
 
         const replay = await fetch(`${baseUrl}/api/users/me?stcontrol_handoff=user`, {
             method: 'POST',
@@ -234,14 +234,14 @@ test('browser handoff keeps the one-use secret in POST body and establishes a fe
         });
         assert.equal(replay.status, 403);
     } finally {
-        await new Promise((resolve, reject) => controllerServer.close(error => error ? reject(error) : resolve()));
-        if (previousControllerUrl === undefined) delete process.env.SILLYTAVERN_STCONTROL_CONTROLLERURL;
-        else process.env.SILLYTAVERN_STCONTROL_CONTROLLERURL = previousControllerUrl;
+        await new Promise((resolve, reject) => agentServer.close(error => error ? reject(error) : resolve()));
+        if (previousAgentUrl === undefined) delete process.env.SILLYTAVERN_STCONTROL_AGENTURL;
+        else process.env.SILLYTAVERN_STCONTROL_AGENTURL = previousAgentUrl;
     }
 });
 
 test('administrator handoff rechecks the permission version and creates an isolated admin session', async () => {
-    const previousControllerUrl = process.env.SILLYTAVERN_STCONTROL_CONTROLLERURL;
+    const previousAgentUrl = process.env.SILLYTAVERN_STCONTROL_AGENTURL;
     const code = 'opaque-one-use-administrator-secret';
     const user = await storage.getItem('user:alice');
     user.admin = true;
@@ -249,13 +249,13 @@ test('administrator handoff rechecks the permission version and creates an isola
     await storage.setItem('user:alice', user);
     const consumed = new Set();
     const acceptedCodes = new Set([code, 'new-code-with-stale-permission']);
-    const controller = express();
-    controller.use(express.json());
-    controller.post('/api/tickets/redeem-admin', (request, response) => {
+    const agent = express();
+    agent.use(express.json());
+    agent.post('/agent/tickets/redeem-admin', (request, response) => {
         const timestamp = request.get('X-Timestamp');
         const nonce = request.get('X-Nonce');
         const expected = adapter.signStcontrolRequest(
-            'test-agent-psk', 'POST', '/api/tickets/redeem-admin', timestamp, nonce, request.body,
+            'test-agent-psk', 'POST', '/agent/tickets/redeem-admin', timestamp, nonce, request.body,
         );
         if (request.get('X-Signature') !== expected) return response.sendStatus(401);
         if (!acceptedCodes.has(request.body.code) || consumed.has(request.body.code)) return response.sendStatus(403);
@@ -268,14 +268,14 @@ test('administrator handoff rechecks the permission version and creates an isola
             controller_generation: 1,
         });
     });
-    const controllerServer = await new Promise((resolve, reject) => {
-        const listener = controller.listen(0, '127.0.0.1', () => resolve(listener));
+    const agentServer = await new Promise((resolve, reject) => {
+        const listener = agent.listen(0, '127.0.0.1', () => resolve(listener));
         listener.once('error', reject);
     });
     try {
-        const address = controllerServer.address();
+        const address = agentServer.address();
         assert.ok(address && typeof address !== 'string');
-        process.env.SILLYTAVERN_STCONTROL_CONTROLLERURL = `http://127.0.0.1:${address.port}`;
+        process.env.SILLYTAVERN_STCONTROL_AGENTURL = `http://127.0.0.1:${address.port}`;
         const response = await fetch(`${baseUrl}/api/users/me?stcontrol_handoff=admin`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -300,9 +300,9 @@ test('administrator handoff rechecks the permission version and creates an isola
         });
         assert.equal(stalePermission.status, 403);
     } finally {
-        await new Promise((resolve, reject) => controllerServer.close(error => error ? reject(error) : resolve()));
-        if (previousControllerUrl === undefined) delete process.env.SILLYTAVERN_STCONTROL_CONTROLLERURL;
-        else process.env.SILLYTAVERN_STCONTROL_CONTROLLERURL = previousControllerUrl;
+        await new Promise((resolve, reject) => agentServer.close(error => error ? reject(error) : resolve()));
+        if (previousAgentUrl === undefined) delete process.env.SILLYTAVERN_STCONTROL_AGENTURL;
+        else process.env.SILLYTAVERN_STCONTROL_AGENTURL = previousAgentUrl;
     }
 });
 

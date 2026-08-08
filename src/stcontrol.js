@@ -73,6 +73,10 @@ export function getStcontrolControllerUrl() {
     return String(getConfigValue('stcontrol.controllerUrl', '', 'string')).replace(/\/+$/, '');
 }
 
+export function getStcontrolAgentUrl() {
+    return String(getConfigValue('stcontrol.agentUrl', '', 'string')).replace(/\/+$/, '');
+}
+
 function statePath() {
     const dataRoot = globalThis.DATA_ROOT || process.cwd();
     return path.join(dataRoot, '_stcontrol', 'adapter-state.json');

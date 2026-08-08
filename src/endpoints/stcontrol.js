@@ -16,7 +16,7 @@ import {
     encodeStcontrolRequestBody,
     establishSnapshotWriteGate,
     establishUserDataFaultGate,
-    getStcontrolControllerUrl,
+    getStcontrolAgentUrl,
     getStcontrolModeStatus,
     getStcontrolPendingSyncUsers,
     getStcontrolSessionTelemetry,
@@ -405,7 +405,7 @@ export async function stcontrolHandoffHandler(request, response) {
     try {
         const mode = getStcontrolModeStatus();
         if (mode.mode !== STCONTROL_MODES.MANAGED) throw new AdapterRequestError(409, 'node_not_managed');
-        const claims = await redeemControllerHandoff(kind, code);
+        const claims = await redeemAgentHandoff(kind, code);
         if (!claims?.ok || typeof claims.handle !== 'string' ||
             !Number.isSafeInteger(claims.controller_generation) || claims.controller_generation < mode.controllerGeneration) {
             throw new AdapterRequestError(403, 'invalid_handoff_claims');
@@ -678,15 +678,15 @@ async function inventoryDirectory(root) {
     return { size, digest: hash.digest('hex') };
 }
 
-async function redeemControllerHandoff(kind, code) {
-    const base = new URL(getStcontrolControllerUrl());
+async function redeemAgentHandoff(kind, code) {
+    const base = new URL(getStcontrolAgentUrl());
     if (base.username || base.password || base.search || base.hash ||
         (base.protocol !== 'https:' && !(base.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(base.hostname)))) {
-        throw new AdapterRequestError(503, 'invalid_controller_url');
+        throw new AdapterRequestError(503, 'invalid_agent_url');
     }
     const body = { code };
     const payload = encodeStcontrolRequestBody(body);
-    const requestPath = kind === 'admin' ? '/api/tickets/redeem-admin' : '/api/tickets/redeem';
+    const requestPath = kind === 'admin' ? '/agent/tickets/redeem-admin' : '/agent/tickets/redeem';
     const target = new URL(requestPath, `${base.toString().replace(/\/+$/, '')}/`);
     const timestamp = String(Math.floor(Date.now() / 1000));
     const nonce = crypto.randomBytes(16).toString('hex');
