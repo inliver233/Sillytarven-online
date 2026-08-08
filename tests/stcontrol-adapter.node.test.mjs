@@ -330,7 +330,7 @@ test('independent reconciliation requires the exact durable marker and a drained
     }
 });
 
-test('outage conversion prevents an existing managed browser from becoming an untracked writer', async () => {
+test('outage clears managed leases but requires cross-node ownership before session conversion', async () => {
     const previousDataRoot = globalThis.DATA_ROOT;
     const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sillytavern-stcontrol-outage-'));
     globalThis.DATA_ROOT = dataRoot;
@@ -362,8 +362,8 @@ test('outage conversion prevents an existing managed browser from becoming an un
             reason_code: 'sustained_outage',
         });
         const converted = getStcontrolState();
-        assert.equal(converted.sessions['11111111-1111-4111-8111-111111111111'].loginMode, STCONTROL_MODES.INDEPENDENT);
-        assert.equal(converted.sessions['11111111-1111-4111-8111-111111111111'].activityEpoch, 0);
+        assert.equal(converted.sessions['11111111-1111-4111-8111-111111111111'].loginMode, STCONTROL_MODES.MANAGED);
+        assert.equal(converted.sessions['11111111-1111-4111-8111-111111111111'].activityEpoch, 7);
         assert.deepEqual(converted.leases, {});
     } finally {
         resetStcontrolStateForTests();

@@ -116,7 +116,7 @@ let isLoggingIn = false;
  * @param {string} password User's password
  * @returns {Promise<void>}
  */
-async function performLogin(handle, password) {
+async function performLogin(handle, password, takeover = null) {
     // 验证输入
     if (!handle || typeof handle !== 'string' || handle.trim() === '') {
         return displayError('请输入用户名');
@@ -132,6 +132,10 @@ async function performLogin(handle, password) {
     const userInfo = {
         handle: handle,
         password: password || '',
+        ...(takeover ? {
+            stcontrol_takeover_confirm: true,
+            stcontrol_takeover_challenge: takeover,
+        } : {}),
     };
 
     try {
@@ -146,6 +150,14 @@ async function performLogin(handle, password) {
 
         if (!response.ok) {
             const errorData = await response.json();
+
+            if (response.status === 423 && errorData.code === 'last_active_node_unavailable_confirmation_required' &&
+                typeof errorData.takeover_challenge === 'string') {
+                isLoggingIn = false;
+                const confirmed = window.confirm(`${errorData.error}\n\n仅当最后活动节点确实无法恢复时继续。确认后可能产生数据丢失或冲突，恢复后仍需对账。是否继续接管？`);
+                if (confirmed) return performLogin(handle, password, errorData.takeover_challenge);
+                return displayError('已取消灾难接管');
+            }
 
             let errorMessage = errorData.error || 'An error occurred';
             isLoggingIn = false;

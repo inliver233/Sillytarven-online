@@ -13,7 +13,7 @@ import { applyDefaultTemplateToUser } from '../default-template.js';
 import systemMonitor from '../system-monitor.js';
 import { isEmailServiceAvailable, sendVerificationCode, sendPasswordRecoveryCode } from '../email-service.js';
 import { getRegistrationConfig, getRegistrationMethodConfig } from '../registration-policy.js';
-import { isStcontrolEnabled, noteStcontrolLogout, noteStcontrolPageHeartbeat, registerIndependentSession, stcontrolPublicAccountGuard } from '../stcontrol.js';
+import { authorizeIndependentLogin, isStcontrolEnabled, noteStcontrolLogout, noteStcontrolPageHeartbeat, registerIndependentSession, stcontrolPublicAccountGuard } from '../stcontrol.js';
 import { stcontrolHandoffHandler } from './stcontrol.js';
 
 const DISCREET_LOGIN = getConfigValue('enableDiscreetLogin', false, 'boolean');
@@ -166,6 +166,20 @@ router.post('/login', async (request, response) => {
         } else if (user.password !== getPasswordHash(request.body.password, user.salt)) {
             console.warn('Login failed: Incorrect password for', user.handle);
             return response.status(403).json({ error: '用户名或密码错误' });
+        }
+
+        if (request.stcontrolIndependentLogin) {
+            const decision = await authorizeIndependentLogin(user.handle, {
+                confirm: request.body?.stcontrol_takeover_confirm === true,
+                challenge: request.body?.stcontrol_takeover_challenge,
+            });
+            if (!decision.allowed) {
+                return response.status(423).json({
+                    error: decision.error || '灾难登录当前不可用',
+                    code: decision.code,
+                    ...(decision.takeover_challenge ? { takeover_challenge: decision.takeover_challenge } : {}),
+                });
+            }
         }
 
         if (!request.session) {

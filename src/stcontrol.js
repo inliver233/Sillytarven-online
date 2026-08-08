@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
 
+import fetch from 'node-fetch';
 import { sync as writeFileAtomicSync } from 'write-file-atomic';
 
 import { getConfigValue } from './util.js';
@@ -18,6 +19,7 @@ export const STCONTROL_CAPABILITIES = Object.freeze([
     'account_inventory_paging',
     'account_restore',
     'activity_leases',
+    'activity_ownership',
     'control_mode',
     'independent_reconciliation',
     'login_handoff',
@@ -32,11 +34,13 @@ export const STCONTROL_CAPABILITIES = Object.freeze([
     'write_gate',
 ]);
 
-const STATE_VERSION = 3;
+const STATE_VERSION = 4;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CLOCK_SKEW_SECONDS = 60;
 const SESSION_IDLE_MS = 15 * 60 * 1000;
 const MAX_NONCES = 2000;
+const MAX_TAKEOVER_CHALLENGES = 1000;
+const TAKEOVER_CHALLENGE_TTL_MS = 5 * 60 * 1000;
 const PROCESS_INSTANCE_ID = crypto.randomUUID();
 const VALID_MODES = new Set(Object.values(STCONTROL_MODES));
 const INTERNAL_PATH_PREFIX = '/api/stcontrol/internal';
@@ -112,6 +116,7 @@ function initialState() {
         gates: {},
         sessions: {},
         lastActiveOwners: {},
+        takeoverChallenges: {},
         pendingSyncUsers: {},
         leases: {},
     };
@@ -129,6 +134,10 @@ function validateLoadedState(value) {
                 reason: String(fact?.reason || 'legacy_pending_sync'),
             };
         }
+        value.version = 3;
+    }
+    if (value?.version === 3) {
+        value.takeoverChallenges = {};
         value.version = STATE_VERSION;
     }
     if (!value || value.version !== STATE_VERSION || !VALID_MODES.has(value.mode) ||
@@ -137,7 +146,7 @@ function validateLoadedState(value) {
         value.runtimeInstanceId !== undefined && !UUID_PATTERN.test(value.runtimeInstanceId)) {
         throw new Error('Invalid persisted stcontrol adapter state');
     }
-    for (const key of ['nonces', 'operations', 'gates', 'sessions', 'lastActiveOwners', 'pendingSyncUsers', 'leases']) {
+    for (const key of ['nonces', 'operations', 'gates', 'sessions', 'lastActiveOwners', 'takeoverChallenges', 'pendingSyncUsers', 'leases']) {
         if (key === 'nonces' ? !Array.isArray(value[key]) : !value[key] || typeof value[key] !== 'object' || Array.isArray(value[key])) {
             throw new Error('Invalid persisted stcontrol adapter state');
         }
@@ -147,6 +156,15 @@ function validateLoadedState(value) {
             !Number.isSafeInteger(fact?.changedAt) || fact.changedAt < 0 ||
             typeof fact?.reason !== 'string' || fact.reason.length > 128) {
             throw new Error('Invalid persisted stcontrol pending synchronization state');
+        }
+    }
+    for (const [digest, challenge] of Object.entries(value.takeoverChallenges)) {
+        if (!/^[a-f0-9]{64}$/i.test(digest) || !challenge ||
+            typeof challenge.handle !== 'string' || challenge.handle.length > 128 ||
+            !/^[a-f0-9]{64}$/i.test(challenge.parentClaimId || '') ||
+            !UUID_PATTERN.test(challenge.operationId || '') ||
+            !Number.isSafeInteger(challenge.expiresAt) || challenge.expiresAt <= 0) {
+            throw new Error('Invalid persisted stcontrol takeover challenge');
         }
     }
     return value;
@@ -354,14 +372,9 @@ export async function applyStcontrolMode(input) {
             if (input.mode === STCONTROL_MODES.INDEPENDENT) {
                 // A browser authenticated before the outage must not remain a
                 // managed writer after its Controller lease can no longer be
-                // renewed. Convert the durable adapter view immediately; the
-                // request envelope is converted on its next request.
-                for (const session of Object.values(state.sessions)) {
-                    if (!session?.loggedOutAt) {
-                        session.loginMode = STCONTROL_MODES.INDEPENDENT;
-                        session.activityEpoch = 0;
-                    }
-                }
+                // renewed. Clear every managed lease immediately, but do not
+                // convert sessions here: each next request must prove the
+                // same cross-Agent ownership quorum as a fresh native login.
                 state.leases = {};
             }
             if (input.mode === STCONTROL_MODES.DRAINING) {
@@ -397,15 +410,171 @@ function getModeStatusFromState(state) {
     };
 }
 
+async function callStcontrolAgent(requestPath, body, timeoutMs = 10_000) {
+    let base;
+    try {
+        base = new URL(getStcontrolAgentUrl());
+    } catch {
+        throw new Error('invalid_agent_url');
+    }
+    if (base.username || base.password || base.search || base.hash ||
+        (base.protocol !== 'https:' && !(base.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(base.hostname)))) {
+        throw new Error('invalid_agent_url');
+    }
+    const psk = getAgentPsk();
+    const nodeId = getNodeId();
+    if (!psk || !Number.isSafeInteger(nodeId) || nodeId <= 0) throw new Error('node_identity_unavailable');
+    const payload = encodeStcontrolRequestBody(body);
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const nonce = crypto.randomBytes(16).toString('hex');
+    const target = new URL(requestPath, `${base.toString().replace(/\/+$/, '')}/`);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const result = await fetch(target, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Agent-Id': String(nodeId),
+                'X-Timestamp': timestamp,
+                'X-Nonce': nonce,
+                'X-Signature': signStcontrolRequest(psk, 'POST', requestPath, timestamp, nonce, body),
+            },
+            body: payload,
+            redirect: 'manual',
+            signal: controller.signal,
+        });
+        const contentLength = Number(result.headers.get('content-length') || 0);
+        if (contentLength > 16 * 1024) throw new Error('agent_response_too_large');
+        const text = await result.text();
+        if (Buffer.byteLength(text) > 16 * 1024) throw new Error('agent_response_too_large');
+        let response;
+        try {
+            response = JSON.parse(text);
+        } catch {
+            throw new Error('invalid_agent_response');
+        }
+        if (!result.ok || result.status >= 300) throw new Error(response?.code || 'agent_request_failed');
+        return response;
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+async function resolveActivityOwnership(handle) {
+    try {
+        const result = await callStcontrolAgent('/agent/activity-ownership/v1/resolve', { handle });
+        if (!result || typeof result.decision !== 'string' || typeof result.reason_code !== 'string' ||
+            result.claim_id !== undefined && !/^[a-f0-9]{64}$/i.test(result.claim_id)) {
+            return { ok: false, decision: 'unavailable', reason_code: 'invalid_agent_response' };
+        }
+        return result;
+    } catch {
+        return { ok: false, decision: 'unavailable', reason_code: 'ownership_quorum_unavailable' };
+    }
+}
+
 export async function canUseNativeLogin(handle) {
     if (!isStcontrolEnabled()) return { allowed: true };
     const state = loadStateSync();
     if (state.mode !== STCONTROL_MODES.INDEPENDENT) {
         return { allowed: false, code: state.mode === STCONTROL_MODES.MANAGED ? 'managed_login_required' : 'controller_unavailable' };
     }
-    const owner = Number(state.lastActiveOwners[handle]);
-    if (owner !== getNodeId()) return { allowed: false, code: 'not_last_active_node' };
-    return { allowed: true, independent: true };
+    const ownership = await resolveActivityOwnership(handle);
+    if (ownership.ok && ownership.decision === 'automatic') return { allowed: true, independent: true };
+    if (ownership.ok && ownership.decision === 'owner_available') return { allowed: false, code: 'not_last_active_node' };
+    if (ownership.ok && ownership.decision === 'takeover_required') {
+        return { allowed: false, code: 'last_active_node_unavailable_confirmation_required' };
+    }
+    return { allowed: false, code: 'activity_ownership_unavailable' };
+}
+
+function cleanTakeoverChallenges(state, now = Date.now()) {
+    for (const [digest, challenge] of Object.entries(state.takeoverChallenges)) {
+        if (!challenge || Number(challenge.expiresAt) <= now) delete state.takeoverChallenges[digest];
+    }
+}
+
+async function issueTakeoverChallenge(handle, parentClaimId) {
+    const token = crypto.randomBytes(32).toString('base64url');
+    const digest = crypto.createHash('sha256').update(token).digest('hex');
+    const operationId = crypto.randomUUID();
+    await mutateState(state => {
+        cleanTakeoverChallenges(state);
+        const entries = Object.entries(state.takeoverChallenges);
+        if (entries.length >= MAX_TAKEOVER_CHALLENGES) {
+            entries.sort((left, right) => Number(left[1]?.expiresAt || 0) - Number(right[1]?.expiresAt || 0));
+            delete state.takeoverChallenges[entries[0][0]];
+        }
+        state.takeoverChallenges[digest] = {
+            handle,
+            parentClaimId,
+            operationId,
+            expiresAt: Date.now() + TAKEOVER_CHALLENGE_TTL_MS,
+        };
+    });
+    return token;
+}
+
+async function loadTakeoverChallenge(token, handle, parentClaimId) {
+    if (typeof token !== 'string' || token.length < 32 || token.length > 128) return null;
+    const digest = crypto.createHash('sha256').update(token).digest('hex');
+    const state = loadStateSync();
+    cleanTakeoverChallenges(state);
+    const challenge = state.takeoverChallenges[digest];
+    if (!challenge || challenge.handle !== handle || challenge.parentClaimId !== parentClaimId ||
+        Number(challenge.expiresAt) <= Date.now()) return null;
+    return { digest, ...challenge };
+}
+
+export async function authorizeIndependentLogin(handle, takeover = {}) {
+    if (!isStcontrolEnabled()) return { allowed: true };
+    if (loadStateSync().mode !== STCONTROL_MODES.INDEPENDENT) {
+        return { allowed: false, code: 'controller_unavailable' };
+    }
+    const ownership = await resolveActivityOwnership(handle);
+    if (ownership.ok && ownership.decision === 'automatic') {
+        return { allowed: true, independent: true };
+    }
+    if (ownership.ok && ownership.decision === 'owner_available') {
+        return { allowed: false, code: 'not_last_active_node', error: '请返回该用户最后活动的节点登录' };
+    }
+    if (!ownership.ok || ownership.decision !== 'takeover_required' || !ownership.claim_id) {
+        return { allowed: false, code: 'activity_ownership_unavailable', error: '无法取得跨节点活动归属法定数，请稍后重试' };
+    }
+    if (takeover.confirm !== true) {
+        const challenge = await issueTakeoverChallenge(handle, ownership.claim_id);
+        return {
+            allowed: false,
+            code: 'last_active_node_unavailable_confirmation_required',
+            error: '最后活动节点不可用。接管可能丢失尚未同步的数据，并可能在恢复后产生需要人工处理的冲突。',
+            takeover_challenge: challenge,
+        };
+    }
+    const challenge = await loadTakeoverChallenge(takeover.challenge, handle, ownership.claim_id);
+    if (!challenge) {
+        return { allowed: false, code: 'takeover_challenge_invalid', error: '接管确认已失效，请重新确认风险' };
+    }
+    let committed;
+    try {
+        committed = await callStcontrolAgent('/agent/activity-ownership/v1/takeover', {
+            handle,
+            parent_claim_id: ownership.claim_id,
+            operation_id: challenge.operationId,
+        });
+    } catch {
+        return { allowed: false, code: 'takeover_quorum_unavailable', error: '接管未获得同伴法定数，未开放写入' };
+    }
+    if (!committed?.ok || committed.decision !== 'takeover_committed' ||
+        !/^[a-f0-9]{64}$/i.test(committed.claim_id || '')) {
+        return { allowed: false, code: 'takeover_quorum_unavailable', error: '接管未获得同伴法定数，未开放写入' };
+    }
+    await mutateState(state => {
+        if (state.takeoverChallenges[challenge.digest]?.operationId === challenge.operationId) {
+            delete state.takeoverChallenges[challenge.digest];
+        }
+    });
+    return { allowed: true, independent: true, takeover: true };
 }
 
 function writeAccessError(response, code = 'managed_account_control') {
@@ -416,9 +585,11 @@ export async function stcontrolPublicAccountGuard(request, response, next) {
     if (!isStcontrolEnabled()) return next();
     const routePath = request.path;
     if (routePath === '/login') {
-        const handle = String(request.body?.handle || '').trim().toLowerCase();
-        const decision = await canUseNativeLogin(handle);
-        if (!decision.allowed) return writeAccessError(response, decision.code);
+        const state = loadStateSync();
+        if (state.mode !== STCONTROL_MODES.INDEPENDENT) {
+            const code = state.mode === STCONTROL_MODES.MANAGED ? 'managed_login_required' : 'controller_unavailable';
+            return writeAccessError(response, code);
+        }
         request.stcontrolIndependentLogin = true;
         return next();
     }
@@ -488,7 +659,6 @@ export async function registerStcontrolSession(request, claims, loginMode = STCO
                 controllerGeneration: Number(claims.controller_generation || 0),
             };
         }
-        state.lastActiveOwners[claims.handle] = getNodeId();
     });
 }
 
@@ -531,8 +701,9 @@ export async function stcontrolRequestTracker(request, response, next) {
     const envelope = ensureSessionEnvelope(request, state.mode === STCONTROL_MODES.INDEPENDENT ? STCONTROL_MODES.INDEPENDENT : STCONTROL_MODES.MANAGED);
     if (!envelope) return response.sendStatus(500);
     if (state.mode === STCONTROL_MODES.INDEPENDENT && envelope.loginMode !== STCONTROL_MODES.INDEPENDENT) {
-        if (Number(state.lastActiveOwners[handle]) !== getNodeId()) {
-            return response.status(423).json({ error: '此节点不是该用户最后活动节点', code: 'not_last_active_node' });
+        const ownership = await canUseNativeLogin(handle);
+        if (!ownership.allowed) {
+            return response.status(423).json({ error: '无法证明此节点拥有该用户的灾难写权', code: ownership.code });
         }
         envelope.loginMode = STCONTROL_MODES.INDEPENDENT;
         envelope.activityEpoch = 0;
@@ -581,7 +752,6 @@ export async function stcontrolRequestTracker(request, response, next) {
         if (isWrite) session.inFlightWrites += 1;
         else session.inFlightReads += 1;
         current.sessions[envelope.sessionId] = session;
-        current.lastActiveOwners[handle] = getNodeId();
         if (isWrite && session.loginMode === STCONTROL_MODES.INDEPENDENT) {
             current.pendingSyncUsers[handle] = { marker: crypto.randomUUID(), changedAt: now, reason: 'independent_write' };
         }
