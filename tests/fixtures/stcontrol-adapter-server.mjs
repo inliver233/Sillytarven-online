@@ -17,6 +17,7 @@ const configPath = process.env.STCONTROL_E2E_CONFIG_PATH
 setConfigFilePath(configPath);
 await storage.init({ dir: path.join(dataRoot, '_storage'), ttl: false, expiredInterval: 0 });
 const { router, stcontrolHandoffHandler } = await import('../../src/endpoints/stcontrol.js');
+const { stcontrolRequestTracker } = await import('../../src/stcontrol.js');
 const usersPublic = await import('../../src/endpoints/users-public.js');
 const systemMonitor = (await import('../../src/system-monitor.js')).default;
 
@@ -26,6 +27,20 @@ const sharedSession = {};
 app.use((request, _response, next) => {
     request.session = sharedSession;
     next();
+});
+app.use('/api/e2e', (request, response, next) => {
+    if (!sharedSession.handle) return response.sendStatus(401);
+    request.user = { profile: { handle: sharedSession.handle } };
+    return stcontrolRequestTracker(request, response, next);
+});
+app.post('/api/e2e/write', (request, response) => {
+    const record = JSON.stringify({
+        operation_id: String(request.body?.operation_id || ''),
+        handle: sharedSession.handle,
+        written_at: Date.now(),
+    });
+    fs.appendFileSync(path.join(dataRoot, 'e2e-writes.jsonl'), `${record}\n`, { encoding: 'utf8', mode: 0o600 });
+    return response.json({ ok: true, handle: sharedSession.handle });
 });
 // The fixture intentionally executes the production public handoff handler.
 app.post('/api/users/me', (request, response) => {

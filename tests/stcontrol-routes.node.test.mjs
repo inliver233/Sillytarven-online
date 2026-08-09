@@ -206,6 +206,8 @@ test('browser handoff uses the local Agent proxy and establishes a fenced sessio
             session_id: '55555555-5555-4555-8555-555555555555',
             activity_epoch: 8,
             controller_generation: 1,
+            lease_confirmed_at: Date.now(),
+            lease_expires_at: Date.now() + 15 * 60 * 1000,
         });
     });
     const agentServer = await new Promise((resolve, reject) => {
@@ -264,6 +266,21 @@ test('browser handoff uses the local Agent proxy and establishes a fenced sessio
         const stillBoundUser = await storage.getItem('user:alice');
         assert.equal(stillBoundUser.stcontrolGlobalUserId, 41);
         assert.equal(stillBoundUser.stcontrolGlobalUserUuid, globalUserUuid);
+
+        const confirmation = {
+            controller_generation: 1,
+            confirmed_at: Date.now(),
+            leases: [],
+        };
+        const unsignedConfirmation = await fetch(`${baseUrl}/api/stcontrol/internal/activity-leases/confirm`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(confirmation),
+        });
+        assert.equal(unsignedConfirmation.status, 401);
+        const signedConfirmation = await signedPost('/api/stcontrol/internal/activity-leases/confirm', confirmation);
+        assert.equal(signedConfirmation.status, 200, await signedConfirmation.text());
+        assert.equal(adapter.getStcontrolState().leases.alice, undefined);
     } finally {
         await new Promise((resolve, reject) => agentServer.close(error => error ? reject(error) : resolve()));
         if (previousAgentUrl === undefined) delete process.env.SILLYTAVERN_STCONTROL_AGENTURL;

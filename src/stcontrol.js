@@ -34,7 +34,7 @@ export const STCONTROL_CAPABILITIES = Object.freeze([
     'write_gate',
 ]);
 
-const STATE_VERSION = 4;
+const STATE_VERSION = 5;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CLOCK_SKEW_SECONDS = 60;
 const DEFAULT_SESSION_IDLE_MS = 15 * 60 * 1000;
@@ -45,6 +45,11 @@ const MAX_SESSION_IDLE_MS = 24 * 60 * 60 * 1000;
 const MIN_HEARTBEAT_MS = 10 * 1000;
 const MAX_NONCES = 2000;
 const MAX_TAKEOVER_CHALLENGES = 1000;
+const MAX_ACTIVITY_LEASE_CONFIRMATIONS = 10_000;
+const MAX_ACTIVITY_LEASE_MS = (24 * 60 + 5) * 60 * 1000;
+// Stop local writes before the Controller deadline so bounded clock skew can
+// never let an isolated old node overlap a newly granted writer.
+const ACTIVITY_LEASE_FENCE_MARGIN_MS = 60 * 1000;
 const TAKEOVER_CHALLENGE_TTL_MS = 5 * 60 * 1000;
 const PROCESS_INSTANCE_ID = crypto.randomUUID();
 const VALID_MODES = new Set(Object.values(STCONTROL_MODES));
@@ -154,6 +159,7 @@ function initialState() {
         takeoverChallenges: {},
         pendingSyncUsers: {},
         leases: {},
+        leaseConfirmationAt: 0,
     };
 }
 
@@ -173,11 +179,26 @@ function validateLoadedState(value) {
     }
     if (value?.version === 3) {
         value.takeoverChallenges = {};
+        value.version = 4;
+    }
+    if (value?.version === 4) {
+        // Version 4 leases did not carry a Controller-confirmed deadline. They
+        // deliberately start expired after upgrade until the Agent forwards a
+        // fresh exact confirmation; retaining an unbounded writer would permit
+        // A/B writes during a Controller↔Agent partition.
+        for (const lease of Object.values(value.leases || {})) {
+            if (lease && typeof lease === 'object') {
+                lease.leaseExpiresAt = 0;
+                lease.confirmedAt = 0;
+            }
+        }
+        value.leaseConfirmationAt = 0;
         value.version = STATE_VERSION;
     }
     if (!value || value.version !== STATE_VERSION || !VALID_MODES.has(value.mode) ||
         !Number.isSafeInteger(value.modeGeneration) || value.modeGeneration < 1 ||
         !Number.isSafeInteger(value.controllerGeneration) || value.controllerGeneration < 0 ||
+        !Number.isSafeInteger(value.leaseConfirmationAt) || value.leaseConfirmationAt < 0 ||
         value.runtimeInstanceId !== undefined && !UUID_PATTERN.test(value.runtimeInstanceId)) {
         throw new Error('Invalid persisted stcontrol adapter state');
     }
@@ -200,6 +221,11 @@ function validateLoadedState(value) {
             !UUID_PATTERN.test(challenge.operationId || '') ||
             !Number.isSafeInteger(challenge.expiresAt) || challenge.expiresAt <= 0) {
             throw new Error('Invalid persisted stcontrol takeover challenge');
+        }
+    }
+    for (const [handle, lease] of Object.entries(value.leases)) {
+        if (!validActivityLeaseConfirmation({ handle, ...lease }, { allowExpired: true })) {
+            throw new Error('Invalid persisted stcontrol activity lease');
         }
     }
     return value;
@@ -688,8 +714,92 @@ function ensureSessionEnvelope(request, loginMode) {
     return envelope;
 }
 
+function validActivityLeaseConfirmation(confirmation, options = {}) {
+    const allowExpired = Boolean(options.allowExpired);
+    const allowMissingConfirmedAt = Boolean(options.allowMissingConfirmedAt);
+    const confirmedAt = confirmation?.confirmedAt ?? confirmation?.confirmed_at;
+    return Boolean(confirmation) && typeof confirmation.handle === 'string' &&
+        confirmation.handle.length > 0 && confirmation.handle.length <= 128 &&
+        UUID_PATTERN.test(confirmation.sessionId ?? confirmation.session_id ?? '') &&
+        Number.isSafeInteger(confirmation.activityEpoch ?? confirmation.activity_epoch) &&
+        Number(confirmation.activityEpoch ?? confirmation.activity_epoch) > 0 &&
+        Number.isSafeInteger(confirmation.controllerGeneration ?? confirmation.controller_generation) &&
+        Number(confirmation.controllerGeneration ?? confirmation.controller_generation) > 0 &&
+        (allowMissingConfirmedAt || Number.isSafeInteger(confirmedAt) && Number(confirmedAt) >= 0) &&
+        Number.isSafeInteger(confirmation.leaseExpiresAt ?? confirmation.lease_expires_at) &&
+        (allowExpired
+            ? Number(confirmation.leaseExpiresAt ?? confirmation.lease_expires_at) >= 0
+            : Number(confirmation.leaseExpiresAt ?? confirmation.lease_expires_at) > 0);
+}
+
+/**
+ * Atomically replace the managed-writer confirmation snapshot delivered by the
+ * node-local Agent. A missing or mismatched lease is revoked; a delayed
+ * snapshot can never restore an older deadline or activity generation.
+ */
+export async function applyStcontrolActivityLeaseConfirmations(input) {
+    if (!input || !Number.isSafeInteger(input.controller_generation) || input.controller_generation < 1 ||
+        !Number.isSafeInteger(input.confirmed_at) || input.confirmed_at < 1 ||
+        input.confirmed_at > Date.now() + CLOCK_SKEW_SECONDS * 1000 ||
+        !Array.isArray(input.leases) || input.leases.length > MAX_ACTIVITY_LEASE_CONFIRMATIONS) {
+        throw new TypeError('Invalid activity lease confirmation snapshot');
+    }
+    const seenHandles = new Set();
+    const normalized = input.leases.map(confirmation => {
+        if (!validActivityLeaseConfirmation(confirmation, { allowMissingConfirmedAt: true }) ||
+            confirmation.controller_generation !== input.controller_generation ||
+            confirmation.lease_expires_at <= input.confirmed_at ||
+            confirmation.lease_expires_at > input.confirmed_at + MAX_ACTIVITY_LEASE_MS + CLOCK_SKEW_SECONDS * 1000 ||
+            seenHandles.has(confirmation.handle)) {
+            throw new TypeError('Invalid activity lease confirmation');
+        }
+        seenHandles.add(confirmation.handle);
+        return {
+            handle: confirmation.handle,
+            sessionId: confirmation.session_id,
+            activityEpoch: confirmation.activity_epoch,
+            controllerGeneration: confirmation.controller_generation,
+            leaseExpiresAt: confirmation.lease_expires_at,
+        };
+    });
+    return mutateState(state => {
+        if (input.controller_generation < state.controllerGeneration || input.confirmed_at < state.leaseConfirmationAt) {
+            throw new Error('Activity lease confirmation rollback');
+        }
+        const exact = new Map(normalized.map(confirmation => [confirmation.handle, confirmation]));
+        let appliedLeases = 0;
+        for (const [handle, lease] of Object.entries(state.leases)) {
+            if (lease.confirmedAt > input.confirmed_at) continue;
+            const confirmation = exact.get(handle);
+            if (!confirmation || lease.sessionId !== confirmation.sessionId ||
+                lease.activityEpoch !== confirmation.activityEpoch ||
+                lease.controllerGeneration !== confirmation.controllerGeneration) {
+                delete state.leases[handle];
+                continue;
+            }
+            lease.leaseExpiresAt = confirmation.leaseExpiresAt;
+            lease.confirmedAt = input.confirmed_at;
+            appliedLeases += 1;
+        }
+        state.controllerGeneration = Math.max(state.controllerGeneration, input.controller_generation);
+        state.leaseConfirmationAt = input.confirmed_at;
+        return { ok: true, confirmed_at: input.confirmed_at, applied_leases: appliedLeases };
+    });
+}
+
 export async function registerStcontrolSession(request, claims, loginMode = STCONTROL_MODES.MANAGED) {
     if (!request.session || !claims?.handle) throw new Error('Session unavailable');
+    if (loginMode === STCONTROL_MODES.MANAGED && (!validActivityLeaseConfirmation({
+        handle: claims.handle,
+        session_id: claims.session_id,
+        activity_epoch: claims.activity_epoch,
+        controller_generation: claims.controller_generation,
+        confirmed_at: claims.lease_confirmed_at,
+        lease_expires_at: claims.lease_expires_at,
+    }) || claims.lease_expires_at <= claims.lease_confirmed_at ||
+        claims.lease_expires_at > claims.lease_confirmed_at + MAX_ACTIVITY_LEASE_MS + CLOCK_SKEW_SECONDS * 1000)) {
+        throw new TypeError('Invalid managed activity lease');
+    }
     const sessionId = claims.session_id || crypto.randomUUID();
     request.session.stcontrol = {
         sessionId,
@@ -716,6 +826,8 @@ export async function registerStcontrolSession(request, claims, loginMode = STCO
                 sessionId,
                 activityEpoch: Number(claims.activity_epoch || 0),
                 controllerGeneration: Number(claims.controller_generation || 0),
+                leaseExpiresAt: Number(claims.lease_expires_at || 0),
+                confirmedAt: Number(claims.lease_confirmed_at || 0),
             };
         }
     });
@@ -797,7 +909,9 @@ export async function stcontrolRequestTracker(request, response, next) {
     }
     const lease = state.leases[handle];
     if (isWrite && envelope.loginMode === STCONTROL_MODES.MANAGED && (!lease || lease.sessionId !== envelope.sessionId ||
-        lease.activityEpoch !== envelope.activityEpoch || lease.controllerGeneration !== envelope.controllerGeneration)) {
+        lease.activityEpoch !== envelope.activityEpoch || lease.controllerGeneration !== envelope.controllerGeneration ||
+        !Number.isSafeInteger(lease.leaseExpiresAt) ||
+        lease.leaseExpiresAt <= Date.now() + ACTIVITY_LEASE_FENCE_MARGIN_MS)) {
         return response.status(409).json({ error: '当前页面的写入租约已失效，请重新登录', code: 'stale_writer_session' });
     }
     await mutateState(current => {

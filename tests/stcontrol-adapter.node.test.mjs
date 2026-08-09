@@ -6,8 +6,9 @@ import path from 'node:path';
 import test from 'node:test';
 
 import {
-	STCONTROL_CAPABILITIES,
+    STCONTROL_CAPABILITIES,
     STCONTROL_MODES,
+    applyStcontrolActivityLeaseConfirmations,
     applyStcontrolMode,
     encodeStcontrolRequestBody,
     getStcontrolActivityPolicy,
@@ -147,6 +148,8 @@ test('process restart clears orphaned in-flight counters without discarding sess
             sessionId: '99999999-9999-4999-8999-999999999999',
             activityEpoch: 11,
             controllerGeneration: 4,
+            leaseExpiresAt: Date.now() + 120_000,
+            confirmedAt: Date.now(),
         };
         fs.mkdirSync(path.join(dataRoot, '_stcontrol'), { recursive: true });
         fs.writeFileSync(path.join(dataRoot, '_stcontrol', 'adapter-state.json'), JSON.stringify(state));
@@ -229,10 +232,10 @@ test('idle sessions become durable tombstones, revoke only their exact lease, an
             ...session('frank', now - 120001),
             loggedOutAt: now - 60001,
         };
-        state.leases.alice = { sessionId: aliceSession, activityEpoch: 9, controllerGeneration: 3 };
-        state.leases.bob = { sessionId: bobSession, activityEpoch: 9, controllerGeneration: 3 };
+        state.leases.alice = { sessionId: aliceSession, activityEpoch: 9, controllerGeneration: 3, leaseExpiresAt: now + 120_000, confirmedAt: now };
+        state.leases.bob = { sessionId: bobSession, activityEpoch: 9, controllerGeneration: 3, leaseExpiresAt: now + 120_000, confirmedAt: now };
         // Carol's newer lease must survive cleanup of her older session.
-        state.leases.carol = { sessionId: replacementSession, activityEpoch: 10, controllerGeneration: 3 };
+        state.leases.carol = { sessionId: replacementSession, activityEpoch: 10, controllerGeneration: 3, leaseExpiresAt: now + 120_000, confirmedAt: now };
         fs.mkdirSync(path.join(dataRoot, '_stcontrol'), { recursive: true });
         fs.writeFileSync(path.join(dataRoot, '_stcontrol', 'adapter-state.json'), JSON.stringify(state));
         resetStcontrolStateForTests();
@@ -322,6 +325,8 @@ test('a stale managed page remains readable but cannot write', async () => {
             sessionId: '22222222-2222-4222-8222-222222222222',
             activityEpoch: 7,
             controllerGeneration: 2,
+            leaseExpiresAt: Date.now() + 120_000,
+            confirmedAt: Date.now(),
         };
         fs.mkdirSync(path.join(dataRoot, '_stcontrol'), { recursive: true });
         fs.writeFileSync(path.join(dataRoot, '_stcontrol', 'adapter-state.json'), JSON.stringify(state));
@@ -364,6 +369,104 @@ test('a stale managed page remains readable but cannot write', async () => {
     }
 });
 
+test('Controller-confirmed lease snapshots revoke omissions and fence writes at the exact deadline', async () => {
+    const previousDataRoot = globalThis.DATA_ROOT;
+    const previousEnabled = process.env.SILLYTAVERN_STCONTROL_ENABLED;
+    const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sillytavern-stcontrol-lease-confirm-'));
+    const aliceSession = 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa';
+    const bobSession = 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb';
+    globalThis.DATA_ROOT = dataRoot;
+    process.env.SILLYTAVERN_STCONTROL_ENABLED = 'true';
+    resetStcontrolStateForTests();
+    try {
+        const now = Date.now();
+        const state = getStcontrolState();
+        const addSession = (handle, sessionId) => {
+            state.sessions[sessionId] = {
+                handle, loginMode: STCONTROL_MODES.MANAGED,
+                activityEpoch: 8, controllerGeneration: 3,
+                lastSeenAt: now, lastPageAt: now, lastRequestAt: now,
+                inFlightReads: 0, inFlightWrites: 0,
+            };
+            state.leases[handle] = {
+                sessionId, activityEpoch: 8, controllerGeneration: 3,
+                leaseExpiresAt: now + 120_000, confirmedAt: now,
+            };
+        };
+        addSession('alice', aliceSession);
+        addSession('bob', bobSession);
+        fs.mkdirSync(path.join(dataRoot, '_stcontrol'), { recursive: true });
+        fs.writeFileSync(path.join(dataRoot, '_stcontrol', 'adapter-state.json'), JSON.stringify(state));
+        resetStcontrolStateForTests();
+
+        const preserved = await applyStcontrolActivityLeaseConfirmations({
+            controller_generation: 3,
+            confirmed_at: now - 1,
+            leases: [],
+        });
+        assert.deepEqual(preserved, { ok: true, confirmed_at: now - 1, applied_leases: 0 });
+        assert.equal(Object.keys(getStcontrolState().leases).length, 2,
+            'a heartbeat observed before handoff revoked the newly issued local leases');
+
+        const confirmedAt = Date.now();
+        const expiresAt = confirmedAt + 60_080;
+        const applied = await applyStcontrolActivityLeaseConfirmations({
+            controller_generation: 3,
+            confirmed_at: confirmedAt,
+            leases: [{
+                handle: 'alice', session_id: aliceSession, activity_epoch: 8,
+                controller_generation: 3, lease_expires_at: expiresAt,
+            }],
+        });
+        assert.deepEqual(applied, { ok: true, confirmed_at: confirmedAt, applied_leases: 1 });
+        assert.equal(getStcontrolState().leases.bob, undefined, 'an omitted lease remained writable');
+
+        const makeRequest = () => ({
+            method: 'POST', path: '/api/chats/save', user: { profile: { handle: 'alice' } },
+            session: { stcontrol: {
+                sessionId: aliceSession, loginMode: STCONTROL_MODES.MANAGED,
+                activityEpoch: 8, controllerGeneration: 3,
+            } },
+        });
+        const makeResponse = () => {
+            const response = new EventEmitter();
+            response.status = status => { response.statusCode = status; return response; };
+            response.json = body => { response.body = body; return response; };
+            return response;
+        };
+        const beforeExpiry = makeResponse();
+        let writes = 0;
+        await stcontrolRequestTracker(makeRequest(), beforeExpiry, () => writes++);
+        assert.equal(writes, 1);
+        beforeExpiry.emit('finish');
+
+        await new Promise(resolve => setTimeout(resolve, 100));
+        const afterExpiry = makeResponse();
+        await stcontrolRequestTracker(makeRequest(), afterExpiry, () => writes++);
+        assert.equal(writes, 1);
+        assert.equal(afterExpiry.statusCode, 409);
+        assert.equal(afterExpiry.body.code, 'stale_writer_session');
+
+        await assert.rejects(() => applyStcontrolActivityLeaseConfirmations({
+            controller_generation: 3,
+            confirmed_at: confirmedAt - 1,
+            leases: [{
+                handle: 'alice', session_id: aliceSession, activity_epoch: 8,
+                controller_generation: 3, lease_expires_at: confirmedAt + 120_000,
+            }],
+        }), /rollback/);
+        resetStcontrolStateForTests();
+        assert.equal(getStcontrolState().leases.alice.leaseExpiresAt, expiresAt, 'confirmed deadline was not durable');
+    } finally {
+        await new Promise(resolve => setTimeout(resolve, 20));
+        resetStcontrolStateForTests();
+        globalThis.DATA_ROOT = previousDataRoot;
+        if (previousEnabled === undefined) delete process.env.SILLYTAVERN_STCONTROL_ENABLED;
+        else process.env.SILLYTAVERN_STCONTROL_ENABLED = previousEnabled;
+        fs.rmSync(dataRoot, { recursive: true, force: true });
+    }
+});
+
 test('multiple tabs sharing one fenced session keep exact concurrent request counters', async () => {
     const previousDataRoot = globalThis.DATA_ROOT;
     const previousEnabled = process.env.SILLYTAVERN_STCONTROL_ENABLED;
@@ -381,7 +484,7 @@ test('multiple tabs sharing one fenced session keep exact concurrent request cou
             lastSeenAt: now, lastPageAt: now, lastRequestAt: now,
             inFlightReads: 0, inFlightWrites: 0,
         };
-        state.leases.alice = { sessionId, activityEpoch: 12, controllerGeneration: 4 };
+        state.leases.alice = { sessionId, activityEpoch: 12, controllerGeneration: 4, leaseExpiresAt: now + 120_000, confirmedAt: now };
         fs.mkdirSync(path.join(dataRoot, '_stcontrol'), { recursive: true });
         fs.writeFileSync(path.join(dataRoot, '_stcontrol', 'adapter-state.json'), JSON.stringify(state));
         resetStcontrolStateForTests();
@@ -460,6 +563,8 @@ test('a durable data fault gate blocks only writes with a machine-readable reaso
             sessionId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
             activityEpoch: 7,
             controllerGeneration: 1,
+            leaseExpiresAt: Date.now() + 120_000,
+            confirmedAt: Date.now(),
         };
         fs.mkdirSync(path.join(dataRoot, '_stcontrol'), { recursive: true });
         fs.writeFileSync(path.join(dataRoot, '_stcontrol', 'adapter-state.json'), JSON.stringify(state));
@@ -568,6 +673,8 @@ test('outage clears managed leases but requires cross-node ownership before sess
             sessionId: '11111111-1111-4111-8111-111111111111',
             activityEpoch: 7,
             controllerGeneration: 1,
+            leaseExpiresAt: Date.now() + 120_000,
+            confirmedAt: Date.now(),
         };
         fs.mkdirSync(path.join(dataRoot, '_stcontrol'), { recursive: true });
         fs.writeFileSync(path.join(dataRoot, '_stcontrol', 'adapter-state.json'), JSON.stringify(state));

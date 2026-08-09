@@ -12,6 +12,7 @@ import { getRegistrationMethodConfig } from '../registration-policy.js';
 import {
     STCONTROL_CAPABILITIES,
     STCONTROL_MODES,
+    applyStcontrolActivityLeaseConfirmations,
     applyStcontrolMode,
     encodeStcontrolRequestBody,
     establishSnapshotWriteGate,
@@ -85,6 +86,14 @@ router.post('/api/stcontrol/internal/sessions', (_request, response) => {
         users: getStcontrolSessionTelemetry(),
         pending_users: getStcontrolPendingSyncUsers(),
     });
+});
+
+router.post('/api/stcontrol/internal/activity-leases/confirm', async (request, response) => {
+    try {
+        return response.json(await applyStcontrolActivityLeaseConfirmations(request.body));
+    } catch (error) {
+        return adapterError(response, error);
+    }
 });
 
 router.post('/api/stcontrol/internal/control/sync-complete', async (request, response) => {
@@ -425,7 +434,13 @@ export async function stcontrolHandoffHandler(request, response) {
             };
         } else if (!UUID_PATTERN.test(claims.user_uuid || '') || !UUID_PATTERN.test(claims.session_id || '') ||
             !Number.isSafeInteger(claims.user_id) || claims.user_id <= 0 ||
-            !Number.isSafeInteger(claims.activity_epoch) || claims.activity_epoch <= 0) {
+            !Number.isSafeInteger(claims.activity_epoch) || claims.activity_epoch <= 0 ||
+            !Number.isSafeInteger(claims.lease_confirmed_at) ||
+            claims.lease_confirmed_at > Date.now() + 60_000 ||
+            !Number.isSafeInteger(claims.lease_expires_at) ||
+            claims.lease_expires_at <= Date.now() - 60_000 ||
+            claims.lease_expires_at <= claims.lease_confirmed_at ||
+            claims.lease_expires_at > claims.lease_confirmed_at + 24 * 60 * 60 * 1000 + 60_000) {
             throw new AdapterRequestError(403, 'invalid_handoff_claims');
         } else {
             const globalUserUuid = String(claims.user_uuid).toLowerCase();
