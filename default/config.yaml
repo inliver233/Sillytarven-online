@@ -443,6 +443,11 @@ stcontrol:
   # Prefer the STCONTROL_AGENT_PSK environment variable in production.
   agentPsk: ""
   controllerGeneration: 0
+  # Managed activity policy. Browser heartbeat intervals are capped below
+  # half of sessionIdleMs so an open foreground/background page stays online.
+  sessionIdleMs: 900000
+  foregroundHeartbeatMs: 120000
+  backgroundHeartbeatMs: 300000
 email:
   enabled: false
   smtp:

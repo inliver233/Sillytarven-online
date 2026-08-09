@@ -37,7 +37,12 @@ export const STCONTROL_CAPABILITIES = Object.freeze([
 const STATE_VERSION = 4;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CLOCK_SKEW_SECONDS = 60;
-const SESSION_IDLE_MS = 15 * 60 * 1000;
+const DEFAULT_SESSION_IDLE_MS = 15 * 60 * 1000;
+const DEFAULT_FOREGROUND_HEARTBEAT_MS = 2 * 60 * 1000;
+const DEFAULT_BACKGROUND_HEARTBEAT_MS = 5 * 60 * 1000;
+const MIN_SESSION_IDLE_MS = 60 * 1000;
+const MAX_SESSION_IDLE_MS = 24 * 60 * 60 * 1000;
+const MIN_HEARTBEAT_MS = 10 * 1000;
 const MAX_NONCES = 2000;
 const MAX_TAKEOVER_CHALLENGES = 1000;
 const TAKEOVER_CHALLENGE_TTL_MS = 5 * 60 * 1000;
@@ -79,6 +84,36 @@ export function getStcontrolControllerUrl() {
 
 export function getStcontrolAgentUrl() {
     return String(getConfigValue('stcontrol.agentUrl', '', 'string')).replace(/\/+$/, '');
+}
+
+function boundedInteger(value, fallback, minimum, maximum) {
+    return Number.isSafeInteger(value) && value >= minimum && value <= maximum ? value : fallback;
+}
+
+/**
+ * Return the public, non-secret timing policy shared by the adapter and its
+ * browser heartbeat. Heartbeats are capped below half of the idle window so
+ * a delayed interval cannot routinely expire an otherwise open page.
+ */
+export function getStcontrolActivityPolicy() {
+    const sessionIdleMs = boundedInteger(
+        getConfigValue('stcontrol.sessionIdleMs', DEFAULT_SESSION_IDLE_MS, 'number'),
+        DEFAULT_SESSION_IDLE_MS,
+        MIN_SESSION_IDLE_MS,
+        MAX_SESSION_IDLE_MS,
+    );
+    const heartbeatMaximum = Math.max(MIN_HEARTBEAT_MS, Math.floor(sessionIdleMs / 2));
+    const heartbeat = (key, fallback) => Math.min(heartbeatMaximum, boundedInteger(
+        getConfigValue(key, fallback, 'number'),
+        fallback,
+        MIN_HEARTBEAT_MS,
+        MAX_SESSION_IDLE_MS,
+    ));
+    return Object.freeze({
+        sessionIdleMs,
+        foregroundHeartbeatMs: heartbeat('stcontrol.foregroundHeartbeatMs', DEFAULT_FOREGROUND_HEARTBEAT_MS),
+        backgroundHeartbeatMs: heartbeat('stcontrol.backgroundHeartbeatMs', DEFAULT_BACKGROUND_HEARTBEAT_MS),
+    });
 }
 
 function statePath() {
@@ -324,15 +359,39 @@ export async function requireStcontrolAgent(request, response, next) {
 }
 
 function cleanExpiredSessions(state, now = Date.now()) {
+    const { sessionIdleMs } = getStcontrolActivityPolicy();
+    let changed = false;
     for (const [sessionId, session] of Object.entries(state.sessions)) {
+        if (!session) {
+            delete state.sessions[sessionId];
+            changed = true;
+            continue;
+        }
+        if (session.loggedOutAt) {
+            if (now - Number(session.loggedOutAt) > sessionIdleMs) {
+                delete state.sessions[sessionId];
+                changed = true;
+            }
+            continue;
+        }
         const inFlight = Number(session?.inFlightReads || 0) + Number(session?.inFlightWrites || 0);
-        if (!session || (inFlight === 0 && now - Number(session.lastSeenAt || 0) > SESSION_IDLE_MS)) delete state.sessions[sessionId];
+        if (inFlight === 0 && now - Number(session.lastSeenAt || 0) > sessionIdleMs) {
+            // Keep an ended tombstone for one more idle window so the Agent
+            // and Controller can durably observe the transition. The exact
+            // local writer lease is revoked in the same atomic state write.
+            session.loggedOutAt = now;
+            session.inFlightReads = 0;
+            session.inFlightWrites = 0;
+            if (state.leases[session.handle]?.sessionId === sessionId) delete state.leases[session.handle];
+            changed = true;
+        }
     }
+    return changed;
 }
 
 export function getStcontrolModeStatus() {
     const state = loadStateSync();
-    cleanExpiredSessions(state);
+    if (cleanExpiredSessions(state)) persistState(state);
     const activeIndependentSessions = Object.values(state.sessions)
         .filter(session => session?.loginMode === STCONTROL_MODES.INDEPENDENT && !session.loggedOutAt).length;
     return {
@@ -682,14 +741,16 @@ export async function noteStcontrolLogout(request) {
 
 export async function noteStcontrolPageHeartbeat(request) {
     const sessionId = request.session?.stcontrol?.sessionId;
-    if (!sessionId || !isStcontrolEnabled()) return;
-    await mutateState(state => {
+    if (!sessionId || !isStcontrolEnabled()) return false;
+    return mutateState(state => {
+        cleanExpiredSessions(state);
         const session = state.sessions[sessionId];
-        if (!session || session.loggedOutAt) return;
+        if (!session || session.loggedOutAt) return false;
         const now = Date.now();
         session.lastPageAt = now;
         session.lastRequestAt = now;
         session.lastSeenAt = now;
+        return true;
     });
 }
 
@@ -698,8 +759,14 @@ export async function stcontrolRequestTracker(request, response, next) {
     if (request.session?.stcontrolAdmin) return next();
     const handle = request.user.profile.handle;
     const state = loadStateSync();
+    if (cleanExpiredSessions(state)) persistState(state);
+    const hadSessionEnvelope = Boolean(request.session?.stcontrol?.sessionId);
     const envelope = ensureSessionEnvelope(request, state.mode === STCONTROL_MODES.INDEPENDENT ? STCONTROL_MODES.INDEPENDENT : STCONTROL_MODES.MANAGED);
     if (!envelope) return response.sendStatus(500);
+    const knownSession = state.sessions[envelope.sessionId];
+    if (knownSession?.loggedOutAt || (hadSessionEnvelope && !knownSession)) {
+        return response.status(409).json({ error: '当前页面会话已过期，请重新登录', code: 'stale_writer_session' });
+    }
     if (state.mode === STCONTROL_MODES.INDEPENDENT && envelope.loginMode !== STCONTROL_MODES.INDEPENDENT) {
         const ownership = await canUseNativeLogin(handle);
         if (!ownership.allowed) {
@@ -728,11 +795,9 @@ export async function stcontrolRequestTracker(request, response, next) {
         }
         return response.status(423).json({ error: '用户数据正在生成一致性快照，请稍后重试', code: 'user_quiescing' });
     }
-    const knownSession = state.sessions[envelope.sessionId];
     const lease = state.leases[handle];
-    if (knownSession?.loggedOutAt ||
-        (isWrite && envelope.loginMode === STCONTROL_MODES.MANAGED && (!lease || lease.sessionId !== envelope.sessionId ||
-            lease.activityEpoch !== envelope.activityEpoch || lease.controllerGeneration !== envelope.controllerGeneration))) {
+    if (isWrite && envelope.loginMode === STCONTROL_MODES.MANAGED && (!lease || lease.sessionId !== envelope.sessionId ||
+        lease.activityEpoch !== envelope.activityEpoch || lease.controllerGeneration !== envelope.controllerGeneration)) {
         return response.status(409).json({ error: '当前页面的写入租约已失效，请重新登录', code: 'stale_writer_session' });
     }
     await mutateState(current => {
@@ -776,12 +841,13 @@ export async function stcontrolRequestTracker(request, response, next) {
 export function getStcontrolSessionTelemetry() {
     const state = loadStateSync();
     const now = Date.now();
-    cleanExpiredSessions(state, now);
+    if (cleanExpiredSessions(state, now)) persistState(state);
+    const { sessionIdleMs } = getStcontrolActivityPolicy();
     const users = [];
     for (const [sessionId, session] of Object.entries(state.sessions)) {
         if (!session?.handle) continue;
-        const hasPage = now - Number(session.lastPageAt || 0) <= SESSION_IDLE_MS;
-        const hasRequest = now - Number(session.lastRequestAt || 0) <= SESSION_IDLE_MS;
+        const hasPage = now - Number(session.lastPageAt || 0) <= sessionIdleMs;
+        const hasRequest = now - Number(session.lastRequestAt || 0) <= sessionIdleMs;
         const inFlightReads = Number(session.inFlightReads || 0);
         const inFlightWrites = Number(session.inFlightWrites || 0);
         users.push({

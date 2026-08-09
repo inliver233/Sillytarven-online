@@ -13,7 +13,7 @@ import { applyDefaultTemplateToUser } from '../default-template.js';
 import systemMonitor from '../system-monitor.js';
 import { isEmailServiceAvailable, sendVerificationCode, sendPasswordRecoveryCode } from '../email-service.js';
 import { getRegistrationConfig, getRegistrationMethodConfig } from '../registration-policy.js';
-import { authorizeIndependentLogin, isStcontrolEnabled, noteStcontrolLogout, noteStcontrolPageHeartbeat, registerIndependentSession, stcontrolPublicAccountGuard } from '../stcontrol.js';
+import { authorizeIndependentLogin, getStcontrolActivityPolicy, getStcontrolControllerUrl, isStcontrolEnabled, noteStcontrolLogout, noteStcontrolPageHeartbeat, registerIndependentSession, stcontrolPublicAccountGuard } from '../stcontrol.js';
 import { stcontrolHandoffHandler } from './stcontrol.js';
 
 const DISCREET_LOGIN = getConfigValue('enableDiscreetLogin', false, 'boolean');
@@ -252,15 +252,18 @@ router.post('/heartbeat', async (request, response) => {
             return response.status(401).json({ error: 'User not found' });
         }
 
-        // 更新用户活动状态
+        const renewed = await noteStcontrolPageHeartbeat(request);
+        if (isStcontrolEnabled() && !renewed) {
+            return response.status(409).json({ error: '当前页面会话已过期，请重新登录', code: 'stale_writer_session' });
+        }
+
+        // Only a current managed lease may refresh either online accounting
+        // or the browser session's last-activity marker.
         systemMonitor.updateUserActivity(userHandle, {
             userName: user.name,
             isHeartbeat: true,
         });
-
-        // 更新session的最后活动时间
         request.session.lastActivity = Date.now();
-        await noteStcontrolPageHeartbeat(request);
 
         return response.json({ status: 'ok', timestamp: Date.now() });
     } catch (error) {
@@ -673,6 +676,8 @@ router.get('/me', async (request, response) => {
             expiresAt: user.expiresAt || null,
             email: user.email || null,
             stcontrolEnabled: isStcontrolEnabled(),
+            stcontrolActivityPolicy: getStcontrolActivityPolicy(),
+            stcontrolControllerUrl: getStcontrolControllerUrl(),
         });
     } catch (error) {
         console.error('Get current user failed:', error);

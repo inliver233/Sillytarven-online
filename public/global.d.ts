@@ -169,6 +169,7 @@ declare global {
             init(): any;
             start(): void;
             stop(): void;
+            setStcontrolEnabled(enabled: boolean, policy?: { foregroundHeartbeatMs?: number; backgroundHeartbeatMs?: number }, controllerUrl?: string): void;
             instance(): any;
             forceStart(): any;
         };

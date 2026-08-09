@@ -81,7 +81,11 @@ async function getCurrentUser() {
 
         currentUser = await response.json();
         $('#admin_button').toggle(accountsEnabled && isAdmin());
-        window.userHeartbeat?.setStcontrolEnabled?.(Boolean(currentUser.stcontrolEnabled));
+        window.userHeartbeat?.setStcontrolEnabled?.(
+            Boolean(currentUser.stcontrolEnabled),
+            currentUser.stcontrolActivityPolicy,
+            currentUser.stcontrolControllerUrl,
+        );
 
         // 启动用户心跳
         if (typeof window.userHeartbeat !== 'undefined' && window.userHeartbeat.forceStart) {

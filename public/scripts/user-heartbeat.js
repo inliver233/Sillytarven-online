@@ -12,6 +12,8 @@ class UserHeartbeat {
         this.hiddenHeartbeatIntervalMs = 5 * 60 * 1000; // 5分钟（页面隐藏时）
         this.inactivityThreshold = 5 * 60 * 1000; // 5分钟无活动则暂停心跳
         this.stcontrolEnabled = false;
+        this.stcontrolControllerUrl = '';
+        this.stcontrolSessionStale = false;
 
         // 绑定页面活动监听器
         this.bindActivityListeners();
@@ -27,6 +29,7 @@ class UserHeartbeat {
      * 开始心跳
      */
     start() {
+        if (this.stcontrolSessionStale) return;
         if (this.heartbeatInterval) {
             // 如果已经在运行，立即发送一次心跳以确保状态更新
             this.sendHeartbeat();
@@ -109,6 +112,10 @@ class UserHeartbeat {
 
             if (response.ok) {
                 // 心跳发送成功
+            } else if (response.status === 409 && this.stcontrolEnabled) {
+                this.handleStcontrolSessionStale();
+            } else if ((response.status === 401 || response.status === 403) && this.stcontrolEnabled) {
+                this.handleStcontrolSessionStale();
             } else if (response.status === 401 || response.status === 403) {
                 // 用户未认证或权限不足，停止心跳
                 console.log('User session ended, stopping heartbeat');
@@ -117,8 +124,10 @@ class UserHeartbeat {
         } catch (error) {
             // 网络错误，继续尝试
             if (error.name === 'TypeError' && error.message.includes('Failed to fetch')) {
-                // 网络连接问题，暂时停止心跳
-                this.stop();
+                // Managed mode keeps its scheduled retry: a short network
+                // interruption must not turn a still-open background tab into
+                // a false offline fact. Standalone behavior remains unchanged.
+                if (!this.stcontrolEnabled) this.stop();
             }
         }
     }
@@ -168,7 +177,7 @@ class UserHeartbeat {
         this.lastActivity = Date.now();
 
         // 如果心跳已停止但用户又开始活动，重新启动心跳
-        if (!this.isActive && !this.heartbeatInterval) {
+        if (!this.stcontrolSessionStale && !this.isActive && !this.heartbeatInterval) {
             this.start();
         }
     }
@@ -177,9 +186,40 @@ class UserHeartbeat {
      * Keep a low-frequency page-presence signal while stcontrol owns the
      * activity lease. Standalone nodes retain their historical idle behavior.
      * @param {boolean} enabled Whether the managed adapter is enabled
+     * @param {{foregroundHeartbeatMs?: number, backgroundHeartbeatMs?: number}} [policy] Public timing policy
+     * @param {string} [controllerUrl] Public Controller login URL
      */
-    setStcontrolEnabled(enabled) {
+    setStcontrolEnabled(enabled, policy = {}, controllerUrl = '') {
         this.stcontrolEnabled = Boolean(enabled);
+        if (this.stcontrolEnabled) {
+            const validInterval = (value, fallback) => Number.isSafeInteger(value) && value >= 10_000 ? value : fallback;
+            this.heartbeatIntervalMs = validInterval(policy.foregroundHeartbeatMs, this.heartbeatIntervalMs);
+            this.hiddenHeartbeatIntervalMs = validInterval(policy.backgroundHeartbeatMs, this.hiddenHeartbeatIntervalMs);
+            this.stcontrolControllerUrl = typeof controllerUrl === 'string' && /^https?:\/\//i.test(controllerUrl) ? controllerUrl : '';
+            // A successful /api/users/me response proves a new authenticated
+            // page and is the only in-page operation allowed to clear stale.
+            this.stcontrolSessionStale = false;
+        }
+        if (this.isActive) this.scheduleHeartbeat();
+    }
+
+    /**
+     * Stop a sleeping/stale managed page from silently restarting its old
+     * heartbeat and direct the user back through the Controller login flow.
+     */
+    handleStcontrolSessionStale() {
+        if (this.stcontrolSessionStale) return;
+        this.stcontrolSessionStale = true;
+        this.stop();
+        const message = '当前页面会话已过期，请通过统一总控重新登录。';
+        if (window.toastr?.error) window.toastr.error(message);
+        else if (typeof window.alert === 'function') window.alert(message);
+        if (typeof window.dispatchEvent === 'function' && typeof CustomEvent === 'function') {
+            window.dispatchEvent(new CustomEvent('stcontrol-session-stale'));
+        }
+        if (this.stcontrolControllerUrl && typeof window.location?.assign === 'function') {
+            setTimeout(() => window.location.assign(this.stcontrolControllerUrl), 0);
+        }
     }
 
     /**
@@ -327,7 +367,7 @@ if (typeof window !== 'undefined') {
         init: initUserHeartbeat,
         start: startUserHeartbeat,
         stop: stopUserHeartbeat,
-        setStcontrolEnabled: enabled => initUserHeartbeat().setStcontrolEnabled(enabled),
+        setStcontrolEnabled: (enabled, policy, controllerUrl) => initUserHeartbeat().setStcontrolEnabled(enabled, policy, controllerUrl),
         instance: () => userHeartbeat,
         forceStart: () => {
             console.log('Force starting user heartbeat...');

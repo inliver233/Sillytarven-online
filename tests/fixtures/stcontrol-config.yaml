@@ -4,6 +4,9 @@ stcontrol:
   agentPsk: test-agent-psk
   controllerUrl: ""
   controllerGeneration: 0
+  sessionIdleMs: 900000
+  foregroundHeartbeatMs: 120000
+  backgroundHeartbeatMs: 300000
 dataRoot: ./data
 listen: true
 listenAddress:
