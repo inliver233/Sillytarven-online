@@ -21,6 +21,7 @@ import { readSecret, writeSecret } from './endpoints/secrets.js';
 import { getContentOfType } from './endpoints/content-manager.js';
 import systemMonitor from './system-monitor.js';
 import { serverDirectory } from './server-directory.js';
+import { isStcontrolEnabled } from './stcontrol.js';
 
 export const KEY_PREFIX = 'user:';
 const AVATAR_PREFIX = 'avatar:';
@@ -808,6 +809,15 @@ export function shouldRedirectToLogin(request) {
  */
 export async function tryAutoLogin(request, basicAuthMode) {
     if (!ENABLE_ACCOUNTS || request.user || !request.session) {
+        return false;
+    }
+
+    // A managed node may only establish a user session through a Controller
+    // handoff. During an independently confirmed outage, native login still
+    // has to pass the explicit password and cross-Agent ownership checks in
+    // /api/users/login; single-user, trusted-header and Basic auto-login paths
+    // cannot prove that ownership and must therefore remain disabled.
+    if (isStcontrolEnabled()) {
         return false;
     }
 

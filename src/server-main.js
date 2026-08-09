@@ -77,6 +77,7 @@ import { migrateGroupChatsMetadataFormat } from './endpoints/groups.js';
 import { initializeUserInvitationSystem } from './user-invitations.js';
 import { getRegistrationMethodConfig } from './registration-policy.js';
 import { beginEndpointPerformance, finalizeRequestPerformance, performanceRequestStartMiddleware } from './performance-monitor.js';
+import { stcontrolOAuthGuard, stcontrolPublicAccountGuard } from './stcontrol.js';
 
 // Work around a node v20.0.0, v20.1.0, and v20.2.0 bug. The issue was fixed in v20.3.0.
 // https://github.com/nodejs/node/issues/47822#issuecomment-1564708870
@@ -279,19 +280,19 @@ app.get('/callback/:source?', (request, response) => {
 
 // Linux.do 应用平台注册的兼容回调地址。
 // 标准内部路由仍保留为 /api/oauth/linuxdo/callback。
-app.get('/oauth', (request, response, next) => {
+app.get('/oauth', stcontrolOAuthGuard, (request, response, next) => {
     setPrivateNoStoreHeaders(response);
     return linuxdoCallbackHandler(request, response, next);
 });
 
 // Host login page
-app.get('/login', (request, response, next) => {
+app.get('/login', stcontrolPublicAccountGuard, (request, response, next) => {
     setPrivateNoStoreHeaders(response);
     return loginPageMiddleware(request, response, next);
 });
 
 // Host additional pages
-app.get('/register', (request, response) => {
+app.get('/register', stcontrolPublicAccountGuard, (request, response) => {
     setPrivateNoStoreHeaders(response);
     return response.sendFile('register.html', { root: path.join(serverDirectory, 'public') });
 });
