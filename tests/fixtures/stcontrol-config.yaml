@@ -7,6 +7,7 @@ stcontrol:
   sessionIdleMs: 900000
   foregroundHeartbeatMs: 120000
   backgroundHeartbeatMs: 300000
+  snapshotGateLeaseMs: 30000
 dataRoot: ./data
 listen: true
 listenAddress:

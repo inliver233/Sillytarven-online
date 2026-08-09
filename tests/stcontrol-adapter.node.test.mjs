@@ -19,6 +19,7 @@ import {
     noteStcontrolPageHeartbeat,
     resetStcontrolStateForTests,
     runIdempotentStcontrolOperation,
+    setUserWriteGate,
     stcontrolRequestTracker,
 } from '../src/stcontrol.js';
 import { setConfigFilePath } from '../src/util.js';
@@ -110,14 +111,25 @@ test('legacy adapter state migrates out of the node-persist namespace', () => {
             changedAt: new Date().toISOString(),
             nonces: [],
             operations: {},
-            gates: {},
+            gates: {
+                alice: {
+                    workflowId: '01010101-0101-4101-8101-010101010101',
+                    snapshotId: '02020202-0202-4202-8202-020202020202',
+                    activityEpoch: 4,
+                    freezeToken: 'legacy-freeze-token-with-sufficient-length',
+                    createdAt: Date.now(),
+                },
+            },
             sessions: {},
             lastActiveOwners: {},
             pendingSyncUsers: {},
             leases: {},
         }));
 
-        assert.equal(getStcontrolState().modeGeneration, 5);
+        const migrated = getStcontrolState();
+        assert.equal(migrated.modeGeneration, 5);
+        assert.equal(migrated.gates.alice.kind, 'snapshot');
+        assert.ok(migrated.gates.alice.expiresAt > migrated.gates.alice.createdAt);
         assert.equal(fs.existsSync(path.join(legacyDirectory, 'stcontrol-adapter-state.json')), false);
         assert.equal(fs.existsSync(path.join(dataRoot, '_stcontrol', 'adapter-state.json')), true);
     } finally {
@@ -533,6 +545,100 @@ test('multiple tabs sharing one fenced session keep exact concurrent request cou
     }
 });
 
+test('snapshot gate leases expire safely and cover extension requests for only one user', async () => {
+    const previousDataRoot = globalThis.DATA_ROOT;
+    const previousEnabled = process.env.SILLYTAVERN_STCONTROL_ENABLED;
+    const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sillytavern-stcontrol-gate-lease-'));
+    globalThis.DATA_ROOT = dataRoot;
+    process.env.SILLYTAVERN_STCONTROL_ENABLED = 'true';
+    resetStcontrolStateForTests();
+    try {
+        const now = Date.now();
+        const aliceSession = '12121212-1212-4121-8121-121212121212';
+        const bobSession = '34343434-3434-4343-8343-343434343434';
+        const state = getStcontrolState();
+        for (const [handle, sessionId, epoch] of [
+            ['alice', aliceSession, 21],
+            ['bob', bobSession, 22],
+        ]) {
+            state.sessions[sessionId] = {
+                handle, loginMode: STCONTROL_MODES.MANAGED,
+                activityEpoch: epoch, controllerGeneration: 7,
+                lastSeenAt: now, lastPageAt: now, lastRequestAt: now,
+                inFlightReads: 0, inFlightWrites: 0,
+            };
+            state.leases[handle] = {
+                sessionId, activityEpoch: epoch, controllerGeneration: 7,
+                leaseExpiresAt: now + 120_000, confirmedAt: now,
+            };
+        }
+        fs.mkdirSync(path.join(dataRoot, '_stcontrol'), { recursive: true });
+        fs.writeFileSync(path.join(dataRoot, '_stcontrol', 'adapter-state.json'), JSON.stringify(state));
+        resetStcontrolStateForTests();
+
+        const gate = expiresAt => ({
+            kind: 'snapshot',
+            workflowId: '56565656-5656-4565-8565-565656565656',
+            snapshotId: '78787878-7878-4787-8787-787878787878',
+            activityEpoch: 21,
+            freezeToken: 'exact-snapshot-gate-token-with-enough-entropy',
+            createdAt: now - 30_001,
+            expiresAt,
+        });
+        const request = (handle, sessionId, epoch, method) => ({
+            method,
+            path: '/api/extensions/example/private-state',
+            user: { profile: { handle } },
+            session: { stcontrol: {
+                sessionId, loginMode: STCONTROL_MODES.MANAGED,
+                activityEpoch: epoch, controllerGeneration: 7,
+            } },
+        });
+        const response = () => {
+            const value = new EventEmitter();
+            value.status = status => { value.statusCode = status; return value; };
+            value.set = (name, data) => { value.headers = { ...value.headers, [name]: data }; return value; };
+            value.json = body => { value.body = body; return value; };
+            return value;
+        };
+
+        await setUserWriteGate('alice', gate(now - 1));
+        const recoveredWrite = response();
+        let continued = 0;
+        await stcontrolRequestTracker(request('alice', aliceSession, 21, 'POST'), recoveredWrite, () => continued++);
+        assert.equal(continued, 1, 'an expired orphan gate kept the user frozen');
+        recoveredWrite.emit('finish');
+        await new Promise(resolve => setTimeout(resolve, 20));
+        assert.equal(getStcontrolState().gates.alice, undefined);
+
+        await setUserWriteGate('alice', gate(Date.now() + 30_000));
+        const aliceRead = response();
+        await stcontrolRequestTracker(request('alice', aliceSession, 21, 'GET'), aliceRead, () => continued++);
+        const aliceWrite = response();
+        await stcontrolRequestTracker(request('alice', aliceSession, 21, 'POST'), aliceWrite, () => continued++);
+        assert.equal(aliceWrite.statusCode, 423);
+        assert.equal(aliceWrite.body.code, 'user_quiescing');
+
+        const bobWrite = response();
+        await stcontrolRequestTracker(request('bob', bobSession, 22, 'POST'), bobWrite, () => continued++);
+        assert.equal(continued, 3, 'one user gate blocked another user or failed to count extension traffic');
+        const facts = Object.fromEntries(getStcontrolSessionTelemetry().map(item => [item.handle, item]));
+        assert.equal(facts.alice.in_flight_reads, 1);
+        assert.equal(facts.alice.in_flight_writes, 0);
+        assert.equal(facts.bob.in_flight_writes, 1);
+
+        aliceRead.emit('close');
+        bobWrite.emit('finish');
+        await new Promise(resolve => setTimeout(resolve, 20));
+    } finally {
+        resetStcontrolStateForTests();
+        globalThis.DATA_ROOT = previousDataRoot;
+        if (previousEnabled === undefined) delete process.env.SILLYTAVERN_STCONTROL_ENABLED;
+        else process.env.SILLYTAVERN_STCONTROL_ENABLED = previousEnabled;
+        fs.rmSync(dataRoot, { recursive: true, force: true });
+    }
+});
+
 test('a durable data fault gate blocks only writes with a machine-readable reason', async () => {
     const previousDataRoot = globalThis.DATA_ROOT;
     const previousEnabled = process.env.SILLYTAVERN_STCONTROL_ENABLED;
@@ -716,6 +822,7 @@ test('stcontrol adapter is wired through authenticated, CSRF-safe integration po
         '/api/stcontrol/internal/admin/verify',
         '/api/stcontrol/internal/admin/check',
         '/api/stcontrol/internal/snapshots/quiesce',
+        '/api/stcontrol/internal/snapshots/renew',
         '/api/stcontrol/internal/snapshots/release',
         '/api/stcontrol/internal/data-faults/freeze',
     ]) {

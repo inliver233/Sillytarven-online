@@ -448,6 +448,10 @@ stcontrol:
   sessionIdleMs: 900000
   foregroundHeartbeatMs: 120000
   backgroundHeartbeatMs: 300000
+  # The Agent renews this per-user snapshot gate while copying. If the Agent
+  # crashes or loses the loopback adapter, the gate expires and cannot freeze
+  # the user indefinitely. Valid range: 10000..300000 milliseconds.
+  snapshotGateLeaseMs: 30000
 email:
   enabled: false
   smtp:

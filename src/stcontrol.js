@@ -34,7 +34,7 @@ export const STCONTROL_CAPABILITIES = Object.freeze([
     'write_gate',
 ]);
 
-const STATE_VERSION = 5;
+const STATE_VERSION = 6;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CLOCK_SKEW_SECONDS = 60;
 const DEFAULT_SESSION_IDLE_MS = 15 * 60 * 1000;
@@ -50,6 +50,9 @@ const MAX_ACTIVITY_LEASE_MS = (24 * 60 + 5) * 60 * 1000;
 // Stop local writes before the Controller deadline so bounded clock skew can
 // never let an isolated old node overlap a newly granted writer.
 const ACTIVITY_LEASE_FENCE_MARGIN_MS = 60 * 1000;
+const DEFAULT_SNAPSHOT_GATE_LEASE_MS = 30 * 1000;
+const MIN_SNAPSHOT_GATE_LEASE_MS = 10 * 1000;
+const MAX_SNAPSHOT_GATE_LEASE_MS = 5 * 60 * 1000;
 const TAKEOVER_CHALLENGE_TTL_MS = 5 * 60 * 1000;
 const PROCESS_INSTANCE_ID = crypto.randomUUID();
 const VALID_MODES = new Set(Object.values(STCONTROL_MODES));
@@ -118,6 +121,17 @@ export function getStcontrolActivityPolicy() {
         sessionIdleMs,
         foregroundHeartbeatMs: heartbeat('stcontrol.foregroundHeartbeatMs', DEFAULT_FOREGROUND_HEARTBEAT_MS),
         backgroundHeartbeatMs: heartbeat('stcontrol.backgroundHeartbeatMs', DEFAULT_BACKGROUND_HEARTBEAT_MS),
+    });
+}
+
+export function getStcontrolSnapshotGatePolicy() {
+    return Object.freeze({
+        leaseMs: boundedInteger(
+            getConfigValue('stcontrol.snapshotGateLeaseMs', DEFAULT_SNAPSHOT_GATE_LEASE_MS, 'number'),
+            DEFAULT_SNAPSHOT_GATE_LEASE_MS,
+            MIN_SNAPSHOT_GATE_LEASE_MS,
+            MAX_SNAPSHOT_GATE_LEASE_MS,
+        ),
     });
 }
 
@@ -193,6 +207,19 @@ function validateLoadedState(value) {
             }
         }
         value.leaseConfirmationAt = 0;
+        value.version = 5;
+    }
+    if (value?.version === 5) {
+        // Earlier snapshot gates had no bounded lease, so an Agent crash after
+        // quiescing could leave one user frozen indefinitely. Preserve only a
+        // still-recent legacy gate and make it expire without trusting a new
+        // process to remember the old in-flight snapshot.
+        for (const gate of Object.values(value.gates || {})) {
+            if (!gate || typeof gate !== 'object' || gate.kind === 'data_fault') continue;
+            gate.kind = 'snapshot';
+            const createdAt = Number.isSafeInteger(gate.createdAt) ? gate.createdAt : 0;
+            gate.expiresAt = createdAt + DEFAULT_SNAPSHOT_GATE_LEASE_MS;
+        }
         value.version = STATE_VERSION;
     }
     if (!value || value.version !== STATE_VERSION || !VALID_MODES.has(value.mode) ||
@@ -226,6 +253,22 @@ function validateLoadedState(value) {
     for (const [handle, lease] of Object.entries(value.leases)) {
         if (!validActivityLeaseConfirmation({ handle, ...lease }, { allowExpired: true })) {
             throw new Error('Invalid persisted stcontrol activity lease');
+        }
+    }
+    for (const [handle, gate] of Object.entries(value.gates)) {
+        if (!handle || handle.length > 128 || !gate || typeof gate !== 'object' || Array.isArray(gate) ||
+            !Number.isSafeInteger(gate.activityEpoch) || gate.activityEpoch <= 0 ||
+            !Number.isSafeInteger(gate.createdAt) || gate.createdAt < 0) {
+            throw new Error('Invalid persisted stcontrol write gate');
+        }
+        if (gate.kind === 'data_fault') {
+            if (!UUID_PATTERN.test(gate.faultId || '')) throw new Error('Invalid persisted stcontrol write gate');
+            continue;
+        }
+        if (gate.kind !== 'snapshot' || !UUID_PATTERN.test(gate.workflowId || '') || !UUID_PATTERN.test(gate.snapshotId || '') ||
+            typeof gate.freezeToken !== 'string' || gate.freezeToken.length < 32 || gate.freezeToken.length > 128 ||
+            !Number.isSafeInteger(gate.expiresAt) || gate.expiresAt <= gate.createdAt) {
+            throw new Error('Invalid persisted stcontrol write gate');
         }
     }
     return value;
@@ -274,6 +317,24 @@ function newPendingSyncFact(reason) {
 
 function clone(value) {
     return structuredClone(value);
+}
+
+function opaqueTextEqual(left, right) {
+    if (typeof left !== 'string' || typeof right !== 'string') return false;
+    const leftBytes = Buffer.from(left);
+    const rightBytes = Buffer.from(right);
+    return leftBytes.length === rightBytes.length && crypto.timingSafeEqual(leftBytes, rightBytes);
+}
+
+function cleanExpiredSnapshotGates(state, now = Date.now()) {
+    let changed = false;
+    for (const [handle, gate] of Object.entries(state.gates)) {
+        if (gate?.kind === 'snapshot' && (!Number.isSafeInteger(gate.expiresAt) || gate.expiresAt <= now)) {
+            delete state.gates[handle];
+            changed = true;
+        }
+    }
+    return changed;
 }
 
 async function mutateState(mutator) {
@@ -871,7 +932,9 @@ export async function stcontrolRequestTracker(request, response, next) {
     if (request.session?.stcontrolAdmin) return next();
     const handle = request.user.profile.handle;
     const state = loadStateSync();
-    if (cleanExpiredSessions(state)) persistState(state);
+    const sessionsChanged = cleanExpiredSessions(state);
+    const gatesChanged = cleanExpiredSnapshotGates(state);
+    if (sessionsChanged || gatesChanged) persistState(state);
     const hadSessionEnvelope = Boolean(request.session?.stcontrol?.sessionId);
     const envelope = ensureSessionEnvelope(request, state.mode === STCONTROL_MODES.INDEPENDENT ? STCONTROL_MODES.INDEPENDENT : STCONTROL_MODES.MANAGED);
     if (!envelope) return response.sendStatus(500);
@@ -1004,11 +1067,13 @@ export async function setUserWriteGate(handle, gate) {
 /** Establish a snapshot gate without racing a concurrent data-fault freeze. */
 export async function establishSnapshotWriteGate(handle, workflowId, snapshotId, activityEpoch) {
     return mutateState(state => {
+        const now = Date.now();
+        cleanExpiredSnapshotGates(state, now);
         const current = state.gates[handle];
         if (current) {
-            const snapshotGate = current.kind === undefined || current.kind === 'snapshot';
-            if (snapshotGate && current.workflowId === workflowId && current.snapshotId === snapshotId &&
+            if (current.kind === 'snapshot' && current.workflowId === workflowId && current.snapshotId === snapshotId &&
                 current.activityEpoch === activityEpoch) {
+                current.expiresAt = now + getStcontrolSnapshotGatePolicy().leaseMs;
                 return { status: 'existing', gate: clone(current) };
             }
             return { status: 'write_gate_conflict' };
@@ -1019,10 +1084,41 @@ export async function establishSnapshotWriteGate(handle, workflowId, snapshotId,
             snapshotId,
             activityEpoch,
             freezeToken: crypto.randomBytes(32).toString('base64url'),
-            createdAt: Date.now(),
+            createdAt: now,
+            expiresAt: now + getStcontrolSnapshotGatePolicy().leaseMs,
         };
         state.gates[handle] = gate;
         return { status: 'created', gate: clone(gate) };
+    });
+}
+
+export async function renewSnapshotWriteGate(handle, workflowId, snapshotId, activityEpoch, freezeToken) {
+    return mutateState(state => {
+        const now = Date.now();
+        cleanExpiredSnapshotGates(state, now);
+        const gate = state.gates[handle];
+        if (!gate) return { status: 'snapshot_gate_expired' };
+        if (gate.kind !== 'snapshot' || gate.workflowId !== workflowId || gate.snapshotId !== snapshotId ||
+            gate.activityEpoch !== activityEpoch || !opaqueTextEqual(gate.freezeToken, freezeToken)) {
+            return { status: 'snapshot_gate_mismatch' };
+        }
+        gate.expiresAt = now + getStcontrolSnapshotGatePolicy().leaseMs;
+        return { status: 'renewed', gate: clone(gate) };
+    });
+}
+
+export async function releaseSnapshotWriteGate(handle, workflowId, snapshotId, activityEpoch, freezeToken) {
+    return mutateState(state => {
+        const now = Date.now();
+        cleanExpiredSnapshotGates(state, now);
+        const gate = state.gates[handle];
+        if (!gate) return { status: 'snapshot_gate_expired' };
+        if (gate.kind !== 'snapshot' || gate.workflowId !== workflowId || gate.snapshotId !== snapshotId ||
+            gate.activityEpoch !== activityEpoch || !opaqueTextEqual(gate.freezeToken, freezeToken)) {
+            return { status: 'snapshot_gate_mismatch' };
+        }
+        delete state.gates[handle];
+        return { status: 'released' };
     });
 }
 

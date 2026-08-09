@@ -366,6 +366,22 @@ test('snapshot write gate drains one user and requires the exact release token',
     assert.equal(quiesceResponse.status, 200);
     assert.equal(quiesce.drained, true);
     assert.ok(typeof quiesce.freeze_token === 'string' && quiesce.freeze_token.length >= 32);
+    assert.ok(Number.isSafeInteger(quiesce.expires_at) && quiesce.expires_at > Date.now());
+
+    const wrongRenew = await signedPost('/api/stcontrol/internal/snapshots/renew', {
+        ...request,
+        freeze_token: 'wrong-renew-token-that-is-long-enough',
+    });
+    assert.equal(wrongRenew.status, 409);
+    assert.equal((await wrongRenew.json()).code, 'snapshot_gate_mismatch');
+
+    const renewResponse = await signedPost('/api/stcontrol/internal/snapshots/renew', {
+        ...request,
+        freeze_token: quiesce.freeze_token,
+    });
+    const renewed = await renewResponse.json();
+    assert.equal(renewResponse.status, 200);
+    assert.ok(renewed.expires_at >= quiesce.expires_at);
 
     const wrongRelease = await signedPost('/api/stcontrol/internal/snapshots/release', {
         ...request,

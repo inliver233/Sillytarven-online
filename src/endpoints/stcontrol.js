@@ -21,13 +21,13 @@ import {
     getStcontrolModeStatus,
     getStcontrolPendingSyncUsers,
     getStcontrolSessionTelemetry,
-    getUserWriteGate,
     isStcontrolEnabled,
     markUserSynchronized,
     registerStcontrolSession,
+    releaseSnapshotWriteGate,
+    renewSnapshotWriteGate,
     requireStcontrolAgent,
     runIdempotentStcontrolOperation,
-    setUserWriteGate,
     signStcontrolRequest,
     stcontrolInventoryRevision,
 } from '../stcontrol.js';
@@ -339,12 +339,30 @@ router.post('/api/stcontrol/internal/snapshots/quiesce', async (request, respons
             const active = getStcontrolSessionTelemetry().filter(user => user.handle === input.handle);
             const inFlight = active.reduce((total, user) => total + user.in_flight_reads + user.in_flight_writes, 0);
             if (inFlight === 0) {
-                return response.json({ ok: true, drained: true, freeze_token: gate.freezeToken });
+                return response.json({ ok: true, drained: true, freeze_token: gate.freezeToken, expires_at: gate.expiresAt });
             }
             await new Promise(resolve => setTimeout(resolve, 50));
         }
-        await setUserWriteGate(input.handle, null);
+        await releaseSnapshotWriteGate(
+            input.handle, input.workflow_id, input.snapshot_id, input.activity_epoch, gate.freezeToken,
+        );
         throw new AdapterRequestError(409, 'write_drain_timeout');
+    } catch (error) {
+        return adapterError(response, error);
+    }
+});
+
+router.post('/api/stcontrol/internal/snapshots/renew', async (request, response) => {
+    try {
+        const input = validateSnapshotRequest(request.body);
+        if (typeof input.freeze_token !== 'string' || input.freeze_token.length < 32 || input.freeze_token.length > 128) {
+            throw new AdapterRequestError(400, 'invalid_freeze_token');
+        }
+        const renewed = await renewSnapshotWriteGate(
+            input.handle, input.workflow_id, input.snapshot_id, input.activity_epoch, input.freeze_token,
+        );
+        if (renewed.status !== 'renewed') throw new AdapterRequestError(409, renewed.status);
+        return response.json({ ok: true, expires_at: renewed.gate.expiresAt });
     } catch (error) {
         return adapterError(response, error);
     }
@@ -356,12 +374,10 @@ router.post('/api/stcontrol/internal/snapshots/release', async (request, respons
         if (typeof input.freeze_token !== 'string' || input.freeze_token.length < 32 || input.freeze_token.length > 128) {
             throw new AdapterRequestError(400, 'invalid_freeze_token');
         }
-        const gate = getUserWriteGate(input.handle);
-        if (!gate || gate.workflowId !== input.workflow_id || gate.snapshotId !== input.snapshot_id ||
-            gate.activityEpoch !== input.activity_epoch || !safeTextEqual(gate.freezeToken, input.freeze_token)) {
-            throw new AdapterRequestError(409, 'snapshot_gate_mismatch');
-        }
-        await setUserWriteGate(input.handle, null);
+        const released = await releaseSnapshotWriteGate(
+            input.handle, input.workflow_id, input.snapshot_id, input.activity_epoch, input.freeze_token,
+        );
+        if (released.status !== 'released') throw new AdapterRequestError(409, released.status);
         return response.json({ ok: true });
     } catch (error) {
         return adapterError(response, error);
