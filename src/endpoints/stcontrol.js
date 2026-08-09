@@ -423,15 +423,22 @@ export async function stcontrolHandoffHandler(request, response) {
                 permissionVersion: claims.permission_version,
                 controllerGeneration: claims.controller_generation,
             };
-        } else if (!UUID_PATTERN.test(claims.session_id || '') || !Number.isSafeInteger(claims.user_id) || claims.user_id <= 0 ||
+        } else if (!UUID_PATTERN.test(claims.user_uuid || '') || !UUID_PATTERN.test(claims.session_id || '') ||
+            !Number.isSafeInteger(claims.user_id) || claims.user_id <= 0 ||
             !Number.isSafeInteger(claims.activity_epoch) || claims.activity_epoch <= 0) {
             throw new AdapterRequestError(403, 'invalid_handoff_claims');
         } else {
+            const globalUserUuid = String(claims.user_uuid).toLowerCase();
             if (user.stcontrolGlobalUserId && Number(user.stcontrolGlobalUserId) !== claims.user_id) {
                 throw new AdapterRequestError(409, 'global_user_binding_changed');
             }
-            if (!user.stcontrolGlobalUserId) {
+            if (user.stcontrolGlobalUserUuid &&
+                !safeTextEqual(String(user.stcontrolGlobalUserUuid).toLowerCase(), globalUserUuid)) {
+                throw new AdapterRequestError(409, 'global_user_binding_changed');
+            }
+            if (!user.stcontrolGlobalUserId || !user.stcontrolGlobalUserUuid) {
                 user.stcontrolGlobalUserId = claims.user_id;
+                user.stcontrolGlobalUserUuid = globalUserUuid;
                 await storage.setItem(toKey(handle), user);
             }
         }

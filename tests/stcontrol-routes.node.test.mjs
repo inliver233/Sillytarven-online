@@ -175,7 +175,14 @@ test('account inventory pages beyond 500 users without gaps and fences revision 
 test('browser handoff uses the local Agent proxy and establishes a fenced session', async () => {
     const previousAgentUrl = process.env.SILLYTAVERN_STCONTROL_AGENTURL;
     const code = 'opaque-one-use-browser-secret';
-    let consumed = false;
+    const globalUserUuid = '44444444-4444-4444-8444-444444444444';
+    const claimsByCode = new Map([
+        [code, { user_uuid: globalUserUuid }],
+        ['missing-user-uuid', { user_uuid: undefined }],
+        ['typed-user-uuid', { user_uuid: 41 }],
+        ['mismatched-user-uuid', { user_uuid: '66666666-6666-4666-8666-666666666666' }],
+    ]);
+    const consumed = new Set();
     let agentRequest;
     const agent = express();
     agent.use(express.json());
@@ -189,12 +196,13 @@ test('browser handoff uses the local Agent proxy and establishes a fenced sessio
         if (request.get('X-Agent-Id') !== '7' || request.get('X-Signature') !== expected) {
             return response.sendStatus(401);
         }
-        if (consumed || request.body.code !== code) return response.sendStatus(403);
-        consumed = true;
+        if (!claimsByCode.has(request.body.code) || consumed.has(request.body.code)) return response.sendStatus(403);
+        consumed.add(request.body.code);
         return response.json({
             ok: true,
             handle: 'alice',
             user_id: 41,
+            ...claimsByCode.get(request.body.code),
             session_id: '55555555-5555-4555-8555-555555555555',
             activity_epoch: 8,
             controller_generation: 1,
@@ -225,6 +233,9 @@ test('browser handoff uses the local Agent proxy and establishes a fenced sessio
         });
         assert.equal(agentRequest.originalUrl, '/agent/tickets/redeem');
         assert.equal(agentRequest.originalUrl.includes(code), false);
+        const boundUser = await storage.getItem('user:alice');
+        assert.equal(boundUser.stcontrolGlobalUserId, 41);
+        assert.equal(boundUser.stcontrolGlobalUserUuid, globalUserUuid);
 
         const replay = await fetch(`${baseUrl}/api/users/me?stcontrol_handoff=user`, {
             method: 'POST',
@@ -233,6 +244,26 @@ test('browser handoff uses the local Agent proxy and establishes a fenced sessio
             redirect: 'manual',
         });
         assert.equal(replay.status, 403);
+
+        for (const rejectedCode of ['missing-user-uuid', 'typed-user-uuid']) {
+            const rejected = await fetch(`${baseUrl}/api/users/me?stcontrol_handoff=user`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ stcontrol_code: rejectedCode }),
+                redirect: 'manual',
+            });
+            assert.equal(rejected.status, 403);
+        }
+        const mismatched = await fetch(`${baseUrl}/api/users/me?stcontrol_handoff=user`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ stcontrol_code: 'mismatched-user-uuid' }),
+            redirect: 'manual',
+        });
+        assert.equal(mismatched.status, 409);
+        const stillBoundUser = await storage.getItem('user:alice');
+        assert.equal(stillBoundUser.stcontrolGlobalUserId, 41);
+        assert.equal(stillBoundUser.stcontrolGlobalUserUuid, globalUserUuid);
     } finally {
         await new Promise((resolve, reject) => agentServer.close(error => error ? reject(error) : resolve()));
         if (previousAgentUrl === undefined) delete process.env.SILLYTAVERN_STCONTROL_AGENTURL;
