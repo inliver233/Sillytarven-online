@@ -113,6 +113,32 @@ function getFreeGeminiOpenAIChatCompletionsUrl(apiUrl, apiVersion) {
     return `${baseUrl}/v1/chat/completions`;
 }
 
+function getFreeGeminiOpenAIResponsesUrl(apiUrl, apiVersion) {
+    const parsed = new URL(apiUrl);
+    const baseUrl = trimTrailingSlash(parsed.toString());
+    if (/\/v1(?:beta)?\/openai$/i.test(baseUrl) || /\/v1$/i.test(baseUrl)) {
+        return `${baseUrl}/responses`;
+    }
+    if (/\/v1beta$/i.test(baseUrl)) {
+        return `${baseUrl}/openai/responses`;
+    }
+    if (parsed.hostname.toLowerCase() === 'generativelanguage.googleapis.com') {
+        return `${baseUrl}/${apiVersion}/openai/responses`;
+    }
+    return `${baseUrl}/v1/responses`;
+}
+
+function getFreeGeminiAnthropicMessagesUrl(apiUrl) {
+    const baseUrl = trimTrailingSlash(new URL(apiUrl).toString());
+    if (/\/v1$/i.test(baseUrl)) {
+        return `${baseUrl}/messages`;
+    }
+    if (/\/v1beta$/i.test(baseUrl)) {
+        return `${baseUrl.replace(/\/v1beta$/i, '/v1')}/messages`;
+    }
+    return `${baseUrl}/v1/messages`;
+}
+
 function normalizeFreeGeminiModelId(value) {
     const modelId = String(value ?? '').trim().replace(/^models\//, '');
     return /^[A-Za-z0-9][A-Za-z0-9._-]{0,511}$/.test(modelId) ? modelId : '';
@@ -499,6 +525,141 @@ function normalizeFreeGeminiRequest({ modelId, messages, generationConfig, body,
     return null;
 }
 
+function toFreeGeminiOpenAIStreamChunk(delta, finishReason = null) {
+    return {
+        choices: [{
+            index: 0,
+            delta,
+            finish_reason: finishReason,
+        }],
+    };
+}
+
+function convertFreeGeminiStreamEvent(requestFormat, eventName, data) {
+    if (data === '[DONE]') {
+        return ['[DONE]'];
+    }
+
+    const payload = tryParse(data);
+    if (!payload || typeof payload !== 'object') {
+        throw new Error(`Invalid ${requestFormat} SSE payload.`);
+    }
+    if (payload.error) {
+        return [JSON.stringify({ error: payload.error })];
+    }
+
+    const eventType = String(eventName || payload.type || '');
+    if (requestFormat === 'anthropic') {
+        if (eventType === 'content_block_delta') {
+            if (payload.delta?.type === 'text_delta' && typeof payload.delta.text === 'string') {
+                return [JSON.stringify(toFreeGeminiOpenAIStreamChunk({ content: payload.delta.text }))];
+            }
+            if (payload.delta?.type === 'thinking_delta' && typeof payload.delta.thinking === 'string') {
+                return [JSON.stringify(toFreeGeminiOpenAIStreamChunk({ reasoning_content: payload.delta.thinking }))];
+            }
+            if (payload.delta?.type === 'input_json_delta') {
+                return [JSON.stringify(toFreeGeminiOpenAIStreamChunk({
+                    tool_calls: [{ index: payload.index ?? 0, function: { arguments: payload.delta.partial_json ?? '' } }],
+                }))];
+            }
+        }
+        if (eventType === 'content_block_start' && payload.content_block?.type === 'tool_use') {
+            return [JSON.stringify(toFreeGeminiOpenAIStreamChunk({
+                tool_calls: [{
+                    index: payload.index ?? 0,
+                    id: payload.content_block.id,
+                    type: 'function',
+                    function: { name: payload.content_block.name, arguments: '' },
+                }],
+            }))];
+        }
+        if (eventType === 'message_stop') {
+            return [JSON.stringify(toFreeGeminiOpenAIStreamChunk({}, 'stop')), '[DONE]'];
+        }
+        return [];
+    }
+
+    if (requestFormat === 'openai-responses') {
+        if (['response.output_text.delta', 'response.refusal.delta'].includes(eventType)
+            && typeof payload.delta === 'string') {
+            return [JSON.stringify(toFreeGeminiOpenAIStreamChunk({ content: payload.delta }))];
+        }
+        if (['response.reasoning_text.delta', 'response.reasoning_summary_text.delta'].includes(eventType)
+            && typeof payload.delta === 'string') {
+            return [JSON.stringify(toFreeGeminiOpenAIStreamChunk({ reasoning_content: payload.delta }))];
+        }
+        if (eventType === 'response.output_item.added' && payload.item?.type === 'function_call') {
+            return [JSON.stringify(toFreeGeminiOpenAIStreamChunk({
+                tool_calls: [{
+                    index: payload.output_index ?? 0,
+                    id: payload.item.call_id ?? payload.item.id,
+                    type: 'function',
+                    function: { name: payload.item.name, arguments: '' },
+                }],
+            }))];
+        }
+        if (eventType === 'response.function_call_arguments.delta') {
+            return [JSON.stringify(toFreeGeminiOpenAIStreamChunk({
+                tool_calls: [{
+                    index: payload.output_index ?? 0,
+                    function: { arguments: payload.delta ?? '' },
+                }],
+            }))];
+        }
+        if (['response.completed', 'response.incomplete', 'response.failed'].includes(eventType)) {
+            return [JSON.stringify(toFreeGeminiOpenAIStreamChunk({}, eventType === 'response.completed' ? 'stop' : 'error')), '[DONE]'];
+        }
+        return [];
+    }
+
+    return [data];
+}
+
+async function forwardConvertedFreeGeminiStream(generateResponse, response, requestFormat) {
+    response.status(generateResponse.status);
+    response.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    response.setHeader('Cache-Control', 'no-cache');
+    response.setHeader('Connection', 'keep-alive');
+
+    let buffer = '';
+    let eventName = '';
+    let dataLines = [];
+    let doneSent = false;
+    const flushEvent = () => {
+        if (dataLines.length === 0) {
+            eventName = '';
+            return;
+        }
+        const converted = convertFreeGeminiStreamEvent(requestFormat, eventName, dataLines.join('\n'));
+        for (const item of converted) {
+            if (item === '[DONE]') doneSent = true;
+            response.write(`data: ${item}\n\n`);
+        }
+        eventName = '';
+        dataLines = [];
+    };
+    const consumeLine = line => {
+        if (line === '') {
+            flushEvent();
+        } else if (line.startsWith('event:')) {
+            eventName = line.slice(6).trim();
+        } else if (line.startsWith('data:')) {
+            dataLines.push(line.slice(5).trimStart());
+        }
+    };
+
+    for await (const chunk of generateResponse.body) {
+        buffer += chunk.toString('utf8');
+        const lines = buffer.split(/\r?\n/);
+        buffer = lines.pop() ?? '';
+        lines.forEach(consumeLine);
+    }
+    if (buffer) consumeLine(buffer);
+    flushEvent();
+    if (!doneSent) response.write('data: [DONE]\n\n');
+    response.end();
+}
+
 function getFreeGeminiOpenAIRequestBody(request, channel, model) {
     const body = {
         model: request.body.model,
@@ -550,11 +711,208 @@ function getFreeGeminiOpenAIRequestBody(request, channel, model) {
     return body;
 }
 
+function getFreeGeminiAnthropicRequestBody(request, channel, model) {
+    const useTools = Array.isArray(request.body.tools) && request.body.tools.length > 0;
+    const converted = convertClaudeMessages(
+        request.body.messages,
+        request.body.assistant_prefill,
+        true,
+        useTools,
+        getPromptNames(request),
+    );
+    if (!Array.isArray(converted.messages) || converted.messages.length === 0) {
+        return null;
+    }
+
+    const requestedMaxTokens = Number(request.body.max_tokens ?? request.body.max_completion_tokens);
+    const body = {
+        model: request.body.model,
+        messages: converted.messages,
+        system: Array.isArray(converted.systemPrompt) && converted.systemPrompt.length > 0
+            ? converted.systemPrompt
+            : undefined,
+        max_tokens: Number.isFinite(requestedMaxTokens)
+            ? Math.min(Math.max(1, Math.trunc(requestedMaxTokens)), getFreeGeminiOutputLimit(channel, model))
+            : (channel.maxOutputTokens > 0 ? getFreeGeminiOutputLimit(channel, model) : 4096),
+        temperature: request.body.temperature,
+        top_p: request.body.top_p,
+        top_k: request.body.top_k,
+        stop_sequences: Array.isArray(request.body.stop) && request.body.stop.length > 0 ? request.body.stop : undefined,
+        stream: Boolean(request.body.stream),
+    };
+    if (useTools) {
+        body.tools = request.body.tools
+            .filter(tool => tool?.type === 'function' && tool.function?.name)
+            .map(tool => ({
+                name: tool.function.name,
+                description: tool.function.description,
+                input_schema: flattenSchema(tool.function.parameters ?? { type: 'object', properties: {} }, CHAT_COMPLETION_SOURCES.CLAUDE),
+            }));
+        if (typeof request.body.tool_choice === 'string' && request.body.tool_choice !== 'auto') {
+            body.tool_choice = { type: request.body.tool_choice === 'required' ? 'any' : request.body.tool_choice };
+        } else if (request.body.tool_choice?.function?.name) {
+            body.tool_choice = { type: 'tool', name: request.body.tool_choice.function.name };
+        }
+    }
+    if (request.body.json_schema) {
+        body.tools = [...(body.tools ?? []), {
+            name: request.body.json_schema.name,
+            description: request.body.json_schema.description || 'Well-formed JSON object',
+            input_schema: request.body.json_schema.value,
+        }];
+        body.tool_choice = { type: 'tool', name: request.body.json_schema.name };
+    }
+    mergeObjectWithYaml(body, request.body.custom_include_body);
+    excludeKeysByYaml(body, request.body.custom_exclude_body);
+    body.model = request.body.model;
+    body.stream = Boolean(request.body.stream);
+    body.max_tokens = Math.min(
+        Math.max(1, Math.trunc(Number(body.max_tokens) || 4096)),
+        getFreeGeminiOutputLimit(channel, model),
+    );
+    return body;
+}
+
+function toFreeGeminiResponsesContent(role, content) {
+    if (!Array.isArray(content)) {
+        return content;
+    }
+    return content.flatMap(part => {
+        if (part?.type === 'text' && typeof part.text === 'string') {
+            return [{ type: role === 'assistant' ? 'output_text' : 'input_text', text: part.text }];
+        }
+        if (part?.type === 'image_url' && typeof part.image_url?.url === 'string') {
+            return [{ type: 'input_image', image_url: part.image_url.url }];
+        }
+        return [];
+    });
+}
+
+function getFreeGeminiOpenAIResponsesRequestBody(request, channel, model) {
+    const messages = Array.isArray(request.body.messages)
+        ? request.body.messages
+            .filter(message => message && typeof message === 'object')
+            .map(message => ({
+                role: message.role,
+                content: toFreeGeminiResponsesContent(message.role, message.content),
+            }))
+            .filter(message => typeof message.content === 'string'
+                ? message.content.trim().length > 0
+                : Array.isArray(message.content) && message.content.length > 0)
+        : [];
+    if (messages.length === 0) {
+        return null;
+    }
+
+    const requestedMaxTokens = Number(request.body.max_tokens ?? request.body.max_completion_tokens);
+    const body = {
+        model: request.body.model,
+        input: messages,
+        temperature: request.body.temperature,
+        top_p: request.body.top_p,
+        max_output_tokens: Number.isFinite(requestedMaxTokens)
+            ? Math.min(Math.max(1, Math.trunc(requestedMaxTokens)), getFreeGeminiOutputLimit(channel, model))
+            : (channel.maxOutputTokens > 0 ? getFreeGeminiOutputLimit(channel, model) : undefined),
+        stream: Boolean(request.body.stream),
+    };
+    if (Array.isArray(request.body.tools) && request.body.tools.length > 0) {
+        body.tools = request.body.tools
+            .filter(tool => tool?.type === 'function' && tool.function?.name)
+            .map(tool => ({ type: 'function', ...tool.function }));
+        body.tool_choice = request.body.tool_choice;
+    }
+    if (request.body.json_schema) {
+        body.text = {
+            format: {
+                type: 'json_schema',
+                name: request.body.json_schema.name,
+                strict: request.body.json_schema.strict ?? true,
+                schema: request.body.json_schema.value,
+            },
+        };
+    }
+    mergeObjectWithYaml(body, request.body.custom_include_body);
+    excludeKeysByYaml(body, request.body.custom_exclude_body);
+    body.model = request.body.model;
+    body.stream = Boolean(request.body.stream);
+    const includedMaxTokens = Number(body.max_output_tokens);
+    if (Number.isFinite(includedMaxTokens)) {
+        body.max_output_tokens = Math.min(
+            Math.max(1, Math.trunc(includedMaxTokens)),
+            getFreeGeminiOutputLimit(channel, model),
+        );
+    } else {
+        delete body.max_output_tokens;
+    }
+    return body;
+}
+
+function getFreeGeminiAnthropicResponse(response) {
+    const content = Array.isArray(response.content) ? response.content : [];
+    const text = content
+        .filter(part => part?.type === 'text' && typeof part.text === 'string')
+        .map(part => part.text)
+        .join('');
+    const toolCalls = content
+        .filter(part => part?.type === 'tool_use' && part.name)
+        .map(part => ({
+            id: part.id,
+            type: 'function',
+            function: { name: part.name, arguments: JSON.stringify(part.input ?? {}) },
+        }));
+    if (!text && toolCalls.length === 0) {
+        return null;
+    }
+    return {
+        choices: [{
+            message: {
+                content: text || null,
+                ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+            },
+            finish_reason: response.stop_reason ?? null,
+        }],
+        content,
+        usage: response.usage,
+    };
+}
+
+function getFreeGeminiOpenAIResponsesResponse(response) {
+    const output = Array.isArray(response.output) ? response.output : [];
+    const text = typeof response.output_text === 'string'
+        ? response.output_text
+        : output.flatMap(item => Array.isArray(item?.content) ? item.content : [])
+            .filter(part => ['output_text', 'text'].includes(part?.type) && typeof part.text === 'string')
+            .map(part => part.text)
+            .join('');
+    const toolCalls = output
+        .filter(item => item?.type === 'function_call' && item.name)
+        .map(item => ({
+            id: item.call_id ?? item.id,
+            type: 'function',
+            function: { name: item.name, arguments: item.arguments ?? '' },
+        }));
+    if (!text && toolCalls.length === 0) {
+        return null;
+    }
+    return {
+        choices: [{
+            message: {
+                content: text || null,
+                ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+            },
+            finish_reason: response.status === 'completed' ? 'stop' : response.status ?? null,
+        }],
+        response,
+        usage: response.usage,
+    };
+}
+
 function toFreeGeminiStatusModel(channel, model) {
     return {
         id: model.id,
         channel_id: channel.id,
         channel_name: channel.name,
+        request_format: getFreeGeminiModelRequestFormat(channel, model.id),
         inputTokenLimit: model.inputTokenLimit ?? null,
         outputTokenLimit: getFreeGeminiOutputLimit(channel, model),
     };
@@ -971,7 +1329,11 @@ async function sendClaudeRequest(request, response) {
  */
 async function sendMakerSuiteRequest(request, response, options = {}) {
     const freeGeminiChannel = options.freeGeminiChannel;
-    const useFreeGeminiOpenAI = Boolean(freeGeminiChannel && options.freeGeminiRequestFormat === 'openai');
+    const freeGeminiRequestFormat = freeGeminiChannel ? String(options.freeGeminiRequestFormat || 'gemini') : 'gemini';
+    const useFreeGeminiOpenAI = Boolean(freeGeminiChannel && freeGeminiRequestFormat === 'openai');
+    const useFreeGeminiOpenAIResponses = Boolean(freeGeminiChannel && freeGeminiRequestFormat === 'openai-responses');
+    const useFreeGeminiAnthropic = Boolean(freeGeminiChannel && freeGeminiRequestFormat === 'anthropic');
+    const useFreeGeminiNative = Boolean(freeGeminiChannel && freeGeminiRequestFormat === 'gemini');
     const deferFreeGeminiFailover = Boolean(freeGeminiChannel && options.deferFreeGeminiFailover);
     const returnFreeGeminiFailure = (status, payload, canFailover = false) => {
         if (deferFreeGeminiFailover && canFailover) {
@@ -1037,7 +1399,7 @@ async function sendMakerSuiteRequest(request, response, options = {}) {
         responseSchema: responseSchema,
         seed: request.body.seed,
     };
-    if (freeGeminiChannel && !useFreeGeminiOpenAI) {
+    if (useFreeGeminiNative) {
         const normalizationError = normalizeFreeGeminiRequest({
             modelId: model,
             messages: request.body.messages,
@@ -1207,14 +1569,18 @@ async function sendMakerSuiteRequest(request, response, options = {}) {
 
     const body = useFreeGeminiOpenAI
         ? getFreeGeminiOpenAIRequestBody(request, freeGeminiChannel, options.freeGeminiModel)
-        : getGeminiBody();
+        : useFreeGeminiOpenAIResponses
+            ? getFreeGeminiOpenAIResponsesRequestBody(request, freeGeminiChannel, options.freeGeminiModel)
+            : useFreeGeminiAnthropic
+                ? getFreeGeminiAnthropicRequestBody(request, freeGeminiChannel, options.freeGeminiModel)
+                : getGeminiBody();
     if (freeGeminiChannel) {
-        if (useFreeGeminiOpenAI && !body) {
+        if (!body) {
             return response.status(400).send({
                 error: { code: 'FREE_GEMINI_INVALID_CONTENTS', message: 'contents 不能为空。' },
             });
         }
-        if (!useFreeGeminiOpenAI) {
+        if (useFreeGeminiNative) {
             const normalizationError = normalizeFreeGeminiRequest({
                 modelId: model,
                 messages: request.body.messages,
@@ -1226,7 +1592,7 @@ async function sendMakerSuiteRequest(request, response, options = {}) {
                 return response.status(400).send({ error: normalizationError });
             }
         }
-        console.debug(`${apiName} request prepared for model ${model} using ${useFreeGeminiOpenAI ? 'OpenAI-compatible' : 'Gemini'} format.`);
+        console.debug(`${apiName} request prepared for model ${model} using ${freeGeminiRequestFormat} format.`);
     } else {
         console.debug(`${apiName} request:`, body);
     }
@@ -1243,6 +1609,15 @@ async function sendMakerSuiteRequest(request, response, options = {}) {
         let headers = {
             'Content-Type': 'application/json',
         };
+        if (freeGeminiChannel) {
+            mergeObjectWithYaml(headers, request.body.custom_include_headers);
+            for (const headerName of Object.keys(headers)) {
+                if (['authorization', 'x-api-key', 'anthropic-version', 'content-type'].includes(headerName.toLowerCase())) {
+                    delete headers[headerName];
+                }
+            }
+            headers['Content-Type'] = 'application/json';
+        }
 
         if (useVertexAi) {
             if (authType === 'express') {
@@ -1289,6 +1664,14 @@ async function sendMakerSuiteRequest(request, response, options = {}) {
         } else if (useFreeGeminiOpenAI) {
             url = getFreeGeminiOpenAIChatCompletionsUrl(apiUrl, apiVersion);
             headers['Authorization'] = authHeader;
+        } else if (useFreeGeminiOpenAIResponses) {
+            url = getFreeGeminiOpenAIResponsesUrl(apiUrl, apiVersion);
+            headers['Authorization'] = authHeader;
+        } else if (useFreeGeminiAnthropic) {
+            url = getFreeGeminiAnthropicMessagesUrl(apiUrl);
+            delete headers['Authorization'];
+            headers['x-api-key'] = apiKey;
+            headers['anthropic-version'] = '2023-06-01';
         } else {
             const versionBaseUrl = getGeminiVersionBaseUrl(apiUrl, apiVersion);
             const requestModel = freeGeminiChannel ? encodeURIComponent(model) : model;
@@ -1502,6 +1885,13 @@ async function sendMakerSuiteRequest(request, response, options = {}) {
         if (stream) {
             try {
                 if (!disconnectController.signal.aborted) {
+                    if (useFreeGeminiAnthropic || useFreeGeminiOpenAIResponses) {
+                        return await forwardConvertedFreeGeminiStream(
+                            generateResponse,
+                            response,
+                            freeGeminiRequestFormat,
+                        );
+                    }
                     generateResponse.body?.once('error', error => {
                         console.error('Free Gemini stream failed after commitment:', error?.code || error?.name || 'stream_failed');
                         if (!response.writableEnded) {
@@ -1550,6 +1940,24 @@ async function sendMakerSuiteRequest(request, response, options = {}) {
             }
             console.debug(`${apiName} returned ${choices.length} OpenAI-compatible choice(s).`);
             return response.send(generateResponseJson);
+        }
+        if (useFreeGeminiAnthropic) {
+            const convertedResponse = getFreeGeminiAnthropicResponse(generateResponseJson);
+            if (!convertedResponse) {
+                return returnFreeGeminiFailure(502, {
+                    error: { code: 'FREE_GEMINI_INVALID_RESPONSE', message: '免费 Gemini 渠道返回了无效的 Anthropic Messages 响应。' },
+                });
+            }
+            return response.send(convertedResponse);
+        }
+        if (useFreeGeminiOpenAIResponses) {
+            const convertedResponse = getFreeGeminiOpenAIResponsesResponse(generateResponseJson);
+            if (!convertedResponse) {
+                return returnFreeGeminiFailure(502, {
+                    error: { code: 'FREE_GEMINI_INVALID_RESPONSE', message: '免费 Gemini 渠道返回了无效的 OpenAI Responses 响应。' },
+                });
+            }
+            return response.send(convertedResponse);
         }
 
         const candidates = generateResponseJson?.candidates;

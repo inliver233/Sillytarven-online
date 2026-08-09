@@ -13,7 +13,7 @@ import { trimTrailingSlash, uuidv4 } from './util.js';
 const STORAGE_DIRECTORY = '_global';
 const LEGACY_STORAGE_DIRECTORY = '_storage';
 const STORAGE_FILE = 'free-gemini-channels.json';
-const STORAGE_VERSION = 3;
+const STORAGE_VERSION = 4;
 const MAX_NAME_LENGTH = 80;
 const MAX_URL_LENGTH = 2048;
 const MAX_KEY_LENGTH = 8192;
@@ -31,7 +31,13 @@ const DEFAULTS = Object.freeze({
     maxOutputTokens: 0,
 });
 const MODEL_POLICIES = new Set(['all', 'allowlist', 'denylist']);
-const MODEL_REQUEST_FORMATS = new Set(['gemini', 'openai']);
+export const FREE_GEMINI_MODEL_REQUEST_FORMATS = Object.freeze([
+    'gemini',
+    'openai',
+    'openai-responses',
+    'anthropic',
+]);
+const MODEL_REQUEST_FORMATS = new Set(FREE_GEMINI_MODEL_REQUEST_FORMATS);
 const DEFAULT_MODEL_REQUEST_FORMAT = 'gemini';
 const storageMutex = new KeyedMutex();
 const modelCache = new Map();
@@ -303,7 +309,7 @@ function normalizeModelRequestFormats(value, { stored = false } = {}) {
             if (stored) {
                 continue;
             }
-            throw createValidationError('modelRequestFormats 仅接受有效模型 ID，以及 gemini 或 openai 格式');
+            throw createValidationError('modelRequestFormats 仅接受有效模型 ID，以及 gemini、openai、openai-responses 或 anthropic 格式');
         }
         formats[modelId] = format;
     }
@@ -482,7 +488,26 @@ function normalizeModelRecord(model) {
     };
 }
 
-function getModelsUrl(channel, apiVersion) {
+function normalizeOpenAIModelRecord(model) {
+    if (!model || typeof model !== 'object') {
+        return null;
+    }
+
+    const id = normalizeModelId(model.id ?? model.name);
+    if (!id) {
+        return null;
+    }
+
+    const inputTokenLimit = Number(model.inputTokenLimit ?? model.context_length ?? model.contextWindow);
+    const outputTokenLimit = Number(model.outputTokenLimit ?? model.max_output_tokens ?? model.maxOutputTokens);
+    return {
+        id,
+        ...(Number.isInteger(inputTokenLimit) && inputTokenLimit > 0 ? { inputTokenLimit } : {}),
+        ...(Number.isInteger(outputTokenLimit) && outputTokenLimit > 0 ? { outputTokenLimit } : {}),
+    };
+}
+
+function getGeminiModelsUrl(channel, apiVersion) {
     const baseUrl = trimTrailingSlash(channel.url);
     const versionBaseUrl = /\/v1(?:beta)?$/i.test(baseUrl) ? baseUrl : `${baseUrl}/${apiVersion}`;
     const modelsUrl = new URL(`${versionBaseUrl}/models`);
@@ -490,11 +515,33 @@ function getModelsUrl(channel, apiVersion) {
     return modelsUrl;
 }
 
-async function fetchChannelModelsAttempt(channel, apiVersion, signal) {
+function getOpenAIModelsUrl(channel) {
+    const baseUrl = trimTrailingSlash(channel.url);
+    if (/\/v1$/i.test(baseUrl) || /\/v1(?:beta)?\/openai$/i.test(baseUrl)) {
+        return new URL(`${baseUrl}/models`);
+    }
+    if (/\/v1beta$/i.test(baseUrl)) {
+        return new URL(`${baseUrl}/openai/models`);
+    }
+    return new URL(`${baseUrl}/v1/models`);
+}
+
+function getChannelModelDiscoveryFormats(channel) {
+    const formats = new Set(Object.values(channel.modelRequestFormats ?? {}));
+    return formats.size > 0 && [...formats].some(format => format !== DEFAULT_MODEL_REQUEST_FORMAT)
+        ? ['gemini', 'openai']
+        : ['gemini'];
+}
+
+async function fetchChannelModelsAttempt(channel, apiVersion, signal, requestFormat) {
     try {
-        const response = await fetch(getModelsUrl(channel, apiVersion), {
+        const useOpenAI = requestFormat === 'openai';
+        const response = await fetch(useOpenAI ? getOpenAIModelsUrl(channel) : getGeminiModelsUrl(channel, apiVersion), {
             method: 'GET',
-            headers: { 'Accept': 'application/json' },
+            headers: {
+                'Accept': 'application/json',
+                ...(useOpenAI ? { 'Authorization': `Bearer ${channel.key}` } : {}),
+            },
             signal,
             agent: getFreeGeminiFetchAgent(channel),
             redirect: 'error',
@@ -513,14 +560,15 @@ async function fetchChannelModelsAttempt(channel, apiVersion, signal) {
         } catch {
             throw createModelsError('免费 Gemini 渠道返回了无效的模型列表。', 502, 'FREE_GEMINI_MODELS_INVALID_RESPONSE');
         }
-        if (!Array.isArray(data?.models)) {
+        const records = useOpenAI ? (data?.data ?? data?.models) : data?.models;
+        if (!Array.isArray(records)) {
             throw createModelsError('免费 Gemini 渠道返回了无效的模型列表。', 502, 'FREE_GEMINI_MODELS_INVALID_RESPONSE');
         }
 
         const seen = new Set();
-        return data.models
+        return records
             .slice(0, MAX_MODELS)
-            .map(normalizeModelRecord)
+            .map(useOpenAI ? normalizeOpenAIModelRecord : normalizeModelRecord)
             .filter(model => model && !seen.has(model.id) && seen.add(model.id));
     } catch (error) {
         if (error?.code?.startsWith?.('FREE_GEMINI_')) {
@@ -561,25 +609,54 @@ async function waitBeforeModelDiscoveryRetry(attempt, signal) {
     });
 }
 
+async function fetchChannelModelsByFormat(channel, apiVersion, signal, requestFormat) {
+    const maxAttempts = channel.maxRetries + 1;
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        try {
+            return await fetchChannelModelsAttempt(channel, apiVersion, signal, requestFormat);
+        } catch (error) {
+            const retryable = (error?.code === 'FREE_GEMINI_MODELS_NETWORK'
+                || MODEL_DISCOVERY_RETRY_STATUSES.has(error?.upstreamStatus))
+                && !signal.aborted;
+            if (!retryable || attempt + 1 >= maxAttempts) {
+                throw error;
+            }
+            console.warn(`Free Gemini ${requestFormat} model discovery failed transiently; retrying (${attempt + 1}/${channel.maxRetries}).`);
+            await waitBeforeModelDiscoveryRetry(attempt, signal);
+        }
+    }
+}
+
 async function fetchChannelModels(channel, apiVersion) {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), channel.timeoutMs);
-    const maxAttempts = channel.maxRetries + 1;
     try {
-        for (let attempt = 0; attempt < maxAttempts; attempt++) {
-            try {
-                return await fetchChannelModelsAttempt(channel, apiVersion, controller.signal);
-            } catch (error) {
-                const retryable = (error?.code === 'FREE_GEMINI_MODELS_NETWORK'
-                    || MODEL_DISCOVERY_RETRY_STATUSES.has(error?.upstreamStatus))
-                    && !controller.signal.aborted;
-                if (!retryable || attempt + 1 >= maxAttempts) {
-                    throw error;
+        const discovered = new Map();
+        let firstError;
+        const formats = getChannelModelDiscoveryFormats(channel);
+        const results = await Promise.allSettled(formats.map(requestFormat =>
+            fetchChannelModelsByFormat(channel, apiVersion, controller.signal, requestFormat)));
+        for (const result of results) {
+            if (result.status === 'fulfilled') {
+                const models = result.value;
+                for (const model of models) {
+                    discovered.set(model.id, { ...(discovered.get(model.id) ?? {}), ...model });
                 }
-                console.warn(`Free Gemini model discovery failed transiently; retrying (${attempt + 1}/${channel.maxRetries}).`);
-                await waitBeforeModelDiscoveryRetry(attempt, controller.signal);
+            } else {
+                firstError ??= result.reason;
             }
         }
+
+        // Keep Gemini as the default while still allowing a new generic
+        // aggregator to expose its initial model list only through /v1/models.
+        if (formats.length === 1 && discovered.size === 0
+            && [400, 401, 403, 404, 405, 422].includes(firstError?.upstreamStatus)) {
+            return await fetchChannelModelsByFormat(channel, apiVersion, controller.signal, 'openai');
+        }
+        if (discovered.size > 0) {
+            return [...discovered.values()].slice(0, MAX_MODELS);
+        }
+        throw firstError ?? createModelsError('免费 Gemini 渠道返回了空模型列表。', 502);
     } finally {
         clearTimeout(timeout);
     }

@@ -188,7 +188,7 @@ test('concurrent channel creation does not lose entries', async () => {
 });
 
 test('channel routing settings are normalized, returned to admins, and validated', async () => {
-    await withTempDataRoot(async () => {
+    await withTempDataRoot(async dataRoot => {
         const created = await createFreeGeminiChannel({
             name: 'policy-channel',
             url: 'https://example.com',
@@ -199,6 +199,8 @@ test('channel routing settings are normalized, returned to admins, and validated
             modelRequestFormats: {
                 'gemini-a': 'openai',
                 'models/gemini-b': 'gemini',
+                'claude-model': 'anthropic',
+                'responses-model': 'openai-responses',
             },
             timeoutMs: 5000,
             maxRetries: 3,
@@ -219,7 +221,12 @@ test('channel routing settings are normalized, returned to admins, and validated
             priority: 900,
             modelPolicy: 'allowlist',
             models: ['gemini-b', 'gemini-a'],
-            modelRequestFormats: { 'gemini-a': 'openai', 'gemini-b': 'gemini' },
+            modelRequestFormats: {
+                'gemini-a': 'openai',
+                'gemini-b': 'gemini',
+                'claude-model': 'anthropic',
+                'responses-model': 'openai-responses',
+            },
             timeoutMs: 5000,
             maxRetries: 3,
             modelCacheTtlMs: 30000,
@@ -235,12 +242,71 @@ test('channel routing settings are normalized, returned to admins, and validated
         await assert.rejects(updateFreeGeminiChannel(created.id, { models: ['ok', 123] }), /模型 ID/);
         await assert.rejects(updateFreeGeminiChannel(created.id, { models: ['../models?key=leak'] }), /模型 ID/);
         await assert.rejects(updateFreeGeminiChannel(created.id, { modelRequestFormats: [] }), /必须是模型 ID 到请求格式的对象/);
-        await assert.rejects(updateFreeGeminiChannel(created.id, { modelRequestFormats: { 'gemini-a': 'anthropic' } }), /gemini 或 openai/);
+        await assert.rejects(updateFreeGeminiChannel(created.id, { modelRequestFormats: { 'gemini-a': 'cohere' } }), /openai-responses 或 anthropic/);
 
         const resolved = await getEnabledFreeGeminiChannel(created.id);
         assert.equal(getFreeGeminiModelRequestFormat(resolved, 'gemini-a'), 'openai');
         assert.equal(getFreeGeminiModelRequestFormat(resolved, 'gemini-b'), 'gemini');
+        assert.equal(getFreeGeminiModelRequestFormat(resolved, 'claude-model'), 'anthropic');
+        assert.equal(getFreeGeminiModelRequestFormat(resolved, 'responses-model'), 'openai-responses');
         assert.equal(getFreeGeminiModelRequestFormat(resolved, 'gemini-unconfigured'), 'gemini');
+        const stored = JSON.parse(await fs.promises.readFile(
+            path.join(dataRoot, '_global', 'free-gemini-channels.json'),
+            'utf8',
+        ));
+        assert.deepEqual(stored.channels[0].modelRequestFormats, created.modelRequestFormats);
+    });
+});
+
+test('model discovery merges Gemini and OpenAI listings when a channel has non-Gemini model formats', async () => {
+    await withTempDataRoot(async () => {
+        const requests = [];
+        const upstream = http.createServer((request, response) => {
+            requests.push({ url: request.url, authorization: request.headers.authorization });
+            response.setHeader('Content-Type', 'application/json');
+            if (request.url === '/v1beta/models?key=discovery-secret') {
+                response.end(JSON.stringify({
+                    models: [{ name: 'models/gemini-model', supportedGenerationMethods: ['generateContent'] }],
+                }));
+                return;
+            }
+            if (request.url === '/v1/models') {
+                response.end(JSON.stringify({
+                    data: [
+                        { id: 'gemini-model', context_length: 32000 },
+                        { id: 'deepseek-model', context_length: 64000, max_output_tokens: 8000 },
+                    ],
+                }));
+                return;
+            }
+            response.statusCode = 404;
+            response.end('{}');
+        });
+        await new Promise((resolve, reject) => {
+            upstream.once('error', reject);
+            upstream.listen(0, '127.0.0.1', resolve);
+        });
+
+        try {
+            const address = upstream.address();
+            const channel = await createFreeGeminiChannel({
+                url: `http://127.0.0.1:${address.port}`,
+                key: 'discovery-secret',
+                maxRetries: 0,
+                modelRequestFormats: { 'deepseek-model': 'openai' },
+            });
+            const resolved = await getEnabledFreeGeminiChannel(channel.id);
+            assert.deepEqual(await getFreeGeminiChannelModels(resolved), [
+                { id: 'gemini-model', inputTokenLimit: 32000 },
+                { id: 'deepseek-model', inputTokenLimit: 64000, outputTokenLimit: 8000 },
+            ]);
+            assert.deepEqual(requests, [
+                { url: '/v1beta/models?key=discovery-secret', authorization: undefined },
+                { url: '/v1/models', authorization: 'Bearer discovery-secret' },
+            ]);
+        } finally {
+            await new Promise(resolve => upstream.close(resolve));
+        }
     });
 });
 

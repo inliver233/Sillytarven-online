@@ -127,6 +127,7 @@ test('free Gemini uses server-side credentials and normalizes the first upstream
                     channel_name: 'free-gemini',
                     inputTokenLimit: 100,
                     outputTokenLimit: 40,
+                    request_format: 'gemini',
                 },
                 {
                     id: 'gemini-null-methods',
@@ -134,6 +135,7 @@ test('free Gemini uses server-side credentials and normalizes the first upstream
                     channel_name: 'free-gemini',
                     inputTokenLimit: null,
                     outputTokenLimit: 40,
+                    request_format: 'gemini',
                 },
                 {
                     id: 'gemini-missing-methods',
@@ -141,6 +143,7 @@ test('free Gemini uses server-side credentials and normalizes the first upstream
                     channel_name: 'free-gemini',
                     inputTokenLimit: null,
                     outputTokenLimit: 40,
+                    request_format: 'gemini',
                 },
             ],
         });
@@ -267,7 +270,7 @@ test('free Gemini uses server-side credentials and normalizes the first upstream
     }
 });
 
-test('free Gemini sends each model with its configured request format', async () => {
+test('one free Gemini channel sends every model with its configured native request format', async () => {
     const previousDataRoot = globalThis.DATA_ROOT;
     const dataRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'st-free-gemini-formats-'));
     globalThis.DATA_ROOT = dataRoot;
@@ -278,26 +281,79 @@ test('free Gemini sends each model with its configured request format', async ()
         if (request.method === 'GET' && request.url === '/v1beta/models?key=format-secret') {
             response.end(JSON.stringify({
                 models: [
-                    { name: 'models/native-model', supportedGenerationMethods: ['generateContent'], outputTokenLimit: 100 },
-                    { name: 'models/openai-model', supportedGenerationMethods: ['generateContent'], outputTokenLimit: 80 },
+                    { name: 'models/gemini-model', supportedGenerationMethods: ['generateContent'], outputTokenLimit: 100 },
+                    { name: 'models/deepseek-model', supportedGenerationMethods: ['generateContent'], outputTokenLimit: 80 },
+                    { name: 'models/claude-model', supportedGenerationMethods: ['generateContent'], outputTokenLimit: 70 },
+                    { name: 'models/responses-model', supportedGenerationMethods: ['generateContent'], outputTokenLimit: 60 },
                 ],
             }));
             return;
         }
         if (request.method === 'POST') {
             const body = await readRequestJson(request);
-            generationRequests.push({ url: request.url, authorization: request.headers.authorization, body });
-            if (request.url === '/v1beta/models/native-model:generateContent?key=format-secret') {
-                response.end(JSON.stringify({ candidates: [{ content: { parts: [{ text: 'native' }] } }] }));
+            generationRequests.push({
+                url: request.url,
+                authorization: request.headers.authorization,
+                xApiKey: request.headers['x-api-key'],
+                anthropicVersion: request.headers['anthropic-version'],
+                body,
+            });
+            if (request.url === '/v1beta/models/gemini-model:generateContent?key=format-secret') {
+                response.end(JSON.stringify({ candidates: [{ content: { parts: [{ text: 'gemini' }] } }] }));
+                return;
+            }
+            if (request.url === '/v1beta/models/gemini-model:streamGenerateContent?key=format-secret&alt=sse') {
+                response.setHeader('Content-Type', 'text/event-stream');
+                response.end('data: {"candidates":[{"content":{"parts":[{"text":"gemini-stream"}]}}]}\n\n');
                 return;
             }
             if (request.url === '/v1/chat/completions') {
                 if (body.stream) {
                     response.setHeader('Content-Type', 'text/event-stream');
-                    response.end('data: {"choices":[{"delta":{"content":"streamed"}}]}\n\ndata: [DONE]\n\n');
+                    response.end('data: {"choices":[{"delta":{"content":"openai-stream"}}]}\n\ndata: [DONE]\n\n');
                     return;
                 }
-                response.end(JSON.stringify({ choices: [{ message: { content: 'openai' } }] }));
+                response.end(JSON.stringify({ choices: [{ message: { content: 'deepseek' } }] }));
+                return;
+            }
+            if (request.url === '/v1/messages') {
+                if (body.stream) {
+                    response.setHeader('Content-Type', 'text/event-stream');
+                    response.end([
+                        'event: content_block_delta',
+                        'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"anthropic-stream"}}',
+                        '',
+                        'event: message_stop',
+                        'data: {"type":"message_stop"}',
+                        '',
+                        '',
+                    ].join('\n'));
+                    return;
+                }
+                response.end(JSON.stringify({
+                    content: [{ type: 'text', text: 'anthropic' }],
+                    stop_reason: 'end_turn',
+                }));
+                return;
+            }
+            if (request.url === '/v1/responses') {
+                if (body.stream) {
+                    response.setHeader('Content-Type', 'text/event-stream');
+                    response.end([
+                        'event: response.output_text.delta',
+                        'data: {"type":"response.output_text.delta","delta":"responses-stream"}',
+                        '',
+                        'event: response.completed',
+                        'data: {"type":"response.completed","response":{"status":"completed"}}',
+                        '',
+                        '',
+                    ].join('\n'));
+                    return;
+                }
+                response.end(JSON.stringify({
+                    status: 'completed',
+                    output: [{ type: 'message', content: [{ type: 'output_text', text: 'responses' }] }],
+                }));
                 return;
             }
         }
@@ -315,9 +371,29 @@ test('free Gemini sends each model with its configured request format', async ()
             key: 'format-secret',
             maxOutputTokens: 50,
             modelRequestFormats: {
-                'native-model': 'gemini',
-                'openai-model': 'openai',
+                'gemini-model': 'gemini',
+                'deepseek-model': 'openai',
+                'claude-model': 'anthropic',
+                'responses-model': 'openai-responses',
             },
+        });
+
+        const statusResponse = await fetch(`${appUrl}/api/backends/chat-completions/status`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                chat_completion_source: 'free-gemini',
+                free_gemini_channel_id: channel.id,
+            }),
+        });
+        assert.equal(statusResponse.status, 200);
+        const statusFormats = Object.fromEntries((await statusResponse.json()).data
+            .map(item => [item.id, item.request_format]));
+        assert.deepEqual(statusFormats, {
+            'gemini-model': 'gemini',
+            'deepseek-model': 'openai',
+            'claude-model': 'anthropic',
+            'responses-model': 'openai-responses',
         });
 
         const generate = async model => {
@@ -331,7 +407,7 @@ test('free Gemini sends each model with its configured request format', async ()
                     messages: [{ role: 'user', content: `use ${model}` }],
                     max_tokens: 70,
                     stream: false,
-                    ...(model === 'openai-model' ? {
+                    ...(model === 'deepseek-model' ? {
                         custom_include_body: 'model: policy-bypass\nmax_tokens: 99999\nstream: true',
                     } : {}),
                 }),
@@ -340,34 +416,59 @@ test('free Gemini sends each model with its configured request format', async ()
             return await result.json();
         };
 
-        assert.equal((await generate('native-model')).choices[0].message.content, 'native');
-        assert.equal((await generate('openai-model')).choices[0].message.content, 'openai');
-        assert.equal(generationRequests[0].url, '/v1beta/models/native-model:generateContent?key=format-secret');
-        assert.equal(generationRequests[0].authorization, undefined);
-        assert.equal(generationRequests[0].body.generationConfig.maxOutputTokens, 50);
-        assert.equal(generationRequests[1].url, '/v1/chat/completions');
-        assert.equal(generationRequests[1].authorization, 'Bearer format-secret');
-        assert.equal(generationRequests[1].body.model, 'openai-model');
-        assert.deepEqual(generationRequests[1].body.messages, [{ role: 'user', content: 'use openai-model' }]);
-        assert.equal(generationRequests[1].body.max_tokens, 50);
-        assert.equal(generationRequests[1].body.stream, false);
-        assert.equal(Object.hasOwn(generationRequests[1].body, 'contents'), false);
+        assert.equal((await generate('gemini-model')).choices[0].message.content, 'gemini');
+        assert.equal((await generate('deepseek-model')).choices[0].message.content, 'deepseek');
+        assert.equal((await generate('claude-model')).choices[0].message.content, 'anthropic');
+        assert.equal((await generate('responses-model')).choices[0].message.content, 'responses');
 
-        const streamResponse = await fetch(`${appUrl}/api/backends/chat-completions/generate`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                chat_completion_source: 'free-gemini',
-                free_gemini_channel_id: channel.id,
-                model: 'openai-model',
-                messages: [{ role: 'user', content: 'stream' }],
-                stream: true,
-            }),
-        });
-        assert.equal(streamResponse.status, 200);
-        assert.match(await streamResponse.text(), /"choices":\[\{"delta":\{"content":"streamed"\}/);
-        assert.equal(generationRequests[2].url, '/v1/chat/completions');
-        assert.equal(generationRequests[2].body.stream, true);
+        const normalRequests = Object.fromEntries(generationRequests
+            .filter(item => item.body.model)
+            .map(item => [item.body.model, item]));
+        const geminiRequest = generationRequests.find(item => item.url.includes('gemini-model:generateContent'));
+        assert.equal(geminiRequest.url, '/v1beta/models/gemini-model:generateContent?key=format-secret');
+        assert.equal(geminiRequest.authorization, undefined);
+        assert.equal(geminiRequest.body.generationConfig.maxOutputTokens, 50);
+        assert.equal(normalRequests['deepseek-model'].url, '/v1/chat/completions');
+        assert.equal(normalRequests['deepseek-model'].authorization, 'Bearer format-secret');
+        assert.deepEqual(normalRequests['deepseek-model'].body.messages, [{ role: 'user', content: 'use deepseek-model' }]);
+        assert.equal(normalRequests['deepseek-model'].body.max_tokens, 50);
+        assert.equal(normalRequests['deepseek-model'].body.stream, false);
+        assert.equal(normalRequests['claude-model'].url, '/v1/messages');
+        assert.equal(normalRequests['claude-model'].xApiKey, 'format-secret');
+        assert.equal(normalRequests['claude-model'].anthropicVersion, '2023-06-01');
+        assert.equal(normalRequests['claude-model'].body.max_tokens, 50);
+        assert.equal(normalRequests['responses-model'].url, '/v1/responses');
+        assert.equal(normalRequests['responses-model'].authorization, 'Bearer format-secret');
+        assert.equal(normalRequests['responses-model'].body.max_output_tokens, 50);
+        assert.deepEqual(normalRequests['responses-model'].body.input, [{ role: 'user', content: 'use responses-model' }]);
+
+        const stream = async model => {
+            const streamResponse = await fetch(`${appUrl}/api/backends/chat-completions/generate`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    chat_completion_source: 'free-gemini',
+                    free_gemini_channel_id: channel.id,
+                    model,
+                    messages: [{ role: 'user', content: `stream ${model}` }],
+                    stream: true,
+                }),
+            });
+            assert.equal(streamResponse.status, 200);
+            return await streamResponse.text();
+        };
+
+        assert.match(await stream('gemini-model'), /"candidates".*"gemini-stream"/);
+        assert.match(await stream('deepseek-model'), /"choices".*"openai-stream"/);
+        assert.match(await stream('claude-model'), /"choices".*"anthropic-stream"/);
+        assert.match(await stream('responses-model'), /"choices".*"responses-stream"/);
+        const streamRequests = generationRequests.filter(item => item.body.stream || item.url.includes(':streamGenerateContent'));
+        assert.deepEqual(streamRequests.map(item => item.url), [
+            '/v1beta/models/gemini-model:streamGenerateContent?key=format-secret&alt=sse',
+            '/v1/chat/completions',
+            '/v1/messages',
+            '/v1/responses',
+        ]);
     } finally {
         await Promise.allSettled([close(appServer), close(upstream)]);
         globalThis.DATA_ROOT = previousDataRoot;
@@ -955,7 +1056,7 @@ test('free Gemini exhausts retries on a 503 channel before failing over to the n
             }
 
             await readRequestJson(request);
-            generationOrder.push(label);
+            generationOrder.push(`${label}:${request.url}`);
             attempts[label]++;
             generate(response);
         });
@@ -967,7 +1068,8 @@ test('free Gemini exhausts retries on a 503 channel before failing over to the n
     });
     const secondaryUpstream = makeUpstream('secondary', response => {
         response.end(JSON.stringify({
-            candidates: [{ content: { parts: [{ text: 'secondary recovered the request' }] } }],
+            content: [{ type: 'text', text: 'secondary recovered the request' }],
+            stop_reason: 'end_turn',
         }));
     });
     const appServer = await createChatAppServer();
@@ -982,6 +1084,7 @@ test('free Gemini exhausts retries on a 503 channel before failing over to the n
             key: 'primary-secret',
             priority: 100,
             maxRetries: 2,
+            modelRequestFormats: { 'shared-503': 'openai' },
         });
         await createFreeGeminiChannel({
             name: 'secondary',
@@ -989,6 +1092,7 @@ test('free Gemini exhausts retries on a 503 channel before failing over to the n
             key: 'secondary-secret',
             priority: 10,
             maxRetries: 0,
+            modelRequestFormats: { 'shared-503': 'anthropic' },
         });
 
         const result = await fetch(`${appUrl}/api/backends/chat-completions/generate`, {
@@ -1006,7 +1110,12 @@ test('free Gemini exhausts retries on a 503 channel before failing over to the n
 
         assert.equal(result.status, 200);
         assert.equal((await result.json()).choices[0].message.content, 'secondary recovered the request');
-        assert.deepEqual(generationOrder, ['primary', 'primary', 'primary', 'secondary']);
+        assert.deepEqual(generationOrder, [
+            'primary:/v1/chat/completions',
+            'primary:/v1/chat/completions',
+            'primary:/v1/chat/completions',
+            'secondary:/v1/messages',
+        ]);
         assert.deepEqual(attempts, { primary: 3, secondary: 1 });
     } finally {
         await Promise.allSettled([close(appServer), close(primaryUpstream), close(secondaryUpstream)]);
@@ -1599,6 +1708,7 @@ test('free Gemini status returns fast channel models within the discovery cap wh
                 channel_name: 'fast-status',
                 inputTokenLimit: null,
                 outputTokenLimit: 65536,
+                request_format: 'gemini',
             }],
         });
         assert.equal(fastModelRequests, 1);

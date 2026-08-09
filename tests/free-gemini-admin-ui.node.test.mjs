@@ -30,7 +30,7 @@ test('admin template uses a searchable per-model policy and request-format list'
     assert.match(channelBlock, /id="freeGeminiModelSelectionCount"/);
     assert.match(channelBlock, /<div id="freeGeminiUpstreamModels"[^>]+role="group"/);
     assert.doesNotMatch(channelBlock, /<select id="freeGeminiUpstreamModels"[^>]*multiple/);
-    assert.match(channelBlock, /每个模型可独立选择“原生 Gemini”或“OpenAI 兼容”请求格式/);
+    assert.match(channelBlock, /每个模型可独立选择原生 Gemini、OpenAI Chat Completions、OpenAI Responses 或 Anthropic Messages 请求格式/);
     assert.match(channelBlock, /class="freeGeminiChannelActions[^>]*">\s*<button type="button"[^>]+id="saveFreeGeminiChannel"/);
     assert.match(adminScript, /\.addClass\('freeGeminiModelEnabled'\)[\s\S]*?\.data\('model', model\)/);
     assert.match(adminScript, /\$\('<span>'\)\.text\(model\)/);
@@ -38,6 +38,10 @@ test('admin template uses a searchable per-model policy and request-format list'
     assert.match(adminScript, /freeGeminiModelEnabledState\.set\(model, \$\(this\)\.prop\('checked'\)\)/);
     assert.match(adminScript, /\.addClass\('text_pole freeGeminiModelRequestFormat'\)/);
     assert.match(adminScript, /freeGeminiModelRequestFormats\.set\(model, format\)/);
+    assert.match(adminScript, /value: 'gemini', label: '原生 Gemini'/);
+    assert.match(adminScript, /value: 'openai', label: 'OpenAI Chat Completions'/);
+    assert.match(adminScript, /value: 'openai-responses', label: 'OpenAI Responses'/);
+    assert.match(adminScript, /value: 'anthropic', label: 'Anthropic Messages'/);
     assert.match(adminScript, /modelRequestFormats: serializeFreeGeminiModelRequestFormats\(\)/);
     assert.match(adminStyles, /\.freeGeminiModelList\s*{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\)/);
     assert.match(adminStyles, /\.freeGeminiModelRow\s*{[\s\S]*?grid-template-columns:\s*auto minmax\(0, 1fr\) minmax\(130px, auto\)/);
@@ -67,6 +71,7 @@ test('admin save retention, mutation busy state, and request races are wired', (
     assert.match(adminScript, /finally \{\s*if \(isCurrentFreeGeminiChannelMutation\(mutationRequestId\)\) setFreeGeminiChannelSaveBusy\(false\)/);
     assert.match(adminScript, /mergeFreeGeminiUpstreamModels\(models, refresh\)/);
     assert.match(adminScript, /replaceUpstream \? \[\] : currentFreeGeminiUpstreamModels/);
+    assert.match(adminScript, /\.\.\.freeGeminiModelRequestFormats\.keys\(\)/);
     assert.match(adminScript, /click\.freeGeminiNavigation[\s\S]*?freeGeminiChannelSaveInProgress[\s\S]*?stopImmediatePropagation/);
     assert.match(adminScript, /if \(root !== document\)\s*{[\s\S]*?click\.freeGeminiNavigation/);
     assert.match(adminScript, /confirmDiscardFreeGeminiChannelChanges\('切换选项卡会放弃当前未保存的渠道配置，确定继续吗？'\)/);
