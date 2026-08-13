@@ -835,6 +835,10 @@ test('stcontrol adapter is wired through authenticated, CSRF-safe integration po
     assert.match(loginBoundary, /request\.path\.startsWith\('\/api\/stcontrol\/internal\/'\)/);
     assert.match(endpoint, /stcontrol_handoff/);
     assert.doesNotMatch(endpoint, /request\.query\.(?:ticket|code)/);
+    // Password unbind on the control plane must be able to remove the
+    // node-local verifier through the same set_password path (no hash material).
+    assert.match(endpoint, /const removing = input\.remove === true;/);
+    assert.match(endpoint, /delete user\.stcontrolPasswordVersion;/);
 	assert.ok(STCONTROL_CAPABILITIES.includes('user_data_fault_freeze'));
 });
 async function startOwnershipAgent(decision) {

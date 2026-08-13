@@ -199,7 +199,8 @@ router.post('/api/stcontrol/internal/users/password', async (request, response) 
         const input = request.body || {};
         requireUUID(input.operation_id, 'invalid_operation_id');
         const handle = requireHandle(input.handle);
-        if (!isHashMaterial(input.password_hash, input.password_salt) || !Number.isSafeInteger(input.version) || input.version <= 0) {
+        const removing = input.remove === true;
+        if (!removing && (!isHashMaterial(input.password_hash, input.password_salt) || !Number.isSafeInteger(input.version) || input.version <= 0)) {
             throw new AdapterRequestError(400, 'invalid_password_material');
         }
         const normalized = { ...input, handle };
@@ -207,6 +208,15 @@ router.post('/api/stcontrol/internal/users/password', async (request, response) 
             const key = toKey(handle);
             const user = await storage.getItem(key);
             if (!user) throw new AdapterRequestError(404, 'user_not_found');
+            if (removing) {
+                // Password identity was unbound on the control plane; drop the
+                // node-local verifier so the old password stops working here.
+                delete user.password;
+                delete user.salt;
+                delete user.stcontrolPasswordVersion;
+                await storage.setItem(key, user);
+                return { ok: true };
+            }
             if (Number(user.stcontrolPasswordVersion || 0) > input.version) {
                 throw new AdapterRequestError(409, 'password_version_rollback');
             }
