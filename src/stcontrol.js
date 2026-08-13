@@ -936,7 +936,10 @@ export async function stcontrolRequestTracker(request, response, next) {
     const gatesChanged = cleanExpiredSnapshotGates(state);
     if (sessionsChanged || gatesChanged) persistState(state);
     const hadSessionEnvelope = Boolean(request.session?.stcontrol?.sessionId);
-    const envelope = ensureSessionEnvelope(request, state.mode === STCONTROL_MODES.INDEPENDENT ? STCONTROL_MODES.INDEPENDENT : STCONTROL_MODES.MANAGED);
+    // New envelopes are always created neutrally MANAGED. INDEPENDENT is granted
+    // only through the ownership-proof branch below, never by control mode alone,
+    // so a mere authenticated handle cannot mint an INDEPENDENT writer.
+    const envelope = ensureSessionEnvelope(request, STCONTROL_MODES.MANAGED);
     if (!envelope) return response.sendStatus(500);
     const knownSession = state.sessions[envelope.sessionId];
     if (knownSession?.loggedOutAt || (hadSessionEnvelope && !knownSession)) {
@@ -962,23 +965,46 @@ export async function stcontrolRequestTracker(request, response, next) {
         }
     }
     const isWrite = !['GET', 'HEAD', 'OPTIONS'].includes(request.method);
-    const gate = state.gates[handle];
-    if (gate && isWrite && !request.path.startsWith(INTERNAL_PATH_PREFIX)) {
-        response.set('Retry-After', '2');
-        if (gate.kind === 'data_fault') {
-            return response.status(423).json({ error: '检测到用户数据异常，写入已冻结，请从控制面板恢复', code: 'user_data_frozen' });
-        }
-        return response.status(423).json({ error: '用户数据正在生成一致性快照，请稍后重试', code: 'user_quiescing' });
-    }
-    const lease = state.leases[handle];
-    if (isWrite && envelope.loginMode === STCONTROL_MODES.MANAGED && (!lease || lease.sessionId !== envelope.sessionId ||
-        lease.activityEpoch !== envelope.activityEpoch || lease.controllerGeneration !== envelope.controllerGeneration ||
-        !Number.isSafeInteger(lease.leaseExpiresAt) ||
-        lease.leaseExpiresAt <= Date.now() + ACTIVITY_LEASE_FENCE_MARGIN_MS)) {
-        return response.status(409).json({ error: '当前页面的写入租约已失效，请重新登录', code: 'stale_writer_session' });
-    }
-    await mutateState(current => {
+
+    // Gate, lease and independent-writer origin are all decided against the SAME
+    // authoritative state that records in-flight admission. Check + admit run
+    // atomically inside the serialized mutateState linearization point, so a
+    // concurrent write-gate establishment command cannot interleave between the
+    // fence check and this request's admission. Status codes and bodies are
+    // unchanged from the previous snapshot-based checks.
+    const admission = await mutateState(current => {
         const now = Date.now();
+        cleanExpiredSessions(current);
+        cleanExpiredSnapshotGates(current);
+
+        const gate = current.gates[handle];
+        if (gate && isWrite && !request.path.startsWith(INTERNAL_PATH_PREFIX)) {
+            response.set('Retry-After', '2');
+            if (gate.kind === 'data_fault') {
+                return { blocked: 'user_data_frozen' };
+            }
+            return { blocked: 'user_quiescing' };
+        }
+
+        const lease = current.leases[handle];
+        if (isWrite && envelope.loginMode === STCONTROL_MODES.MANAGED && (!lease || lease.sessionId !== envelope.sessionId ||
+            lease.activityEpoch !== envelope.activityEpoch || lease.controllerGeneration !== envelope.controllerGeneration ||
+            !Number.isSafeInteger(lease.leaseExpiresAt) ||
+            lease.leaseExpiresAt <= now + ACTIVITY_LEASE_FENCE_MARGIN_MS)) {
+            return { blocked: 'stale_writer_session' };
+        }
+
+        // Defense-in-depth: an INDEPENDENT writer must be backed by a durable
+        // independent session owned by this handle and still logged in. A forged
+        // envelope claiming independent mode has no such backing session.
+        if (isWrite && envelope.loginMode === STCONTROL_MODES.INDEPENDENT) {
+            const durableSession = current.sessions[envelope.sessionId];
+            if (!durableSession || durableSession.loginMode !== STCONTROL_MODES.INDEPENDENT ||
+                durableSession.handle !== handle || durableSession.loggedOutAt) {
+                return { blocked: 'stale_writer_session' };
+            }
+        }
+
         const session = current.sessions[envelope.sessionId] ?? {
             handle,
             loginMode: envelope.loginMode,
@@ -997,7 +1023,18 @@ export async function stcontrolRequestTracker(request, response, next) {
         if (isWrite && session.loginMode === STCONTROL_MODES.INDEPENDENT) {
             current.pendingSyncUsers[handle] = { marker: crypto.randomUUID(), changedAt: now, reason: 'independent_write' };
         }
+        return { blocked: null };
     });
+
+    if (admission.blocked === 'user_data_frozen') {
+        return response.status(423).json({ error: '检测到用户数据异常，写入已冻结，请从控制面板恢复', code: 'user_data_frozen' });
+    }
+    if (admission.blocked === 'user_quiescing') {
+        return response.status(423).json({ error: '用户数据正在生成一致性快照，请稍后重试', code: 'user_quiescing' });
+    }
+    if (admission.blocked === 'stale_writer_session') {
+        return response.status(409).json({ error: '当前页面的写入租约已失效，请重新登录', code: 'stale_writer_session' });
+    }
     let finished = false;
     const finish = () => {
         if (finished) return;

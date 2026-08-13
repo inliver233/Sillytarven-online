@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -836,3 +837,228 @@ test('stcontrol adapter is wired through authenticated, CSRF-safe integration po
     assert.doesNotMatch(endpoint, /request\.query\.(?:ticket|code)/);
 	assert.ok(STCONTROL_CAPABILITIES.includes('user_data_fault_freeze'));
 });
+async function startOwnershipAgent(decision) {
+    const server = http.createServer(async (request, response) => {
+        for await (const _chunk of request) { /* drain body */ }
+        if (request.url === '/agent/activity-ownership/v1/resolve') {
+            response.setHeader('Content-Type', 'application/json');
+            response.end(JSON.stringify({
+                ok: true,
+                decision,
+                claim_id: 'a'.repeat(64),
+                reason_code: decision === 'automatic' ? 'last_active_owner' : 'last_active_node_available',
+            }));
+            return;
+        }
+        response.statusCode = 404;
+        response.end('{}');
+    });
+    await new Promise((resolve, reject) => {
+        server.listen(0, '127.0.0.1', resolve);
+        server.once('error', reject);
+    });
+    return { server, url: `http://127.0.0.1:${server.address().port}` };
+}
+
+function makeTrackerResponse() {
+    const response = new EventEmitter();
+    response.status = status => { response.statusCode = status; return response; };
+    response.sendStatus = status => { response.statusCode = status; return response; };
+    response.set = (name, value) => { response.headers = { ...response.headers, [name]: value }; return response; };
+    response.json = body => { response.body = body; return response; };
+    return response;
+}
+
+function recordEnv(...keys) {
+    const saved = {};
+    for (const key of keys) saved[key] = process.env[key];
+    return saved;
+}
+
+function restoreEnv(saved) {
+    for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+    }
+}
+
+test('independent mode requires ownership proof before minting a new envelope writer', async () => {
+    const previousDataRoot = globalThis.DATA_ROOT;
+    const previous = recordEnv(
+        'SILLYTAVERN_STCONTROL_ENABLED',
+        'SILLYTAVERN_STCONTROL_NODEID',
+        'SILLYTAVERN_STCONTROL_AGENTPSK',
+        'SILLYTAVERN_STCONTROL_AGENTURL',
+    );
+    const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sillytavern-stcontrol-independent-new-envelope-'));
+    globalThis.DATA_ROOT = dataRoot;
+    process.env.SILLYTAVERN_STCONTROL_ENABLED = 'true';
+    process.env.SILLYTAVERN_STCONTROL_NODEID = '7';
+    process.env.SILLYTAVERN_STCONTROL_AGENTPSK = 'test-agent-psk';
+    resetStcontrolStateForTests();
+    let deniedAgent;
+    let allowedAgent;
+    try {
+        // A brand-new (no prior session envelope) request in independent mode must
+        // prove ownership before it can become an independent writer. When the
+        // ownership stub says not-allowed the request is rejected without next().
+        deniedAgent = await startOwnershipAgent('owner_available');
+        process.env.SILLYTAVERN_STCONTROL_AGENTURL = deniedAgent.url;
+        await applyStcontrolMode({
+            mode: STCONTROL_MODES.INDEPENDENT,
+            mode_generation: 2,
+            controller_generation: 1,
+            reason_code: 'sustained_outage',
+        });
+        const deniedRequest = {
+            method: 'POST',
+            path: '/api/chats/save',
+            user: { profile: { handle: 'alice' } },
+            session: {},
+        };
+        const deniedResponse = makeTrackerResponse();
+        let nextCalls = 0;
+        await stcontrolRequestTracker(deniedRequest, deniedResponse, () => nextCalls++);
+        assert.equal(deniedResponse.statusCode, 423);
+        assert.deepEqual(deniedResponse.body, {
+            error: '无法证明此节点拥有该用户的灾难写权',
+            code: 'not_last_active_node',
+        });
+        assert.equal(nextCalls, 0, 'denied ownership must not proceed');
+        await new Promise(resolve => deniedAgent.server.close(resolve));
+
+        // When ownership is automatic/allowed the new envelope is upgraded to
+        // INDEPENDENT and the request proceeds.
+        allowedAgent = await startOwnershipAgent('automatic');
+        process.env.SILLYTAVERN_STCONTROL_AGENTURL = allowedAgent.url;
+        const allowedRequest = {
+            method: 'GET',
+            path: '/api/chats/get',
+            user: { profile: { handle: 'alice' } },
+            session: {},
+        };
+        const allowedResponse = makeTrackerResponse();
+        nextCalls = 0;
+        await stcontrolRequestTracker(allowedRequest, allowedResponse, () => nextCalls++);
+        assert.equal(nextCalls, 1, 'accepted ownership must proceed');
+        assert.equal(allowedRequest.session.stcontrol.loginMode, STCONTROL_MODES.INDEPENDENT);
+        allowedResponse.emit('finish');
+        await new Promise(resolve => setTimeout(resolve, 20));
+        await new Promise(resolve => allowedAgent.server.close(resolve));
+    } finally {
+        resetStcontrolStateForTests();
+        globalThis.DATA_ROOT = previousDataRoot;
+        restoreEnv(previous);
+        if (deniedAgent && typeof deniedAgent.server.close === 'function') {
+            await new Promise(resolve => deniedAgent.server.close(() => resolve()));
+        }
+        if (allowedAgent && typeof allowedAgent.server.close === 'function') {
+            await new Promise(resolve => allowedAgent.server.close(() => resolve()));
+        }
+        fs.rmSync(dataRoot, { recursive: true, force: true });
+    }
+});
+
+test('an independent write requires a matching durable session, rejecting forged envelopes', async () => {
+    const previousDataRoot = globalThis.DATA_ROOT;
+    const previous = recordEnv(
+        'SILLYTAVERN_STCONTROL_ENABLED',
+        'SILLYTAVERN_STCONTROL_NODEID',
+        'SILLYTAVERN_STCONTROL_AGENTPSK',
+        'SILLYTAVERN_STCONTROL_AGENTURL',
+    );
+    const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sillytavern-stcontrol-forged-envelope-'));
+    const forgedSessionId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const genuineSessionId = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    globalThis.DATA_ROOT = dataRoot;
+    process.env.SILLYTAVERN_STCONTROL_ENABLED = 'true';
+    resetStcontrolStateForTests();
+    try {
+        await applyStcontrolMode({
+            mode: STCONTROL_MODES.INDEPENDENT,
+            mode_generation: 2,
+            controller_generation: 1,
+            reason_code: 'sustained_outage',
+        });
+
+        const statePath = path.join(dataRoot, '_stcontrol', 'adapter-state.json');
+        fs.mkdirSync(path.dirname(statePath), { recursive: true });
+        // A durable MANAGED session exists for this handle, but the envelope
+        // falsely claims INDEPENDENT mode: a forged independent writer must 409.
+        const forgedState = getStcontrolState();
+        forgedState.sessions[forgedSessionId] = {
+            handle: 'alice',
+            loginMode: STCONTROL_MODES.MANAGED,
+            activityEpoch: 0,
+            controllerGeneration: 1,
+            lastSeenAt: Date.now(),
+            lastPageAt: Date.now(),
+            lastRequestAt: Date.now(),
+            inFlightReads: 0,
+            inFlightWrites: 0,
+        };
+        fs.writeFileSync(statePath, JSON.stringify(forgedState));
+        resetStcontrolStateForTests();
+
+        const forgedRequest = {
+            method: 'POST',
+            path: '/api/chats/save',
+            user: { profile: { handle: 'alice' } },
+            session: { stcontrol: {
+                sessionId: forgedSessionId,
+                loginMode: STCONTROL_MODES.INDEPENDENT,
+                activityEpoch: 0,
+                controllerGeneration: 1,
+            } },
+        };
+        const forgedResponse = makeTrackerResponse();
+        let nextCalls = 0;
+        await stcontrolRequestTracker(forgedRequest, forgedResponse, () => nextCalls++);
+        assert.equal(forgedResponse.statusCode, 409);
+        assert.equal(forgedResponse.body.code, 'stale_writer_session');
+        assert.equal(nextCalls, 0);
+
+        // Control: a genuine durable INDEPENDENT session owned by this handle may
+        // write, so the defense does not over-block legitimate independent writers.
+        const genuineState = getStcontrolState();
+        genuineState.sessions[genuineSessionId] = {
+            handle: 'alice',
+            loginMode: STCONTROL_MODES.INDEPENDENT,
+            activityEpoch: 0,
+            controllerGeneration: 1,
+            lastSeenAt: Date.now(),
+            lastPageAt: Date.now(),
+            lastRequestAt: Date.now(),
+            inFlightReads: 0,
+            inFlightWrites: 0,
+        };
+        fs.writeFileSync(statePath, JSON.stringify(genuineState));
+        resetStcontrolStateForTests();
+
+        const genuineRequest = {
+            method: 'POST',
+            path: '/api/chats/save',
+            user: { profile: { handle: 'alice' } },
+            session: { stcontrol: {
+                sessionId: genuineSessionId,
+                loginMode: STCONTROL_MODES.INDEPENDENT,
+                activityEpoch: 0,
+                controllerGeneration: 1,
+            } },
+        };
+        const genuineResponse = makeTrackerResponse();
+        nextCalls = 0;
+        await stcontrolRequestTracker(genuineRequest, genuineResponse, () => nextCalls++);
+        assert.equal(nextCalls, 1, 'a genuine independent session must be able to write');
+        genuineResponse.emit('finish');
+        await new Promise(resolve => setTimeout(resolve, 20));
+        assert.equal(getStcontrolPendingSyncUsers().map(item => item.handle).includes('alice'), true,
+            'an admitted independent write marks the handle for reconciliation');
+    } finally {
+        resetStcontrolStateForTests();
+        globalThis.DATA_ROOT = previousDataRoot;
+        restoreEnv(previous);
+        fs.rmSync(dataRoot, { recursive: true, force: true });
+    }
+});
+
