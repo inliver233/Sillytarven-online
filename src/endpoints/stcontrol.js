@@ -458,6 +458,10 @@ export async function stcontrolHandoffHandler(request, response) {
                 permissionVersion: claims.permission_version,
                 controllerGeneration: claims.controller_generation,
             };
+            // Drop any user-session envelope left by a previous user handoff in
+            // this same browser session, so it cannot leak back once the admin
+            // marker is gone.
+            delete request.session.stcontrol;
         } else if (!UUID_PATTERN.test(claims.user_uuid || '') || !UUID_PATTERN.test(claims.session_id || '') ||
             !Number.isSafeInteger(claims.user_id) || claims.user_id <= 0 ||
             !Number.isSafeInteger(claims.activity_epoch) || claims.activity_epoch <= 0 ||
@@ -485,7 +489,14 @@ export async function stcontrolHandoffHandler(request, response) {
         }
         request.session.handle = user.handle;
         request.session.userId = user.id || user.handle;
-        if (kind === 'user') await registerStcontrolSession(request, claims, STCONTROL_MODES.MANAGED);
+        if (kind === 'user') {
+            // Redeeming a user handoff must restore the write fences: clear any
+            // stale admin passthrough marker left by an earlier admin handoff
+            // in this same browser session, otherwise the session would bypass
+            // lease/gate fencing forever.
+            delete request.session.stcontrolAdmin;
+            await registerStcontrolSession(request, claims, STCONTROL_MODES.MANAGED);
+        }
         systemMonitor.recordUserLogin(user.handle, { userName: user.name });
         systemMonitor.updateUserActivity(user.handle, { userName: user.name, isHeartbeat: false });
         return response.redirect(303, kind === 'admin' ? '/?stcontrol_admin=1' : '/');

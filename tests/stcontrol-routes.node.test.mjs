@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -348,6 +349,127 @@ test('administrator handoff rechecks the permission version and creates an isola
         });
         assert.equal(stalePermission.status, 403);
     } finally {
+        await new Promise((resolve, reject) => agentServer.close(error => error ? reject(error) : resolve()));
+        if (previousAgentUrl === undefined) delete process.env.SILLYTAVERN_STCONTROL_AGENTURL;
+        else process.env.SILLYTAVERN_STCONTROL_AGENTURL = previousAgentUrl;
+    }
+});
+
+test('user handoff after an admin handoff clears the stale admin marker so writes stay fenced', async () => {
+    const previousAgentUrl = process.env.SILLYTAVERN_STCONTROL_AGENTURL;
+    const adminCode = 'opaque-one-use-admin-then-user-admin-secret';
+    const userCode = 'opaque-one-use-admin-then-user-user-secret';
+    const userSessionId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+    const user = await storage.getItem('user:alice');
+    user.admin = true;
+    user.stcontrolPermissionVersion = 5;
+    await storage.setItem('user:alice', user);
+    const consumed = new Set();
+    const agent = express();
+    agent.use(express.json());
+    agent.post(['/agent/tickets/redeem', '/agent/tickets/redeem-admin'], (request, response) => {
+        const isAdmin = request.path === '/agent/tickets/redeem-admin';
+        const timestamp = request.get('X-Timestamp');
+        const nonce = request.get('X-Nonce');
+        const expected = adapter.signStcontrolRequest(
+            'test-agent-psk', 'POST', request.path, timestamp, nonce, request.body,
+        );
+        if (request.get('X-Signature') !== expected) return response.sendStatus(401);
+        const code = request.body.code;
+        const accepted = isAdmin ? code === adminCode : code === userCode;
+        if (!accepted || consumed.has(code)) return response.sendStatus(403);
+        consumed.add(code);
+        if (isAdmin) {
+            return response.json({
+                ok: true,
+                handle: 'alice',
+                admin_id: 9,
+                permission_version: 5,
+                controller_generation: 1,
+            });
+        }
+        return response.json({
+            ok: true,
+            handle: 'alice',
+            user_uuid: user.stcontrolGlobalUserUuid,
+            user_id: user.stcontrolGlobalUserId,
+            session_id: userSessionId,
+            activity_epoch: 12,
+            controller_generation: 1,
+            lease_confirmed_at: Date.now(),
+            lease_expires_at: Date.now() + 15 * 60 * 1000,
+        });
+    });
+    const agentServer = await new Promise((resolve, reject) => {
+        const listener = agent.listen(0, '127.0.0.1', () => resolve(listener));
+        listener.once('error', reject);
+    });
+    let frozenGate = false;
+    try {
+        const address = agentServer.address();
+        assert.ok(address && typeof address !== 'string');
+        process.env.SILLYTAVERN_STCONTROL_AGENTURL = `http://127.0.0.1:${address.port}`;
+
+        // Same browser session: first redeem an admin handoff ...
+        const adminResponse = await fetch(`${baseUrl}/api/users/me?stcontrol_handoff=admin`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ stcontrol_code: adminCode }),
+            redirect: 'manual',
+        });
+        assert.equal(adminResponse.status, 303);
+        assert.deepEqual(sharedSession.stcontrolAdmin, {
+            adminId: 9,
+            permissionVersion: 5,
+            controllerGeneration: 1,
+        });
+        // The admin handoff must also drop any user envelope from an earlier
+        // user handoff in this same session (no reverse residue).
+        assert.equal(sharedSession.stcontrol, undefined);
+
+        // ... then redeem a user handoff in the very same session.
+        const userResponse = await fetch(`${baseUrl}/api/users/me?stcontrol_handoff=user`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ stcontrol_code: userCode }),
+            redirect: 'manual',
+        });
+        assert.equal(userResponse.status, 303);
+        assert.equal(userResponse.headers.get('location'), '/');
+        // The stale admin passthrough marker must be gone: write fences apply again.
+        assert.equal(sharedSession.stcontrolAdmin, undefined);
+        assert.equal(sharedSession.stcontrol.sessionId, userSessionId);
+
+        // Prove the fence is live: with an authoritative data-fault gate set,
+        // a write from this session must be blocked instead of hitting the
+        // admin fast path (which would call next() unconditionally).
+        const freezeResponse = await signedPost('/api/stcontrol/internal/data-faults/freeze', {
+            fault_id: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+            handle: 'alice',
+            activity_epoch: 12,
+        });
+        frozenGate = freezeResponse.status === 200;
+        assert.equal(freezeResponse.status, 200, await freezeResponse.text());
+
+        const writeRequest = {
+            method: 'POST',
+            path: '/api/chats/save',
+            user: { profile: { handle: 'alice' } },
+            session: sharedSession,
+        };
+        const writeResponse = new EventEmitter();
+        writeResponse.status = status => { writeResponse.statusCode = status; return writeResponse; };
+        writeResponse.json = body => { writeResponse.body = body; return writeResponse; };
+        writeResponse.set = () => writeResponse;
+        let continued = 0;
+        await adapter.stcontrolRequestTracker(writeRequest, writeResponse, () => continued++);
+        assert.equal(continued, 0, 'a fenced write must not reach the admin passthrough branch');
+        assert.equal(writeResponse.statusCode, 423);
+        assert.equal(writeResponse.body.code, 'user_data_frozen');
+    } finally {
+        if (frozenGate) await adapter.setUserWriteGate('alice', null);
+        delete sharedSession.stcontrolAdmin;
+        delete sharedSession.stcontrol;
         await new Promise((resolve, reject) => agentServer.close(error => error ? reject(error) : resolve()));
         if (previousAgentUrl === undefined) delete process.env.SILLYTAVERN_STCONTROL_AGENTURL;
         else process.env.SILLYTAVERN_STCONTROL_AGENTURL = previousAgentUrl;
