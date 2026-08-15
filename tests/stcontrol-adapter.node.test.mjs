@@ -140,6 +140,48 @@ test('legacy adapter state migrates out of the node-persist namespace', () => {
     }
 });
 
+test('v7 adapter state migrates successful data fault releases into durable scoped tombstones', () => {
+    const previousDataRoot = globalThis.DATA_ROOT;
+    const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sillytavern-stcontrol-release-migrate-'));
+    globalThis.DATA_ROOT = dataRoot;
+    resetStcontrolStateForTests();
+    try {
+        const statePath = path.join(dataRoot, '_stcontrol', 'adapter-state.json');
+        const state = getStcontrolState();
+        state.version = 7;
+        delete state.releasedDataFaults;
+        state.operations['data-fault-release:30303030-3030-4030-8030-303030303030'] = {
+            digest: 'a'.repeat(64),
+            completedAt: '2026-08-15T08:00:00.000Z',
+            result: {
+                ok: true,
+                released: true,
+                operation_id: '30303030-3030-4030-8030-303030303030',
+                controller_generation: 7,
+                fault_id: '31313131-3131-4131-8131-313131313131',
+                global_user_id: 41,
+                handle: 'alice',
+                activity_epoch: 8,
+            },
+        };
+        fs.writeFileSync(statePath, JSON.stringify(state));
+        resetStcontrolStateForTests();
+
+        const migrated = getStcontrolState();
+        assert.equal(migrated.version, 8);
+        assert.deepEqual(migrated.releasedDataFaults['31313131-3131-4131-8131-313131313131'], {
+            globalUserId: 41,
+            handle: 'alice',
+            activityEpoch: 8,
+            releasedAt: Date.parse('2026-08-15T08:00:00.000Z'),
+        });
+    } finally {
+        resetStcontrolStateForTests();
+        globalThis.DATA_ROOT = previousDataRoot;
+        fs.rmSync(dataRoot, { recursive: true, force: true });
+    }
+});
+
 test('process restart clears orphaned in-flight counters without discarding session fences', () => {
     const previousDataRoot = globalThis.DATA_ROOT;
     const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sillytavern-stcontrol-restart-'));
@@ -652,6 +694,7 @@ test('a durable data fault gate blocks only writes with a machine-readable reaso
         state.gates.alice = {
             kind: 'data_fault',
             faultId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+            globalUserId: 41,
             activityEpoch: 7,
             createdAt: Date.now(),
         };
@@ -804,6 +847,425 @@ test('outage clears managed leases but requires cross-node ownership before sess
     }
 });
 
+test('ordinary managed heartbeat and request accounting stay volatile until a durable boundary is needed', async () => {
+    const previousDataRoot = globalThis.DATA_ROOT;
+    const previousEnabled = process.env.SILLYTAVERN_STCONTROL_ENABLED;
+    const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sillytavern-stcontrol-volatile-'));
+    const sessionId = '12121212-1212-4121-8121-121212121212';
+    globalThis.DATA_ROOT = dataRoot;
+    process.env.SILLYTAVERN_STCONTROL_ENABLED = 'true';
+    resetStcontrolStateForTests();
+    try {
+        const now = Date.now();
+        const state = getStcontrolState();
+        state.sessions[sessionId] = {
+            handle: 'alice',
+            loginMode: STCONTROL_MODES.MANAGED,
+            activityEpoch: 8,
+            controllerGeneration: 3,
+            lastSeenAt: now - 1000,
+            lastPageAt: now - 1000,
+            lastRequestAt: now - 1000,
+            inFlightReads: 0,
+            inFlightWrites: 0,
+        };
+        state.leases.alice = {
+            sessionId,
+            activityEpoch: 8,
+            controllerGeneration: 3,
+            leaseExpiresAt: now + 120_000,
+            confirmedAt: now,
+        };
+        fs.mkdirSync(path.join(dataRoot, '_stcontrol'), { recursive: true });
+        const statePath = path.join(dataRoot, '_stcontrol', 'adapter-state.json');
+        fs.writeFileSync(statePath, JSON.stringify(state));
+        resetStcontrolStateForTests();
+        const before = fs.readFileSync(statePath, 'utf8');
+
+        assert.equal(await noteStcontrolPageHeartbeat({ session: { stcontrol: { sessionId } } }), true);
+        const request = {
+            method: 'POST',
+            path: '/api/chats/save',
+            user: { profile: { handle: 'alice' } },
+            session: { stcontrol: {
+                sessionId,
+                loginMode: STCONTROL_MODES.MANAGED,
+                activityEpoch: 8,
+                controllerGeneration: 3,
+            } },
+        };
+        const response = new EventEmitter();
+        let continued = 0;
+        await stcontrolRequestTracker(request, response, () => continued++);
+        assert.equal(continued, 1);
+        response.emit('finish');
+        await new Promise(resolve => setTimeout(resolve, 20));
+
+        assert.equal(fs.readFileSync(statePath, 'utf8'), before);
+    } finally {
+        resetStcontrolStateForTests();
+        globalThis.DATA_ROOT = previousDataRoot;
+        if (previousEnabled === undefined) delete process.env.SILLYTAVERN_STCONTROL_ENABLED;
+        else process.env.SILLYTAVERN_STCONTROL_ENABLED = previousEnabled;
+        fs.rmSync(dataRoot, { recursive: true, force: true });
+    }
+});
+
+test('managed mode rejects requests that lack a durable stcontrol envelope', async () => {
+    const previousDataRoot = globalThis.DATA_ROOT;
+    const previousEnabled = process.env.SILLYTAVERN_STCONTROL_ENABLED;
+    const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sillytavern-stcontrol-managed-no-envelope-'));
+    globalThis.DATA_ROOT = dataRoot;
+    process.env.SILLYTAVERN_STCONTROL_ENABLED = 'true';
+    resetStcontrolStateForTests();
+    try {
+        const request = {
+            method: 'GET',
+            path: '/api/chats/get',
+            user: { profile: { handle: 'alice' } },
+            session: {},
+        };
+        const response = new EventEmitter();
+        response.status = status => { response.statusCode = status; return response; };
+        response.json = body => { response.body = body; return response; };
+        let continued = 0;
+        await stcontrolRequestTracker(request, response, () => continued++);
+        assert.equal(continued, 0);
+        assert.equal(response.statusCode, 409);
+        assert.equal(response.body.code, 'stale_writer_session');
+        assert.equal(request.session.stcontrol, undefined);
+    } finally {
+        resetStcontrolStateForTests();
+        globalThis.DATA_ROOT = previousDataRoot;
+        if (previousEnabled === undefined) delete process.env.SILLYTAVERN_STCONTROL_ENABLED;
+        else process.env.SILLYTAVERN_STCONTROL_ENABLED = previousEnabled;
+        fs.rmSync(dataRoot, { recursive: true, force: true });
+    }
+});
+
+test('independent mode rejects requests that lack a durable stcontrol envelope', async () => {
+    const previousDataRoot = globalThis.DATA_ROOT;
+    const previousEnabled = process.env.SILLYTAVERN_STCONTROL_ENABLED;
+    const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sillytavern-stcontrol-no-envelope-'));
+    globalThis.DATA_ROOT = dataRoot;
+    process.env.SILLYTAVERN_STCONTROL_ENABLED = 'true';
+    resetStcontrolStateForTests();
+    try {
+        await applyStcontrolMode({
+            mode: STCONTROL_MODES.INDEPENDENT,
+            mode_generation: 2,
+            controller_generation: 1,
+            reason_code: 'sustained_outage',
+        });
+        const request = {
+            method: 'POST',
+            path: '/api/chats/save',
+            user: { profile: { handle: 'alice' } },
+            session: {},
+        };
+        const response = new EventEmitter();
+        response.status = status => { response.statusCode = status; return response; };
+        response.json = body => { response.body = body; return response; };
+        let continued = 0;
+        await stcontrolRequestTracker(request, response, () => continued++);
+        assert.equal(continued, 0);
+        assert.equal(response.statusCode, 409);
+        assert.equal(response.body.code, 'stale_writer_session');
+        assert.equal(request.session.stcontrol, undefined);
+    } finally {
+        resetStcontrolStateForTests();
+        globalThis.DATA_ROOT = previousDataRoot;
+        if (previousEnabled === undefined) delete process.env.SILLYTAVERN_STCONTROL_ENABLED;
+        else process.env.SILLYTAVERN_STCONTROL_ENABLED = previousEnabled;
+        fs.rmSync(dataRoot, { recursive: true, force: true });
+    }
+});
+
+test('ownership proof atomically promotes a managed durable session and persists the first independent write marker', async () => {
+    const previousDataRoot = globalThis.DATA_ROOT;
+    const previousEnabled = process.env.SILLYTAVERN_STCONTROL_ENABLED;
+    const previousAgentUrl = process.env.SILLYTAVERN_STCONTROL_AGENTURL;
+    const previousNodeId = process.env.SILLYTAVERN_STCONTROL_NODEID;
+    const previousAgentPsk = process.env.STCONTROL_AGENT_PSK;
+    const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sillytavern-stcontrol-promotion-'));
+    const sessionId = '13131313-1313-4131-8131-131313131313';
+    globalThis.DATA_ROOT = dataRoot;
+    process.env.SILLYTAVERN_STCONTROL_ENABLED = 'true';
+    process.env.SILLYTAVERN_STCONTROL_NODEID = '7';
+    process.env.STCONTROL_AGENT_PSK = 'test-agent-psk';
+    resetStcontrolStateForTests();
+    const agentServer = http.createServer((request, response) => {
+        if (request.method !== 'POST' || request.url !== '/agent/activity-ownership/v1/resolve') {
+            response.statusCode = 404;
+            response.end();
+            return;
+        }
+        request.resume();
+        request.on('end', () => {
+            response.setHeader('Content-Type', 'application/json');
+            response.end(JSON.stringify({ ok: true, decision: 'automatic', reason_code: 'owner_available' }));
+        });
+    });
+    try {
+        const state = getStcontrolState();
+        state.sessions[sessionId] = {
+            handle: 'alice',
+            loginMode: STCONTROL_MODES.MANAGED,
+            activityEpoch: 7,
+            controllerGeneration: 1,
+            lastSeenAt: Date.now(),
+            lastPageAt: Date.now(),
+            lastRequestAt: Date.now(),
+            inFlightReads: 0,
+            inFlightWrites: 0,
+        };
+        state.leases.alice = {
+            sessionId,
+            activityEpoch: 7,
+            controllerGeneration: 1,
+            leaseExpiresAt: Date.now() + 120_000,
+            confirmedAt: Date.now(),
+        };
+        fs.mkdirSync(path.join(dataRoot, '_stcontrol'), { recursive: true });
+        const statePath = path.join(dataRoot, '_stcontrol', 'adapter-state.json');
+        fs.writeFileSync(statePath, JSON.stringify(state));
+        resetStcontrolStateForTests();
+
+        await new Promise((resolve, reject) => {
+            agentServer.listen(0, '127.0.0.1', () => resolve());
+            agentServer.once('error', reject);
+        });
+        const address = agentServer.address();
+        assert.ok(address && typeof address !== 'string');
+        process.env.SILLYTAVERN_STCONTROL_AGENTURL = `http://127.0.0.1:${address.port}`;
+
+        await applyStcontrolMode({
+            mode: STCONTROL_MODES.INDEPENDENT,
+            mode_generation: 2,
+            controller_generation: 1,
+            reason_code: 'sustained_outage',
+        });
+        const request = {
+            method: 'POST',
+            path: '/api/chats/save',
+            user: { profile: { handle: 'alice' } },
+            session: { stcontrol: {
+                sessionId,
+                loginMode: STCONTROL_MODES.MANAGED,
+                activityEpoch: 7,
+                controllerGeneration: 1,
+            } },
+        };
+        const response = new EventEmitter();
+        response.status = status => { response.statusCode = status; return response; };
+        response.json = body => { response.body = body; return response; };
+        let continued = 0;
+        await stcontrolRequestTracker(request, response, () => continued++);
+        assert.equal(continued, 1);
+        assert.deepEqual(request.session.stcontrol, {
+            sessionId,
+            loginMode: STCONTROL_MODES.INDEPENDENT,
+            activityEpoch: 0,
+            controllerGeneration: 1,
+        });
+        const promoted = getStcontrolState();
+        assert.equal(promoted.sessions[sessionId].loginMode, STCONTROL_MODES.INDEPENDENT);
+        assert.equal(promoted.sessions[sessionId].activityEpoch, 0);
+        assert.equal(promoted.pendingSyncUsers.alice.reason, 'independent_write');
+        const persisted = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+        assert.equal(persisted.sessions[sessionId].loginMode, STCONTROL_MODES.INDEPENDENT);
+        assert.equal(persisted.sessions[sessionId].activityEpoch, 0);
+        assert.equal(persisted.pendingSyncUsers.alice.reason, 'independent_write');
+        const afterFirstWrite = fs.readFileSync(statePath, 'utf8');
+
+        const secondResponse = new EventEmitter();
+        secondResponse.status = status => { secondResponse.statusCode = status; return secondResponse; };
+        secondResponse.json = body => { secondResponse.body = body; return secondResponse; };
+        await stcontrolRequestTracker(request, secondResponse, () => continued++);
+        assert.equal(continued, 2);
+        assert.equal(fs.readFileSync(statePath, 'utf8'), afterFirstWrite);
+    } finally {
+        await new Promise(resolve => agentServer.close(() => resolve()));
+        resetStcontrolStateForTests();
+        globalThis.DATA_ROOT = previousDataRoot;
+        if (previousEnabled === undefined) delete process.env.SILLYTAVERN_STCONTROL_ENABLED;
+        else process.env.SILLYTAVERN_STCONTROL_ENABLED = previousEnabled;
+        if (previousAgentUrl === undefined) delete process.env.SILLYTAVERN_STCONTROL_AGENTURL;
+        else process.env.SILLYTAVERN_STCONTROL_AGENTURL = previousAgentUrl;
+        if (previousNodeId === undefined) delete process.env.SILLYTAVERN_STCONTROL_NODEID;
+        else process.env.SILLYTAVERN_STCONTROL_NODEID = previousNodeId;
+        if (previousAgentPsk === undefined) delete process.env.STCONTROL_AGENT_PSK;
+        else process.env.STCONTROL_AGENT_PSK = previousAgentPsk;
+        fs.rmSync(dataRoot, { recursive: true, force: true });
+    }
+});
+
+test('activity checkpoints persist bounded freshness across reloads', async () => {
+    const previousDataRoot = globalThis.DATA_ROOT;
+    const previousEnabled = process.env.SILLYTAVERN_STCONTROL_ENABLED;
+    const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sillytavern-stcontrol-checkpoint-'));
+    const sessionId = '17171717-1717-4171-8171-171717171717';
+    const realNow = Date.now;
+    let fakeNow = 1_760_000_000_000;
+    globalThis.DATA_ROOT = dataRoot;
+    process.env.SILLYTAVERN_STCONTROL_ENABLED = 'true';
+    Date.now = () => fakeNow;
+    resetStcontrolStateForTests();
+    try {
+        const { sessionIdleMs } = getStcontrolActivityPolicy();
+        const checkpointMs = Math.min(5 * 60 * 1000, Math.max(10 * 1000, Math.floor(sessionIdleMs / 3)));
+        const previousSeenAt = fakeNow - checkpointMs - 1;
+        const state = getStcontrolState();
+        state.sessions[sessionId] = {
+            handle: 'alice',
+            loginMode: STCONTROL_MODES.MANAGED,
+            activityEpoch: 11,
+            controllerGeneration: 4,
+            lastSeenAt: previousSeenAt,
+            lastPageAt: previousSeenAt,
+            lastRequestAt: previousSeenAt,
+            lastCheckpointAt: previousSeenAt,
+            inFlightReads: 0,
+            inFlightWrites: 0,
+        };
+        state.leases.alice = {
+            sessionId,
+            activityEpoch: 11,
+            controllerGeneration: 4,
+            leaseExpiresAt: fakeNow + 120_000,
+            confirmedAt: fakeNow,
+        };
+        fs.mkdirSync(path.join(dataRoot, '_stcontrol'), { recursive: true });
+        const statePath = path.join(dataRoot, '_stcontrol', 'adapter-state.json');
+        fs.writeFileSync(statePath, JSON.stringify(state));
+        resetStcontrolStateForTests();
+
+        assert.equal(await noteStcontrolPageHeartbeat({ session: { stcontrol: { sessionId } } }), true);
+        const checkpointed = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+        assert.equal(checkpointed.sessions[sessionId].lastSeenAt, fakeNow);
+        assert.equal(checkpointed.sessions[sessionId].lastPageAt, fakeNow);
+        assert.equal(checkpointed.sessions[sessionId].lastRequestAt, fakeNow);
+        assert.equal(checkpointed.sessions[sessionId].lastCheckpointAt, fakeNow);
+
+        const afterFirstCheckpoint = fs.readFileSync(statePath, 'utf8');
+        fakeNow += checkpointMs - 1_000;
+        assert.equal(await noteStcontrolPageHeartbeat({ session: { stcontrol: { sessionId } } }), true);
+        assert.equal(fs.readFileSync(statePath, 'utf8'), afterFirstCheckpoint);
+
+        fakeNow += 1_500;
+        assert.equal(await noteStcontrolPageHeartbeat({ session: { stcontrol: { sessionId } } }), true);
+        const refreshed = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+        assert.equal(refreshed.sessions[sessionId].lastCheckpointAt, fakeNow);
+        assert.equal(refreshed.sessions[sessionId].lastSeenAt, fakeNow);
+
+        resetStcontrolStateForTests();
+        fakeNow += sessionIdleMs - Math.floor(checkpointMs / 2);
+        assert.equal(await noteStcontrolPageHeartbeat({ session: { stcontrol: { sessionId } } }), true);
+        assert.equal(Boolean(getStcontrolState().sessions[sessionId].loggedOutAt), false);
+    } finally {
+        Date.now = realNow;
+        resetStcontrolStateForTests();
+        globalThis.DATA_ROOT = previousDataRoot;
+        if (previousEnabled === undefined) delete process.env.SILLYTAVERN_STCONTROL_ENABLED;
+        else process.env.SILLYTAVERN_STCONTROL_ENABLED = previousEnabled;
+        fs.rmSync(dataRoot, { recursive: true, force: true });
+    }
+});
+
+test('controller recovery refuses DRAINING to MANAGED while independent sessions or pending sync remain', async () => {
+    const previousDataRoot = globalThis.DATA_ROOT;
+    const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sillytavern-stcontrol-recovery-guard-'));
+    globalThis.DATA_ROOT = dataRoot;
+    resetStcontrolStateForTests();
+    try {
+        const state = getStcontrolState();
+        state.mode = STCONTROL_MODES.DRAINING;
+        state.modeGeneration = 3;
+        state.controllerGeneration = 2;
+        state.sessions['14141414-1414-4141-8141-141414141414'] = {
+            handle: 'alice',
+            loginMode: STCONTROL_MODES.INDEPENDENT,
+            activityEpoch: 0,
+            controllerGeneration: 2,
+            lastSeenAt: Date.now(),
+            lastPageAt: Date.now(),
+            lastRequestAt: Date.now(),
+            inFlightReads: 0,
+            inFlightWrites: 0,
+        };
+        state.pendingSyncUsers.alice = {
+            marker: '15151515-1515-4151-8151-151515151515',
+            changedAt: Date.now(),
+            reason: 'independent_write',
+        };
+        fs.mkdirSync(path.join(dataRoot, '_stcontrol'), { recursive: true });
+        fs.writeFileSync(path.join(dataRoot, '_stcontrol', 'adapter-state.json'), JSON.stringify(state));
+        resetStcontrolStateForTests();
+        await assert.rejects(() => applyStcontrolMode({
+            mode: STCONTROL_MODES.MANAGED,
+            mode_generation: 4,
+            controller_generation: 3,
+            reason_code: 'controller_recovered',
+        }), /Independent reconciliation incomplete/);
+    } finally {
+        resetStcontrolStateForTests();
+        globalThis.DATA_ROOT = previousDataRoot;
+        fs.rmSync(dataRoot, { recursive: true, force: true });
+    }
+});
+
+test('managed recovery does not let an independent envelope bypass the managed lease fence', async () => {
+    const previousDataRoot = globalThis.DATA_ROOT;
+    const previousEnabled = process.env.SILLYTAVERN_STCONTROL_ENABLED;
+    const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sillytavern-stcontrol-managed-recovery-'));
+    const sessionId = '16161616-1616-4161-8161-161616161616';
+    globalThis.DATA_ROOT = dataRoot;
+    process.env.SILLYTAVERN_STCONTROL_ENABLED = 'true';
+    resetStcontrolStateForTests();
+    try {
+        const state = getStcontrolState();
+        state.sessions[sessionId] = {
+            handle: 'alice',
+            loginMode: STCONTROL_MODES.INDEPENDENT,
+            activityEpoch: 0,
+            controllerGeneration: 3,
+            lastSeenAt: Date.now(),
+            lastPageAt: Date.now(),
+            lastRequestAt: Date.now(),
+            inFlightReads: 0,
+            inFlightWrites: 0,
+        };
+        fs.mkdirSync(path.join(dataRoot, '_stcontrol'), { recursive: true });
+        fs.writeFileSync(path.join(dataRoot, '_stcontrol', 'adapter-state.json'), JSON.stringify(state));
+        resetStcontrolStateForTests();
+        const request = {
+            method: 'POST',
+            path: '/api/chats/save',
+            user: { profile: { handle: 'alice' } },
+            session: { stcontrol: {
+                sessionId,
+                loginMode: STCONTROL_MODES.INDEPENDENT,
+                activityEpoch: 0,
+                controllerGeneration: 3,
+            } },
+        };
+        const response = new EventEmitter();
+        response.status = status => { response.statusCode = status; return response; };
+        response.json = body => { response.body = body; return response; };
+        let continued = 0;
+        await stcontrolRequestTracker(request, response, () => continued++);
+        assert.equal(continued, 0);
+        assert.equal(response.statusCode, 409);
+        assert.equal(response.body.code, 'stale_writer_session');
+    } finally {
+        resetStcontrolStateForTests();
+        globalThis.DATA_ROOT = previousDataRoot;
+        if (previousEnabled === undefined) delete process.env.SILLYTAVERN_STCONTROL_ENABLED;
+        else process.env.SILLYTAVERN_STCONTROL_ENABLED = previousEnabled;
+        fs.rmSync(dataRoot, { recursive: true, force: true });
+    }
+});
+
 test('stcontrol adapter is wired through authenticated, CSRF-safe integration points', () => {
     const endpoint = fs.readFileSync(new URL('../src/endpoints/stcontrol.js', import.meta.url), 'utf8');
     const startup = fs.readFileSync(new URL('../src/server-startup.js', import.meta.url), 'utf8');
@@ -826,6 +1288,7 @@ test('stcontrol adapter is wired through authenticated, CSRF-safe integration po
         '/api/stcontrol/internal/snapshots/renew',
         '/api/stcontrol/internal/snapshots/release',
         '/api/stcontrol/internal/data-faults/freeze',
+        '/api/stcontrol/internal/data-faults/release',
     ]) {
         assert.match(endpoint, new RegExp(route.replaceAll('/', '\\/')));
     }
@@ -840,6 +1303,7 @@ test('stcontrol adapter is wired through authenticated, CSRF-safe integration po
     assert.match(endpoint, /const removing = input\.remove === true;/);
     assert.match(endpoint, /delete user\.stcontrolPasswordVersion;/);
 	assert.ok(STCONTROL_CAPABILITIES.includes('user_data_fault_freeze'));
+	assert.ok(STCONTROL_CAPABILITIES.includes('user_data_fault_release'));
 });
 async function startOwnershipAgent(decision) {
     const server = http.createServer(async (request, response) => {

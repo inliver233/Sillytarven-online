@@ -2,6 +2,7 @@ import { getRequestHeaders } from '../script.js';
 import { POPUP_RESULT, POPUP_TYPE, callGenericPopup } from './popup.js';
 import { renderTemplateAsync } from './templates.js';
 import { ensureImageFormatSupported, getBase64Async, humanFileSize } from './utils.js';
+import './user-heartbeat.js';
 
 /**
  * @type {import('../../src/users.js').UserViewModel} Logged in user
@@ -22,6 +23,11 @@ const INACTIVE_USER_DAY_OPTIONS = [
 // Lightweight online presence indicator
 // Note: window.isUserOnline and window.userHeartbeat are defined in user-heartbeat.js
 window.isUserOnline = false;
+
+function isStcontrolAdminOnlyPage() {
+    if (typeof window === 'undefined' || !window.location?.search) return false;
+    return new URLSearchParams(window.location.search).get('stcontrol_admin') === '1';
+}
 
 /**
  * Enable or disable user account controls in the UI.
@@ -82,13 +88,13 @@ async function getCurrentUser() {
         currentUser = await response.json();
         $('#admin_button').toggle(accountsEnabled && isAdmin());
         window.userHeartbeat?.setStcontrolEnabled?.(
-            Boolean(currentUser.stcontrolEnabled),
+            Boolean(currentUser.stcontrolEnabled) && !isStcontrolAdminOnlyPage(),
             currentUser.stcontrolActivityPolicy,
             currentUser.stcontrolControllerUrl,
         );
 
         // 启动用户心跳
-        if (typeof window.userHeartbeat !== 'undefined' && window.userHeartbeat.forceStart) {
+        if (!isStcontrolAdminOnlyPage() && typeof window.userHeartbeat !== 'undefined' && window.userHeartbeat.forceStart) {
             setTimeout(() => {
                 // 检查CSRF token是否可用
                 const hasToken = window.token || window.csrfToken;

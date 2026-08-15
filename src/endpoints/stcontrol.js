@@ -23,6 +23,8 @@ import {
     getStcontrolSessionTelemetry,
     isStcontrolEnabled,
     markUserSynchronized,
+    noteStcontrolLogout,
+    releaseUserDataFaultGate,
     registerStcontrolSession,
     releaseSnapshotWriteGate,
     renewSnapshotWriteGate,
@@ -49,7 +51,9 @@ const MAX_INVENTORY_PAGE_USERS = 250;
 const INVENTORY_LOAD_BATCH = 100;
 const MAX_HANDOFF_CODE_LENGTH = 512;
 const MAX_CONTROLLER_RESPONSE_BYTES = 64 * 1024;
-const QUIESCE_TIMEOUT_MS = 15_000;
+const DEFAULT_WRITE_DRAIN_TIMEOUT_MS = 15_000;
+const MIN_WRITE_DRAIN_TIMEOUT_MS = 50;
+const MAX_WRITE_DRAIN_TIMEOUT_MS = 60_000;
 const ALLOWED_OAUTH_PROVIDERS = new Set(['discord', 'linuxdo']);
 
 export const router = express.Router();
@@ -199,29 +203,33 @@ router.post('/api/stcontrol/internal/users/password', async (request, response) 
         const input = request.body || {};
         requireUUID(input.operation_id, 'invalid_operation_id');
         const handle = requireHandle(input.handle);
-        const removing = input.remove === true;
-        if (!removing && (!isHashMaterial(input.password_hash, input.password_salt) || !Number.isSafeInteger(input.version) || input.version <= 0)) {
+        const remove = input.remove === true;
+        if (!Number.isSafeInteger(input.version) || input.version <= 0 ||
+            (remove
+                ? Boolean((input.password_hash ?? '') || (input.password_salt ?? ''))
+                : !isHashMaterial(input.password_hash, input.password_salt))) {
             throw new AdapterRequestError(400, 'invalid_password_material');
         }
-        const normalized = { ...input, handle };
+        const normalized = { ...input, handle, remove };
         const result = await runIdempotentStcontrolOperation('password', input.operation_id, normalized, async () => {
             const key = toKey(handle);
             const user = await storage.getItem(key);
             if (!user) throw new AdapterRequestError(404, 'user_not_found');
-            if (removing) {
-                // Password identity was unbound on the control plane; drop the
-                // node-local verifier so the old password stops working here.
-                delete user.password;
-                delete user.salt;
-                delete user.stcontrolPasswordVersion;
-                await storage.setItem(key, user);
-                return { ok: true };
-            }
-            if (Number(user.stcontrolPasswordVersion || 0) > input.version) {
+            const currentVersion = Number(user.stcontrolPasswordVersion || 0);
+            if (currentVersion > input.version) {
                 throw new AdapterRequestError(409, 'password_version_rollback');
             }
-            user.password = input.password_hash;
-            user.salt = input.password_salt;
+            const currentHash = String(user.password || '');
+            const currentSalt = String(user.salt || '');
+            if (currentVersion === input.version) {
+                const sameMaterial = remove
+                    ? currentHash === '' && currentSalt === ''
+                    : currentHash === String(input.password_hash) && currentSalt === String(input.password_salt);
+                if (!sameMaterial) throw new AdapterRequestError(409, 'password_version_conflict');
+                return { ok: true };
+            }
+            user.password = remove ? '' : input.password_hash;
+            user.salt = remove ? '' : input.password_salt;
             user.stcontrolPasswordVersion = input.version;
             await storage.setItem(key, user);
             return { ok: true };
@@ -344,7 +352,7 @@ router.post('/api/stcontrol/internal/snapshots/quiesce', async (request, respons
             throw new AdapterRequestError(409, 'user_already_quiescing');
         }
         const gate = established.gate;
-        const deadline = Date.now() + QUIESCE_TIMEOUT_MS;
+        const deadline = Date.now() + getWriteDrainTimeoutMs();
         while (Date.now() < deadline) {
             const active = getStcontrolSessionTelemetry().filter(user => user.handle === input.handle);
             const inFlight = active.reduce((total, user) => total + user.in_flight_reads + user.in_flight_writes, 0);
@@ -396,30 +404,79 @@ router.post('/api/stcontrol/internal/snapshots/release', async (request, respons
 
 router.post('/api/stcontrol/internal/data-faults/freeze', async (request, response) => {
     try {
-        const input = validateDataFaultRequest(request.body);
-        const established = await establishUserDataFaultGate(input.handle, input.fault_id, input.activity_epoch);
-        if (established.status === 'fault_id_conflict') {
-            throw new AdapterRequestError(409, 'data_fault_scope_mismatch');
-        }
-        if (established.status === 'write_gate_conflict') {
-            throw new AdapterRequestError(409, 'user_write_gate_conflict');
-        }
-
-        const deadline = Date.now() + QUIESCE_TIMEOUT_MS;
-        while (Date.now() < deadline) {
-            const active = getStcontrolSessionTelemetry().filter(user => user.handle === input.handle);
-            const inFlight = active.reduce((total, user) => total + user.in_flight_reads + user.in_flight_writes, 0);
-            if (inFlight === 0) {
-                return response.json({ ok: true, frozen: true, drained: true });
+        const input = validateDataFaultRequest(request.body, { requireOperationId: true, requireControllerGeneration: true });
+        const result = await runIdempotentStcontrolOperation('data-fault-freeze', input.operation_id, input, async () => {
+            const established = await establishUserDataFaultGate(
+                input.handle,
+                input.fault_id,
+                input.global_user_id,
+                input.activity_epoch,
+                {
+                    allowLegacyScopeAdoption: await allowLegacyDataFaultScope(input.handle, input.global_user_id),
+                    controllerGeneration: input.controller_generation,
+                },
+            );
+            if (established.status === 'controller_generation_mismatch') {
+                throw new AdapterRequestError(409, established.status);
             }
-            await new Promise(resolve => setTimeout(resolve, 50));
-        }
+            if (established.status === 'fault_id_conflict') {
+                throw new AdapterRequestError(409, 'data_fault_scope_mismatch');
+            }
+            if (established.status === 'write_gate_conflict') {
+                throw new AdapterRequestError(409, 'user_write_gate_conflict');
+            }
 
-        // Unlike a snapshot gate, a fault gate must remain closed after a
-        // drain timeout. A later idempotent command observes the same gate and
-        // retries the drain without reopening a potentially corrupt home.
-        throw new AdapterRequestError(409, 'write_drain_timeout');
+            const deadline = Date.now() + getWriteDrainTimeoutMs();
+            while (Date.now() < deadline) {
+                const active = getStcontrolSessionTelemetry().filter(user => user.handle === input.handle);
+                const inFlight = active.reduce((total, user) => total + user.in_flight_reads + user.in_flight_writes, 0);
+                if (inFlight === 0) {
+                    return {
+                        ok: true,
+                        operation_id: input.operation_id,
+                        controller_generation: input.controller_generation,
+                        fault_id: input.fault_id,
+                        global_user_id: input.global_user_id,
+                        handle: input.handle,
+                        activity_epoch: input.activity_epoch,
+                        frozen: true,
+                        drained: true,
+                    };
+                }
+                await new Promise(resolve => setTimeout(resolve, 50));
+            }
+
+            // Unlike a snapshot gate, a fault gate must remain closed after a
+            // drain timeout. A later idempotent command observes the same gate
+            // and retries the drain without reopening a potentially corrupt home.
+            throw new AdapterRequestError(409, 'write_drain_timeout');
+        });
+        return response.json(result);
     } catch (error) {
+        if (error?.message === 'Operation id payload conflict') {
+            return adapterError(response, new AdapterRequestError(409, 'operation_id_payload_conflict'));
+        }
+        return adapterError(response, error);
+    }
+});
+
+router.post('/api/stcontrol/internal/data-faults/release', async (request, response) => {
+    try {
+        const input = validateDataFaultRequest(request.body, { requireOperationId: true, requireControllerGeneration: true });
+        const released = await releaseUserDataFaultGate({
+            operationId: input.operation_id,
+            controllerGeneration: input.controller_generation,
+            faultId: input.fault_id,
+            globalUserId: input.global_user_id,
+            handle: input.handle,
+            activityEpoch: input.activity_epoch,
+        }, { allowLegacyGlobalUserIdMatch: await allowLegacyDataFaultScope(input.handle, input.global_user_id) });
+        if (released?.ok !== true || released.released !== true) throw new AdapterRequestError(409, released.status);
+        return response.json(released);
+    } catch (error) {
+        if (error?.message === 'Operation id payload conflict') {
+            return adapterError(response, new AdapterRequestError(409, 'operation_id_payload_conflict'));
+        }
         return adapterError(response, error);
     }
 });
@@ -453,15 +510,15 @@ export async function stcontrolHandoffHandler(request, response) {
             if (!Number.isSafeInteger(claims.admin_id) || claims.admin_id <= 0 || !user.admin || claims.permission_version !== permissionVersion) {
                 throw new AdapterRequestError(403, 'administrator_permission_changed');
             }
+            if (request.session?.stcontrol?.sessionId) {
+                await noteStcontrolLogout(request);
+                delete request.session.stcontrol;
+            }
             request.session.stcontrolAdmin = {
                 adminId: claims.admin_id,
                 permissionVersion: claims.permission_version,
                 controllerGeneration: claims.controller_generation,
             };
-            // Drop any user-session envelope left by a previous user handoff in
-            // this same browser session, so it cannot leak back once the admin
-            // marker is gone.
-            delete request.session.stcontrol;
         } else if (!UUID_PATTERN.test(claims.user_uuid || '') || !UUID_PATTERN.test(claims.session_id || '') ||
             !Number.isSafeInteger(claims.user_id) || claims.user_id <= 0 ||
             !Number.isSafeInteger(claims.activity_epoch) || claims.activity_epoch <= 0 ||
@@ -487,16 +544,10 @@ export async function stcontrolHandoffHandler(request, response) {
                 await storage.setItem(toKey(handle), user);
             }
         }
+        if (kind === 'user') delete request.session.stcontrolAdmin;
         request.session.handle = user.handle;
         request.session.userId = user.id || user.handle;
-        if (kind === 'user') {
-            // Redeeming a user handoff must restore the write fences: clear any
-            // stale admin passthrough marker left by an earlier admin handoff
-            // in this same browser session, otherwise the session would bypass
-            // lease/gate fencing forever.
-            delete request.session.stcontrolAdmin;
-            await registerStcontrolSession(request, claims, STCONTROL_MODES.MANAGED);
-        }
+        if (kind === 'user') await registerStcontrolSession(request, claims, STCONTROL_MODES.MANAGED);
         systemMonitor.recordUserLogin(user.handle, { userName: user.name });
         systemMonitor.updateUserActivity(user.handle, { userName: user.name, isHeartbeat: false });
         return response.redirect(303, kind === 'admin' ? '/?stcontrol_admin=1' : '/');
@@ -624,14 +675,35 @@ function validateSnapshotRequest(raw) {
     return input;
 }
 
-function validateDataFaultRequest(raw) {
+function validateDataFaultRequest(raw, options = {}) {
     const input = raw && typeof raw === 'object' ? raw : {};
+    if (options.requireOperationId === true) requireUUID(input.operation_id, 'invalid_operation_id');
+    else if (input.operation_id !== undefined) requireUUID(input.operation_id, 'invalid_operation_id');
+    if (options.requireControllerGeneration === true &&
+        (!Number.isSafeInteger(input.controller_generation) || input.controller_generation <= 0)) {
+        throw new AdapterRequestError(400, 'invalid_controller_generation');
+    }
     requireUUID(input.fault_id, 'invalid_fault_id');
     input.handle = requireHandle(input.handle);
-    if (!Number.isSafeInteger(input.activity_epoch) || input.activity_epoch < 0) {
+    if (!Number.isSafeInteger(input.global_user_id) || input.global_user_id <= 0) {
+        throw new AdapterRequestError(400, 'invalid_global_user_id');
+    }
+    if (!Number.isSafeInteger(input.activity_epoch) || input.activity_epoch <= 0) {
         throw new AdapterRequestError(400, 'invalid_activity_epoch');
     }
     return input;
+}
+
+function getWriteDrainTimeoutMs() {
+    const configured = Number(process.env.SILLYTAVERN_STCONTROL_WRITE_DRAIN_TIMEOUT_MS ??
+        getConfigValue('stcontrol.writeDrainTimeoutMs', DEFAULT_WRITE_DRAIN_TIMEOUT_MS, 'number'));
+    return Number.isSafeInteger(configured) && configured >= MIN_WRITE_DRAIN_TIMEOUT_MS &&
+        configured <= MAX_WRITE_DRAIN_TIMEOUT_MS ? configured : DEFAULT_WRITE_DRAIN_TIMEOUT_MS;
+}
+
+async function allowLegacyDataFaultScope(handle, globalUserId) {
+    const user = await storage.getItem(toKey(handle));
+    return Number(user?.stcontrolGlobalUserId) === globalUserId;
 }
 
 function safeTextEqual(left, right) {

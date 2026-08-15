@@ -25,6 +25,7 @@ test('stcontrol keeps the page-presence heartbeat alive while standalone idle be
         setInterval: () => 1,
         clearInterval() {},
         setTimeout() {},
+        URLSearchParams,
         window,
     };
     vm.runInNewContext(source, context, { filename: 'user-heartbeat.js' });
@@ -72,6 +73,7 @@ test('managed heartbeat applies public foreground/background timing and stops a 
         setInterval: (_callback, delay) => { intervals.push(delay); return intervals.length; },
         clearInterval() {},
         setTimeout(callback, delay) { if (delay === 0) callback(); },
+        URLSearchParams,
         window,
     };
     vm.runInNewContext(source, context, { filename: 'user-heartbeat.js' });
@@ -121,6 +123,7 @@ test('managed heartbeat keeps retrying transient network failures while standalo
         setInterval: () => 1,
         clearInterval() {},
         setTimeout() {},
+        URLSearchParams,
         window,
     };
     vm.runInNewContext(source, context, { filename: 'user-heartbeat.js' });
@@ -133,4 +136,37 @@ test('managed heartbeat keeps retrying transient network failures while standalo
     heartbeat.start();
     await heartbeat.sendHeartbeat();
     assert.equal(heartbeat.isActive, true, 'managed page stopped retrying after a transient network failure');
+});
+
+test('admin-only stcontrol pages do not auto-start user heartbeat and user.js imports the production entry', () => {
+    const heartbeatSource = fs.readFileSync(new URL('../public/scripts/user-heartbeat.js', import.meta.url), 'utf8');
+    const userSource = fs.readFileSync(new URL('../public/scripts/user.js', import.meta.url), 'utf8');
+    const document = {
+        hidden: false,
+        readyState: 'loading',
+        addEventListener() {},
+        querySelector() { return null; },
+    };
+    const window = {
+        addEventListener() {},
+        location: { search: '?stcontrol_admin=1' },
+    };
+    const context = {
+        Boolean,
+        Date,
+        Number,
+        URLSearchParams,
+        console: { log() {}, warn() {} },
+        document,
+        fetch: async () => ({ ok: true }),
+        navigator: { userAgent: 'test' },
+        setInterval: () => 1,
+        clearInterval() {},
+        setTimeout() {},
+        window,
+    };
+    vm.runInNewContext(heartbeatSource, context, { filename: 'user-heartbeat.js' });
+    assert.equal(window.userHeartbeat.forceStart(), null);
+    assert.match(userSource, /import '\.\/user-heartbeat\.js';/);
+    assert.match(userSource, /stcontrol_admin/);
 });

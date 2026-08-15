@@ -295,6 +295,11 @@ class UserHeartbeat {
 // 全局心跳实例
 let userHeartbeat = null;
 
+function isStcontrolAdminOnlyPage() {
+    if (typeof window === 'undefined' || !window.location?.search) return false;
+    return new URLSearchParams(window.location.search).get('stcontrol_admin') === '1';
+}
+
 /**
  * 初始化用户心跳
  */
@@ -309,6 +314,7 @@ function initUserHeartbeat() {
  * 启动用户心跳（仅在用户已登录时）
  */
 function startUserHeartbeat() {
+    if (isStcontrolAdminOnlyPage()) return false;
     // 检查用户是否已登录 - 多种方式检测
     const checkLoginStatus = () => {
         return (typeof window !== 'undefined' &&
@@ -370,6 +376,7 @@ if (typeof window !== 'undefined') {
         setStcontrolEnabled: (enabled, policy, controllerUrl) => initUserHeartbeat().setStcontrolEnabled(enabled, policy, controllerUrl),
         instance: () => userHeartbeat,
         forceStart: () => {
+            if (isStcontrolAdminOnlyPage()) return null;
             console.log('Force starting user heartbeat...');
             const heartbeat = initUserHeartbeat();
             heartbeat.start();

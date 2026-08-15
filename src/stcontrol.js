@@ -30,11 +30,12 @@ export const STCONTROL_CAPABILITIES = Object.freeze([
     'registration_policy',
     'snapshot_boundary',
     'user_data_fault_freeze',
+    'user_data_fault_release',
     'user_provision',
     'write_gate',
 ]);
 
-const STATE_VERSION = 6;
+const STATE_VERSION = 8;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CLOCK_SKEW_SECONDS = 60;
 const DEFAULT_SESSION_IDLE_MS = 15 * 60 * 1000;
@@ -50,6 +51,7 @@ const MAX_ACTIVITY_LEASE_MS = (24 * 60 + 5) * 60 * 1000;
 // Stop local writes before the Controller deadline so bounded clock skew can
 // never let an isolated old node overlap a newly granted writer.
 const ACTIVITY_LEASE_FENCE_MARGIN_MS = 60 * 1000;
+const MAX_SESSION_ACTIVITY_CHECKPOINT_MS = 5 * 60 * 1000;
 const DEFAULT_SNAPSHOT_GATE_LEASE_MS = 30 * 1000;
 const MIN_SNAPSHOT_GATE_LEASE_MS = 10 * 1000;
 const MAX_SNAPSHOT_GATE_LEASE_MS = 5 * 60 * 1000;
@@ -167,6 +169,7 @@ function initialState() {
         runtimeInstanceId: PROCESS_INSTANCE_ID,
         nonces: [],
         operations: {},
+        releasedDataFaults: {},
         gates: {},
         sessions: {},
         lastActiveOwners: {},
@@ -220,6 +223,41 @@ function validateLoadedState(value) {
             const createdAt = Number.isSafeInteger(gate.createdAt) ? gate.createdAt : 0;
             gate.expiresAt = createdAt + DEFAULT_SNAPSHOT_GATE_LEASE_MS;
         }
+        value.version = 6;
+    }
+    if (value?.version === 6) {
+        for (const gate of Object.values(value.gates || {})) {
+            if (!gate || typeof gate !== 'object' || gate.kind !== 'data_fault' ||
+                Number.isSafeInteger(gate.globalUserId) && gate.globalUserId > 0) {
+                continue;
+            }
+            gate.legacyGlobalUserIdMissing = true;
+            delete gate.globalUserId;
+        }
+        value.version = 7;
+    }
+    if (value?.version === 7) {
+        // Successful releases need a fault-scoped tombstone independent of
+        // the bounded general operation replay cache. Otherwise unrelated
+        // traffic could evict the only proof needed to converge a Controller
+        // generation rollover after the node-local delete already committed.
+        value.releasedDataFaults = {};
+        for (const [operationKey, operation] of Object.entries(value.operations || {})) {
+            const result = operation?.result;
+            if (!operationKey.startsWith('data-fault-release:') || result?.ok !== true || result.released !== true ||
+                !UUID_PATTERN.test(result.fault_id || '') || !exactPositiveInteger(result.global_user_id) ||
+                typeof result.handle !== 'string' || !result.handle || result.handle.length > 128 ||
+                !exactPositiveInteger(result.activity_epoch)) {
+                continue;
+            }
+            const completedAt = Date.parse(operation.completedAt);
+            value.releasedDataFaults[result.fault_id] = {
+                globalUserId: result.global_user_id,
+                handle: result.handle,
+                activityEpoch: result.activity_epoch,
+                releasedAt: Number.isFinite(completedAt) && completedAt >= 0 ? completedAt : 0,
+            };
+        }
         value.version = STATE_VERSION;
     }
     if (!value || value.version !== STATE_VERSION || !VALID_MODES.has(value.mode) ||
@@ -229,7 +267,7 @@ function validateLoadedState(value) {
         value.runtimeInstanceId !== undefined && !UUID_PATTERN.test(value.runtimeInstanceId)) {
         throw new Error('Invalid persisted stcontrol adapter state');
     }
-    for (const key of ['nonces', 'operations', 'gates', 'sessions', 'lastActiveOwners', 'takeoverChallenges', 'pendingSyncUsers', 'leases']) {
+    for (const key of ['nonces', 'operations', 'releasedDataFaults', 'gates', 'sessions', 'lastActiveOwners', 'takeoverChallenges', 'pendingSyncUsers', 'leases']) {
         if (key === 'nonces' ? !Array.isArray(value[key]) : !value[key] || typeof value[key] !== 'object' || Array.isArray(value[key])) {
             throw new Error('Invalid persisted stcontrol adapter state');
         }
@@ -239,6 +277,14 @@ function validateLoadedState(value) {
             !Number.isSafeInteger(fact?.changedAt) || fact.changedAt < 0 ||
             typeof fact?.reason !== 'string' || fact.reason.length > 128) {
             throw new Error('Invalid persisted stcontrol pending synchronization state');
+        }
+    }
+    for (const [faultId, released] of Object.entries(value.releasedDataFaults)) {
+        if (!UUID_PATTERN.test(faultId) || !exactPositiveInteger(released?.globalUserId) ||
+            typeof released?.handle !== 'string' || !released.handle || released.handle.length > 128 ||
+            !exactPositiveInteger(released?.activityEpoch) ||
+            !Number.isSafeInteger(released?.releasedAt) || released.releasedAt < 0) {
+            throw new Error('Invalid persisted stcontrol data fault release');
         }
     }
     for (const [digest, challenge] of Object.entries(value.takeoverChallenges)) {
@@ -262,7 +308,11 @@ function validateLoadedState(value) {
             throw new Error('Invalid persisted stcontrol write gate');
         }
         if (gate.kind === 'data_fault') {
-            if (!UUID_PATTERN.test(gate.faultId || '')) throw new Error('Invalid persisted stcontrol write gate');
+            const exactGlobalUserId = Number.isSafeInteger(gate.globalUserId) && gate.globalUserId > 0;
+            const legacyGlobalUserIdMissing = gate.legacyGlobalUserIdMissing === true && gate.globalUserId === undefined;
+            if (!UUID_PATTERN.test(gate.faultId || '') || (!exactGlobalUserId && !legacyGlobalUserIdMissing)) {
+                throw new Error('Invalid persisted stcontrol write gate');
+            }
             continue;
         }
         if (gate.kind !== 'snapshot' || !UUID_PATTERN.test(gate.workflowId || '') || !UUID_PATTERN.test(gate.snapshotId || '') ||
@@ -319,6 +369,10 @@ function clone(value) {
     return structuredClone(value);
 }
 
+function exactPositiveInteger(value) {
+    return Number.isSafeInteger(value) && value > 0;
+}
+
 function opaqueTextEqual(left, right) {
     if (typeof left !== 'string' || typeof right !== 'string') return false;
     const leftBytes = Buffer.from(left);
@@ -337,11 +391,12 @@ function cleanExpiredSnapshotGates(state, now = Date.now()) {
     return changed;
 }
 
-async function mutateState(mutator) {
+async function mutateState(mutator, options = {}) {
     const run = stateQueue.then(async () => {
         const state = loadStateSync();
-        const result = await mutator(state);
-        persistState(state);
+        const control = { persist: options.persist !== false };
+        const result = await mutator(state, control);
+        if (control.persist) persistState(state);
         return result;
     });
     stateQueue = run.catch(() => undefined);
@@ -398,14 +453,15 @@ function safeEqualHex(left, right) {
     return leftBytes.length === rightBytes.length && crypto.timingSafeEqual(leftBytes, rightBytes);
 }
 
-async function consumeRequestNonce(nonce, timestamp) {
+async function consumeRequestNonce(nonce) {
     const digest = crypto.createHash('sha256').update(nonce).digest('hex');
     return mutateState(state => {
-        const cutoff = timestamp - CLOCK_SKEW_SECONDS;
+        const now = Math.floor(Date.now() / 1000);
+        const cutoff = now - CLOCK_SKEW_SECONDS;
         state.nonces = state.nonces.filter(item => Number(item.timestamp) >= cutoff);
         if (state.nonces.some(item => item.digest === digest)) return false;
-        state.nonces.push({ digest, timestamp });
-        if (state.nonces.length > MAX_NONCES) state.nonces.splice(0, state.nonces.length - MAX_NONCES);
+        if (state.nonces.length >= MAX_NONCES) return false;
+        state.nonces.push({ digest, timestamp: now });
         return true;
     });
 }
@@ -439,7 +495,7 @@ export async function requireStcontrolAgent(request, response, next) {
     // exact path rather than the router-relative suffix.
     const signedPath = String(request.originalUrl || request.path).split('?', 1)[0];
     const expected = signStcontrolRequest(psk, request.method, signedPath, timestampText, nonce, request.body);
-    if (!safeEqualHex(expected, signature) || !await consumeRequestNonce(nonce, timestamp)) {
+    if (!safeEqualHex(expected, signature) || !await consumeRequestNonce(nonce)) {
         return response.sendStatus(401);
     }
     return next();
@@ -513,6 +569,12 @@ export async function applyStcontrolMode(input) {
         }
         if (!ALLOWED_TRANSITIONS[state.mode]?.has(input.mode)) {
             throw new Error('Invalid control mode transition');
+        }
+        if (state.mode === STCONTROL_MODES.DRAINING && input.mode === STCONTROL_MODES.MANAGED) {
+            const status = getModeStatusFromState(state);
+            if (status.activeIndependentSessions > 0 || status.pendingUserSyncs > 0) {
+                throw new Error('Independent reconciliation incomplete');
+            }
         }
         if (input.mode_generation > state.modeGeneration) {
             if (input.mode === STCONTROL_MODES.INDEPENDENT) {
@@ -761,18 +823,93 @@ export function stcontrolAdminAccountGuard(request, response, next) {
     return writeAccessError(response, 'managed_administrator_mutation');
 }
 
-function ensureSessionEnvelope(request, loginMode) {
-    if (!request.session) return null;
-    const current = request.session.stcontrol;
-    if (current?.sessionId) return current;
-    const envelope = {
-        sessionId: crypto.randomUUID(),
-        loginMode,
-        activityEpoch: 0,
-        controllerGeneration: loadStateSync().controllerGeneration,
+function staleSessionFailure() {
+    return {
+        status: 409,
+        body: { error: '当前页面会话已过期，请重新登录', code: 'stale_writer_session' },
     };
-    request.session.stcontrol = envelope;
-    return envelope;
+}
+
+function staleManagedLeaseFailure() {
+    return {
+        status: 409,
+        body: { error: '当前页面的写入租约已失效，请重新登录', code: 'stale_writer_session' },
+    };
+}
+
+function gateFailure(gate) {
+    if (gate?.kind === 'data_fault') {
+        return {
+            status: 423,
+            retryAfter: '2',
+            body: { error: '检测到用户数据异常，写入已冻结，请从控制面板恢复', code: 'user_data_frozen' },
+        };
+    }
+    return {
+        status: 423,
+        retryAfter: '2',
+        body: { error: '用户数据正在生成一致性快照，请稍后重试', code: 'user_quiescing' },
+    };
+}
+
+function ownershipFailure(code = 'activity_ownership_unavailable') {
+    return {
+        status: 423,
+        body: { error: '无法证明此节点拥有该用户的灾难写权', code },
+    };
+}
+
+function drainingFailure() {
+    return {
+        status: 423,
+        body: { error: '独立模式数据正在对账，请重新登录', code: 'independent_reconciliation_required' },
+    };
+}
+
+function applyTrackerFailure(response, failure) {
+    if (failure.retryAfter && typeof response.set === 'function') {
+        response.set('Retry-After', failure.retryAfter);
+    }
+    return response.status(failure.status).json(failure.body);
+}
+
+function leaseMatchesEnvelope(lease, envelope, now = Date.now()) {
+    return Boolean(lease) &&
+        lease.sessionId === envelope.sessionId &&
+        lease.activityEpoch === envelope.activityEpoch &&
+        lease.controllerGeneration === envelope.controllerGeneration &&
+        Number.isSafeInteger(lease.leaseExpiresAt) &&
+        lease.leaseExpiresAt > now + ACTIVITY_LEASE_FENCE_MARGIN_MS;
+}
+
+function getSessionCheckpointIntervalMs() {
+    const { sessionIdleMs } = getStcontrolActivityPolicy();
+    return Math.min(MAX_SESSION_ACTIVITY_CHECKPOINT_MS, Math.max(MIN_HEARTBEAT_MS, Math.floor(sessionIdleMs / 3)));
+}
+
+function getLastSessionCheckpointAt(session) {
+    const checkpointAt = Number(session?.lastCheckpointAt || 0);
+    if (checkpointAt > 0) return checkpointAt;
+    return Math.max(
+        Number(session?.lastSeenAt || 0),
+        Number(session?.lastPageAt || 0),
+        Number(session?.lastRequestAt || 0),
+    );
+}
+
+function shouldPersistSessionCheckpoint(session, now) {
+    return now - getLastSessionCheckpointAt(session) >= getSessionCheckpointIntervalMs();
+}
+
+function updateSessionActivity(session, control, now, options = {}) {
+    const persistCheckpoint = shouldPersistSessionCheckpoint(session, now);
+    session.lastSeenAt = now;
+    session.lastRequestAt = now;
+    if (options.page) session.lastPageAt = now;
+    if (persistCheckpoint) {
+        session.lastCheckpointAt = now;
+        control.persist = true;
+    }
 }
 
 function validActivityLeaseConfirmation(confirmation, options = {}) {
@@ -878,6 +1015,7 @@ export async function registerStcontrolSession(request, claims, loginMode = STCO
             lastSeenAt: now,
             lastPageAt: now,
             lastRequestAt: now,
+            lastCheckpointAt: now,
             inFlightReads: 0,
             inFlightWrites: 0,
         };
@@ -904,8 +1042,11 @@ export async function noteStcontrolLogout(request) {
     await mutateState(state => {
         const session = state.sessions[sessionId];
         if (!session) return;
-        session.loggedOutAt = Date.now();
-        session.lastSeenAt = Date.now();
+        const now = Date.now();
+        session.loggedOutAt = now;
+        session.lastSeenAt = now;
+        session.lastRequestAt = now;
+        session.lastCheckpointAt = now;
         session.inFlightReads = 0;
         session.inFlightWrites = 0;
         if (state.leases[session.handle]?.sessionId === sessionId) delete state.leases[session.handle];
@@ -915,137 +1056,118 @@ export async function noteStcontrolLogout(request) {
 export async function noteStcontrolPageHeartbeat(request) {
     const sessionId = request.session?.stcontrol?.sessionId;
     if (!sessionId || !isStcontrolEnabled()) return false;
-    return mutateState(state => {
-        cleanExpiredSessions(state);
+    return mutateState((state, control) => {
+        const changed = cleanExpiredSessions(state);
+        control.persist = changed;
         const session = state.sessions[sessionId];
         if (!session || session.loggedOutAt) return false;
         const now = Date.now();
-        session.lastPageAt = now;
-        session.lastRequestAt = now;
-        session.lastSeenAt = now;
+        updateSessionActivity(session, control, now, { page: true });
         return true;
-    });
+    }, { persist: false });
 }
 
 export async function stcontrolRequestTracker(request, response, next) {
     if (!isStcontrolEnabled() || !request.user?.profile?.handle) return next();
     if (request.session?.stcontrolAdmin) return next();
     const handle = request.user.profile.handle;
-    const state = loadStateSync();
-    const sessionsChanged = cleanExpiredSessions(state);
-    const gatesChanged = cleanExpiredSnapshotGates(state);
-    if (sessionsChanged || gatesChanged) persistState(state);
-    const hadSessionEnvelope = Boolean(request.session?.stcontrol?.sessionId);
-    // New envelopes are always created neutrally MANAGED. INDEPENDENT is granted
-    // only through the ownership-proof branch below, never by control mode alone,
-    // so a mere authenticated handle cannot mint an INDEPENDENT writer.
-    const envelope = ensureSessionEnvelope(request, STCONTROL_MODES.MANAGED);
-    if (!envelope) return response.sendStatus(500);
-    const knownSession = state.sessions[envelope.sessionId];
-    if (knownSession?.loggedOutAt || (hadSessionEnvelope && !knownSession)) {
-        return response.status(409).json({ error: '当前页面会话已过期，请重新登录', code: 'stale_writer_session' });
-    }
-    if (state.mode === STCONTROL_MODES.INDEPENDENT && envelope.loginMode !== STCONTROL_MODES.INDEPENDENT) {
+    const preProofEnvelope = request.session?.stcontrol?.sessionId ? request.session.stcontrol : null;
+    const isWrite = !['GET', 'HEAD', 'OPTIONS'].includes(request.method);
+    const preProofState = preProofEnvelope ? loadStateSync() : null;
+    const preProofSession = preProofEnvelope ? preProofState?.sessions?.[preProofEnvelope.sessionId] : null;
+    let ownershipProof = null;
+    if (preProofState?.mode === STCONTROL_MODES.INDEPENDENT &&
+        preProofSession && !preProofSession.loggedOutAt &&
+        preProofSession.handle === handle &&
+        preProofSession.loginMode !== STCONTROL_MODES.INDEPENDENT) {
         const ownership = await canUseNativeLogin(handle);
-        if (!ownership.allowed) {
-            return response.status(423).json({ error: '无法证明此节点拥有该用户的灾难写权', code: ownership.code });
-        }
-        envelope.loginMode = STCONTROL_MODES.INDEPENDENT;
-        envelope.activityEpoch = 0;
-        envelope.controllerGeneration = state.controllerGeneration;
+        ownershipProof = {
+            allowed: Boolean(ownership.allowed),
+            code: ownership.code || 'activity_ownership_unavailable',
+            modeGeneration: preProofState.modeGeneration,
+            controllerGeneration: preProofState.controllerGeneration,
+        };
     }
-    if (state.mode === STCONTROL_MODES.DRAINING && envelope.loginMode !== STCONTROL_MODES.INDEPENDENT) {
-        const durableSession = state.sessions[envelope.sessionId];
-        if (durableSession?.loginMode === STCONTROL_MODES.INDEPENDENT && !durableSession.loggedOutAt) {
+    const admission = await mutateState((current, control) => {
+        const now = Date.now();
+        const sessionsChanged = cleanExpiredSessions(current, now);
+        const gatesChanged = cleanExpiredSnapshotGates(current, now);
+        control.persist = sessionsChanged || gatesChanged;
+        const envelope = request.session?.stcontrol?.sessionId ? request.session.stcontrol : null;
+        if (!envelope) return { failure: staleSessionFailure() };
+        const knownSession = current.sessions[envelope.sessionId];
+        if (!knownSession || knownSession.loggedOutAt || knownSession.handle !== handle) {
+            return { failure: staleSessionFailure() };
+        }
+        const durableMode = knownSession?.loginMode;
+        const promotingToIndependent = current.mode === STCONTROL_MODES.INDEPENDENT && durableMode !== STCONTROL_MODES.INDEPENDENT;
+        if (!promotingToIndependent) {
+            envelope.loginMode = durableMode;
+            envelope.activityEpoch = Number(knownSession.activityEpoch || 0);
+            envelope.controllerGeneration = Number(knownSession.controllerGeneration || current.controllerGeneration);
+        }
+        if (current.mode === STCONTROL_MODES.DRAINING) {
+            if (durableMode !== STCONTROL_MODES.INDEPENDENT) return { failure: drainingFailure() };
             envelope.loginMode = STCONTROL_MODES.INDEPENDENT;
             envelope.activityEpoch = 0;
-            envelope.controllerGeneration = state.controllerGeneration;
-        } else {
-            return response.status(423).json({ error: '独立模式数据正在对账，请重新登录', code: 'independent_reconciliation_required' });
+            envelope.controllerGeneration = Number(knownSession.controllerGeneration || current.controllerGeneration);
+        } else if (promotingToIndependent) {
+            if (!ownershipProof?.allowed ||
+                ownershipProof.modeGeneration !== current.modeGeneration ||
+                ownershipProof.controllerGeneration !== current.controllerGeneration) {
+                return { failure: ownershipFailure(ownershipProof?.allowed ? 'activity_ownership_stale' : ownershipProof?.code) };
+            }
+            knownSession.loginMode = STCONTROL_MODES.INDEPENDENT;
+            knownSession.activityEpoch = 0;
+            knownSession.controllerGeneration = current.controllerGeneration;
+            envelope.loginMode = STCONTROL_MODES.INDEPENDENT;
+            envelope.activityEpoch = 0;
+            envelope.controllerGeneration = current.controllerGeneration;
+            control.persist = true;
         }
-    }
-    const isWrite = !['GET', 'HEAD', 'OPTIONS'].includes(request.method);
-
-    // Gate, lease and independent-writer origin are all decided against the SAME
-    // authoritative state that records in-flight admission. Check + admit run
-    // atomically inside the serialized mutateState linearization point, so a
-    // concurrent write-gate establishment command cannot interleave between the
-    // fence check and this request's admission. Status codes and bodies are
-    // unchanged from the previous snapshot-based checks.
-    const admission = await mutateState(current => {
-        const now = Date.now();
-        cleanExpiredSessions(current);
-        cleanExpiredSnapshotGates(current);
-
         const gate = current.gates[handle];
         if (gate && isWrite && !request.path.startsWith(INTERNAL_PATH_PREFIX)) {
-            response.set('Retry-After', '2');
-            if (gate.kind === 'data_fault') {
-                return { blocked: 'user_data_frozen' };
-            }
-            return { blocked: 'user_quiescing' };
+            return { failure: gateFailure(gate) };
         }
-
+        if (current.mode === STCONTROL_MODES.MANAGED && isWrite && envelope.loginMode === STCONTROL_MODES.INDEPENDENT) {
+            return { failure: staleManagedLeaseFailure() };
+        }
         const lease = current.leases[handle];
-        if (isWrite && envelope.loginMode === STCONTROL_MODES.MANAGED && (!lease || lease.sessionId !== envelope.sessionId ||
-            lease.activityEpoch !== envelope.activityEpoch || lease.controllerGeneration !== envelope.controllerGeneration ||
-            !Number.isSafeInteger(lease.leaseExpiresAt) ||
-            lease.leaseExpiresAt <= now + ACTIVITY_LEASE_FENCE_MARGIN_MS)) {
-            return { blocked: 'stale_writer_session' };
+        if (isWrite && envelope.loginMode === STCONTROL_MODES.MANAGED && !leaseMatchesEnvelope(lease, envelope, now)) {
+            return { failure: staleManagedLeaseFailure() };
         }
-
-        // Defense-in-depth: an INDEPENDENT writer must be backed by a durable
-        // independent session owned by this handle and still logged in. A forged
-        // envelope claiming independent mode has no such backing session.
-        if (isWrite && envelope.loginMode === STCONTROL_MODES.INDEPENDENT) {
-            const durableSession = current.sessions[envelope.sessionId];
-            if (!durableSession || durableSession.loginMode !== STCONTROL_MODES.INDEPENDENT ||
-                durableSession.handle !== handle || durableSession.loggedOutAt) {
-                return { blocked: 'stale_writer_session' };
-            }
-        }
-
-        const session = current.sessions[envelope.sessionId] ?? {
-            handle,
-            loginMode: envelope.loginMode,
-            activityEpoch: envelope.activityEpoch,
-            controllerGeneration: envelope.controllerGeneration,
-            lastPageAt: now,
-            inFlightReads: 0,
-            inFlightWrites: 0,
-        };
-        session.lastSeenAt = now;
-        session.lastRequestAt = now;
-        if (request.path === '/api/users/heartbeat') session.lastPageAt = now;
+        const session = knownSession;
+        session.handle = handle;
+        session.loginMode = envelope.loginMode;
+        session.activityEpoch = envelope.activityEpoch;
+        session.controllerGeneration = envelope.controllerGeneration;
+        updateSessionActivity(session, control, now, { page: request.path === '/api/users/heartbeat' });
         if (isWrite) session.inFlightWrites += 1;
         else session.inFlightReads += 1;
         current.sessions[envelope.sessionId] = session;
         if (isWrite && session.loginMode === STCONTROL_MODES.INDEPENDENT) {
-            current.pendingSyncUsers[handle] = { marker: crypto.randomUUID(), changedAt: now, reason: 'independent_write' };
+            if (!current.pendingSyncUsers[handle]) {
+                current.pendingSyncUsers[handle] = { marker: crypto.randomUUID(), changedAt: now, reason: 'independent_write' };
+                control.persist = true;
+            }
         }
-        return { blocked: null };
-    });
-
-    if (admission.blocked === 'user_data_frozen') {
-        return response.status(423).json({ error: '检测到用户数据异常，写入已冻结，请从控制面板恢复', code: 'user_data_frozen' });
+        return { envelope };
+    }, { persist: false });
+    if (admission.failure) {
+        return applyTrackerFailure(response, admission.failure);
     }
-    if (admission.blocked === 'user_quiescing') {
-        return response.status(423).json({ error: '用户数据正在生成一致性快照，请稍后重试', code: 'user_quiescing' });
-    }
-    if (admission.blocked === 'stale_writer_session') {
-        return response.status(409).json({ error: '当前页面的写入租约已失效，请重新登录', code: 'stale_writer_session' });
-    }
+    const envelope = admission.envelope;
     let finished = false;
     const finish = () => {
         if (finished) return;
         finished = true;
-        void mutateState(current => {
+        void mutateState((current, control) => {
             const session = current.sessions[envelope.sessionId];
             if (!session) return;
             if (isWrite) session.inFlightWrites = Math.max(0, Number(session.inFlightWrites) - 1);
             else session.inFlightReads = Math.max(0, Number(session.inFlightReads) - 1);
-            session.lastSeenAt = Date.now();
-        });
+            updateSessionActivity(session, control, Date.now());
+        }, { persist: false }).catch(() => undefined);
     };
     response.once('finish', finish);
     response.once('close', finish);
@@ -1099,6 +1221,13 @@ export async function setUserWriteGate(handle, gate) {
         if (gate) state.gates[handle] = gate;
         else delete state.gates[handle];
     });
+}
+
+function trimRecordedOperations(state) {
+    const keys = Object.keys(state.operations);
+    if (keys.length <= 5000) return;
+    keys.sort((left, right) => String(state.operations[left].completedAt).localeCompare(String(state.operations[right].completedAt)));
+    for (const oldKey of keys.slice(0, keys.length - 5000)) delete state.operations[oldKey];
 }
 
 /** Establish a snapshot gate without racing a concurrent data-fault freeze. */
@@ -1164,14 +1293,27 @@ export async function releaseSnapshotWriteGate(handle, workflowId, snapshotId, a
  * data-fault freeze. A fault id is globally bound to one handle and activity
  * epoch so a retried signed Agent command cannot silently change its scope.
  */
-export async function establishUserDataFaultGate(handle, faultId, activityEpoch) {
+export async function establishUserDataFaultGate(handle, faultId, globalUserId, activityEpoch, options = {}) {
     return mutateState(state => {
+        cleanExpiredSnapshotGates(state);
+        if (!exactPositiveInteger(options.controllerGeneration) ||
+            state.controllerGeneration !== options.controllerGeneration) {
+            return { status: 'controller_generation_mismatch' };
+        }
+        const allowLegacyScopeAdoption = options.allowLegacyScopeAdoption === true;
         for (const [boundHandle, gate] of Object.entries(state.gates)) {
             if (gate?.kind !== 'data_fault' || gate.faultId !== faultId) continue;
-            if (boundHandle !== handle || gate.activityEpoch !== activityEpoch) {
-                return { status: 'fault_id_conflict' };
+            if (boundHandle === handle && gate.activityEpoch === activityEpoch) {
+                if (exactPositiveInteger(gate.globalUserId) && gate.globalUserId === globalUserId) {
+                    return { status: 'existing', gate: clone(gate) };
+                }
+                if (gate.legacyGlobalUserIdMissing === true && allowLegacyScopeAdoption) {
+                    gate.globalUserId = globalUserId;
+                    delete gate.legacyGlobalUserIdMissing;
+                    return { status: 'existing', gate: clone(gate) };
+                }
             }
-            return { status: 'existing', gate: clone(gate) };
+            return { status: 'fault_id_conflict' };
         }
 
         const current = state.gates[handle];
@@ -1179,12 +1321,88 @@ export async function establishUserDataFaultGate(handle, faultId, activityEpoch)
         const gate = {
             kind: 'data_fault',
             faultId,
+            globalUserId,
             activityEpoch,
             createdAt: Date.now(),
         };
         state.gates[handle] = gate;
         return { status: 'created', gate: clone(gate) };
     });
+}
+
+export async function releaseUserDataFaultGate(input, options = {}) {
+    if (!UUID_PATTERN.test(input?.operationId || '')) throw new TypeError('Invalid operation id');
+    const key = `data-fault-release:${input.operationId}`;
+    const digest = crypto.createHash('sha256').update(JSON.stringify(input)).digest('hex');
+    const previous = operationQueues.get(key) ?? Promise.resolve();
+    const run = previous.catch(() => undefined).then(() => mutateState(state => {
+        const replay = state.operations[key];
+        if (replay) {
+            if (replay.digest !== digest) throw new Error('Operation id payload conflict');
+            return clone(replay.result);
+        }
+        const releasedReceipt = () => ({
+            ok: true,
+            released: true,
+            operation_id: input.operationId,
+            fault_id: input.faultId,
+            global_user_id: input.globalUserId,
+            handle: input.handle,
+            activity_epoch: input.activityEpoch,
+            controller_generation: input.controllerGeneration,
+        });
+        let result;
+        if (state.controllerGeneration !== input.controllerGeneration) {
+            result = { status: 'controller_generation_mismatch' };
+        } else {
+            const gate = state.gates[input.handle];
+            if (!gate) {
+                // The node-local delete may have committed immediately before
+                // Controller failover fenced the old completion. A new
+                // generation uses a new operation id; accept it only when a
+                // durable prior success proves the complete fault scope.
+                const prior = state.releasedDataFaults[input.faultId];
+                const previouslyReleased = prior?.globalUserId === input.globalUserId && prior.handle === input.handle &&
+                    prior.activityEpoch === input.activityEpoch;
+                result = previouslyReleased ? releasedReceipt() : { status: 'data_fault_gate_missing' };
+            } else if (gate.kind !== 'data_fault' || gate.faultId !== input.faultId || gate.activityEpoch !== input.activityEpoch) {
+                result = { status: 'data_fault_scope_mismatch' };
+            } else if (exactPositiveInteger(gate.globalUserId)) {
+                if (gate.globalUserId !== input.globalUserId) {
+                    result = { status: 'data_fault_scope_mismatch' };
+                } else {
+                    delete state.gates[input.handle];
+                    result = releasedReceipt();
+                }
+            } else if (gate.legacyGlobalUserIdMissing === true && options.allowLegacyGlobalUserIdMatch === true) {
+                delete state.gates[input.handle];
+                result = releasedReceipt();
+            } else {
+                result = { status: 'data_fault_scope_mismatch' };
+            }
+        }
+        // Only a completed release is a durable idempotency result. A
+        // generation mismatch can be transient while the adapter is applying
+        // the matching control-mode heartbeat; caching that rejection would
+        // make an exact Controller retry fail forever with the same operation.
+        if (result?.ok === true && result.released === true) {
+            state.releasedDataFaults[input.faultId] = {
+                globalUserId: input.globalUserId,
+                handle: input.handle,
+                activityEpoch: input.activityEpoch,
+                releasedAt: Date.now(),
+            };
+            state.operations[key] = { digest, result: clone(result), completedAt: new Date().toISOString() };
+            trimRecordedOperations(state);
+        }
+        return clone(result);
+    }));
+    operationQueues.set(key, run);
+    try {
+        return await run;
+    } finally {
+        if (operationQueues.get(key) === run) operationQueues.delete(key);
+    }
 }
 
 export function getUserWriteGate(handle) {
@@ -1224,11 +1442,7 @@ export async function runIdempotentStcontrolOperation(kind, operationId, input, 
             const replay = state.operations[key];
             if (replay && replay.digest !== digest) throw new Error('Operation id payload conflict');
             state.operations[key] = { digest, result: clone(result), completedAt: new Date().toISOString() };
-            const keys = Object.keys(state.operations);
-            if (keys.length > 5000) {
-                keys.sort((left, right) => String(state.operations[left].completedAt).localeCompare(String(state.operations[right].completedAt)));
-                for (const oldKey of keys.slice(0, keys.length - 5000)) delete state.operations[oldKey];
-            }
+            trimRecordedOperations(state);
         });
         return result;
     });
