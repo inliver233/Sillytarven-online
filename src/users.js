@@ -61,6 +61,7 @@ const STORAGE_KEYS = {
  * @property {string} [email] - The user's email address (optional)
  * @property {string} [oauthProvider] - OAuth provider (github/discord/linuxdo) for third-party login users
  * @property {string} [oauthUserId] - OAuth user ID from the provider
+ * @property {Record<string, string>} [oauthIdentities] - OAuth provider-to-subject mapping
  * @property {string} [avatar] - Avatar URL for the user
  * @property {number} [storageLimitMiB] - User storage limit in MiB (when enabled)
  * @property {string} [storageLastCheckInDate] - Last storage check-in date (YYYY-MM-DD)
@@ -547,6 +548,58 @@ export function normalizeHandle(handle) {
         .replace(/[^a-z0-9-]/g, '-')      // 将非字母数字字符替换为横杠
         .replace(/-+/g, '-')              // 连续横杠合并为一个
         .replace(/^-+|-+$/g, '');         // 去除首尾横杠
+}
+
+const OAUTH_IDENTITY_PROVIDERS = Object.freeze(['github', 'discord', 'linuxdo']);
+
+/**
+ * Returns the normalized OAuth identities stored on a user record. New records
+ * use oauthIdentities while legacy records with oauthProvider/oauthUserId remain
+ * readable during rolling upgrades.
+ * @param {Partial<User>} user User record
+ * @returns {Record<string, string>} Provider-to-subject mapping
+ */
+export function getUserOAuthIdentities(user) {
+    const identities = {};
+    const stored = user?.oauthIdentities;
+    if (stored && typeof stored === 'object' && !Array.isArray(stored)) {
+        for (const provider of OAUTH_IDENTITY_PROVIDERS) {
+            const subject = stored[provider];
+            if (typeof subject === 'string' && subject) identities[provider] = subject;
+        }
+    }
+    if (OAUTH_IDENTITY_PROVIDERS.includes(user?.oauthProvider) &&
+        typeof user?.oauthUserId === 'string' && user.oauthUserId && !identities[user.oauthProvider]) {
+        identities[user.oauthProvider] = user.oauthUserId;
+    }
+    return identities;
+}
+
+/**
+ * Applies a normalized OAuth identity mapping and keeps the legacy single-value
+ * projection in sync for older extensions and rolling-upgrade compatibility.
+ * @param {Partial<User>} user User record to update
+ * @param {Record<string, string>} identities Provider-to-subject mapping
+ * @returns {Partial<User>} The updated record
+ */
+export function applyUserOAuthIdentities(user, identities) {
+    const normalized = {};
+    for (const provider of OAUTH_IDENTITY_PROVIDERS) {
+        const subject = identities?.[provider];
+        if (typeof subject === 'string' && subject) normalized[provider] = subject;
+    }
+    user.oauthIdentities = normalized;
+    const currentProvider = OAUTH_IDENTITY_PROVIDERS.includes(user.oauthProvider) && normalized[user.oauthProvider]
+        ? user.oauthProvider
+        : OAUTH_IDENTITY_PROVIDERS.find(provider => normalized[provider]);
+    if (currentProvider) {
+        user.oauthProvider = currentProvider;
+        user.oauthUserId = normalized[currentProvider];
+    } else {
+        delete user.oauthProvider;
+        delete user.oauthUserId;
+    }
+    return user;
 }
 
 /**

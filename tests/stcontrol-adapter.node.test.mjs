@@ -943,7 +943,7 @@ test('managed mode rejects requests that lack a durable stcontrol envelope', asy
     }
 });
 
-test('independent mode rejects requests that lack a durable stcontrol envelope', async () => {
+test('independent mode rejects envelope minting when ownership proof is unavailable', async () => {
     const previousDataRoot = globalThis.DATA_ROOT;
     const previousEnabled = process.env.SILLYTAVERN_STCONTROL_ENABLED;
     const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sillytavern-stcontrol-no-envelope-'));
@@ -969,8 +969,8 @@ test('independent mode rejects requests that lack a durable stcontrol envelope',
         let continued = 0;
         await stcontrolRequestTracker(request, response, () => continued++);
         assert.equal(continued, 0);
-        assert.equal(response.statusCode, 409);
-        assert.equal(response.body.code, 'stale_writer_session');
+        assert.equal(response.statusCode, 423);
+        assert.equal(response.body.code, 'activity_ownership_unavailable');
         assert.equal(request.session.stcontrol, undefined);
     } finally {
         resetStcontrolStateForTests();
@@ -1280,6 +1280,7 @@ test('stcontrol adapter is wired through authenticated, CSRF-safe integration po
         '/api/stcontrol/internal/users/provision',
         '/api/stcontrol/internal/users/restore',
         '/api/stcontrol/internal/users/password',
+        '/api/stcontrol/internal/users/oauth',
         '/api/stcontrol/internal/users/verify',
         '/api/stcontrol/internal/users/scan',
         '/api/stcontrol/internal/admin/verify',
@@ -1300,11 +1301,13 @@ test('stcontrol adapter is wired through authenticated, CSRF-safe integration po
     assert.doesNotMatch(endpoint, /request\.query\.(?:ticket|code)/);
     // Password unbind on the control plane must be able to remove the
     // node-local verifier through the same set_password path (no hash material).
-    assert.match(endpoint, /const removing = input\.remove === true;/);
-    assert.match(endpoint, /delete user\.stcontrolPasswordVersion;/);
-	assert.ok(STCONTROL_CAPABILITIES.includes('user_data_fault_freeze'));
-	assert.ok(STCONTROL_CAPABILITIES.includes('user_data_fault_release'));
+    assert.match(endpoint, /const remove = input\.remove === true;/);
+    assert.match(endpoint, /user\.stcontrolPasswordVersion = input\.version;/);
+    assert.ok(STCONTROL_CAPABILITIES.includes('user_data_fault_freeze'));
+    assert.ok(STCONTROL_CAPABILITIES.includes('user_data_fault_release'));
+    assert.ok(STCONTROL_CAPABILITIES.includes('oauth_identity_sync'));
 });
+
 async function startOwnershipAgent(decision) {
     const server = http.createServer(async (request, response) => {
         for await (const _chunk of request) { /* drain body */ }
@@ -1529,4 +1532,3 @@ test('an independent write requires a matching durable session, rejecting forged
         fs.rmSync(dataRoot, { recursive: true, force: true });
     }
 });
-

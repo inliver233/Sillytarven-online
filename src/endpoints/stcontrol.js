@@ -35,10 +35,12 @@ import {
 } from '../stcontrol.js';
 import systemMonitor from '../system-monitor.js';
 import {
+    applyUserOAuthIdentities,
     ensurePublicDirectoriesExist,
     getAllUserHandles,
     getPasswordHash,
     getUserDirectories,
+    getUserOAuthIdentities,
     normalizeHandle,
     toKey,
 } from '../users.js';
@@ -183,11 +185,10 @@ router.post('/api/stcontrol/internal/users/restore', async (request, response) =
                 expiresAt: null,
                 password: input.password_hash || '',
                 salt: input.password_salt || '',
-                oauthProvider: input.oauth_provider || undefined,
-                oauthUserId: input.oauth_subject || undefined,
                 stcontrolGlobalUserId: input.global_user_id,
                 stcontrolAccountVersion: input.account_version,
             };
+            applyUserOAuthIdentities(user, input.oauth_provider ? { [input.oauth_provider]: input.oauth_subject } : {});
             await storage.setItem(key, user);
             if (!existing) await initializeUserDirectories(user);
             return { ok: true, handle: user.handle, local_user_id: user.handle };
@@ -233,6 +234,59 @@ router.post('/api/stcontrol/internal/users/password', async (request, response) 
             user.stcontrolPasswordVersion = input.version;
             await storage.setItem(key, user);
             return { ok: true };
+        });
+        return response.json(result);
+    } catch (error) {
+        return adapterError(response, error);
+    }
+});
+
+router.post('/api/stcontrol/internal/users/oauth', async (request, response) => {
+    try {
+        const input = request.body || {};
+        requireUUID(input.operation_id, 'invalid_operation_id');
+        const handle = requireHandle(input.handle);
+        const provider = input.provider;
+        const subject = input.subject;
+        const remove = input.remove === true;
+        if (!ALLOWED_OAUTH_PROVIDERS.has(provider) || typeof subject !== 'string' || !subject ||
+            subject.length > 512 || subject.trim() !== subject || /[\x00-\x1f\x7f]/.test(subject) ||
+            !Number.isSafeInteger(input.version) || input.version <= 0) {
+            throw new AdapterRequestError(400, 'invalid_oauth_identity');
+        }
+        const normalized = { operation_id: input.operation_id, handle, provider, subject, remove, version: input.version };
+        const result = await runIdempotentStcontrolOperation('oauth-identity', input.operation_id, normalized, async () => {
+            const key = toKey(handle);
+            const user = await storage.getItem(key);
+            if (!user) throw new AdapterRequestError(404, 'user_not_found');
+
+            const identities = getUserOAuthIdentities(user);
+            const states = user.stcontrolOAuthIdentityStates && typeof user.stcontrolOAuthIdentityStates === 'object' &&
+                !Array.isArray(user.stcontrolOAuthIdentityStates) ? { ...user.stcontrolOAuthIdentityStates } : {};
+            const prior = states[provider] && typeof states[provider] === 'object' ? states[provider] : {};
+            const currentVersion = Number(prior.version || 0);
+            const currentSubject = identities[provider];
+            if (currentVersion > input.version) {
+                throw new AdapterRequestError(409, 'oauth_identity_version_rollback');
+            }
+            if (currentVersion === input.version && currentVersion > 0) {
+                const sameSubject = prior.subject === subject;
+                const samePresence = remove ? !currentSubject && prior.present === false : currentSubject === subject && prior.present === true;
+                if (!sameSubject || !samePresence) throw new AdapterRequestError(409, 'oauth_identity_version_conflict');
+                return { ok: true, provider, version: input.version };
+            }
+            if ((currentSubject && currentSubject !== subject) ||
+                (!currentSubject && prior.subject && prior.subject !== subject)) {
+                throw new AdapterRequestError(409, 'oauth_identity_subject_conflict');
+            }
+
+            if (remove) delete identities[provider];
+            else identities[provider] = subject;
+            states[provider] = { version: input.version, subject, present: !remove };
+            applyUserOAuthIdentities(user, identities);
+            user.stcontrolOAuthIdentityStates = states;
+            await storage.setItem(key, user);
+            return { ok: true, provider, version: input.version };
         });
         return response.json(result);
     } catch (error) {
@@ -624,19 +678,18 @@ function validateAccountRequest(raw, provision) {
 }
 
 function makeUserRecord(input, extra = {}) {
-    return {
+    const user = {
         handle: input.handle,
         name: input.name,
         created: Date.now(),
         password: input.password_hash || '',
         salt: input.password_salt || '',
-        oauthProvider: input.oauth_provider || undefined,
-        oauthUserId: input.oauth_subject || undefined,
         admin: false,
         enabled: true,
         expiresAt: null,
         ...extra,
     };
+    return applyUserOAuthIdentities(user, input.oauth_provider ? { [input.oauth_provider]: input.oauth_subject } : {});
 }
 
 function matchesProvisionedAccount(user, input) {
@@ -645,8 +698,8 @@ function matchesProvisionedAccount(user, input) {
         user.name === input.name &&
         String(user.password || '') === String(input.password_hash || '') &&
         String(user.salt || '') === String(input.password_salt || '') &&
-        String(user.oauthProvider || '') === String(input.oauth_provider || '') &&
-        String(user.oauthUserId || '') === String(input.oauth_subject || '');
+        String(getUserOAuthIdentities(user)[input.oauth_provider] || '') === String(input.oauth_subject || '') &&
+        Object.keys(getUserOAuthIdentities(user)).length === (input.oauth_provider ? 1 : 0);
 }
 
 async function initializeUserDirectories(user) {
@@ -742,11 +795,12 @@ async function loadInventoryAccounts() {
                 throw new AdapterRequestError(409, 'inventory_invalid_local_user_id');
             }
             const oauthIdentities = [];
-            if (ALLOWED_OAUTH_PROVIDERS.has(user.oauthProvider) && typeof user.oauthUserId === 'string' && user.oauthUserId) {
-                if (user.oauthUserId.length > 512 || user.oauthUserId.trim() !== user.oauthUserId || /[\x00-\x1f\x7f]/.test(user.oauthUserId)) {
+            for (const [provider, subject] of Object.entries(getUserOAuthIdentities(user))) {
+                if (!ALLOWED_OAUTH_PROVIDERS.has(provider)) continue;
+                if (subject.length > 512 || subject.trim() !== subject || /[\x00-\x1f\x7f]/.test(subject)) {
                     throw new AdapterRequestError(409, 'inventory_invalid_oauth_subject');
                 }
-                oauthIdentities.push({ provider: user.oauthProvider, subject: user.oauthUserId });
+                oauthIdentities.push({ provider, subject });
             }
             return {
                 localUserId,

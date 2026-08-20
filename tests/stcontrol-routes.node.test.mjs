@@ -528,6 +528,86 @@ test('password sync accepts exact remove versions and rejects rollback or mixed 
     assert.equal((await staleRollback.json()).code, 'password_version_rollback');
 });
 
+test('OAuth identity sync upgrades legacy records and fences per-provider drift and rollback', async () => {
+    const seeded = await storage.getItem('user:alice');
+    seeded.oauthProvider = 'discord';
+    seeded.oauthUserId = 'discord-alice';
+    delete seeded.oauthIdentities;
+    delete seeded.stcontrolOAuthIdentityStates;
+    await storage.setItem('user:alice', seeded);
+
+    const addLinuxdo = await signedPost('/api/stcontrol/internal/users/oauth', {
+        operation_id: '20202020-2020-4020-8020-202020202020',
+        handle: 'alice',
+        provider: 'linuxdo',
+        subject: 'linuxdo-alice',
+        remove: false,
+        version: 1,
+    });
+    assert.equal(addLinuxdo.status, 200, await addLinuxdo.text());
+    let updated = await storage.getItem('user:alice');
+    assert.deepEqual(updated.oauthIdentities, { discord: 'discord-alice', linuxdo: 'linuxdo-alice' });
+    assert.equal(updated.oauthProvider, 'discord', 'the compatible legacy projection remains stable');
+
+    const drift = await signedPost('/api/stcontrol/internal/users/oauth', {
+        operation_id: '21212121-2121-4121-8121-212121212121',
+        handle: 'alice',
+        provider: 'linuxdo',
+        subject: 'different-linuxdo-subject',
+        remove: false,
+        version: 2,
+    });
+    assert.equal(drift.status, 409);
+    assert.equal((await drift.json()).code, 'oauth_identity_subject_conflict');
+
+    const advanceLinuxdo = await signedPost('/api/stcontrol/internal/users/oauth', {
+        operation_id: '25252525-2525-4525-8525-252525252525',
+        handle: 'alice',
+        provider: 'linuxdo',
+        subject: 'linuxdo-alice',
+        remove: false,
+        version: 2,
+    });
+    assert.equal(advanceLinuxdo.status, 200, await advanceLinuxdo.text());
+
+    const removeDiscordRequest = {
+        operation_id: '22222222-2222-4222-8222-222222222222',
+        handle: 'alice',
+        provider: 'discord',
+        subject: 'discord-alice',
+        remove: true,
+        version: 1,
+    };
+    const removeDiscord = await signedPost('/api/stcontrol/internal/users/oauth', removeDiscordRequest);
+    assert.equal(removeDiscord.status, 200, await removeDiscord.text());
+    const repeatRemove = await signedPost('/api/stcontrol/internal/users/oauth', {
+        ...removeDiscordRequest,
+        operation_id: '23232323-2323-4323-8323-232323232323',
+    });
+    assert.equal(repeatRemove.status, 200, await repeatRemove.text());
+    updated = await storage.getItem('user:alice');
+    assert.deepEqual(updated.oauthIdentities, { linuxdo: 'linuxdo-alice' });
+    assert.equal(updated.oauthProvider, 'linuxdo');
+    assert.equal(updated.oauthUserId, 'linuxdo-alice');
+
+    const staleAdd = await signedPost('/api/stcontrol/internal/users/oauth', {
+        operation_id: '24242424-2424-4424-8424-242424242424',
+        handle: 'alice',
+        provider: 'linuxdo',
+        subject: 'linuxdo-alice',
+        remove: false,
+        version: 1,
+    });
+    assert.equal(staleAdd.status, 409);
+    assert.equal((await staleAdd.json()).code, 'oauth_identity_version_rollback');
+
+    const inventory = await signedPost('/api/stcontrol/internal/users/scan', { cursor: 0, limit: 250 });
+    const inventoryText = await inventory.text();
+    assert.equal(inventory.status, 200, inventoryText);
+    const inventoryUser = JSON.parse(inventoryText).users.find(user => user.handle === 'alice');
+    assert.deepEqual(inventoryUser.oauth_identities, [{ provider: 'linuxdo', subject: 'linuxdo-alice' }]);
+});
+
 test('snapshot write gate drains one user and requires the exact release token', async () => {
     const request = {
         workflow_id: '66666666-6666-4666-8666-666666666666',

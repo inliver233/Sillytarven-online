@@ -11,6 +11,7 @@ import {
     getUserDirectories,
     getAllUserHandles,
     ensurePublicDirectoriesExist,
+    getUserOAuthIdentities,
     makeUserAccountPermanent,
     toAvatarKey,
 } from '../users.js';
@@ -735,7 +736,7 @@ async function findUserByOAuthIdentity(provider, userId) {
     const handles = await getAllUserHandles();
     for (const handle of handles) {
         const candidate = await storage.getItem(toKey(handle));
-        if (candidate?.oauthProvider === provider && candidate?.oauthUserId === userId) {
+        if (getUserOAuthIdentities(candidate)[provider] === userId) {
             return candidate;
         }
     }
@@ -895,6 +896,7 @@ export async function handleOAuthLogin(request, response, provider, userData, in
                 salt: null,
                 oauthProvider: provider,  // 标记为第三方登录用户
                 oauthUserId: userId,
+                oauthIdentities: { [provider]: userId },
                 avatar: typeof avatar === 'string' ? avatar : null,
                 expiresAt: null,
             };
@@ -1028,6 +1030,7 @@ router.post('/verify-invitation', async (request, response) => {
             salt: null,
             oauthProvider: pendingUser.provider,  // 标记为第三方登录用户
             oauthUserId: pendingUser.userId,
+            oauthIdentities: { [pendingUser.provider]: pendingUser.userId },
             avatar: pendingUser.avatar || null,
             expiresAt: null,
         };

@@ -26,6 +26,7 @@ export const STCONTROL_CAPABILITIES = Object.freeze([
     'local_account_proof',
     'node_admin_handoff',
     'node_admin_verify',
+    'oauth_identity_sync',
     'password_update',
     'registration_policy',
     'snapshot_boundary',
@@ -1073,13 +1074,13 @@ export async function stcontrolRequestTracker(request, response, next) {
     const handle = request.user.profile.handle;
     const preProofEnvelope = request.session?.stcontrol?.sessionId ? request.session.stcontrol : null;
     const isWrite = !['GET', 'HEAD', 'OPTIONS'].includes(request.method);
-    const preProofState = preProofEnvelope ? loadStateSync() : null;
+    const preProofState = loadStateSync();
     const preProofSession = preProofEnvelope ? preProofState?.sessions?.[preProofEnvelope.sessionId] : null;
     let ownershipProof = null;
     if (preProofState?.mode === STCONTROL_MODES.INDEPENDENT &&
-        preProofSession && !preProofSession.loggedOutAt &&
-        preProofSession.handle === handle &&
-        preProofSession.loginMode !== STCONTROL_MODES.INDEPENDENT) {
+        (!preProofEnvelope || (preProofSession && !preProofSession.loggedOutAt &&
+            preProofSession.handle === handle &&
+            preProofSession.loginMode !== STCONTROL_MODES.INDEPENDENT))) {
         const ownership = await canUseNativeLogin(handle);
         ownershipProof = {
             allowed: Boolean(ownership.allowed),
@@ -1093,13 +1094,47 @@ export async function stcontrolRequestTracker(request, response, next) {
         const sessionsChanged = cleanExpiredSessions(current, now);
         const gatesChanged = cleanExpiredSnapshotGates(current, now);
         control.persist = sessionsChanged || gatesChanged;
-        const envelope = request.session?.stcontrol?.sessionId ? request.session.stcontrol : null;
-        if (!envelope) return { failure: staleSessionFailure() };
-        const knownSession = current.sessions[envelope.sessionId];
+        let envelope = request.session?.stcontrol?.sessionId ? request.session.stcontrol : null;
+        let knownSession = envelope ? current.sessions[envelope.sessionId] : null;
+        if (!envelope) {
+            if (current.mode !== STCONTROL_MODES.INDEPENDENT || !request.session) {
+                return { failure: staleSessionFailure() };
+            }
+            if (!ownershipProof?.allowed ||
+                ownershipProof.modeGeneration !== current.modeGeneration ||
+                ownershipProof.controllerGeneration !== current.controllerGeneration) {
+                return { failure: ownershipFailure(ownershipProof?.allowed ? 'activity_ownership_stale' : ownershipProof?.code) };
+            }
+            const sessionId = crypto.randomUUID();
+            envelope = {
+                sessionId,
+                loginMode: STCONTROL_MODES.INDEPENDENT,
+                activityEpoch: 0,
+                controllerGeneration: current.controllerGeneration,
+            };
+            request.session.stcontrol = envelope;
+            knownSession = {
+                handle,
+                loginMode: STCONTROL_MODES.INDEPENDENT,
+                activityEpoch: 0,
+                controllerGeneration: current.controllerGeneration,
+                lastSeenAt: now,
+                lastPageAt: now,
+                lastRequestAt: now,
+                lastCheckpointAt: now,
+                inFlightReads: 0,
+                inFlightWrites: 0,
+            };
+            current.sessions[sessionId] = knownSession;
+            control.persist = true;
+        }
         if (!knownSession || knownSession.loggedOutAt || knownSession.handle !== handle) {
             return { failure: staleSessionFailure() };
         }
         const durableMode = knownSession?.loginMode;
+        if (envelope.loginMode === STCONTROL_MODES.INDEPENDENT && durableMode !== STCONTROL_MODES.INDEPENDENT) {
+            return { failure: staleSessionFailure() };
+        }
         const promotingToIndependent = current.mode === STCONTROL_MODES.INDEPENDENT && durableMode !== STCONTROL_MODES.INDEPENDENT;
         if (!promotingToIndependent) {
             envelope.loginMode = durableMode;
