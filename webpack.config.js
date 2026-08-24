@@ -51,7 +51,20 @@ export default function getPublicLibConfig(forceDist = false) {
         },
         devtool: false,
         watch: false,
-        module: {},
+        module: {
+            rules: [
+                {
+                    // Showdown 3 publishes an ESM browser build from a package
+                    // marked as CommonJS. Parse that one file as ESM and leave
+                    // its lazy Node-only require branch out of the browser bundle.
+                    test: /showdown\.esm\.js$/,
+                    type: 'javascript/esm',
+                    parser: {
+                        commonjs: false,
+                    },
+                },
+            ],
+        },
         stats: {
             preset: 'minimal',
             assets: false,

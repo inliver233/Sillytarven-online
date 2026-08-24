@@ -6,7 +6,6 @@ import fetch from 'node-fetch';
 import { getConfigValue } from '../util.js';
 import {
     toKey,
-    getUserAvatar,
     normalizeHandle,
     getUserDirectories,
     getAllUserHandles,
@@ -680,7 +679,7 @@ export async function linuxdoCallbackHandler(request, response) {
         if (!userData && tokenData.access_token) {
             const endpoints = [
                 oauthConfig.linuxdo.userInfoUrl,
-                'https://connect.linux.do/api/user'
+                'https://connect.linux.do/api/user',
             ];
 
             for (const endpoint of endpoints) {
@@ -792,7 +791,7 @@ export async function handleOAuthLogin(request, response, provider, userData, in
                     ? `https://cdn.discordapp.com/avatars/${userData.id}/${userData.avatar}.png`
                     : null;
                 break;
-            case 'linuxdo':
+            case 'linuxdo': {
                 // Linux.do 返回格式：{ id, username, name, email, avatar_url, ... }
                 // 可能的嵌套结构：{user: {...}} 或 {current_user: {...}}
                 const userInfo = userData.user || userData.current_user || userData;
@@ -823,6 +822,7 @@ export async function handleOAuthLogin(request, response, provider, userData, in
                     avatar = processDiscourseAvatarTemplate(avatar);
                 }
                 break;
+            }
             default:
                 throw new Error('Unknown OAuth provider');
         }
@@ -1004,83 +1004,83 @@ router.post('/verify-invitation', async (request, response) => {
 
         try {
 
-        // 回调与提交邀请码之间再次检查，防止覆盖现有账号或重复创建同一 OAuth 身份。
-        const existingOAuthUser = await findUserByOAuthIdentity(pendingUser.provider, pendingUser.userId);
-        const existingHandleOwner = await storage.getItem(toKey(pendingUser.handle));
-        if (existingOAuthUser || existingHandleOwner) {
-            delete request.session.oauthPendingUser;
-            return response.status(409).json({ error: '账号已存在，请重新使用第三方登录' });
-        }
+            // 回调与提交邀请码之间再次检查，防止覆盖现有账号或重复创建同一 OAuth 身份。
+            const existingOAuthUser = await findUserByOAuthIdentity(pendingUser.provider, pendingUser.userId);
+            const existingHandleOwner = await storage.getItem(toKey(pendingUser.handle));
+            if (existingOAuthUser || existingHandleOwner) {
+                delete request.session.oauthPendingUser;
+                return response.status(409).json({ error: '账号已存在，请重新使用第三方登录' });
+            }
 
-        // 验证邀请码
-        const validation = await validateInvitationCode(invitationCode, { required: true });
-        if (!validation.valid) {
-            return response.status(400).json({ error: validation.reason || '邀请码无效' });
-        }
+            // 验证邀请码
+            const validation = await validateInvitationCode(invitationCode, { required: true });
+            if (!validation.valid) {
+                return response.status(400).json({ error: validation.reason || '邀请码无效' });
+            }
 
-        // 创建用户
-        const user = {
-            handle: pendingUser.handle,
-            name: pendingUser.name || pendingUser.handle,
-            email: pendingUser.email || '',
-            created: Date.now(),
-            admin: false,
-            enabled: true,
-            password: null,  // 第三方登录用户没有密码
-            salt: null,
-            oauthProvider: pendingUser.provider,  // 标记为第三方登录用户
-            oauthUserId: pendingUser.userId,
-            oauthIdentities: { [pendingUser.provider]: pendingUser.userId },
-            avatar: pendingUser.avatar || null,
-            expiresAt: null,
-        };
+            // 创建用户
+            const user = {
+                handle: pendingUser.handle,
+                name: pendingUser.name || pendingUser.handle,
+                email: pendingUser.email || '',
+                created: Date.now(),
+                admin: false,
+                enabled: true,
+                password: null,  // 第三方登录用户没有密码
+                salt: null,
+                oauthProvider: pendingUser.provider,  // 标记为第三方登录用户
+                oauthUserId: pendingUser.userId,
+                oauthIdentities: { [pendingUser.provider]: pendingUser.userId },
+                avatar: pendingUser.avatar || null,
+                expiresAt: null,
+            };
 
-        if (USER_STORAGE_ENABLED) {
-            const limitMiB = Number(USER_STORAGE_DEFAULT_LIMIT_MIB) || 0;
-            user.storageLimitMiB = Math.max(0, limitMiB);
-        }
+            if (USER_STORAGE_ENABLED) {
+                const limitMiB = Number(USER_STORAGE_DEFAULT_LIMIT_MIB) || 0;
+                user.storageLimitMiB = Math.max(0, limitMiB);
+            }
 
-        await storage.setItem(toKey(pendingUser.handle), user);
-        console.log(`Created new user via ${pendingUser.provider} OAuth with invitation code:`, pendingUser.handle);
+            await storage.setItem(toKey(pendingUser.handle), user);
+            console.log(`Created new user via ${pendingUser.provider} OAuth with invitation code:`, pendingUser.handle);
 
-        // 保存头像 URL
-        if (pendingUser.avatar) {
-            await storage.setItem(toAvatarKey(pendingUser.handle), pendingUser.avatar);
-        }
-
-        // 使用邀请码。若并发请求已先消费该邀请码，必须回滚刚创建的 OAuth 用户。
-        const invitationUse = await useInvitationCode(invitationCode, pendingUser.handle, null, { required: true });
-        if (!invitationUse.success) {
-            await storage.removeItem(toKey(pendingUser.handle));
+            // 保存头像 URL
             if (pendingUser.avatar) {
-                await storage.removeItem(toAvatarKey(pendingUser.handle));
+                await storage.setItem(toAvatarKey(pendingUser.handle), pendingUser.avatar);
             }
-            return response.status(400).json({ error: invitationUse.reason || '邀请码无效' });
-        }
 
-        // 创建用户目录并初始化默认内容
-        console.info('Creating data directories for', pendingUser.handle);
-        await ensurePublicDirectoriesExist();
-        const directories = getUserDirectories(pendingUser.handle);
-        // 确保用户目录实际存在
-        for (const dir of Object.values(directories)) {
-            if (!fs.existsSync(dir)) {
-                fs.mkdirSync(dir, { recursive: true });
+            // 使用邀请码。若并发请求已先消费该邀请码，必须回滚刚创建的 OAuth 用户。
+            const invitationUse = await useInvitationCode(invitationCode, pendingUser.handle, null, { required: true });
+            if (!invitationUse.success) {
+                await storage.removeItem(toKey(pendingUser.handle));
+                if (pendingUser.avatar) {
+                    await storage.removeItem(toAvatarKey(pendingUser.handle));
+                }
+                return response.status(400).json({ error: invitationUse.reason || '邀请码无效' });
             }
-        }
-        // 检查并创建默认设置文件
-        await checkForNewContent([directories], [CONTENT_TYPES.SETTINGS]);
-        applyDefaultTemplateToUser(directories, { userName: user.name });
 
-        // 清除pending user信息
-        if (request.session) {
-            delete request.session.oauthPendingUser;
+            // 创建用户目录并初始化默认内容
+            console.info('Creating data directories for', pendingUser.handle);
+            await ensurePublicDirectoriesExist();
+            const directories = getUserDirectories(pendingUser.handle);
+            // 确保用户目录实际存在
+            for (const dir of Object.values(directories)) {
+                if (!fs.existsSync(dir)) {
+                    fs.mkdirSync(dir, { recursive: true });
+                }
+            }
+            // 检查并创建默认设置文件
+            await checkForNewContent([directories], [CONTENT_TYPES.SETTINGS]);
+            applyDefaultTemplateToUser(directories, { userName: user.name });
 
-            // 设置session
-            request.session.handle = user.handle;
-            request.session.userId = user.id || user.handle;
-            request.session.authenticated = true;
-        }
+            // 清除pending user信息
+            if (request.session) {
+                delete request.session.oauthPendingUser;
+
+                // 设置session
+                request.session.handle = user.handle;
+                request.session.userId = user.id || user.handle;
+                request.session.authenticated = true;
+            }
 
             return response.json({ success: true, handle: user.handle });
         } finally {

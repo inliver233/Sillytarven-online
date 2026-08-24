@@ -15,8 +15,8 @@ import {
     getStcontrolActivityPolicy,
     getStcontrolSessionTelemetry,
     getStcontrolState,
-	getStcontrolPendingSyncUsers,
-	markUserSynchronized,
+    getStcontrolPendingSyncUsers,
+    markUserSynchronized,
     noteStcontrolPageHeartbeat,
     resetStcontrolStateForTests,
     runIdempotentStcontrolOperation,
@@ -1276,7 +1276,7 @@ test('stcontrol adapter is wired through authenticated, CSRF-safe integration po
         '/api/stcontrol/internal/health',
         '/api/stcontrol/internal/control-mode',
         '/api/stcontrol/internal/sessions',
-		'/api/stcontrol/internal/control/sync-complete',
+        '/api/stcontrol/internal/control/sync-complete',
         '/api/stcontrol/internal/users/provision',
         '/api/stcontrol/internal/users/restore',
         '/api/stcontrol/internal/users/password',
@@ -1310,7 +1310,7 @@ test('stcontrol adapter is wired through authenticated, CSRF-safe integration po
 
 async function startOwnershipAgent(decision) {
     const server = http.createServer(async (request, response) => {
-        for await (const _chunk of request) { /* drain body */ }
+        for await (const chunk of request) { void chunk; }
         if (request.url === '/agent/activity-ownership/v1/resolve') {
             response.setHeader('Content-Type', 'application/json');
             response.end(JSON.stringify({

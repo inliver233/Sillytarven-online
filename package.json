@@ -32,6 +32,7 @@
         "@jsquash/webp": "^1.4.0",
         "@mozilla/readability": "^0.6.0",
         "@popperjs/core": "^2.11.8",
+        "@xenova/transformers": "2.17.2",
         "@zeldafan0225/ai_horde": "^5.2.0",
         "archiver": "^7.0.1",
         "bing-translate-api": "^4.1.0",
@@ -39,7 +40,7 @@
         "bowser": "^2.12.1",
         "bytes": "^3.1.2",
         "chalk": "^5.6.0",
-        "chevrotain": "^11.0.3",
+        "chevrotain": "10.5.0",
         "command-exists": "^1.2.9",
         "compression": "^1.8.1",
         "cookie-parser": "^1.4.6",
@@ -66,7 +67,7 @@
         "ipaddr.js": "^2.2.0",
         "is-docker": "^3.0.0",
         "localforage": "^1.10.0",
-        "lodash": "^4.17.21",
+        "lodash": "4.18.1",
         "mime-types": "^3.0.2",
         "moment": "^2.30.1",
         "morphdom": "^2.7.7",
@@ -74,7 +75,8 @@
         "node-cron": "^4.2.1",
         "node-fetch": "^3.3.2",
         "node-persist": "^4.0.4",
-        "nodemailer": "^7.0.10",
+        "nodemailer": "9.0.5",
+        "onnxruntime-web": "1.16.1",
         "open": "^10.2.0",
         "png-chunk-text": "^1.0.0",
         "png-chunks-extract": "^1.0.0",
@@ -83,13 +85,13 @@
         "response-time": "^2.3.4",
         "sanitize-filename": "^1.6.3",
         "seedrandom": "^3.0.5",
-        "showdown": "^2.1.0",
-        "sillytavern-transformers": "2.14.6",
+        "sharp": "0.35.0",
+        "showdown": "https://github.com/showdownjs/showdown/archive/d1a8d16344b855ea2f37677ee8a9e0cc2c597ea4.tar.gz",
         "simple-git": "^3.28.0",
         "slidetoggle": "^4.0.0",
         "tiktoken": "^1.0.22",
         "url-join": "^5.0.0",
-        "vectra": "^0.2.2",
+        "vectra": "0.12.3",
         "wavefile": "^11.0.0",
         "webpack": "^5.98.0",
         "write-file-atomic": "^5.0.1",
@@ -99,7 +101,7 @@
         "yauzl": "^3.2.0"
     },
     "engines": {
-        "node": ">= 18"
+        "node": ">= 20.9"
     },
     "overrides": {
         "vectra": {
@@ -110,7 +112,11 @@
         },
         "node-fetch": {
             "whatwg-url": "^14.0.0"
-        }
+        },
+        "lodash": "$lodash",
+        "onnxruntime-web": "$onnxruntime-web",
+        "sharp": "$sharp",
+        "protobufjs": "8.7.2"
     },
     "name": "sillytavern",
     "type": "module",
@@ -132,7 +138,8 @@
         "test:optimizations": "node --test tests/optimization.node.test.mjs tests/performance-monitor.node.test.mjs tests/performance-telemetry.node.test.mjs tests/version-memo.node.test.mjs tests/character-list-cache.node.test.mjs tests/settings-cache.node.test.mjs tests/recent-chats-cache.node.test.mjs tests/group-chat-paging.node.test.mjs tests/chat-tail-nonchunked.node.test.mjs tests/chat-paging-kill-switch.node.test.mjs tests/keyed-mutex.node.test.mjs tests/welcome-image-loader.node.test.mjs tests/welcome-image-cache-route.node.test.mjs tests/system-message-templates.node.test.mjs tests/frame-budget.node.test.mjs tests/regex-refresh-coordinator.node.test.mjs tests/latest-task-scheduler.node.test.mjs tests/prompt-manager-result.node.test.mjs tests/settings-save-tracker.node.test.mjs tests/settings-save-route.node.test.mjs tests/extension-resource-preload.node.test.mjs tests/chat-render-optimizer.node.test.mjs tests/scroll-coordinator.node.test.mjs tests/welcome-motion.node.test.mjs tests/theme-css-resolver.node.test.mjs tests/inliver-motion-css.node.test.mjs tests/drawer-switch-coordinator.node.test.mjs",
         "test:user-invitations": "node --test tests/user-invitations.node.test.mjs",
         "test:registration": "node --test tests/registration-policy.node.test.mjs",
-    "test:imports": "node --test tests/character-card-parser.node.test.mjs tests/bounded-zip.node.test.mjs tests/archive-import.node.test.mjs tests/file-transaction.node.test.mjs tests/upload-middleware.node.test.mjs tests/background-media.node.test.mjs tests/background-client-cache.node.test.mjs tests/charx-assets.node.test.mjs tests/character-import-route.node.test.mjs tests/background-route.node.test.mjs",
+        "test:server-update": "node --test tests/showdown-security.node.test.mjs tests/transformers-security.node.test.mjs tests/stcontrol-adapter.node.test.mjs tests/stcontrol-disaster-login.node.test.mjs tests/registration-policy.node.test.mjs tests/server-branch-webpack.node.test.mjs",
+        "test:imports": "node --test tests/character-card-parser.node.test.mjs tests/bounded-zip.node.test.mjs tests/archive-import.node.test.mjs tests/file-transaction.node.test.mjs tests/upload-middleware.node.test.mjs tests/background-media.node.test.mjs tests/background-client-cache.node.test.mjs tests/charx-assets.node.test.mjs tests/character-import-route.node.test.mjs tests/background-route.node.test.mjs",
         "lint": "eslint \"src/**/*.js\" \"public/**/*.js\" ./*.js",
         "lint:fix": "eslint \"src/**/*.js\" \"public/**/*.js\" ./*.js --fix",
         "plugins:update": "node plugins update",

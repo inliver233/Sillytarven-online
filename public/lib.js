@@ -13,16 +13,22 @@ import Bowser from 'bowser';
 import DiffMatchPatch from 'diff-match-patch';
 import { isProbablyReaderable, Readability } from '@mozilla/readability';
 import SVGInject from '@iconfu/svg-inject';
-import showdown from 'showdown';
+import showdownModule from 'showdown/dist/showdown.esm.js';
 import moment from 'moment';
 import seedrandom from 'seedrandom';
-import * as Popper from '@popperjs/core';
+import * as PopperModule from '@popperjs/core';
 import droll from 'droll';
 import morphdom from 'morphdom';
 import { toggle as slideToggle } from 'slidetoggle';
 import chalk from 'chalk';
 import yaml from 'yaml';
-import * as chevrotain from 'chevrotain';
+import * as chevrotainModule from 'chevrotain';
+
+// Keep the public binding local. Webpack 5.109 otherwise mistakes the imported
+// default for a direct re-export while emitting the ESM library.
+const showdown = showdownModule;
+const Popper = PopperModule;
+const chevrotain = chevrotainModule;
 
 /**
  * Expose the libraries to the 'window' object.

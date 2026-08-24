@@ -19,6 +19,17 @@ module.exports = {
         sourceType: 'module',
     },
     overrides: [
+        {
+            files: ['*.node.test.mjs'],
+            env: {
+                es2021: true,
+                node: true,
+            },
+            rules: {
+                'playwright/expect-expect': 'off',
+                'playwright/no-conditional-in-test': 'off',
+            },
+        },
     ],
     ignorePatterns: [
         '*.min.js',

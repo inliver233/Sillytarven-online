@@ -160,7 +160,7 @@ export async function ensurePublicDirectoriesExist() {
     }
 
     if (totalUsers > 20) {
-        console.log(`✓ 所有用户目录创建完成`);
+        console.log('✓ 所有用户目录创建完成');
     }
 
     return directoriesList;
