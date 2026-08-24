@@ -82,7 +82,16 @@ async function fsyncDirectory(directory) {
     let handle;
     try {
         handle = await fs.promises.open(directory, 'r');
-        await handle.sync();
+        try {
+            await handle.sync();
+        } catch (error) {
+            // Windows does not support flushing directory handles. The file
+            // itself was already fsynced before rename, so only ignore the
+            // documented platform limitation; real I/O failures still abort.
+            const unsupportedOnWindows = process.platform === 'win32'
+                && ['EACCES', 'EINVAL', 'EPERM'].includes(error?.code);
+            if (!unsupportedOnWindows) throw error;
+        }
     } finally {
         await handle?.close();
     }

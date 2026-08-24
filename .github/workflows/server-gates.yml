@@ -1,0 +1,44 @@
+name: server-gates
+
+on:
+  push:
+    branches: [server]
+  pull_request:
+    branches: [server]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: server-gates-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  node-and-server-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install exact dependencies
+        run: |
+          npm ci --ignore-scripts
+          npm run postinstall
+      - name: Verify the complete Node test inventory
+        run: npm run test:ci
+      - name: Verify server-update manifest and production dependencies
+        run: |
+          sha256sum --check SERVER_UPDATE_FILES.sha256
+          npm audit --omit=dev
+
+  production-container:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build deployable container
+        run: docker build --tag sillytarven-online:server-ci .

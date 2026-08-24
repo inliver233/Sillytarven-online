@@ -15,7 +15,7 @@ test('Transformers image and inference runtimes are locked to the reviewed depen
     assert.equal(packageManifest.dependencies.sharp, '0.35.0');
     assert.equal(packageManifest.overrides['onnxruntime-web'], '$onnxruntime-web');
     assert.equal(packageManifest.overrides.sharp, '$sharp');
-    assert.equal(packageManifest.engines.node, '>= 20.9');
+    assert.equal(packageManifest.engines.node, '>= 24.0');
     assert.equal(packageManifest.dependencies['sillytavern-transformers'], undefined);
 
     assert.equal(packageLock.packages['node_modules/@xenova/transformers'].version, '2.17.2');

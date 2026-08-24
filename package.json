@@ -101,7 +101,7 @@
         "yauzl": "^3.2.0"
     },
     "engines": {
-        "node": ">= 20.9"
+        "node": ">= 24.0"
     },
     "overrides": {
         "vectra": {
@@ -140,6 +140,7 @@
         "test:registration": "node --test tests/registration-policy.node.test.mjs",
         "test:server-update": "node --test tests/showdown-security.node.test.mjs tests/transformers-security.node.test.mjs tests/stcontrol-adapter.node.test.mjs tests/stcontrol-disaster-login.node.test.mjs tests/registration-policy.node.test.mjs tests/server-branch-webpack.node.test.mjs",
         "test:imports": "node --test tests/character-card-parser.node.test.mjs tests/bounded-zip.node.test.mjs tests/archive-import.node.test.mjs tests/file-transaction.node.test.mjs tests/upload-middleware.node.test.mjs tests/background-media.node.test.mjs tests/background-client-cache.node.test.mjs tests/charx-assets.node.test.mjs tests/character-import-route.node.test.mjs tests/background-route.node.test.mjs",
+        "test:ci": "node --test \"tests/*.node.test.mjs\"",
         "lint": "eslint \"src/**/*.js\" \"public/**/*.js\" ./*.js",
         "lint:fix": "eslint \"src/**/*.js\" \"public/**/*.js\" ./*.js --fix",
         "plugins:update": "node plugins update",
