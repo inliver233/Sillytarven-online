@@ -112,7 +112,79 @@ test('actual adapter route resumes provisioning after a lost idempotency receipt
         registration_id: '44444444-4444-4444-8444-444444444444',
     });
     assert.equal(conflictResponse.status, 409);
-    assert.equal((await conflictResponse.json()).code, 'user_already_exists');
+    assert.equal((await conflictResponse.json()).code, 'handle_conflict');
+});
+
+test('actual adapter safely reclaims an unbound OAuth provisioning orphan', async () => {
+    const policyResponse = await signedPost('/api/stcontrol/internal/registration-policy', {});
+    assert.equal(policyResponse.status, 200);
+    const policy = await policyResponse.json();
+    const handle = 'oauth-orphan';
+    const key = `user:${handle}`;
+    const firstRequest = {
+        operation_id: '51000000-0000-4000-8000-000000000001',
+        registration_id: '51000000-0000-4000-8000-000000000002',
+        policy_version: policy.version,
+        handle,
+        name: 'OAuth Orphan',
+        oauth_provider: 'discord',
+        oauth_subject: 'discord-subject-510',
+    };
+    try {
+        const firstResponse = await signedPost('/api/stcontrol/internal/users/provision', firstRequest);
+        assert.equal(firstResponse.status, 200, await firstResponse.text());
+
+        const orphan = await storage.getItem(key);
+        orphan.oauthIdentities = {};
+        delete orphan.oauthProvider;
+        delete orphan.oauthUserId;
+        orphan.stcontrolAccountVersion = 2;
+        await storage.setItem(key, orphan);
+
+        const reclaimedResponse = await signedPost('/api/stcontrol/internal/users/provision', {
+            ...firstRequest,
+            operation_id: '51000000-0000-4000-8000-000000000003',
+            registration_id: '51000000-0000-4000-8000-000000000004',
+            name: 'OAuth Reclaimed',
+        });
+        const reclaimed = await reclaimedResponse.json();
+        assert.equal(reclaimedResponse.status, 200, JSON.stringify(reclaimed));
+        assert.equal(reclaimed.reclaimed, true);
+
+        const stored = await storage.getItem(key);
+        assert.equal(stored.stcontrolRegistrationId, '51000000-0000-4000-8000-000000000004');
+        assert.equal(stored.stcontrolAccountVersion, 1);
+        assert.equal(stored.oauthIdentities.discord, 'discord-subject-510');
+        assert.equal(stored.name, 'OAuth Reclaimed');
+
+        stored.oauthIdentities = { github: 'different-subject' };
+        stored.oauthProvider = 'github';
+        stored.oauthUserId = 'different-subject';
+        await storage.setItem(key, stored);
+        const identityConflict = await signedPost('/api/stcontrol/internal/users/provision', {
+            ...firstRequest,
+            operation_id: '51000000-0000-4000-8000-000000000005',
+            registration_id: '51000000-0000-4000-8000-000000000006',
+        });
+        assert.equal(identityConflict.status, 409);
+        assert.equal((await identityConflict.json()).code, 'handle_conflict');
+
+        stored.oauthIdentities = { discord: 'discord-subject-510' };
+        stored.oauthProvider = 'discord';
+        stored.oauthUserId = 'discord-subject-510';
+        stored.stcontrolGlobalUserId = 99;
+        await storage.setItem(key, stored);
+        const boundConflict = await signedPost('/api/stcontrol/internal/users/provision', {
+            ...firstRequest,
+            operation_id: '51000000-0000-4000-8000-000000000007',
+            registration_id: '51000000-0000-4000-8000-000000000008',
+        });
+        assert.equal(boundConflict.status, 409);
+        assert.equal((await boundConflict.json()).code, 'handle_conflict');
+    } finally {
+        await storage.removeItem(key);
+        fs.rmSync(path.join(testRoot, handle), { recursive: true, force: true });
+    }
 });
 
 test('account inventory pages beyond 500 users without gaps and fences revision drift', async () => {

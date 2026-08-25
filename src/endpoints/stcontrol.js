@@ -131,25 +131,36 @@ router.post('/api/stcontrol/internal/users/provision', async (request, response)
             const key = toKey(input.handle);
             const existing = await storage.getItem(key);
             if (existing) {
-                if (!matchesProvisionedAccount(existing, input)) {
-                    throw new AdapterRequestError(409, 'user_already_exists');
+                if (matchesProvisionedAccount(existing, input)) {
+                    await initializeUserDirectories(existing);
+                    return { ok: true, handle: existing.handle, local_user_id: existing.handle, replayed: true };
                 }
-                await initializeUserDirectories(existing);
-                return { ok: true, handle: existing.handle, local_user_id: existing.handle, replayed: true };
+                if (!canReclaimProvisionedOAuthOrphan(existing, input)) {
+                    throw new AdapterRequestError(409, 'handle_conflict');
+                }
             }
 
             const policy = await currentRegistrationPolicy();
             const method = input.oauth_provider || 'password';
             const methodPolicy = policy.methods[method];
-            if (input.policy_version !== policy.version || !methodPolicy?.enabled) {
-                throw new AdapterRequestError(409, 'registration_policy_changed');
+            if (input.policy_version !== policy.version) {
+                throw new AdapterRequestError(409, 'policy_changed');
+            }
+            if (!methodPolicy?.enabled) {
+                throw new AdapterRequestError(409, 'registration_closed');
             }
             if (methodPolicy.invitation_required) {
                 const used = await useInvitationCode(input.invitation_code, input.handle, null, {
                     required: true,
                     claimId: input.registration_id,
                 });
-                if (!used.success) throw new AdapterRequestError(403, 'invalid_invitation_code');
+                if (!used.success) throw new AdapterRequestError(403, 'invitation_invalid');
+            }
+            if (existing) {
+                reclaimProvisionedOAuthOrphan(existing, input);
+                await storage.setItem(key, existing);
+                await initializeUserDirectories(existing);
+                return { ok: true, handle: existing.handle, local_user_id: existing.handle, reclaimed: true };
             }
             const newUser = makeUserRecord(input, {
                 stcontrolRegistrationId: input.registration_id,
@@ -727,6 +738,30 @@ function matchesProvisionedAccount(user, input) {
         String(user.salt || '') === String(input.password_salt || '') &&
         String(getUserOAuthIdentities(user)[input.oauth_provider] || '') === String(input.oauth_subject || '') &&
         Object.keys(getUserOAuthIdentities(user)).length === (input.oauth_provider ? 1 : 0);
+}
+
+function canReclaimProvisionedOAuthOrphan(user, input) {
+    if (!input.oauth_provider || !input.oauth_subject || !UUID_PATTERN.test(user?.stcontrolRegistrationId || '') ||
+        user.admin || String(user.password || '') || String(user.salt || '') ||
+        String(user.stcontrolGlobalUserId ?? '') || String(user.stcontrolGlobalUserUuid || '')) {
+        return false;
+    }
+    const identities = getUserOAuthIdentities(user);
+    const providers = Object.keys(identities);
+    return providers.length === 0 ||
+        providers.length === 1 && identities[input.oauth_provider] === input.oauth_subject;
+}
+
+function reclaimProvisionedOAuthOrphan(user, input) {
+    user.name = input.name;
+    user.enabled = true;
+    user.expiresAt = null;
+    user.stcontrolRegistrationId = input.registration_id;
+    // This is a new Controller account lifecycle. Reset the local fence to the
+    // same initial version used by CompleteRegistrationWorkflow so subsequent
+    // password/OAuth convergence cannot be rejected as a rollback.
+    user.stcontrolAccountVersion = 1;
+    applyUserOAuthIdentities(user, { [input.oauth_provider]: input.oauth_subject });
 }
 
 async function initializeUserDirectories(user) {
