@@ -52,8 +52,12 @@ import { checkForNewContent, CONTENT_TYPES } from './content-manager.js';
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_INVENTORY_USERS = 10_000;
 const MAX_INVENTORY_PAGE_USERS = 250;
-const INVENTORY_LOAD_BATCH = 100;
-const INVENTORY_DIRECTORY_CONCURRENCY = 8;
+// Large legacy nodes can hold thousands of users. Account metadata reads are
+// cheap and independent, while directory hashing is I/O bound; these bounded
+// pools keep a Controller-requested 50-user work unit below common proxy
+// deadlines without allowing an unbounded Promise fan-out.
+const INVENTORY_LOAD_BATCH = 250;
+const INVENTORY_DIRECTORY_CONCURRENCY = 16;
 const MAX_HANDOFF_CODE_LENGTH = 512;
 const MAX_CONTROLLER_RESPONSE_BYTES = 64 * 1024;
 const DEFAULT_WRITE_DRAIN_TIMEOUT_MS = 15_000;
