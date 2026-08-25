@@ -11,6 +11,7 @@ import {
     getAllUserHandles,
     ensurePublicDirectoriesExist,
     getUserOAuthIdentities,
+    canonicalOAuthSubject,
     makeUserAccountPermanent,
     toAvatarKey,
 } from '../users.js';
@@ -732,10 +733,12 @@ router.get('/linuxdo/callback', linuxdoCallbackHandler);
  * 可能被错误绑定并造成越权登录。
  */
 async function findUserByOAuthIdentity(provider, userId) {
+    const wanted = canonicalOAuthSubject(provider, userId);
+    if (!wanted) return null;
     const handles = await getAllUserHandles();
     for (const handle of handles) {
         const candidate = await storage.getItem(toKey(handle));
-        if (getUserOAuthIdentities(candidate)[provider] === userId) {
+        if (canonicalOAuthSubject(provider, getUserOAuthIdentities(candidate)[provider]) === wanted) {
             return candidate;
         }
     }

@@ -640,7 +640,7 @@ test('password sync accepts exact remove versions and rejects rollback or mixed 
 test('OAuth identity sync upgrades legacy records and fences per-provider drift and rollback', async () => {
     const seeded = await storage.getItem('user:alice');
     seeded.oauthProvider = 'discord';
-    seeded.oauthUserId = 'discord-alice';
+    seeded.oauthUserId = 'discord_123';
     delete seeded.oauthIdentities;
     delete seeded.stcontrolOAuthIdentityStates;
     await storage.setItem('user:alice', seeded);
@@ -655,7 +655,7 @@ test('OAuth identity sync upgrades legacy records and fences per-provider drift 
     });
     assert.equal(addLinuxdo.status, 200, await addLinuxdo.text());
     let updated = await storage.getItem('user:alice');
-    assert.deepEqual(updated.oauthIdentities, { discord: 'discord-alice', linuxdo: 'linuxdo-alice' });
+    assert.deepEqual(updated.oauthIdentities, { discord: 'discord_123', linuxdo: 'linuxdo-alice' });
     assert.equal(updated.oauthProvider, 'discord', 'the compatible legacy projection remains stable');
 
     const drift = await signedPost('/api/stcontrol/internal/users/oauth', {
@@ -683,7 +683,7 @@ test('OAuth identity sync upgrades legacy records and fences per-provider drift 
         operation_id: '22222222-2222-4222-8222-222222222222',
         handle: 'alice',
         provider: 'discord',
-        subject: 'discord-alice',
+        subject: '123',
         remove: true,
         version: 1,
     };

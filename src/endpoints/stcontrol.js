@@ -38,6 +38,7 @@ import {
 import systemMonitor from '../system-monitor.js';
 import {
     applyUserOAuthIdentities,
+    canonicalOAuthSubject,
     ensurePublicDirectoriesExist,
     getAllUserHandles,
     getPasswordHash,
@@ -290,23 +291,28 @@ router.post('/api/stcontrol/internal/users/oauth', async (request, response) => 
             const prior = states[provider] && typeof states[provider] === 'object' ? states[provider] : {};
             const currentVersion = Number(prior.version || 0);
             const currentSubject = identities[provider];
+            const canonicalSubject = canonicalOAuthSubject(provider, subject);
+            const canonicalCurrentSubject = canonicalOAuthSubject(provider, currentSubject);
+            const canonicalPriorSubject = canonicalOAuthSubject(provider, prior.subject);
             if (currentVersion > input.version) {
                 throw new AdapterRequestError(409, 'oauth_identity_version_rollback');
             }
             if (currentVersion === input.version && currentVersion > 0) {
-                const sameSubject = prior.subject === subject;
-                const samePresence = remove ? !currentSubject && prior.present === false : currentSubject === subject && prior.present === true;
+                const sameSubject = canonicalPriorSubject === canonicalSubject;
+                const samePresence = remove
+                    ? !currentSubject && prior.present === false
+                    : canonicalCurrentSubject === canonicalSubject && prior.present === true;
                 if (!sameSubject || !samePresence) throw new AdapterRequestError(409, 'oauth_identity_version_conflict');
                 return { ok: true, provider, version: input.version };
             }
-            if ((currentSubject && currentSubject !== subject) ||
-                (!currentSubject && prior.subject && prior.subject !== subject)) {
+            if ((currentSubject && canonicalCurrentSubject !== canonicalSubject) ||
+                (!currentSubject && prior.subject && canonicalPriorSubject !== canonicalSubject)) {
                 throw new AdapterRequestError(409, 'oauth_identity_subject_conflict');
             }
 
             if (remove) delete identities[provider];
-            else identities[provider] = subject;
-            states[provider] = { version: input.version, subject, present: !remove };
+            else identities[provider] = currentSubject || subject;
+            states[provider] = { version: input.version, subject: canonicalSubject, present: !remove };
             applyUserOAuthIdentities(user, identities);
             user.stcontrolOAuthIdentityStates = states;
             await storage.setItem(key, user);

@@ -553,6 +553,21 @@ export function normalizeHandle(handle) {
 const OAUTH_IDENTITY_PROVIDERS = Object.freeze(['github', 'discord', 'linuxdo']);
 
 /**
+ * Returns one provider-qualified comparison value for both historical native
+ * OAuth subjects (for example "discord_123") and Controller-managed raw
+ * subjects ("123"). User records keep their existing representation during a
+ * rolling upgrade; callers use this value only for identity equality.
+ * @param {string} provider OAuth provider
+ * @param {unknown} subject Stored or incoming provider subject
+ * @returns {string} Canonical provider-qualified subject, or an empty string
+ */
+export function canonicalOAuthSubject(provider, subject) {
+    if (!OAUTH_IDENTITY_PROVIDERS.includes(provider) || typeof subject !== 'string' || !subject) return '';
+    const prefix = `${provider}_`;
+    return subject.startsWith(prefix) ? subject : `${prefix}${subject}`;
+}
+
+/**
  * Returns the normalized OAuth identities stored on a user record. New records
  * use oauthIdentities while legacy records with oauthProvider/oauthUserId remain
  * readable during rolling upgrades.
