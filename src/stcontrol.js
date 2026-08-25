@@ -29,6 +29,7 @@ export const STCONTROL_CAPABILITIES = Object.freeze([
     'oauth_identity_sync',
     'password_update',
     'registration_policy',
+    'registration_policy_methods',
     'snapshot_boundary',
     'user_data_fault_freeze',
     'user_data_fault_release',
@@ -36,7 +37,7 @@ export const STCONTROL_CAPABILITIES = Object.freeze([
     'write_gate',
 ]);
 
-const STATE_VERSION = 8;
+const STATE_VERSION = 9;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const CLOCK_SKEW_SECONDS = 60;
 const DEFAULT_SESSION_IDLE_MS = 15 * 60 * 1000;
@@ -178,6 +179,7 @@ function initialState() {
         pendingSyncUsers: {},
         leases: {},
         leaseConfirmationAt: 0,
+        registrationPolicy: { fingerprint: '', version: 0 },
     };
 }
 
@@ -259,12 +261,20 @@ function validateLoadedState(value) {
                 releasedAt: Number.isFinite(completedAt) && completedAt >= 0 ? completedAt : 0,
             };
         }
+        value.version = 8;
+    }
+    if (value?.version === 8) {
+        value.registrationPolicy = { fingerprint: '', version: 0 };
         value.version = STATE_VERSION;
     }
     if (!value || value.version !== STATE_VERSION || !VALID_MODES.has(value.mode) ||
         !Number.isSafeInteger(value.modeGeneration) || value.modeGeneration < 1 ||
         !Number.isSafeInteger(value.controllerGeneration) || value.controllerGeneration < 0 ||
         !Number.isSafeInteger(value.leaseConfirmationAt) || value.leaseConfirmationAt < 0 ||
+        !value.registrationPolicy || typeof value.registrationPolicy !== 'object' ||
+        !Number.isSafeInteger(value.registrationPolicy.version) || value.registrationPolicy.version < 0 ||
+        value.registrationPolicy.version > 0 && !/^[a-f0-9]{64}$/.test(value.registrationPolicy.fingerprint || '') ||
+        value.registrationPolicy.version === 0 && value.registrationPolicy.fingerprint !== '' ||
         value.runtimeInstanceId !== undefined && !UUID_PATTERN.test(value.runtimeInstanceId)) {
         throw new Error('Invalid persisted stcontrol adapter state');
     }
@@ -406,6 +416,31 @@ async function mutateState(mutator, options = {}) {
 
 export function getStcontrolState() {
     return clone(loadStateSync());
+}
+
+/**
+ * Return a durable, monotonically increasing registration-policy generation.
+ * Only public policy material is fingerprinted; OAuth credentials must never
+ * be passed to this function or written into adapter state.
+ * @param {object} material Public registration policy material
+ * @returns {Promise<number>}
+ */
+export function stcontrolRegistrationPolicyVersion(material) {
+    const fingerprint = crypto.createHash('sha256').update(JSON.stringify(material)).digest('hex');
+    return mutateState((state, control) => {
+        if (state.registrationPolicy.fingerprint === fingerprint) {
+            control.persist = false;
+            return state.registrationPolicy.version;
+        }
+        if (state.registrationPolicy.version >= Number.MAX_SAFE_INTEGER) {
+            throw new Error('Registration policy version exhausted');
+        }
+        state.registrationPolicy = {
+            fingerprint,
+            version: state.registrationPolicy.version + 1,
+        };
+        return state.registrationPolicy.version;
+    });
 }
 
 export function resetStcontrolStateForTests() {

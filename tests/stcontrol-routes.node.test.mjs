@@ -75,6 +75,12 @@ test('actual adapter route resumes provisioning after a lost idempotency receipt
     assert.equal(policyResponse.status, 200);
     const policy = await policyResponse.json();
     assert.equal(policy.mode, 'open');
+    assert.deepEqual(policy.methods.password, { enabled: true, invitation_required: false });
+    assert.deepEqual(policy.methods.discord, {
+        enabled: true,
+        invitation_required: false,
+        guild_membership: { enabled: false, guild_id: '', guild_name: '', minimum_days: 0 },
+    });
 
     const request = {
         operation_id: '11111111-1111-4111-8111-111111111111',

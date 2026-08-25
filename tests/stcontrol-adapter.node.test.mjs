@@ -21,6 +21,7 @@ import {
     resetStcontrolStateForTests,
     runIdempotentStcontrolOperation,
     setUserWriteGate,
+    stcontrolRegistrationPolicyVersion,
     stcontrolRequestTracker,
 } from '../src/stcontrol.js';
 import { setConfigFilePath } from '../src/util.js';
@@ -93,6 +94,31 @@ test('stcontrol adapter persists fenced modes and serializes duplicate operation
 test('stcontrol request encoding matches Go security escaping without corrupting literal escapes', () => {
     const encoded = encodeStcontrolRequestBody({ value: '<tag>&\u2028', literal: '\\u2028' });
     assert.equal(encoded, '{"value":"\\u003ctag\\u003e\\u0026\\u2028","literal":"\\\\u2028"}');
+});
+
+test('registration policy versions advance only when public method policy changes', async () => {
+    const previousDataRoot = globalThis.DATA_ROOT;
+    const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sillytavern-stcontrol-policy-'));
+    globalThis.DATA_ROOT = dataRoot;
+    resetStcontrolStateForTests();
+    try {
+        const first = await stcontrolRegistrationPolicyVersion({
+            methods: { password: { enabled: false }, discord: { enabled: true } },
+        });
+        const replay = await stcontrolRegistrationPolicyVersion({
+            methods: { password: { enabled: false }, discord: { enabled: true } },
+        });
+        const changed = await stcontrolRegistrationPolicyVersion({
+            methods: { password: { enabled: false }, discord: { enabled: false } },
+        });
+        assert.equal(first, 1);
+        assert.equal(replay, first);
+        assert.equal(changed, first + 1);
+    } finally {
+        resetStcontrolStateForTests();
+        globalThis.DATA_ROOT = previousDataRoot;
+        fs.rmSync(dataRoot, { recursive: true, force: true });
+    }
 });
 
 test('legacy adapter state migrates out of the node-persist namespace', () => {
@@ -168,7 +194,7 @@ test('v7 adapter state migrates successful data fault releases into durable scop
         resetStcontrolStateForTests();
 
         const migrated = getStcontrolState();
-        assert.equal(migrated.version, 8);
+        assert.equal(migrated.version, 9);
         assert.deepEqual(migrated.releasedDataFaults['31313131-3131-4131-8131-313131313131'], {
             globalUserId: 41,
             handle: 'alice',
@@ -1308,6 +1334,7 @@ test('stcontrol adapter is wired through authenticated, CSRF-safe integration po
     assert.ok(STCONTROL_CAPABILITIES.includes('user_data_fault_freeze'));
     assert.ok(STCONTROL_CAPABILITIES.includes('user_data_fault_release'));
     assert.ok(STCONTROL_CAPABILITIES.includes('oauth_identity_sync'));
+    assert.ok(STCONTROL_CAPABILITIES.includes('registration_policy_methods'));
 });
 
 async function startOwnershipAgent(decision) {

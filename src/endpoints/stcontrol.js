@@ -7,6 +7,7 @@ import fetch from 'node-fetch';
 import storage from 'node-persist';
 
 import { applyDefaultTemplateToUser } from '../default-template.js';
+import { getDiscordGuildMembershipConfig } from '../discord-registration-policy.js';
 import { useInvitationCode } from '../invitation-codes.js';
 import { getRegistrationMethodConfig } from '../registration-policy.js';
 import {
@@ -31,6 +32,7 @@ import {
     requireStcontrolAgent,
     runIdempotentStcontrolOperation,
     signStcontrolRequest,
+    stcontrolRegistrationPolicyVersion,
     stcontrolInventoryRevision,
 } from '../stcontrol.js';
 import systemMonitor from '../system-monitor.js';
@@ -73,9 +75,13 @@ router.post('/api/stcontrol/internal/health', async (_request, response) => {
     });
 });
 
-router.post('/api/stcontrol/internal/registration-policy', (_request, response) => {
-    const policy = currentRegistrationPolicy();
-    return response.json({ ok: true, mode: policy.mode, version: policy.version });
+router.post('/api/stcontrol/internal/registration-policy', async (_request, response) => {
+    try {
+        const policy = await currentRegistrationPolicy();
+        return response.json({ ok: true, mode: policy.mode, version: policy.version, methods: policy.methods });
+    } catch (error) {
+        return adapterError(response, error);
+    }
 });
 
 router.post('/api/stcontrol/internal/control-mode', async (request, response) => {
@@ -132,11 +138,13 @@ router.post('/api/stcontrol/internal/users/provision', async (request, response)
                 return { ok: true, handle: existing.handle, local_user_id: existing.handle, replayed: true };
             }
 
-            const policy = currentRegistrationPolicy();
-            if (input.policy_version !== policy.version || policy.mode === 'closed') {
+            const policy = await currentRegistrationPolicy();
+            const method = input.oauth_provider || 'password';
+            const methodPolicy = policy.methods[method];
+            if (input.policy_version !== policy.version || !methodPolicy?.enabled) {
                 throw new AdapterRequestError(409, 'registration_policy_changed');
             }
-            if (policy.mode === 'invitation_required') {
+            if (methodPolicy.invitation_required) {
                 const used = await useInvitationCode(input.invitation_code, input.handle, null, {
                     required: true,
                     claimId: input.registration_id,
@@ -628,12 +636,31 @@ function adapterError(response, error) {
     return response.status(status).json({ error: code, code });
 }
 
-function currentRegistrationPolicy() {
-    const config = getRegistrationMethodConfig('password');
-    const mode = !config.enabled ? 'closed' : config.requireInvitationCode ? 'invitation_required' : 'open';
-    const digest = crypto.createHash('sha256').update(JSON.stringify({ mode })).digest();
-    const version = digest.readUInt32BE(0) || 1;
-    return { mode, version };
+async function currentRegistrationPolicy() {
+    const methods = Object.fromEntries(['password', 'github', 'discord', 'linuxdo'].map(method => {
+        const config = getRegistrationMethodConfig(method);
+        const policy = {
+            enabled: config.enabled,
+            invitation_required: config.requireInvitationCode,
+        };
+        if (method === 'discord') {
+            const guild = getDiscordGuildMembershipConfig();
+            const guildEnabled = config.enabled && guild.enabled;
+            policy.guild_membership = {
+                enabled: guildEnabled,
+                guild_id: guildEnabled ? guild.guildId : '',
+                guild_name: guildEnabled ? guild.guildName : '',
+                minimum_days: guildEnabled ? guild.minimumDays : 0,
+            };
+        }
+        return [method, policy];
+    }));
+    const enabled = Object.values(methods).filter(method => method.enabled);
+    const mode = enabled.length === 0
+        ? 'closed'
+        : enabled.every(method => method.invitation_required) ? 'invitation_required' : 'open';
+    const version = await stcontrolRegistrationPolicyVersion({ methods });
+    return { mode, version, methods };
 }
 
 function requireUUID(value, code) {
