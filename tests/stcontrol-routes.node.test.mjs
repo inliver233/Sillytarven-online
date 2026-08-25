@@ -139,6 +139,12 @@ test('actual adapter safely reclaims an unbound OAuth provisioning orphan', asyn
         delete orphan.oauthProvider;
         delete orphan.oauthUserId;
         orphan.stcontrolAccountVersion = 2;
+        orphan.stcontrolOAuthIdentityStates = {
+            discord: { version: 4, subject: 'discord-subject-510', present: false },
+            linuxdo: { version: 3, subject: 'retired-linuxdo-subject', present: false },
+        };
+        orphan.stcontrolPasswordVersion = 7;
+        orphan.stcontrolPermissionVersion = 9;
         await storage.setItem(key, orphan);
 
         const reclaimedResponse = await signedPost('/api/stcontrol/internal/users/provision', {
@@ -156,6 +162,31 @@ test('actual adapter safely reclaims an unbound OAuth provisioning orphan', asyn
         assert.equal(stored.stcontrolAccountVersion, 1);
         assert.equal(stored.oauthIdentities.discord, 'discord-subject-510');
         assert.equal(stored.name, 'OAuth Reclaimed');
+        assert.deepEqual(stored.stcontrolOAuthIdentityStates, {
+            discord: { version: 1, subject: 'discord-subject-510', present: true },
+        });
+        assert.equal(stored.stcontrolPasswordVersion, undefined);
+        assert.equal(stored.stcontrolPermissionVersion, 1);
+
+        const oauthConvergenceResponse = await signedPost('/api/stcontrol/internal/users/oauth', {
+            operation_id: '51000000-0000-4000-8000-000000000009',
+            handle,
+            provider: 'discord',
+            subject: 'discord-subject-510',
+            remove: false,
+            version: 1,
+        });
+        assert.equal(oauthConvergenceResponse.status, 200, await oauthConvergenceResponse.text());
+
+        const passwordConvergenceResponse = await signedPost('/api/stcontrol/internal/users/password', {
+            operation_id: '51000000-0000-4000-8000-000000000010',
+            handle,
+            password_hash: 'replacement-password-hash',
+            password_salt: 'replacement-password-salt',
+            remove: false,
+            version: 1,
+        });
+        assert.equal(passwordConvergenceResponse.status, 200, await passwordConvergenceResponse.text());
 
         stored.oauthIdentities = { github: 'different-subject' };
         stored.oauthProvider = 'github';

@@ -762,6 +762,21 @@ function reclaimProvisionedOAuthOrphan(user, input) {
     // password/OAuth convergence cannot be rejected as a rollback.
     user.stcontrolAccountVersion = 1;
     applyUserOAuthIdentities(user, { [input.oauth_provider]: input.oauth_subject });
+    // The abandoned lifecycle may have already received an OAuth removal
+    // tombstone (or a password removal) before the Controller rolled its
+    // registration back. Those provider-specific versions belong to the old
+    // global account. Carrying them into the replacement account makes the
+    // Controller's initial version=1 projection fail forever as a rollback or
+    // same-version presence conflict.
+    user.stcontrolOAuthIdentityStates = {
+        [input.oauth_provider]: {
+            version: 1,
+            subject: input.oauth_subject,
+            present: true,
+        },
+    };
+    delete user.stcontrolPasswordVersion;
+    user.stcontrolPermissionVersion = 1;
 }
 
 async function initializeUserDirectories(user) {
