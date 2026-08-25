@@ -1269,6 +1269,7 @@ test('managed recovery does not let an independent envelope bypass the managed l
 test('stcontrol adapter is wired through authenticated, CSRF-safe integration points', () => {
     const endpoint = fs.readFileSync(new URL('../src/endpoints/stcontrol.js', import.meta.url), 'utf8');
     const startup = fs.readFileSync(new URL('../src/server-startup.js', import.meta.url), 'utf8');
+    const serverMain = fs.readFileSync(new URL('../src/server-main.js', import.meta.url), 'utf8');
     const publicUsers = fs.readFileSync(new URL('../src/endpoints/users-public.js', import.meta.url), 'utf8');
     const loginBoundary = fs.readFileSync(new URL('../src/users.js', import.meta.url), 'utf8');
 
@@ -1295,6 +1296,7 @@ test('stcontrol adapter is wired through authenticated, CSRF-safe integration po
     }
     assert.match(startup, /app\.use\(stcontrolRouter\)/);
     assert.match(startup, /app\.use\(stcontrolRequestTracker\)/);
+    assert.match(serverMain, /req\.path\.startsWith\('\/api\/stcontrol\/internal\/'\)/);
     assert.match(publicUsers, /router\.post\('\/me', stcontrolHandoffHandler\)/);
     assert.match(loginBoundary, /request\.path\.startsWith\('\/api\/stcontrol\/internal\/'\)/);
     assert.match(endpoint, /stcontrol_handoff/);

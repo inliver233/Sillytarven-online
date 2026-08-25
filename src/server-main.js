@@ -218,6 +218,8 @@ if (!cliArgs.disableCsrf) {
         }
         // 豁免特定路径
         if (req.path.startsWith('/api/public-characters') ||
+            req.path === '/api/stcontrol/internal' ||
+            req.path.startsWith('/api/stcontrol/internal/') ||
             req.path === '/api/users/me' ||
             req.path === '/api/users/heartbeat' ||
             req.path === '/api/invitation-codes/status' ||
