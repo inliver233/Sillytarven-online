@@ -53,6 +53,7 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3
 const MAX_INVENTORY_USERS = 10_000;
 const MAX_INVENTORY_PAGE_USERS = 250;
 const INVENTORY_LOAD_BATCH = 100;
+const INVENTORY_DIRECTORY_CONCURRENCY = 8;
 const MAX_HANDOFF_CODE_LENGTH = 512;
 const MAX_CONTROLLER_RESPONSE_BYTES = 64 * 1024;
 const DEFAULT_WRITE_DRAIN_TIMEOUT_MS = 15_000;
@@ -349,19 +350,25 @@ router.post('/api/stcontrol/internal/users/scan', async (request, response) => {
         }
         if (input.cursor > accounts.length) throw new AdapterRequestError(409, 'inventory_changed');
         const end = Math.min(input.cursor + input.limit, accounts.length);
-        const users = [];
-        for (const account of accounts.slice(input.cursor, end)) {
-            const inventory = await inventoryDirectory(getUserDirectories(account.handle).root);
-            users.push({
-                local_user_id: account.localUserId,
-                handle: account.handle,
-                size_bytes: inventory.size,
-                directory_fingerprint: inventory.digest,
-                has_password: account.hasPassword,
-                oauth_identities: account.oauthIdentities,
-                is_admin: account.isAdmin,
-            });
-        }
+        // Hashing old user directories is the expensive part of inventory.
+        // Keep result order stable while using a bounded worker pool so a
+        // 250-user page does not serialize hundreds of independent disk walks.
+        const users = await mapInventoryPage(
+            accounts.slice(input.cursor, end),
+            INVENTORY_DIRECTORY_CONCURRENCY,
+            async (account) => {
+                const inventory = await inventoryDirectory(getUserDirectories(account.handle).root);
+                return {
+                    local_user_id: account.localUserId,
+                    handle: account.handle,
+                    size_bytes: inventory.size,
+                    directory_fingerprint: inventory.digest,
+                    has_password: account.hasPassword,
+                    oauth_identities: account.oauthIdentities,
+                    is_admin: account.isAdmin,
+                };
+            },
+        );
         const hasMore = end < accounts.length;
         return response.json({
             ok: true,
@@ -905,6 +912,22 @@ function compareInventoryText(left, right) {
 
 function inventoryRevision(accounts) {
     return stcontrolInventoryRevision(JSON.stringify(accounts));
+}
+
+async function mapInventoryPage(accounts, concurrency, mapper) {
+    const results = new Array(accounts.length);
+    let cursor = 0;
+    const workers = Array.from(
+        { length: Math.min(concurrency, accounts.length) },
+        async () => {
+            while (cursor < accounts.length) {
+                const index = cursor++;
+                results[index] = await mapper(accounts[index]);
+            }
+        },
+    );
+    await Promise.all(workers);
+    return results;
 }
 
 async function inventoryDirectory(root) {
