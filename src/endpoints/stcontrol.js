@@ -748,13 +748,16 @@ function makeUserRecord(input, extra = {}) {
 }
 
 function matchesProvisionedAccount(user, input) {
+    const identities = getUserOAuthIdentities(user);
+    const currentSubject = input.oauth_provider ? identities[input.oauth_provider] : '';
     return user.stcontrolRegistrationId === input.registration_id &&
         user.handle === input.handle &&
         user.name === input.name &&
         String(user.password || '') === String(input.password_hash || '') &&
         String(user.salt || '') === String(input.password_salt || '') &&
-        String(getUserOAuthIdentities(user)[input.oauth_provider] || '') === String(input.oauth_subject || '') &&
-        Object.keys(getUserOAuthIdentities(user)).length === (input.oauth_provider ? 1 : 0);
+        canonicalOAuthSubject(input.oauth_provider, currentSubject) ===
+            canonicalOAuthSubject(input.oauth_provider, input.oauth_subject) &&
+        Object.keys(identities).length === (input.oauth_provider ? 1 : 0);
 }
 
 function canReclaimProvisionedOAuthOrphan(user, input) {
@@ -766,7 +769,8 @@ function canReclaimProvisionedOAuthOrphan(user, input) {
     const identities = getUserOAuthIdentities(user);
     const providers = Object.keys(identities);
     return providers.length === 0 ||
-        providers.length === 1 && identities[input.oauth_provider] === input.oauth_subject;
+        providers.length === 1 && canonicalOAuthSubject(input.oauth_provider, identities[input.oauth_provider]) ===
+            canonicalOAuthSubject(input.oauth_provider, input.oauth_subject);
 }
 
 function reclaimProvisionedOAuthOrphan(user, input) {

@@ -218,6 +218,66 @@ test('actual adapter safely reclaims an unbound OAuth provisioning orphan', asyn
     }
 });
 
+test('OAuth provisioning replay and orphan reclaim preserve data across historical subject formats', async () => {
+    const policyResponse = await signedPost('/api/stcontrol/internal/registration-policy', {});
+    assert.equal(policyResponse.status, 200);
+    const policy = await policyResponse.json();
+    const handle = 'oauth-format-orphan';
+    const key = `user:${handle}`;
+    const firstRequest = {
+        operation_id: '52000000-0000-4000-8000-000000000001',
+        registration_id: '52000000-0000-4000-8000-000000000002',
+        policy_version: policy.version,
+        handle,
+        name: 'OAuth Format Orphan',
+        oauth_provider: 'discord',
+        oauth_subject: '123456789',
+    };
+    try {
+        const firstResponse = await signedPost('/api/stcontrol/internal/users/provision', firstRequest);
+        assert.equal(firstResponse.status, 200, await firstResponse.text());
+
+        const historical = await storage.getItem(key);
+        historical.oauthIdentities = { discord: 'discord_123456789' };
+        historical.oauthProvider = 'discord';
+        historical.oauthUserId = 'discord_123456789';
+        historical.dataSentinel = 'existing-user-data-must-survive';
+        await storage.setItem(key, historical);
+
+        // Simulate a lost Controller response followed by an adapter restart.
+        // The durable user has the historical provider-qualified subject while
+        // the replay carries the Controller's raw subject.
+        const statePath = path.join(testRoot, '_stcontrol', 'adapter-state.json');
+        const state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+        state.operations = {};
+        fs.writeFileSync(statePath, JSON.stringify(state));
+        adapter.resetStcontrolStateForTests();
+
+        const replayResponse = await signedPost('/api/stcontrol/internal/users/provision', firstRequest);
+        const replay = await replayResponse.json();
+        assert.equal(replayResponse.status, 200, JSON.stringify(replay));
+        assert.equal(replay.replayed, true);
+
+        const reclaimedResponse = await signedPost('/api/stcontrol/internal/users/provision', {
+            ...firstRequest,
+            operation_id: '52000000-0000-4000-8000-000000000003',
+            registration_id: '52000000-0000-4000-8000-000000000004',
+            name: 'OAuth Format Reclaimed',
+        });
+        const reclaimed = await reclaimedResponse.json();
+        assert.equal(reclaimedResponse.status, 200, JSON.stringify(reclaimed));
+        assert.equal(reclaimed.reclaimed, true);
+
+        const stored = await storage.getItem(key);
+        assert.equal(stored.dataSentinel, 'existing-user-data-must-survive');
+        assert.equal(stored.oauthIdentities.discord, '123456789');
+        assert.equal(stored.stcontrolRegistrationId, '52000000-0000-4000-8000-000000000004');
+    } finally {
+        await storage.removeItem(key);
+        fs.rmSync(path.join(testRoot, handle), { recursive: true, force: true });
+    }
+});
+
 test('account inventory pages beyond 500 users without gaps and fences revision drift', async () => {
     const keys = Array.from({ length: 620 }, (_, index) => `user:inventory-${String(index).padStart(4, '0')}`);
     try {
