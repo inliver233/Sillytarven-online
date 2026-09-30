@@ -1693,6 +1693,130 @@ export async function fetchChatRange({ before = null, limit = null, isGroup = fa
     return await response.json();
 }
 
+/**
+ * Older messages that paging left on the server, fetched only to build prompts.
+ * They are never rendered and never written back; `chat` and saving are untouched.
+ */
+const PROMPT_BACKFILL_PAGE_SIZE = 500;
+const PROMPT_BACKFILL_MAX_MESSAGES = 5000;
+const PROMPT_BACKFILL_TIMEOUT_MS = 15_000;
+// Generous characters-per-token bound, so the backfill always covers the context.
+const PROMPT_BACKFILL_CHARS_PER_TOKEN = 6;
+
+/**
+ * @typedef {object} PromptBackfillCache
+ * @property {string|null} key Chat identity and paging cursor the cache belongs to
+ * @property {ChatMessage[]} messages Older messages, oldest first
+ * @property {number|null} nextCursor Cursor for the next older page
+ * @property {boolean} hasMore Whether older messages remain on the server
+ * @property {number} chars Approximate characters of cached messages
+ * @property {Promise<void>|null} loading In-flight fetch for this key
+ */
+
+/** @type {PromptBackfillCache} */
+const promptBackfill = { key: null, messages: [], nextCursor: null, hasMore: false, chars: 0, loading: null };
+
+function getMessagePromptChars(message) {
+    return String(message?.mes ?? '').length + String(message?.extra?.reasoning ?? '').length;
+}
+
+function getPromptBackfillKey() {
+    if (!chatPagingState.active || !chatPagingState.hasMore || !Number.isFinite(chatPagingState.cursor)) {
+        return null;
+    }
+    return `${getCurrentChatIdentity()}\0${chatPagingState.cursor}`;
+}
+
+function resetPromptBackfill(key) {
+    promptBackfill.key = key;
+    promptBackfill.messages = [];
+    promptBackfill.nextCursor = key === null ? null : chatPagingState.cursor;
+    promptBackfill.hasMore = key !== null;
+    promptBackfill.chars = 0;
+    promptBackfill.loading = null;
+}
+
+/**
+ * Fetches older pages until the prompt budget is covered.
+ * @param {string} key Cache key the fetch belongs to
+ * @param {number} charBudget Characters of older history worth having
+ * @param {AbortSignal} signal Abort signal
+ */
+async function fillPromptBackfill(key, charBudget, signal) {
+    while (promptBackfill.key === key && promptBackfill.hasMore &&
+        promptBackfill.chars < charBudget && promptBackfill.messages.length < PROMPT_BACKFILL_MAX_MESSAGES) {
+        const previousCursor = promptBackfill.nextCursor;
+        const data = await fetchChatRange({
+            before: previousCursor,
+            limit: PROMPT_BACKFILL_PAGE_SIZE,
+            isGroup: chatPagingState.isGroup,
+            chatId: chatPagingState.isGroup ? chatPagingState.chatId : null,
+            signal,
+        });
+        if (promptBackfill.key !== key) {
+            return;
+        }
+        if (!data || !Array.isArray(data.messages)) {
+            // Transient failure: keep what we have and retry on the next generation.
+            return;
+        }
+        if (data.messages.length === 0 || !Number.isFinite(data.cursor) || data.cursor === previousCursor) {
+            promptBackfill.hasMore = false;
+            return;
+        }
+        promptBackfill.messages.unshift(...data.messages);
+        promptBackfill.chars += data.messages.reduce((total, message) => total + getMessagePromptChars(message), 0);
+        promptBackfill.nextCursor = data.cursor;
+        promptBackfill.hasMore = Boolean(data.hasMore);
+    }
+}
+
+/**
+ * Returns older chat messages that are folded away by chat paging, so the
+ * model can read them without rendering them. Only fetches as much history as
+ * the current context size can use, and caches it per chat and paging cursor.
+ * Failures and timeouts fall back to the loaded messages only.
+ * @param {object} [options]
+ * @param {boolean} [options.cachedOnly] Never touch the network (for dry runs)
+ * @returns {Promise<ChatMessage[]>} Older messages, oldest first
+ */
+export async function getPromptBackfillMessages({ cachedOnly = false } = {}) {
+    const key = getPromptBackfillKey();
+    if (key === null) {
+        return [];
+    }
+    if (promptBackfill.key !== key) {
+        resetPromptBackfill(key);
+    }
+    if (cachedOnly) {
+        return promptBackfill.messages.slice();
+    }
+
+    const loadedChars = chat.reduce((total, message) => total + getMessagePromptChars(message), 0);
+    const contextTokens = Math.max(Number(getMaxContextSize()) || 0, 4096);
+    const charBudget = contextTokens * PROMPT_BACKFILL_CHARS_PER_TOKEN - loadedChars;
+    if (charBudget > promptBackfill.chars && promptBackfill.hasMore) {
+        if (!promptBackfill.loading) {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), PROMPT_BACKFILL_TIMEOUT_MS);
+            promptBackfill.loading = fillPromptBackfill(key, charBudget, controller.signal)
+                .catch(error => {
+                    if (error?.name !== 'AbortError') {
+                        console.warn('Could not load older chat history for the prompt', error);
+                    }
+                })
+                .finally(() => {
+                    clearTimeout(timeout);
+                    if (promptBackfill.key === key) {
+                        promptBackfill.loading = null;
+                    }
+                });
+        }
+        await promptBackfill.loading;
+    }
+    return promptBackfill.key === key ? promptBackfill.messages.slice() : [];
+}
+
 function shiftDisplayedMessageIds(offset) {
     if (!offset) return;
     chatElement.children('.mes').each((_, element) => {
@@ -4980,7 +5104,9 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
     // Collect messages with usable content
     const canUseTools = ToolManager.isToolCallingSupported();
     const canPerformToolCalls = !dryRun && ToolManager.canPerformToolCalls(type) && depth < ToolManager.RECURSE_LIMIT;
-    let coreChat = chat.filter(x => !x.is_system || (canUseTools && Array.isArray(x.extra?.tool_invocations)));
+    // Chat paging keeps older messages out of `chat`; read them for the prompt without rendering them.
+    const promptBackfillMessages = await getPromptBackfillMessages({ cachedOnly: dryRun });
+    let coreChat = [...promptBackfillMessages, ...chat].filter(x => !x.is_system || (canUseTools && Array.isArray(x.extra?.tool_invocations)));
     if (type === 'swipe') {
         coreChat.pop();
     }
