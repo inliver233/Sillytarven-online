@@ -331,12 +331,27 @@ class ChatTransferPanel {
         this.busy = false;
         this.restoreFile = /** @type {File|null} */ (null);
         this.dataChanged = false;
+        /** @type {{mode: string, limit: number|null, used: number, remaining: number|null}|null} */
+        this.bundleQuota = null;
 
         this.bind();
         this.renderTargets();
         this.setTab(TABS.includes(tab) ? tab : 'export');
         this.setScope(this.scope);
         void this.loadChats();
+        void this.loadBundleQuota();
+    }
+
+    async loadBundleQuota() {
+        try {
+            const response = await fetch('/api/backup-limits/status', { headers: getRequestHeaders(), cache: 'no-store' });
+            if (!response.ok) return;
+            const data = await response.json();
+            this.bundleQuota = data?.partial ?? null;
+        } catch {
+            this.bundleQuota = null;
+        }
+        this.updateExportState();
     }
 
     $(role) {
@@ -630,11 +645,28 @@ class ChatTransferPanel {
             const count = this.scope === 'target' ? this.chats.length : this.selectedFiles.size;
             hint = `将 ${count} 段对话打包为 ZIP`;
         }
+
+        // Bundles count against the daily export quota set by the administrator.
+        let quotaBlocked = false;
+        const quota = this.bundleQuota;
+        if (plan?.kind === 'bundle' && quota && quota.limit !== null) {
+            if (quota.mode === 'disabled') {
+                hint = '管理员已关闭批量导出，可以改为逐段导出单个对话';
+                quotaBlocked = true;
+            } else if (quota.remaining <= 0) {
+                hint = `今日批量导出次数已用完（${quota.used}/${quota.limit}），明天再试，或逐段导出单个对话`;
+                quotaBlocked = true;
+            } else {
+                hint += `（今日还可批量导出 ${quota.remaining} 次）`;
+            }
+        }
         this.$('export-hint').textContent = hint;
+        this.$('export-hint').classList.toggle('chatTransfer-hintWarning', quotaBlocked);
 
         const button = /** @type {HTMLButtonElement} */ (this.root.querySelector('[data-action="export"]'));
-        button.classList.toggle('disabled', this.busy || !plan);
-        button.toggleAttribute('disabled', this.busy || !plan);
+        const disabled = this.busy || !plan || quotaBlocked;
+        button.classList.toggle('disabled', disabled);
+        button.toggleAttribute('disabled', disabled);
     }
 
     chatListRequestPending() {
@@ -711,11 +743,14 @@ class ChatTransferPanel {
             body: JSON.stringify({ ...body, format, include_cards: includeCards }),
         });
         if (!response.ok) {
-            throw new Error(await readErrorMessage(response, '导出失败'));
+            const message = await readErrorMessage(response, '导出失败');
+            void this.loadBundleQuota();
+            throw new Error(message);
         }
         const blob = await response.blob();
         downloadBlob(blob, `${toSafeFileName(name)}-${format.toUpperCase()}-${getDateStamp()}.zip`);
         toastr.success(`已导出 ZIP（${formatBytes(blob.size)}）`);
+        void this.loadBundleQuota();
     }
 
     /**

@@ -1369,9 +1369,25 @@ export async function createBackupArchive(handle, response) {
     // @ts-ignore
     archive.pipe(response);
 
-    // Append files from a sub-directory, putting its contents at the root of archive
-    archive.directory(directories.root, false);
-    archive.finalize();
+    // Append the user directory at the archive root, in the upstream SillyTavern layout.
+    try {
+        // Loaded lazily: the archive writer depends on the chat endpoints module.
+        const { appendUserDataToArchive } = await import('./user-data-archive.js');
+        await appendUserDataToArchive(archive, {
+            handle,
+            rootPath: directories.root,
+            isCancelled: () => !completed && response.destroyed,
+        });
+        await archive.finalize();
+    } catch (error) {
+        console.error('Backup archive failed:', error);
+        archive.abort();
+        if (!response.headersSent) {
+            response.status(500).send({ error: 'Backup failed' });
+        } else {
+            response.destroy(error);
+        }
+    }
 }
 
 /**

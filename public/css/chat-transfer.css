@@ -123,6 +123,10 @@
     color: var(--ct-muted);
 }
 
+.chatTransfer-muted.chatTransfer-hintWarning {
+    color: var(--ct-warning);
+}
+
 /* Scope choices */
 .chatTransfer-choices {
     display: grid;

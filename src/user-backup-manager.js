@@ -30,10 +30,16 @@ export class UserBackupManager {
     cleanupTimer;
 
     /**
-     * @param {{directory: string, retentionMs?: number, maxConcurrent?: number}} options Options
+     * @param {{directory: string, retentionMs?: number, maxConcurrent?: number, writeEntries?: (archive: import('archiver').Archiver, job: {handle: string, rootPath: string, isCancelled: () => boolean}) => Promise<void>}} options Options.
+     *   writeEntries adds the backed up files to the archive; by default the user root is copied as-is.
      */
-    constructor({ directory, retentionMs = DEFAULT_RETENTION_MS, maxConcurrent = 2 }) {
+    constructor({ directory, retentionMs = DEFAULT_RETENTION_MS, maxConcurrent = 2, writeEntries }) {
         this.directory = path.resolve(directory);
+        this.writeEntries = typeof writeEntries === 'function'
+            ? writeEntries
+            : async (archive, job) => {
+                archive.directory(job.rootPath, false);
+            };
         this.retentionMs = retentionMs;
         this.maxConcurrent = maxConcurrent;
         fs.mkdirSync(this.directory, { recursive: true });
@@ -50,11 +56,27 @@ export class UserBackupManager {
     }
 
     /**
+     * Returns the queued or running job for the same requester and target, if any.
+     * @param {string} handle Target user
+     * @param {string} requestedBy Requesting user
+     * @returns {object|null} Public job status
+     */
+    findActiveJob(handle, requestedBy) {
+        for (const job of this.jobs.values()) {
+            if (job.handle === handle && job.requestedBy === requestedBy && ['queued', 'running'].includes(job.status)) {
+                return { ...this.toPublicJob(job), reused: true };
+            }
+        }
+        return null;
+    }
+
+    /**
      * Starts a backup or returns the already running job for the same request.
-     * @param {{handle: string, requestedBy: string, rootPath: string}} options Job options
+     * @param {{handle: string, requestedBy: string, rootPath: string, onSettled?: (status: string) => void}} options Job options.
+     *   onSettled is called once with the final status of a newly started job ('ready', 'failed' or 'cancelled').
      * @returns {Promise<object>} Public job status
      */
-    async startJob({ handle, requestedBy, rootPath }) {
+    async startJob({ handle, requestedBy, rootPath, onSettled }) {
         await this.cleanupExpiredJobs();
 
         for (const job of this.jobs.values()) {
@@ -109,6 +131,7 @@ export class UserBackupManager {
             filePath: path.join(this.directory, `${id}.zip`),
             archive: null,
             output: null,
+            onSettled: typeof onSettled === 'function' ? onSettled : null,
         };
 
         this.jobs.set(id, job);
@@ -148,8 +171,14 @@ export class UserBackupManager {
                 });
 
                 archive.pipe(output);
-                archive.directory(job.rootPath, false);
-                archive.finalize().catch(reject);
+                Promise.resolve()
+                    .then(() => this.writeEntries(archive, {
+                        handle: job.handle,
+                        rootPath: job.rootPath,
+                        isCancelled: () => job.status === 'cancelled',
+                    }))
+                    .then(() => archive.finalize())
+                    .catch(reject);
             });
 
             if (job.status === 'cancelled') {
@@ -164,7 +193,7 @@ export class UserBackupManager {
             job.updatedAt = Date.now();
             console.info(`Backup ready for ${job.handle}: ${job.size} bytes`);
         } catch (error) {
-            if (job.status !== 'cancelled') {
+            if (job.status !== 'cancelled' && error?.name !== 'ArchiveCancelledError') {
                 job.status = 'failed';
                 job.error = '备份生成失败，请稍后重试';
                 job.updatedAt = Date.now();
@@ -175,6 +204,13 @@ export class UserBackupManager {
             job.archive = null;
             job.output = null;
             this.activeJobs = Math.max(0, this.activeJobs - 1);
+            const onSettled = job.onSettled;
+            job.onSettled = null;
+            try {
+                onSettled?.(job.status);
+            } catch (error) {
+                console.error('Backup job settle callback failed:', error);
+            }
         }
     }
 

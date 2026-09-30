@@ -10,13 +10,28 @@ import { checkForNewContent, CONTENT_TYPES } from './content-manager.js';
 import { BackupJobError, UserBackupManager } from '../user-backup-manager.js';
 import { matchesAccountResetUsername } from '../account-reset.js';
 import { noteStcontrolLogout, stcontrolPrivateAccountGuard } from '../stcontrol.js';
+import { BackupQuotaError, consumeBackupQuota } from '../backup-limits.js';
 
 const userBackupManager = new UserBackupManager({
     directory: path.join(globalThis.DATA_ROOT, '_exports'),
+    // Write backups in the upstream SillyTavern layout so they also work there.
+    writeEntries: async (archive, job) => {
+        const { appendUserDataToArchive } = await import('../user-data-archive.js');
+        await appendUserDataToArchive(archive, job);
+    },
 });
 
 export const router = express.Router();
 router.use(stcontrolPrivateAccountGuard);
+
+/**
+ * @param {import('express').Response} response Response
+ * @param {BackupQuotaError} error Quota error
+ */
+function sendBackupQuotaError(response, error) {
+    const status = error.code === 'backup_disabled' ? 403 : 429;
+    return response.status(status).json({ error: error.message, message: error.message, code: error.code, quota: error.quota });
+}
 
 router.post('/logout', async (request, response) => {
     try {
@@ -179,8 +194,17 @@ router.post('/backup', async (request, response) => {
             return response.status(403).json({ error: 'Unauthorized' });
         }
 
-        await createBackupArchive(handle, response);
+        const quota = await consumeBackupQuota(request.user.profile, 'full');
+        try {
+            await createBackupArchive(handle, response);
+        } catch (error) {
+            await quota.release();
+            throw error;
+        }
     } catch (error) {
+        if (error instanceof BackupQuotaError) {
+            return sendBackupQuotaError(response, error);
+        }
         console.error('Backup failed', error);
         return response.sendStatus(500);
     }
@@ -202,14 +226,40 @@ router.post('/backup/start', async (request, response) => {
             return response.status(404).json({ error: 'User not found' });
         }
 
-        const job = await userBackupManager.startJob({
-            handle,
-            requestedBy: request.user.profile.handle,
-            rootPath: getUserDirectories(handle).root,
-        });
+        // Reconnecting to a backup that is still being built is not a new backup.
+        const activeJob = userBackupManager.findActiveJob(handle, request.user.profile.handle);
+        if (activeJob) {
+            return response.status(200).json(activeJob);
+        }
+
+        const quota = await consumeBackupQuota(request.user.profile, 'full');
+        let job;
+        try {
+            job = await userBackupManager.startJob({
+                handle,
+                requestedBy: request.user.profile.handle,
+                rootPath: getUserDirectories(handle).root,
+                // A backup that never becomes downloadable does not use up the daily quota.
+                onSettled: status => {
+                    if (status !== 'ready') {
+                        void quota.release();
+                    }
+                },
+            });
+        } catch (error) {
+            await quota.release();
+            throw error;
+        }
+        if (job.reused) {
+            // Joining an already running backup does not start a new one.
+            await quota.release();
+        }
 
         return response.status(job.reused ? 200 : 202).json(job);
     } catch (error) {
+        if (error instanceof BackupQuotaError) {
+            return sendBackupQuotaError(response, error);
+        }
         if (error instanceof BackupJobError) {
             const status = error.code === 'BACKUP_BUSY' ? 429 : 400;
             return response.status(status).json({ error: error.message, code: error.code });

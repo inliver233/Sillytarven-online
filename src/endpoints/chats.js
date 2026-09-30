@@ -30,6 +30,7 @@ import { KeyedMutex } from '../keyed-mutex.js';
 import { FileTransaction } from '../file-transaction.js';
 import { ArchiveReadError, openZipFileReader } from '../bounded-zip.js';
 import { read as readCharacterCard } from '../character-card-parser.js';
+import { BackupQuotaError, consumeBackupQuota } from '../backup-limits.js';
 import { invalidateRecentChatsCache, RecentChatsCache, registerRecentChatsCache } from '../recent-chats-cache.js';
 
 const isBackupEnabled = !!getConfigValue('backups.chat.enabled', true, 'boolean');
@@ -2299,6 +2300,37 @@ async function readChatJsonl(filePath, isGroup = false) {
 }
 
 /**
+ * Directory suffix and sidecar file suffixes that only exist in this fork's
+ * chunked chat layout. Upstream SillyTavern stores each chat as one JSONL file.
+ */
+export const CHAT_STORAGE_LAYOUT = Object.freeze({
+    chunkDirectorySuffix: `.jsonl${CHAT_CHUNK_DIR_SUFFIX}`,
+    sidecarSuffixes: Object.freeze([CHAT_METADATA_SUFFIX, CHAT_INDEX_SUFFIX, CHAT_REVISION_SUFFIX].map(suffix => `.jsonl${suffix}`)),
+});
+
+/**
+ * @param {string} filePath Chat .jsonl path
+ * @returns {boolean} Whether the chat's messages live in chunk shards
+ */
+export function isChunkedChatFile(filePath) {
+    return isChunkedChat(filePath);
+}
+
+/**
+ * Reads a chat as one upstream-compatible JSONL document for backups, under
+ * the same lock that chat saves take, so a concurrent save is never half read.
+ * @param {string} handle Owner of the chat
+ * @param {string} filePath Chat .jsonl path
+ * @param {boolean} isGroup Whether this is a group chat
+ * @returns {Promise<string>}
+ */
+export async function readChatForBackup(handle, filePath, isGroup) {
+    const lockOwner = { user: { profile: { handle } } };
+    return await chatStorageMutex.runExclusive(getChatStorageLockKey(lockOwner, filePath),
+        () => readChatJsonl(filePath, isGroup));
+}
+
+/**
  * Converts a chat JSONL document into a readable transcript.
  * @param {string} jsonl Chat JSONL
  * @returns {string}
@@ -2963,6 +2995,17 @@ router.post('/export-bundle', async function (request, response) {
         return response.status(404).json({ error: 'no_chats', message: '没有找到可导出的对话' });
     }
 
+    let quota;
+    try {
+        quota = await consumeBackupQuota(request.user.profile, 'partial');
+    } catch (error) {
+        if (error instanceof BackupQuotaError) {
+            const status = error.code === 'backup_disabled' ? 403 : 429;
+            return response.status(status).json({ error: error.code, message: error.message, quota: error.quota });
+        }
+        return sendChatTransferError(response, error, 'chat_export_failed');
+    }
+
     const archive = archiver('zip', { zlib: { level: 6 } });
     let completed = false;
     response.once('finish', () => {
@@ -2986,10 +3029,10 @@ router.post('/export-bundle', async function (request, response) {
     response.setHeader('Cache-Control', 'private, no-store, max-age=0');
     archive.pipe(response);
 
+    let exported = 0;
     try {
         const textFolders = format === 'txt' ? getTextExportFolders(plan.chats) : null;
         const failed = [];
-        let exported = 0;
         for (const chat of plan.chats) {
             let content;
             try {
@@ -3046,6 +3089,10 @@ router.post('/export-bundle', async function (request, response) {
             }
             archive.abort();
             response.destroy();
+            if (exported === 0) {
+                // Nothing was delivered, so the attempt does not count.
+                await quota.release();
+            }
         }
     }
 });

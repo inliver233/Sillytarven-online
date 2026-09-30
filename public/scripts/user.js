@@ -328,6 +328,40 @@ async function createUser(form, callback) {
  * @param {function} callback Success callback
  * @returns {Promise<void>}
  */
+/**
+ * Shows today's remaining full backups on the profile backup button.
+ * @param {JQuery<HTMLElement>} template Profile template
+ */
+async function refreshFullBackupQuota(template) {
+    const button = template.find('.userBackupButton');
+    if (!button.length) return;
+    if (!button.data('default-title')) {
+        button.data('default-title', button.attr('title') || '');
+    }
+    let quota = null;
+    try {
+        const response = await fetch('/api/backup-limits/status', { headers: getRequestHeaders(), cache: 'no-store' });
+        quota = response.ok ? (await response.json())?.full : null;
+    } catch {
+        quota = null;
+    }
+    button.find('.userBackupQuota').remove();
+    button.removeAttr('data-quota-blocked').removeClass('disabled').attr('title', button.data('default-title'));
+    if (!quota || quota.limit === null) {
+        return;
+    }
+    const blocked = quota.mode === 'disabled' || quota.remaining <= 0;
+    const label = quota.mode === 'disabled' ? '已关闭' : `今日剩 ${quota.remaining} 次`;
+    const title = quota.mode === 'disabled'
+        ? '管理员已关闭全量备份'
+        : blocked ? `今日全量备份次数已用完（${quota.used}/${quota.limit}），请明天再试` : `今日还可全量备份 ${quota.remaining} 次（共 ${quota.limit} 次）`;
+    button.append($('<small class="userBackupQuota"></small>').text(`（${label}）`));
+    button.attr('title', title);
+    if (blocked) {
+        button.attr('data-quota-blocked', 'true').addClass('disabled');
+    }
+}
+
 async function backupUserData(handle, callback) {
     let progressToast;
     try {
@@ -1345,11 +1379,17 @@ async function openUserProfile() {
     });
 
     template.find('.userBackupButton').on('click', function () {
+        if ($(this).attr('data-quota-blocked') === 'true') {
+            toastr.warning(String($(this).attr('title') || ''));
+            return;
+        }
         $(this).addClass('disabled');
         backupUserData(currentUser.handle, () => {
             $(this).removeClass('disabled');
+            void refreshFullBackupQuota(template);
         });
     });
+    void refreshFullBackupQuota(template);
     template.find('.userStorageRedeemButton').on('click', async () => {
         const code = await callGenericPopup('请输入扩容激活码', POPUP_TYPE.INPUT, '', { okButton: '确认', cancelButton: '取消' });
         if (!code) {
@@ -1805,6 +1845,9 @@ async function openAdminPanel(initialTab = 'usersList') {
         template.find('.navTab').each(function () {
             $(this).toggle(this.classList.contains(target));
         });
+        if (target === 'backupLimitsAdminBlock') {
+            void import('./backup-limits-admin.js').then(module => module.openBackupLimitsAdmin(template.find('.backupLimitsAdminBlock')[0]));
+        }
         // 初始化管理员扩展功能
         if (typeof window.initializeAdminExtensions === 'function') {
             setTimeout(() => {
