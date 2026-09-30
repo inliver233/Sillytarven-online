@@ -306,9 +306,13 @@ class SystemMonitor {
             }
         }
 
+        // Always keep the latest sample for live admin views; getSystemLoad()
+        // advances the CPU smoothing window, so readers must not call it again.
+        const currentLoad = this.getSystemLoad();
+        this.latestSystemLoad = currentLoad;
+
         // 只在有活跃用户时记录系统负载
         if (hasActiveUsers) {
-            const currentLoad = this.getSystemLoad();
             this.systemLoadHistory.push(currentLoad);
 
             // 保持历史记录在限定长度内
@@ -316,6 +320,43 @@ class SystemMonitor {
                 this.systemLoadHistory.shift();
             }
         }
+    }
+
+    /**
+     * Latest periodic sample (taken every 5 seconds). Cheap to read and does
+     * not disturb the CPU smoothing window.
+     * @returns {Object} 系统负载信息
+     */
+    getLatestSystemLoad() {
+        if (!this.latestSystemLoad) {
+            this.latestSystemLoad = this.getSystemLoad();
+        }
+        return this.latestSystemLoad;
+    }
+
+    /**
+     * One page of user summaries, optionally filtered by name or handle.
+     * @param {{page?: number, pageSize?: number, search?: string}} options Paging options
+     * @returns {{users: Object[], total: number, page: number, pageSize: number, totalPages: number}}
+     */
+    getUserLoadStatsPage({ page = 1, pageSize = 20, search = '' } = {}) {
+        const size = Math.min(100, Math.max(1, Math.trunc(Number(pageSize)) || 20));
+        const term = String(search || '').trim().toLowerCase();
+        let users = this.getAllUserLoadStats({ includeDetails: false });
+        if (term) {
+            users = users.filter(user =>
+                String(user.userName || '').toLowerCase().includes(term) ||
+                String(user.userHandle || '').toLowerCase().includes(term));
+        }
+        const totalPages = Math.max(1, Math.ceil(users.length / size));
+        const current = Math.min(totalPages, Math.max(1, Math.trunc(Number(page)) || 1));
+        return {
+            users: users.slice((current - 1) * size, current * size),
+            total: users.length,
+            page: current,
+            pageSize: size,
+            totalPages,
+        };
     }
 
     /**

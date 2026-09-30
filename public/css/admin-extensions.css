@@ -863,3 +863,50 @@
     background: rgba(255, 193, 7, 0.15);
     border: 1px solid rgba(255, 193, 7, 0.35);
 }
+
+/* 管理员面板：实时刷新状态 */
+.adminLiveHeader {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+}
+
+.adminLiveHeader h3 {
+    margin: 0;
+}
+
+.adminLiveStatus {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.8em;
+    opacity: 0.75;
+    font-variant-numeric: tabular-nums;
+}
+
+.adminLiveStatus:not(:empty)::before {
+    content: '';
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #22c55e;
+    animation: adminLivePulse 2s ease-in-out infinite;
+}
+
+.adminLiveStatus.is-error::before {
+    background: #ef4444;
+    animation: none;
+}
+
+@keyframes adminLivePulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.35; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .adminLiveStatus::before {
+        animation: none;
+    }
+}

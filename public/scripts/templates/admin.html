@@ -248,7 +248,10 @@
     <!-- 系统负载管理选项卡 -->
     <div class="navTab systemLoadBlock" style="display: none;">
         <div class="flex-container flexFlowColumn flexGap10">
-            <h3 data-i18n="System Load Monitoring">系统负载监控</h3>
+            <div class="adminLiveHeader">
+                <h3 data-i18n="System Load Monitoring">系统负载监控</h3>
+                <span class="adminLiveStatus" id="systemLoadLiveStatus" role="status"></span>
+            </div>
 
             <!-- 系统概览 -->
             <div class="systemOverview flex-container flexGap20">

@@ -2,8 +2,6 @@
 // 管理员面板扩展功能
 import { renderAnnouncementMarkdownInto } from './announcement-markdown.js';
 
-let systemLoadInterval;
-let systemLoadAutoPaused = false;
 let currentSystemData = null;
 let currentPerformanceData = null;
 let currentFreeGeminiChannels = [];
@@ -1000,13 +998,12 @@ function checkAndLoadCurrentTab() {
         const systemLoadBlock = document.querySelector('.systemLoadBlock');
         if (systemLoadBlock && isElementVisible(systemLoadBlock)) {
             console.log('System load tab is visible, loading data...');
-            loadSystemLoadData();
             startSystemLoadAutoRefresh();
         }
 
         const performanceMetricsBlock = document.querySelector('.performanceMetricsBlock');
         if (performanceMetricsBlock && isElementVisible(performanceMetricsBlock)) {
-            loadPerformanceMetrics();
+            performanceMetricsRefresher.start();
         }
 
         // 检查邀请码管理选项卡是否显示
@@ -1147,9 +1144,7 @@ function showSystemLoadTab() {
     const systemLoadBlock = document.querySelector('.systemLoadBlock');
     if (systemLoadBlock) {
         systemLoadBlock.style.display = 'block';
-        // 立即加载数据
-        loadSystemLoadData();
-        // 启动自动刷新
+        // 立即加载并开始实时刷新
         startSystemLoadAutoRefresh();
     }
 }
@@ -1159,7 +1154,7 @@ function showPerformanceMetricsTab() {
     const block = document.querySelector('.performanceMetricsBlock');
     if (block) {
         block.style.display = 'block';
-        loadPerformanceMetrics();
+        performanceMetricsRefresher.start();
     }
 }
 
@@ -1231,8 +1226,8 @@ function showUserStorageTab() {
 
 // 隐藏所有选项卡
 function hideAllTabs() {
-    // 停止系统负载自动刷新
-    stopSystemLoadAutoRefresh();
+    // 停止所有实时刷新
+    stopAllAdminLiveRefresh();
 
     const tabs = document.querySelectorAll('.navTab');
     tabs.forEach(tab => {
@@ -1258,70 +1253,217 @@ function bindSystemLoadEvents() {
         });
     }
 
-	// 鼠标悬停用户统计区域时暂停自动刷新，便于查看
-	const userActivityList = document.getElementById('userActivityList');
-	if (userActivityList) {
-		userActivityList.addEventListener('mouseenter', function() {
-			pauseSystemLoadAutoRefresh();
-		});
-		userActivityList.addEventListener('mouseleave', function() {
-			resumeSystemLoadAutoRefresh();
-		});
-	}
+    // 用鼠标阅读用户统计时暂停列表刷新（触摸设备不会触发，避免刷新被永久卡住）
+    const userActivityList = document.getElementById('userActivityList');
+    if (userActivityList && !userActivityList.dataset.liveBound) {
+        userActivityList.dataset.liveBound = 'true';
+        userActivityList.addEventListener('pointerenter', function(event) {
+            if (event.pointerType === 'mouse') userListHoverPaused = true;
+        });
+        userActivityList.addEventListener('pointerleave', function(event) {
+            if (event.pointerType === 'mouse') userListHoverPaused = false;
+        });
+    }
 
-	// 页面不可见时暂停，返回时恢复
-		document.removeEventListener('visibilitychange', handleAdminVisibilityChange);
-		document.addEventListener('visibilitychange', handleAdminVisibilityChange);
-	}
+    // 页面切到后台时停止请求，回来后立即刷新一次
+    document.removeEventListener('visibilitychange', handleAdminVisibilityChange);
+    document.addEventListener('visibilitychange', handleAdminVisibilityChange);
+}
 
 function handleAdminVisibilityChange() {
-    if (document.hidden) {
-        pauseSystemLoadAutoRefresh();
-    } else {
-        resumeSystemLoadAutoRefresh();
+    if (!document.hidden) {
+        for (const refresher of adminLiveRefreshers) {
+            refresher.nudge();
+        }
+    }
+}
+
+function stopAllAdminLiveRefresh() {
+    stopSystemLoadAutoRefresh();
+    for (const refresher of [...adminLiveRefreshers]) {
+        refresher.stop();
     }
 }
 
 function disposeAdminExtensions() {
-    stopSystemLoadAutoRefresh();
+    stopAllAdminLiveRefresh();
+    userListInitialized = false;
+    userListHoverPaused = false;
+    uptimeBase = null;
     document.removeEventListener('visibilitychange', handleAdminVisibilityChange);
     currentSystemData = null;
     currentPerformanceData = null;
     resetFreeGeminiChannelRuntimeState();
 }
 
-// 加载系统负载数据
-async function loadSystemLoadData() {
-    try {
-        showLoadingState('userActivityList');
+// ===== 管理员面板实时刷新 =====
+// Every live tab polls only while it is visible and the page is in the
+// foreground, never overlaps requests, and stops when the tab or panel closes.
+const adminLiveRefreshers = new Set();
 
-        const response = await fetch('/api/system-load/?summary=1', {
-            method: 'GET',
-            headers: getRequestHeaders()
-        });
-
-        if (!response.ok) {
-            throw new Error('Failed to load system data');
+/**
+ * @param {{name: string, intervalMs: number, blockSelector: string, run: () => Promise<void>, canRun?: () => boolean}} options
+ */
+function createAdminLiveRefresher({ name, intervalMs, blockSelector, run, canRun = () => true }) {
+    let timer = null;
+    let running = false;
+    let active = false;
+    // A user action that arrived while a request was in flight.
+    let pendingForce = false;
+    const isVisible = () => {
+        const block = document.querySelector(blockSelector);
+        return Boolean(block) && isElementVisible(block) && !document.hidden;
+    };
+    const schedule = () => {
+        clearTimeout(timer);
+        timer = active ? setTimeout(tick, intervalMs) : null;
+    };
+    async function tick(force = false) {
+        timer = null;
+        if (!active) return;
+        if (!document.querySelector(blockSelector)) {
+            // The admin panel was closed.
+            refresher.stop();
+            return;
         }
-
-        currentSystemData = await response.json();
-        renderSystemLoadData();
-
-    } catch (error) {
-        console.error('Error loading system load data:', error);
-        showErrorState('userActivityList', '加载系统数据失败');
+        if (!running && isVisible() && (force || canRun())) {
+            running = true;
+            try {
+                await run();
+            } catch (error) {
+                console.warn(`Live refresh "${name}" failed:`, error);
+            } finally {
+                running = false;
+            }
+        }
+        if (pendingForce && active) {
+            pendingForce = false;
+            void tick(true);
+            return;
+        }
+        schedule();
     }
+    const refresher = {
+        start() {
+            active = true;
+            adminLiveRefreshers.add(refresher);
+            clearTimeout(timer);
+            void tick();
+        },
+        stop() {
+            active = false;
+            clearTimeout(timer);
+            timer = null;
+            adminLiveRefreshers.delete(refresher);
+        },
+        /**
+         * Refreshes now. force skips canRun(), for explicit user actions.
+         * @param {{force?: boolean}} [options]
+         */
+        nudge({ force = false } = {}) {
+            if (!active) return;
+            if (running) {
+                // Re-run with the new state as soon as the current request ends.
+                pendingForce = pendingForce || force;
+                return;
+            }
+            clearTimeout(timer);
+            void tick(force);
+        },
+    };
+    return refresher;
 }
 
-// 渲染系统负载数据
-function renderSystemLoadData() {
-    if (!currentSystemData) return;
+function formatClockTime(date) {
+    const pad = value => String(value).padStart(2, '0');
+    return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
 
-    // 更新系统概览
-    updateSystemOverview(currentSystemData.system);
+function setLiveStatus(elementId, text, isError = false) {
+    const element = document.getElementById(elementId);
+    if (!element) return;
+    element.textContent = text;
+    element.classList.toggle('is-error', isError);
+}
 
-    // 更新用户活动统计
-    updateUserActivity(currentSystemData.users);
+let userListHoverPaused = false;
+let userListInitialized = false;
+let uptimeBase = null;
+let uptimeTimer = null;
+
+function formatUptimeSeconds(seconds) {
+    const total = Math.max(0, Math.floor(seconds));
+    const days = Math.floor(total / 86400);
+    const hours = Math.floor((total % 86400) / 3600);
+    const minutes = Math.floor((total % 3600) / 60);
+    const secs = total % 60;
+    return `${days}天 ${hours}时 ${minutes}分 ${secs}秒`;
+}
+
+function renderUptime() {
+    const uptime = document.getElementById('uptime');
+    if (!uptime || !uptimeBase) return;
+    uptime.textContent = formatUptimeSeconds(uptimeBase.seconds + (Date.now() - uptimeBase.receivedAt) / 1000);
+}
+
+async function refreshSystemOverview() {
+    const response = await fetch('/api/system-load/live', { headers: getRequestHeaders(), cache: 'no-store' });
+    if (!response.ok) {
+        setLiveStatus('systemLoadLiveStatus', '实时更新暂不可用', true);
+        throw new Error(`HTTP ${response.status}`);
+    }
+    const data = await response.json();
+    currentSystemData = { ...(currentSystemData || {}), system: data.system };
+    updateSystemOverview(data.system);
+    if (Number.isFinite(data.system?.uptime?.process)) {
+        const sampleAge = Number.isFinite(data.serverTime) && Number.isFinite(data.system?.timestamp)
+            ? Math.max(0, data.serverTime - data.system.timestamp) : 0;
+        uptimeBase = { seconds: data.system.uptime.process + sampleAge / 1000, receivedAt: Date.now() };
+        renderUptime();
+    }
+    setLiveStatus('systemLoadLiveStatus', `实时 · 更新于 ${formatClockTime(new Date())}`);
+}
+
+async function refreshUserActivityPage() {
+    const params = new URLSearchParams({ page: String(currentUserPage), pageSize: String(usersPerPage) });
+    if (userSearchTerm) params.set('search', userSearchTerm);
+    const response = await fetch(`/api/system-load/users-page?${params}`, { headers: getRequestHeaders(), cache: 'no-store' });
+    if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+    }
+    const data = await response.json();
+    currentUserPage = data.page;
+    renderUserActivityPage(data);
+}
+
+const systemOverviewRefresher = createAdminLiveRefresher({
+    name: 'system-overview',
+    intervalMs: 5000,
+    blockSelector: '.systemLoadBlock',
+    run: refreshSystemOverview,
+});
+
+const userActivityRefresher = createAdminLiveRefresher({
+    name: 'user-activity',
+    intervalMs: 15000,
+    blockSelector: '.systemLoadBlock',
+    run: refreshUserActivityPage,
+    canRun: () => !userListHoverPaused,
+});
+
+// 加载系统负载数据（首次打开或手动刷新）
+async function loadSystemLoadData() {
+    if (!userListInitialized) {
+        showLoadingState('userActivityList');
+    }
+    try {
+        await Promise.all([refreshSystemOverview(), refreshUserActivityPage()]);
+    } catch (error) {
+        console.error('Error loading system load data:', error);
+        if (!userListInitialized) {
+            showErrorState('userActivityList', '加载系统数据失败');
+        }
+    }
 }
 
 // 更新系统概览
@@ -1362,7 +1504,7 @@ function updateSystemOverview(systemData) {
         }
     }
 
-    const userSummary = getUserSummaryFromList(currentSystemData.users || []);
+    const userSummary = getUserSummaryFromList(currentSystemData?.users || []);
     const activeCount = typeof systemData?.activeUsers === 'number' ? systemData.activeUsers : userSummary.active;
     const onlineCount = typeof systemData?.onlineUsers === 'number' ? systemData.onlineUsers : userSummary.online;
     const totalUsers = typeof systemData?.totalTrackedUsers === 'number' ? systemData.totalTrackedUsers : userSummary.total;
@@ -1382,9 +1524,9 @@ function updateSystemOverview(systemData) {
         }
     }
 
-    // 运行时间
+    // 运行时间（拿到基准后每秒在本地递增，见 renderUptime）
     const uptime = document.getElementById('uptime');
-    if (uptime && systemData.uptime) {
+    if (uptime && systemData.uptime && !uptimeBase) {
         uptime.textContent = systemData.uptime.processFormatted || '--';
     }
 }
@@ -1392,7 +1534,6 @@ function updateSystemOverview(systemData) {
 // 用户活动分页相关
 let currentUserPage = 1;
 const usersPerPage = 20; // 每页显示20个用户
-let filteredUsers = [];
 let userSearchTerm = '';
 
 function getUserSummaryFromList(users) {
@@ -1436,59 +1577,53 @@ function getUserSummaryFromList(users) {
     };
 }
 
-// 更新用户统计
-function updateUserActivity(usersData) {
+// 渲染一页用户统计：搜索框只创建一次，刷新时只替换计数、分页和列表内容
+function renderUserActivityPage(data) {
     const userActivityList = document.getElementById('userActivityList');
     if (!userActivityList) return;
 
-    if (!usersData || usersData.length === 0) {
-        userActivityList.innerHTML = createEmptyState('fa-users', '暂无用户数据', '没有用户统计数据');
-        return;
-    }
-
-    // 应用搜索过滤
-    filteredUsers = userSearchTerm ? usersData.filter(user =>
-        (user.userName && user.userName.toLowerCase().includes(userSearchTerm.toLowerCase())) ||
-        (user.userHandle && user.userHandle.toLowerCase().includes(userSearchTerm.toLowerCase()))
-    ) : usersData;
-
-    // 计算分页
-    const totalPages = Math.ceil(filteredUsers.length / usersPerPage);
-    const startIndex = (currentUserPage - 1) * usersPerPage;
-    const endIndex = startIndex + usersPerPage;
-    const pageUsers = filteredUsers.slice(startIndex, endIndex);
-
-    // 渲染用户列表
-    const userActivityHtml = pageUsers.map(user => createUserActivityItem(user)).join('');
-
-    // 创建分页控件
-    const paginationHtml = createPaginationControls(currentUserPage, totalPages, filteredUsers.length);
-
-    userActivityList.innerHTML = `
-        <div class="userActivityControls">
-            <input type="text" id="userSearchInput" placeholder="搜索用户名或句柄..."
-                   value="${userSearchTerm}" class="text_pole" style="flex: 1; margin-right: 10px;">
-            <span class="userCount" style="white-space: nowrap; opacity: 0.7;">
-                显示 ${startIndex + 1}-${Math.min(endIndex, filteredUsers.length)} / ${filteredUsers.length} 用户
-            </span>
-        </div>
-        ${paginationHtml}
-        <div class="userActivityListContent">${userActivityHtml}</div>
-        ${paginationHtml}
-    `;
-
-    // 绑定搜索事件
-    const searchInput = document.getElementById('userSearchInput');
-    if (searchInput) {
+    if (!userListInitialized || !userActivityList.querySelector('#userActivitySearchInput')) {
+        userActivityList.innerHTML = `
+            <div class="userActivityControls">
+                <input type="search" id="userActivitySearchInput" placeholder="搜索用户名或句柄..." class="text_pole" autocomplete="off" style="flex: 1; margin-right: 10px;">
+                <span class="userCount" style="white-space: nowrap; opacity: 0.7;"></span>
+            </div>
+            <div class="userActivityPaginationTop"></div>
+            <div class="userActivityListContent"></div>
+            <div class="userActivityPaginationBottom"></div>
+        `;
+        const searchInput = userActivityList.querySelector('#userActivitySearchInput');
+        searchInput.value = userSearchTerm;
         searchInput.addEventListener('input', debounceSearch(function(e) {
             userSearchTerm = e.target.value.trim();
-            currentUserPage = 1; // 重置到第一页
-            updateUserActivity(currentSystemData.users);
+            currentUserPage = 1;
+            userActivityRefresher.nudge({ force: true });
         }, 300));
+        if (!userActivityList.dataset.paginationBound) {
+            userActivityList.dataset.paginationBound = 'true';
+            userActivityList.addEventListener('click', function(event) {
+                const button = event.target instanceof Element ? event.target.closest('.pagination-btn') : null;
+                if (!button) return;
+                currentUserPage = parseInt(button.dataset.page, 10) || 1;
+                userActivityRefresher.nudge({ force: true });
+                userActivityList.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            });
+        }
+        userListInitialized = true;
     }
 
-    // 绑定分页按钮事件
-    bindPaginationEvents();
+    const users = Array.isArray(data?.users) ? data.users : [];
+    const total = Number(data?.total) || 0;
+    const startIndex = (currentUserPage - 1) * usersPerPage;
+    userActivityList.querySelector('.userCount').textContent = total === 0
+        ? (userSearchTerm ? '没有匹配的用户' : '暂无用户')
+        : `显示 ${startIndex + 1}-${Math.min(startIndex + users.length, total)} / ${total} 用户`;
+    const paginationHtml = createPaginationControls(currentUserPage, Number(data?.totalPages) || 1, total);
+    userActivityList.querySelector('.userActivityPaginationTop').innerHTML = paginationHtml;
+    userActivityList.querySelector('.userActivityPaginationBottom').innerHTML = paginationHtml;
+    userActivityList.querySelector('.userActivityListContent').innerHTML = users.length
+        ? users.map(user => createUserActivityItem(user)).join('')
+        : createEmptyState('fa-users', userSearchTerm ? '没有匹配的用户' : '暂无用户数据', userSearchTerm ? '换个关键词试试' : '没有用户统计数据');
 }
 
 // 创建分页控件
@@ -1556,23 +1691,6 @@ function createPaginationControls(currentPage, totalPages, totalUsers) {
 
     html += '</div>';
     return html;
-}
-
-// 绑定分页按钮事件
-function bindPaginationEvents() {
-    const paginationBtns = document.querySelectorAll('.pagination-btn');
-    paginationBtns.forEach(btn => {
-        btn.addEventListener('click', function() {
-            currentUserPage = parseInt(this.dataset.page);
-            updateUserActivity(currentSystemData.users);
-
-            // 滚动到顶部
-            const userActivityList = document.getElementById('userActivityList');
-            if (userActivityList) {
-                userActivityList.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            }
-        });
-    });
 }
 
 // 防抖函数
@@ -1663,29 +1781,18 @@ function getActivityLevelColor(level) {
 
 // 开始系统负载自动刷新
 function startSystemLoadAutoRefresh() {
-    stopSystemLoadAutoRefresh();
-    systemLoadInterval = setInterval(() => {
-        if (!systemLoadAutoPaused) {
-            loadSystemLoadData();
-        }
-    }, 60000); // 每60秒刷新一次
+    systemOverviewRefresher.start();
+    userActivityRefresher.start();
+    clearInterval(uptimeTimer);
+    uptimeTimer = setInterval(renderUptime, 1000);
 }
 
 // 停止系统负载自动刷新
 function stopSystemLoadAutoRefresh() {
-    if (systemLoadInterval) {
-        clearInterval(systemLoadInterval);
-        systemLoadInterval = null;
-    }
-}
-
-// 暂停/恢复自动刷新（不销毁现有间隔，仅设置暂停标记）
-function pauseSystemLoadAutoRefresh() {
-    systemLoadAutoPaused = true;
-}
-
-function resumeSystemLoadAutoRefresh() {
-    systemLoadAutoPaused = false;
+    systemOverviewRefresher.stop();
+    userActivityRefresher.stop();
+    clearInterval(uptimeTimer);
+    uptimeTimer = null;
 }
 
 // 清除系统统计数据
@@ -1778,9 +1885,16 @@ function renderPerformanceMetrics() {
     }).join('');
 }
 
-async function loadPerformanceMetrics() {
+const performanceMetricsRefresher = createAdminLiveRefresher({
+    name: 'performance-metrics',
+    intervalMs: 10000,
+    blockSelector: '.performanceMetricsBlock',
+    run: () => loadPerformanceMetrics({ silent: true }),
+});
+
+async function loadPerformanceMetrics({ silent = false } = {}) {
     const status = document.getElementById('performanceMetricsStatus');
-    if (status) status.textContent = '正在加载性能指标…';
+    if (status && !silent && !currentPerformanceData) status.textContent = '正在加载性能指标…';
     try {
         const response = await fetch('/api/performance/summary', {
             headers: getRequestHeaders(),

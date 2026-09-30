@@ -12,7 +12,7 @@ export const router = express.Router();
 router.get('/', requireAdminMiddleware, async (request, response) => {
     try {
         const summaryOnly = ['1', 'true'].includes(String(request.query.summary || '').toLowerCase());
-        const systemLoad = systemMonitor.getSystemLoad();
+        const systemLoad = systemMonitor.getLatestSystemLoad();
         const userStats = systemMonitor.getAllUserLoadStats({ includeDetails: !summaryOnly });
         const loadHistory = summaryOnly ? [] : systemMonitor.getSystemLoadHistory(50);
 
@@ -24,6 +24,27 @@ router.get('/', requireAdminMiddleware, async (request, response) => {
     } catch (error) {
         console.error('Error getting system load:', error);
         response.status(500).json({ error: 'Failed to get system load' });
+    }
+});
+
+// Live overview: the latest 5-second sample, without the user list.
+router.get('/live', requireAdminMiddleware, (_request, response) => {
+    response.setHeader('Cache-Control', 'private, no-store, max-age=0');
+    return response.json({ system: systemMonitor.getLatestSystemLoad(), serverTime: Date.now() });
+});
+
+// One page of user statistics with optional search.
+router.get('/users-page', requireAdminMiddleware, (request, response) => {
+    try {
+        response.setHeader('Cache-Control', 'private, no-store, max-age=0');
+        return response.json(systemMonitor.getUserLoadStatsPage({
+            page: request.query.page,
+            pageSize: request.query.pageSize,
+            search: request.query.search,
+        }));
+    } catch (error) {
+        console.error('Error getting user stats page:', error);
+        return response.status(500).json({ error: 'Failed to get user stats' });
     }
 });
 

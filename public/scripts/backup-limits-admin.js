@@ -192,6 +192,36 @@ function setStatus(view, text, state = '') {
     view.status.dataset.state = state;
 }
 
+const USAGE_REFRESH_MS = 30_000;
+
+/**
+ * Refreshes only the usage section while the tab is on screen. The policy
+ * form is never overwritten, so unsaved edits survive.
+ * @param {HTMLElement} block Tab block
+ * @param {ReturnType<typeof buildView>} view View
+ */
+function startUsageAutoRefresh(block, view) {
+    let running = false;
+    const timer = setInterval(async () => {
+        if (!block.isConnected) {
+            clearInterval(timer);
+            return;
+        }
+        if (running || document.hidden || block.offsetParent === null) {
+            return;
+        }
+        running = true;
+        try {
+            const data = await request('GET');
+            renderUsage(view, data.usage);
+        } catch (error) {
+            console.warn('Backup usage refresh failed:', error);
+        } finally {
+            running = false;
+        }
+    }, USAGE_REFRESH_MS);
+}
+
 /**
  * Renders the backup limits tab into the admin panel block and loads data.
  * Safe to call again whenever the tab is opened.
@@ -227,6 +257,7 @@ export async function openBackupLimitsAdmin(block) {
             }
         });
         view.refresh.addEventListener('click', () => void openBackupLimitsAdmin(block));
+        startUsageAutoRefresh(block, view);
     }
 
     setStatus(view, '正在加载…');
