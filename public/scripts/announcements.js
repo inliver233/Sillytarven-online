@@ -1,4 +1,6 @@
 // 公告弹窗功能
+import { renderAnnouncementMarkdownInto } from './announcement-markdown.js';
+
 let announcementsChecked = false; // 防止重复检查
 
 // 初始化公告系统
@@ -90,6 +92,11 @@ function showAnnouncementsPopup(announcements) {
     // 添加到页面
     document.body.insertAdjacentHTML('beforeend', popupHtml);
 
+    // 渲染 Markdown 内容
+    document.querySelectorAll('#announcementsPopup .announcement-content').forEach((element, index) => {
+        renderAnnouncementMarkdownInto(element, announcements[index]?.content);
+    });
+
     // 绑定事件
     bindAnnouncementPopupEvents();
 
@@ -111,7 +118,7 @@ function createAnnouncementsPopupHtml(announcements) {
             <div class="announcement-header">
                 <h3 class="announcement-title">${escapeHtml(announcement.title)}</h3>
             </div>
-            <div class="announcement-content">${escapeHtml(announcement.content).replace(/\n/g, '<br>')}</div>
+            <div class="announcement-content"></div>
             <div class="announcement-footer">
                 <small class="announcement-time">
                     发布时间: ${new Date(announcement.createdAt).toLocaleString('zh-CN')}

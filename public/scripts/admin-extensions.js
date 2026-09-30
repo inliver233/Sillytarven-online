@@ -1,5 +1,7 @@
 // @ts-nocheck
 // 管理员面板扩展功能
+import { renderAnnouncementMarkdownInto } from './announcement-markdown.js';
+
 let systemLoadInterval;
 let systemLoadAutoPaused = false;
 let currentSystemData = null;
@@ -2754,6 +2756,7 @@ function bindAnnouncementEvents() {
             e.preventDefault();
             createAnnouncement();
         });
+        bindAnnouncementPreview(newForm);
     }
 
     // 创建登录页面公告表单
@@ -2767,7 +2770,26 @@ function bindAnnouncementEvents() {
             e.preventDefault();
             createLoginAnnouncement(e.target);
         });
+        bindAnnouncementPreview(newLoginForm);
     }
+}
+
+// 公告内容 Markdown 实时预览
+function bindAnnouncementPreview(form) {
+    const textarea = form.querySelector('textarea[name="content"]');
+    const preview = form.querySelector('.announcementPreview');
+    if (!textarea || !preview) return;
+
+    const update = () => {
+        const content = textarea.value;
+        preview.hidden = !content.trim();
+        renderAnnouncementMarkdownInto(preview, content);
+    };
+
+    textarea.addEventListener('input', update);
+    // reset 事件在字段清空前触发，延后一帧再刷新
+    form.addEventListener('reset', () => setTimeout(update, 0));
+    update();
 }
 
 // 切换公告类型
@@ -2832,6 +2854,14 @@ function renderAnnouncements() {
 
     const announcementsHtml = currentAnnouncements.map(announcement => createAnnouncementItem(announcement)).join('');
     container.innerHTML = announcementsHtml;
+    renderAnnouncementContents(container, currentAnnouncements);
+}
+
+// 将公告列表中的内容区域渲染为 Markdown
+function renderAnnouncementContents(container, announcements) {
+    container.querySelectorAll('.announcementItem').forEach((item, index) => {
+        renderAnnouncementMarkdownInto(item.querySelector('.announcementContent'), announcements[index]?.content);
+    });
 }
 
 // 创建公告项目
@@ -2857,7 +2887,7 @@ function createAnnouncementItem(announcement) {
                     </span>
                 </div>
             </div>
-            <div class="announcementContent">${escapeHtml(announcement.content)}</div>
+            <div class="announcementContent"></div>
             <div class="announcementMeta">
                 <span>${timeInfo}${validityInfo}</span>
                 <span>创建者: ${escapeHtml(announcement.createdBy)}</span>
@@ -3103,6 +3133,7 @@ function renderLoginAnnouncements() {
 
     const announcementsHtml = currentLoginAnnouncements.map(announcement => createLoginAnnouncementItem(announcement)).join('');
     container.innerHTML = announcementsHtml;
+    renderAnnouncementContents(container, currentLoginAnnouncements);
 }
 
 // 创建登录页面公告项目
@@ -3134,7 +3165,7 @@ function createLoginAnnouncementItem(announcement) {
                     </span>
                 </div>
             </div>
-            <div class="announcementContent">${escapeHtml(announcement.content)}</div>
+            <div class="announcementContent"></div>
             <div class="announcementMeta">
                 <span>${timeInfo}</span>
                 <span>创建者: ${escapeHtml(announcement.createdBy)}</span>

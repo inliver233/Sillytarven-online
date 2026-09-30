@@ -421,7 +421,7 @@ async function loadLoginAnnouncements() {
         console.log('Login announcements loaded:', announcements);
 
         if (announcements && announcements.length > 0) {
-            showLoginAnnouncements(announcements);
+            await showLoginAnnouncements(announcements);
         }
     } catch (error) {
         console.error('Error loading login announcements:', error);
@@ -429,10 +429,24 @@ async function loadLoginAnnouncements() {
 }
 
 /**
+ * 按需加载公告 Markdown 渲染器（依赖体积较大的 lib.js，仅在有公告时加载）
+ * @returns {Promise<((container: Element, markdown: string) => void) | null>}
+ */
+async function loadAnnouncementMarkdownRenderer() {
+    try {
+        const module = await import('./announcement-markdown.js');
+        return module.renderAnnouncementMarkdownInto;
+    } catch (error) {
+        console.error('Failed to load announcement markdown renderer:', error);
+        return null;
+    }
+}
+
+/**
  * 显示登录页面公告
  * @param {Array} announcements 公告列表
  */
-function showLoginAnnouncements(announcements) {
+async function showLoginAnnouncements(announcements) {
     const announcementArea = $('#loginAnnouncementArea');
     announcementArea.empty();
 
@@ -440,6 +454,8 @@ function showLoginAnnouncements(announcements) {
         announcementArea.hide();
         return;
     }
+
+    const renderMarkdownInto = await loadAnnouncementMarkdownRenderer();
 
     announcements.forEach(announcement => {
         const typeClass = announcement.type || 'info';
@@ -471,7 +487,11 @@ function showLoginAnnouncements(announcements) {
                 ${createdDate ? `<div class="login-announcement-time"><i class="fa-solid fa-clock"></i><span>${createdDate}</span></div>` : ''}
             </div>
         `;
-        announcementArea.append(announcementHtml);
+        const announcementElement = $(announcementHtml);
+        if (renderMarkdownInto) {
+            renderMarkdownInto(announcementElement.find('.login-announcement-content')[0], announcement.content);
+        }
+        announcementArea.append(announcementElement);
     });
 
     announcementArea.show();
