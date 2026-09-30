@@ -1,5 +1,5 @@
 import { getRequestHeaders } from '../script.js';
-import { POPUP_RESULT, POPUP_TYPE, callGenericPopup } from './popup.js';
+import { POPUP_RESULT, POPUP_TYPE, Popup, callGenericPopup } from './popup.js';
 import { renderTemplateAsync } from './templates.js';
 import { ensureImageFormatSupported, getBase64Async, humanFileSize } from './utils.js';
 import './user-heartbeat.js';
@@ -362,7 +362,40 @@ async function refreshFullBackupQuota(template) {
     }
 }
 
-async function backupUserData(handle, callback) {
+/**
+ * Asks the user what to include in their own full backup.
+ * @returns {Promise<{includeSecrets: boolean}|null>} Options, or null when cancelled
+ */
+async function askFullBackupOptions() {
+    const inputId = 'backupIncludeSecrets';
+    let includeSecrets = false;
+    const content = document.createElement('div');
+    const title = document.createElement('h3');
+    title.textContent = '下载全量备份';
+    const text = document.createElement('p');
+    text.textContent = '备份会打包你的全部数据（角色、对话、世界书、设置等）。完成后会自动开始下载。';
+    const note = document.createElement('p');
+    note.className = 'notes';
+    note.textContent = 'API 密钥默认不会放进备份。只有勾选下面的选项才会一起打包，请妥善保管含密钥的备份文件，不要发给别人。';
+    content.append(title, text, note);
+    const popup = new Popup(content, POPUP_TYPE.CONFIRM, null, {
+        okButton: '开始备份',
+        cancelButton: '取消',
+        customInputs: [{ id: inputId, type: 'checkbox', label: '同时包含 API 密钥（secrets.json）', defaultState: false }],
+        onClose: (closingPopup) => {
+            includeSecrets = Boolean(closingPopup?.inputResults?.get(inputId) ?? false);
+        },
+    });
+    const result = await popup.show();
+    return result === POPUP_RESULT.AFFIRMATIVE ? { includeSecrets } : null;
+}
+
+/**
+ * @param {string} handle User to back up
+ * @param {() => void} callback Called when the backup finished or failed
+ * @param {{includeSecrets?: boolean}} [options] Include API keys (own backups only)
+ */
+async function backupUserData(handle, callback, { includeSecrets = false } = {}) {
     let progressToast;
     try {
         progressToast = toastr.info('正在后台整理文件，请保持页面打开。', '正在生成全量备份', {
@@ -374,7 +407,7 @@ async function backupUserData(handle, callback) {
         const response = await fetch('/api/users/backup/start', {
             method: 'POST',
             headers: getRequestHeaders(),
-            body: JSON.stringify({ handle }),
+            body: JSON.stringify({ handle, include_secrets: includeSecrets }),
         });
 
         if (!response.ok) {
@@ -1378,16 +1411,23 @@ async function openUserProfile() {
         }
     });
 
-    template.find('.userBackupButton').on('click', function () {
+    template.find('.userBackupButton').on('click', async function () {
         if ($(this).attr('data-quota-blocked') === 'true') {
             toastr.warning(String($(this).attr('title') || ''));
+            return;
+        }
+        if ($(this).hasClass('disabled')) {
+            return;
+        }
+        const options = await askFullBackupOptions();
+        if (!options) {
             return;
         }
         $(this).addClass('disabled');
         backupUserData(currentUser.handle, () => {
             $(this).removeClass('disabled');
             void refreshFullBackupQuota(template);
-        });
+        }, options);
     });
     void refreshFullBackupQuota(template);
     template.find('.userStorageRedeemButton').on('click', async () => {

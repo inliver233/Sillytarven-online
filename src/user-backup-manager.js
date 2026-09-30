@@ -30,7 +30,7 @@ export class UserBackupManager {
     cleanupTimer;
 
     /**
-     * @param {{directory: string, retentionMs?: number, maxConcurrent?: number, writeEntries?: (archive: import('archiver').Archiver, job: {handle: string, rootPath: string, isCancelled: () => boolean}) => Promise<void>}} options Options.
+     * @param {{directory: string, retentionMs?: number, maxConcurrent?: number, writeEntries?: (archive: import('archiver').Archiver, job: {handle: string, rootPath: string, includeSecrets: boolean, isCancelled: () => boolean}) => Promise<void>}} options Options.
      *   writeEntries adds the backed up files to the archive; by default the user root is copied as-is.
      */
     constructor({ directory, retentionMs = DEFAULT_RETENTION_MS, maxConcurrent = 2, writeEntries }) {
@@ -59,11 +59,13 @@ export class UserBackupManager {
      * Returns the queued or running job for the same requester and target, if any.
      * @param {string} handle Target user
      * @param {string} requestedBy Requesting user
+     * @param {boolean} [includeSecrets] Whether the backup includes API keys
      * @returns {object|null} Public job status
      */
-    findActiveJob(handle, requestedBy) {
+    findActiveJob(handle, requestedBy, includeSecrets = false) {
         for (const job of this.jobs.values()) {
-            if (job.handle === handle && job.requestedBy === requestedBy && ['queued', 'running'].includes(job.status)) {
+            if (job.handle === handle && job.requestedBy === requestedBy && job.includeSecrets === Boolean(includeSecrets) &&
+                ['queued', 'running'].includes(job.status)) {
                 return { ...this.toPublicJob(job), reused: true };
             }
         }
@@ -72,17 +74,16 @@ export class UserBackupManager {
 
     /**
      * Starts a backup or returns the already running job for the same request.
-     * @param {{handle: string, requestedBy: string, rootPath: string, onSettled?: (status: string) => void}} options Job options.
+     * @param {{handle: string, requestedBy: string, rootPath: string, includeSecrets?: boolean, onSettled?: (status: string) => void}} options Job options.
      *   onSettled is called once with the final status of a newly started job ('ready', 'failed' or 'cancelled').
      * @returns {Promise<object>} Public job status
      */
-    async startJob({ handle, requestedBy, rootPath, onSettled }) {
+    async startJob({ handle, requestedBy, rootPath, includeSecrets = false, onSettled }) {
         await this.cleanupExpiredJobs();
 
-        for (const job of this.jobs.values()) {
-            if (job.handle === handle && job.requestedBy === requestedBy && ['queued', 'running'].includes(job.status)) {
-                return { ...this.toPublicJob(job), reused: true };
-            }
+        const activeJob = this.findActiveJob(handle, requestedBy, includeSecrets);
+        if (activeJob) {
+            return activeJob;
         }
 
         if (this.activeJobs >= this.maxConcurrent) {
@@ -119,6 +120,7 @@ export class UserBackupManager {
             handle,
             requestedBy,
             rootPath: resolvedRoot,
+            includeSecrets: Boolean(includeSecrets),
             status: 'queued',
             createdAt,
             updatedAt: createdAt,
@@ -175,6 +177,7 @@ export class UserBackupManager {
                     .then(() => this.writeEntries(archive, {
                         handle: job.handle,
                         rootPath: job.rootPath,
+                        includeSecrets: job.includeSecrets,
                         isCancelled: () => job.status === 'cancelled',
                     }))
                     .then(() => archive.finalize())
@@ -275,6 +278,7 @@ export class UserBackupManager {
             archiveBytes: job.archiveBytes,
             size: job.size,
             filename: job.status === 'ready' ? job.filename : null,
+            includeSecrets: job.includeSecrets,
             error: job.error,
             expiresAt: job.status === 'ready' ? job.updatedAt + this.retentionMs : null,
         };

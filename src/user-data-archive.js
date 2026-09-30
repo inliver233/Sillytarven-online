@@ -10,6 +10,19 @@ export class ArchiveCancelledError extends Error {
     }
 }
 
+// API keys stay out of backups unless the owner opts in, like upstream
+// SillyTavern (which excludes them unless allowKeysExposure is set).
+const SECRETS_FILE = 'secrets.json';
+const SECRETS_MIGRATION_PATTERN = /^backups\/secrets_migration_[^/]*\.json$/;
+
+/**
+ * @param {string} name Entry path relative to the user root
+ * @returns {boolean}
+ */
+function isSecretsEntry(name) {
+    return name === SECRETS_FILE || SECRETS_MIGRATION_PATTERN.test(name);
+}
+
 /**
  * Whether a directory (relative to the user root, "/"-separated) holds chat files.
  * @param {string} relativeDirectory Directory relative to the user root
@@ -67,9 +80,10 @@ function appendAndWait(archive, content, data) {
  * @param {string} options.handle User handle (used for chat storage locks)
  * @param {string} options.rootPath User data root
  * @param {() => boolean} [options.isCancelled] Stops the walk when it returns true
+ * @param {boolean} [options.includeSecrets] Include the user's API keys (secrets.json)
  * @returns {Promise<void>}
  */
-export async function appendUserDataToArchive(archive, { handle, rootPath, isCancelled = () => false }) {
+export async function appendUserDataToArchive(archive, { handle, rootPath, isCancelled = () => false, includeSecrets = false }) {
     const root = path.resolve(rootPath);
 
     async function walk(directory, relativeDirectory) {
@@ -103,6 +117,9 @@ export async function appendUserDataToArchive(archive, { handle, rootPath, isCan
                 continue;
             }
             if (!entry.isFile()) {
+                continue;
+            }
+            if (!includeSecrets && isSecretsEntry(name)) {
                 continue;
             }
 

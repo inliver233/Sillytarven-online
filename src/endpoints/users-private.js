@@ -194,9 +194,11 @@ router.post('/backup', async (request, response) => {
             return response.status(403).json({ error: 'Unauthorized' });
         }
 
+        // API keys are only ever included in a user's own backup, on request.
+        const includeSecrets = request.body?.include_secrets === true && handle === request.user.profile.handle;
         const quota = await consumeBackupQuota(request.user.profile, 'full');
         try {
-            await createBackupArchive(handle, response);
+            await createBackupArchive(handle, response, { includeSecrets });
         } catch (error) {
             await quota.release();
             throw error;
@@ -226,8 +228,11 @@ router.post('/backup/start', async (request, response) => {
             return response.status(404).json({ error: 'User not found' });
         }
 
+        // API keys are only ever included in a user's own backup, on request.
+        const includeSecrets = request.body?.include_secrets === true && handle === request.user.profile.handle;
+
         // Reconnecting to a backup that is still being built is not a new backup.
-        const activeJob = userBackupManager.findActiveJob(handle, request.user.profile.handle);
+        const activeJob = userBackupManager.findActiveJob(handle, request.user.profile.handle, includeSecrets);
         if (activeJob) {
             return response.status(200).json(activeJob);
         }
@@ -239,6 +244,7 @@ router.post('/backup/start', async (request, response) => {
                 handle,
                 requestedBy: request.user.profile.handle,
                 rootPath: getUserDirectories(handle).root,
+                includeSecrets,
                 // A backup that never becomes downloadable does not use up the daily quota.
                 onSettled: status => {
                     if (status !== 'ready') {

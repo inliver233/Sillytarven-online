@@ -1330,9 +1330,10 @@ export function requireAdminMiddleware(request, response, next) {
  * Creates an archive of the user's data root directory.
  * @param {string} handle User handle
  * @param {import('express').Response} response Express response object to write to
+ * @param {{includeSecrets?: boolean}} [options] Include the user's API keys (secrets.json)
  * @returns {Promise<void>} Promise that resolves when the archive is created
  */
-export async function createBackupArchive(handle, response) {
+export async function createBackupArchive(handle, response, { includeSecrets = false } = {}) {
     const directories = getUserDirectories(handle);
 
     console.info('Backup requested for', handle);
@@ -1376,6 +1377,7 @@ export async function createBackupArchive(handle, response) {
         await appendUserDataToArchive(archive, {
             handle,
             rootPath: directories.root,
+            includeSecrets,
             isCancelled: () => !completed && response.destroyed,
         });
         await archive.finalize();
