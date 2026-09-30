@@ -76,6 +76,7 @@ import {
     getGroupCharacterCardsLazy,
     getGroupDepthPrompts,
 } from './scripts/group-chats.js';
+import { getFullGroupMessageIndex } from './scripts/group-chat-paging.js';
 
 import {
     collapseNewlines,
@@ -8058,6 +8059,66 @@ async function saveChatTail(options = {}) {
 }
 
 /**
+ * Saves a copy of the current paged chat (up to a message) under a new file name.
+ * The loaded page is committed first, then the copy is cut from the full chat.
+ * @param {{fileName: string, metadata: object, mesId?: number}} options
+ * @returns {Promise<void>}
+ */
+async function saveChatCopyFromPagedChat({ fileName, metadata, mesId }) {
+    const character = characters[this_chid];
+    const sourceFile = character.chat;
+    await saveChatTail({
+        fileName: sourceFile,
+        header: { user_name: name1, character_name: name2, create_date: chat_create_date, chat_metadata },
+        messages: chat.slice(),
+    });
+
+    const sourceResponse = await fetch('/api/chats/get', {
+        method: 'POST',
+        cache: 'no-cache',
+        headers: getRequestHeaders(),
+        body: JSON.stringify({ ch_name: character.name, file_name: sourceFile, avatar_url: character.avatar }),
+    });
+    const sourceChat = sourceResponse.ok ? await sourceResponse.json() : null;
+    if (!Array.isArray(sourceChat) || !sourceChat.length) {
+        throw new Error('Could not load the full chat to copy.');
+    }
+
+    const fullMessages = sourceChat.slice(1);
+    const lastIndex = (mesId !== undefined && mesId >= 0 && mesId < chat.length)
+        ? getFullGroupMessageIndex(mesId, chatPagingState.messageOffset, fullMessages, chat)
+        : fullMessages.length - 1;
+
+    const header = {
+        user_name: name1,
+        character_name: name2,
+        create_date: chat_create_date,
+        chat_metadata: metadata,
+    };
+    const result = await fetch('/api/chats/save', {
+        method: 'POST',
+        cache: 'no-cache',
+        headers: getRequestHeaders(),
+        body: JSON.stringify({
+            ch_name: character.name,
+            file_name: fileName,
+            chat: [header, ...fullMessages.slice(0, lastIndex + 1)],
+            avatar_url: character.avatar,
+        }),
+    });
+    if (result.ok) {
+        return;
+    }
+
+    const errorData = await result.json().catch(() => null);
+    if (errorData?.error === 'storage_limit') {
+        toastr.error(errorData.message || '存储空间不足，无法保存聊天记录。请删除内容或使用激活码扩容。', '存储空间不足');
+        return;
+    }
+    throw new Error(result.statusText);
+}
+
+/**
  * Saves the chat to the server.
  * @param {object} [options] - Additional options.
  * @param {string} [options.chatName] The name of the chat file to save to
@@ -8104,6 +8165,19 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false } 
         create_date: chat_create_date,
         chat_metadata: metadata,
     };
+
+    if (chatPagingState.active && fileName !== characters[this_chid]?.chat) {
+        // Branches and checkpoints go to a new file: the loaded page is only the
+        // tail of the chat, so copy them from the full saved chat instead.
+        try {
+            await saveChatCopyFromPagedChat({ fileName, metadata, mesId });
+            return;
+        } catch (error) {
+            console.error(error);
+            toastr.error(t`Check the server connection and reload the page to prevent data loss.`, t`Chat could not be saved`);
+            return;
+        }
+    }
 
     if (chatPagingState.active) {
         try {
