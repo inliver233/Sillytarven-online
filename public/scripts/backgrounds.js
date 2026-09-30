@@ -1156,5 +1156,12 @@ export function initBackgrounds() {
         });
     });
 
+    // With <base href="/"> and the app served at /app, "#tab" links resolve to
+    // "/#tab" and jQuery UI treats them as remote tabs, loading the whole page
+    // into a hidden panel. Anchor them to the current page so they stay local.
+    const pageUrl = location.href.replace(/#.*$/, '');
+    $('#bg_tabs .bg_tabs_list a[href^="#"]').each(function () {
+        this.setAttribute('href', pageUrl + this.getAttribute('href'));
+    });
     $('#bg_tabs').tabs();
 }

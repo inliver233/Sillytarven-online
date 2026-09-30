@@ -660,3 +660,99 @@
         display: none;
     }
 }
+
+/* 用户设置里的「备份与导出」入口 */
+.backupHub {
+    --bh-accent: var(--st-primary, #3b82f6);
+    --bh-border: var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.12));
+    --bh-surface: color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 5%, transparent);
+    --bh-surface-hover: color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 10%, transparent);
+    --bh-muted: color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 62%, transparent);
+
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    width: min(620px, 100%);
+    margin: 0 auto;
+    text-align: left;
+    color: var(--SmartThemeBodyColor);
+}
+
+.backupHub-title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 1.2em;
+    font-weight: 600;
+}
+
+.backupHub-title i {
+    color: var(--bh-accent);
+}
+
+.backupHub-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: 10px;
+}
+
+.backupHub-card {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 12px;
+    padding: 14px;
+    border: 1px solid var(--bh-border);
+    border-radius: 12px;
+    background: var(--bh-surface);
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: background-color 0.15s, border-color 0.15s;
+}
+
+.backupHub-card:hover,
+.backupHub-card:focus-visible {
+    background: var(--bh-surface-hover);
+    border-color: color-mix(in srgb, var(--bh-accent) 55%, var(--bh-border));
+    outline: none;
+}
+
+.backupHub-card.disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
+.backupHub-icon {
+    flex: 0 0 auto;
+    display: grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--bh-accent) 16%, transparent);
+    color: var(--bh-accent);
+    font-size: 1.1em;
+}
+
+.backupHub-text {
+    flex: 1 1 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.backupHub-text span {
+    color: var(--bh-muted);
+    font-size: 0.85em;
+    line-height: 1.4;
+}
+
+.backupHub-card .userBackupQuota {
+    flex-basis: 100%;
+    padding-left: 46px;
+    color: var(--bh-muted);
+    font-size: 0.8em;
+}

@@ -363,6 +363,81 @@ async function refreshFullBackupQuota(template) {
 }
 
 /**
+ * Wires the current user's "download full backup" button inside a container.
+ * @param {JQuery<HTMLElement>} container Element holding a .userBackupButton
+ */
+function bindOwnFullBackupButton(container) {
+    container.find('.userBackupButton').on('click', async function () {
+        if ($(this).attr('data-quota-blocked') === 'true') {
+            toastr.warning(String($(this).attr('title') || ''));
+            return;
+        }
+        if ($(this).hasClass('disabled')) {
+            return;
+        }
+        const options = await askFullBackupOptions();
+        if (!options) {
+            return;
+        }
+        $(this).addClass('disabled');
+        backupUserData(getCurrentUserHandle(), () => {
+            $(this).removeClass('disabled');
+            void refreshFullBackupQuota(container);
+        }, options);
+    });
+    void refreshFullBackupQuota(container);
+}
+
+/**
+ * Opens the "backup & export" hub from the user settings panel.
+ */
+async function openBackupHub() {
+    const root = $(`
+        <div class="backupHub">
+            <div class="backupHub-title"><i class="fa-solid fa-box-archive"></i>备份与导出</div>
+            <div class="backupHub-grid">
+                <button type="button" class="backupHub-card userBackupButton" title="下载你的全部数据">
+                    <i class="backupHub-icon fa-solid fa-download"></i>
+                    <span class="backupHub-text">
+                        <b>下载全量备份</b>
+                        <span>角色、对话、世界书、设置等全部数据，打包成一个 ZIP</span>
+                    </span>
+                </button>
+                <button type="button" class="backupHub-card" data-transfer-tab="export">
+                    <i class="backupHub-icon fa-solid fa-file-export"></i>
+                    <span class="backupHub-text">
+                        <b>导出对话</b>
+                        <span>导出全部、某个角色或选中的对话</span>
+                    </span>
+                </button>
+                <button type="button" class="backupHub-card" data-transfer-tab="import">
+                    <i class="backupHub-icon fa-solid fa-file-import"></i>
+                    <span class="backupHub-text">
+                        <b>导入对话</b>
+                        <span>把对话文件导入到任意角色</span>
+                    </span>
+                </button>
+                <button type="button" class="backupHub-card" data-transfer-tab="restore">
+                    <i class="backupHub-icon fa-solid fa-clock-rotate-left"></i>
+                    <span class="backupHub-text">
+                        <b>从备份恢复对话</b>
+                        <span>从导出的对话包或全量备份 ZIP 中恢复</span>
+                    </span>
+                </button>
+            </div>
+        </div>`);
+    const popup = new Popup(root, POPUP_TYPE.TEXT, '', { okButton: '关闭', allowVerticalScrolling: true });
+    bindOwnFullBackupButton(root);
+    root.find('[data-transfer-tab]').on('click', async function () {
+        const tab = String($(this).data('transfer-tab'));
+        await popup.completeCancelled();
+        const { openChatTransferPanel } = await import('./chat-transfer.js');
+        await openChatTransferPanel(tab === 'export' ? { tab, scope: 'all' } : { tab });
+    });
+    await popup.show();
+}
+
+/**
  * Asks the user what to include in their own full backup.
  * @returns {Promise<{includeSecrets: boolean}|null>} Options, or null when cancelled
  */
@@ -1411,25 +1486,7 @@ async function openUserProfile() {
         }
     });
 
-    template.find('.userBackupButton').on('click', async function () {
-        if ($(this).attr('data-quota-blocked') === 'true') {
-            toastr.warning(String($(this).attr('title') || ''));
-            return;
-        }
-        if ($(this).hasClass('disabled')) {
-            return;
-        }
-        const options = await askFullBackupOptions();
-        if (!options) {
-            return;
-        }
-        $(this).addClass('disabled');
-        backupUserData(currentUser.handle, () => {
-            $(this).removeClass('disabled');
-            void refreshFullBackupQuota(template);
-        }, options);
-    });
-    void refreshFullBackupQuota(template);
+    bindOwnFullBackupButton(template);
     template.find('.userStorageRedeemButton').on('click', async () => {
         const code = await callGenericPopup('请输入扩容激活码', POPUP_TYPE.INPUT, '', { okButton: '确认', cancelButton: '取消' });
         if (!code) {
@@ -2235,6 +2292,9 @@ jQuery(() => {
     });
     $('#account_button').on('click', () => {
         openUserProfile();
+    });
+    $('#backup_hub_button').on('click', () => {
+        openBackupHub();
     });
     setInterval(async () => {
         if (currentUser) {
