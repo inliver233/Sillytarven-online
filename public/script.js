@@ -12,6 +12,7 @@ import {
 
 import { humanizedDateTime, favsToHotswap, getMessageTimeStamp, dragElement, isMobile, initRossMods } from './scripts/RossAscends-mods.js';
 import './scripts/announcements.js';
+import { openChatTransferPanel } from './scripts/chat-transfer.js';
 import { userStatsHandler, statMesProcess, initStats } from './scripts/stats.js';
 import {
     generateKoboldWithStreaming,
@@ -12391,6 +12392,10 @@ jQuery(async function () {
             await closeCurrentChat();
         }
 
+        else if (id == 'option_chat_transfer') {
+            void openChatTransferPanel();
+        }
+
         else if (id === 'option_settings') {
             //var checkBox = document.getElementById("waifuMode");
             var topBar = document.getElementById('top-bar');
@@ -12796,6 +12801,10 @@ jQuery(async function () {
     //**************************CHAT IMPORT EXPORT*************************//
     $('#chat_import_button').on('click', function () {
         $('#chat_import_file').trigger('click');
+    });
+
+    $('#chat_transfer_button').on('click', function () {
+        void openChatTransferPanel({ tab: 'export', scope: 'target' });
     });
 
     $('#chat_import_file').on('change', async function (e) {

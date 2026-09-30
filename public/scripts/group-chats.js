@@ -1012,11 +1012,11 @@ function updateGroupAvatar(group) {
  * @returns {boolean} True if valid, false otherwise
  */
 function isValidImageUrl(url) {
-    // check if empty dict
-    if (Object.keys(url).length === 0) {
+    // Groups restored from backups or created by other tools may lack an avatar
+    if (typeof url !== 'string' || url.length === 0) {
         return false;
     }
-    return isDataURL(url) || (url && (url.startsWith('user') || url.startsWith('/user')));
+    return isDataURL(url) || url.startsWith('user') || url.startsWith('/user');
 }
 
 /**

@@ -4,6 +4,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import process from 'node:process';
 
+import archiver from 'archiver';
 import express from 'express';
 import sanitize from 'sanitize-filename';
 import { sync as writeFileAtomicSync } from 'write-file-atomic';
@@ -26,6 +27,9 @@ import { canConsumeStorage } from '../storage-quota.js';
 import { beginEndpointPerformance } from '../performance-monitor.js';
 import { invalidateCharacterListCache } from '../character-list-cache.js';
 import { KeyedMutex } from '../keyed-mutex.js';
+import { FileTransaction } from '../file-transaction.js';
+import { ArchiveReadError, openZipFileReader } from '../bounded-zip.js';
+import { read as readCharacterCard } from '../character-card-parser.js';
 import { invalidateRecentChatsCache, RecentChatsCache, registerRecentChatsCache } from '../recent-chats-cache.js';
 
 const isBackupEnabled = !!getConfigValue('backups.chat.enabled', true, 'boolean');
@@ -2160,15 +2164,923 @@ router.post('/delete', validateAvatarUrlMiddleware, function (request, response)
     }
 });
 
+//************************** CHAT TRANSFER (bulk export / archive restore) **************************//
+
+const CHAT_TRANSFER_LIMITS = Object.freeze({
+    maxExportTargets: 5000,
+    maxChatPartBytes: 256 * 1024 * 1024,
+    maxChatBytes: 512 * 1024 * 1024,
+    maxSidecarBytes: 16 * 1024 * 1024,
+    maxGroupBytes: 4 * 1024 * 1024,
+    maxCardBytes: 64 * 1024 * 1024,
+    maxTotalReadBytes: 4 * 1024 * 1024 * 1024,
+    maxCompressionRatio: 200,
+    maxRenameAttempts: 100,
+    maxReportedMissingCharacters: 50,
+});
+
+const ARCHIVE_ROOT_MARKERS = Object.freeze(['chats', 'group chats', 'groups', 'characters']);
+const CHAT_ARCHIVE_PATTERNS = Object.freeze([
+    ['characterChat', /^chats\/([^/]+)\/([^/]+\.jsonl)$/],
+    ['characterSidecar', /^chats\/([^/]+)\/([^/]+\.jsonl)\.metadata\.json$/],
+    ['characterShard', /^chats\/([^/]+)\/([^/]+\.jsonl)\.chunks\/([^/]+\.jsonl)$/],
+    ['groupChat', /^group chats\/()([^/]+\.jsonl)$/],
+    ['groupSidecar', /^group chats\/()([^/]+\.jsonl)\.metadata\.json$/],
+    ['groupShard', /^group chats\/()([^/]+\.jsonl)\.chunks\/([^/]+\.jsonl)$/],
+    ['group', /^groups\/([^/]+\.json)$/],
+    ['character', /^characters\/([^/]+\.png)$/],
+]);
+
+const ARCHIVE_ERROR_MESSAGES = Object.freeze({
+    invalid_archive: '文件不是有效的 ZIP 压缩包，或压缩包已损坏',
+    archive_entry_limit_exceeded: '压缩包内文件数量过多',
+    archive_entry_too_large: '压缩包中有单个文件过大',
+    archive_size_limit_exceeded: '压缩包解压后的数据过大',
+    archive_compression_ratio_exceeded: '压缩包中存在异常的高压缩比文件',
+});
+
+class ChatTransferError extends Error {
+    /**
+     * @param {number} status HTTP status
+     * @param {string} code Stable error code
+     * @param {string} message User-facing message
+     */
+    constructor(status, code, message) {
+        super(message);
+        this.name = 'ChatTransferError';
+        this.status = status;
+        this.code = code;
+    }
+}
+
+function sendChatTransferError(response, error, fallbackCode) {
+    if (error instanceof ChatTransferError) {
+        return response.status(error.status).json({ error: error.code, message: error.message });
+    }
+    if (error instanceof ArchiveReadError) {
+        return response.status(error.status).json({
+            error: error.code,
+            message: ARCHIVE_ERROR_MESSAGES[error.code] ?? '无法读取压缩包',
+        });
+    }
+    console.error(`${fallbackCode}:`, error);
+    return response.status(500).json({ error: fallbackCode, message: '服务器处理失败，请稍后重试' });
+}
+
+function toPathKey(filePath) {
+    const resolved = path.resolve(filePath);
+    return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+function isPlainObject(value) {
+    return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+/**
+ * Whether a file or folder name can be used verbatim inside a user directory.
+ * @param {unknown} name Candidate name
+ * @returns {boolean}
+ */
+function isSafeEntryName(name) {
+    return typeof name === 'string'
+        && name.length > 0
+        && name.length <= 255
+        && !name.startsWith('.')
+        && sanitize(name) === name;
+}
+
+function splitJsonlLines(text) {
+    return String(text)
+        .replace(/^\uFEFF/, '')
+        .split('\n')
+        .map(line => line.replace(/\r$/, ''))
+        .filter(line => line.trim().length > 0);
+}
+
+/**
+ * Chat headers carry metadata but never message text.
+ * @param {unknown} value Parsed JSONL line
+ * @returns {boolean}
+ */
+function isChatHeaderObject(value) {
+    return isPlainObject(value)
+        && !Object.hasOwn(value, 'mes')
+        && (Object.hasOwn(value, 'chat_metadata') || Boolean(value.user_name && value.character_name));
+}
+
+/**
+ * Reads a chat (legacy or chunked) as a complete JSONL document.
+ * @param {string} filePath Chat file path
+ * @param {boolean} isGroup Whether this is a group chat
+ * @returns {Promise<string>}
+ */
+async function readChatJsonl(filePath, isGroup = false) {
+    if (!isChunkedChat(filePath)) {
+        return await fs.promises.readFile(filePath, 'utf8');
+    }
+
+    const index = await ensureChatIndex(filePath);
+    let header;
+    let embeddedHeaderCount = 0;
+    if (isGroup) {
+        const headerInfo = await readGroupChatHeaderInfo(filePath);
+        header = headerInfo.header;
+        embeddedHeaderCount = headerInfo.embeddedHeaderCount;
+    } else {
+        header = await readChatHeader(filePath);
+    }
+
+    const lines = [];
+    for (const shard of index?.shards ?? []) {
+        lines.push(...await readShardLines(path.join(getChatChunkDir(filePath), shard.file)));
+    }
+    const messageLines = lines.slice(embeddedHeaderCount);
+    return (header ? [JSON.stringify(header), ...messageLines] : messageLines).join('\n');
+}
+
+/**
+ * Converts a chat JSONL document into a readable transcript.
+ * @param {string} jsonl Chat JSONL
+ * @returns {string}
+ */
+function chatJsonlToText(jsonl) {
+    let buffer = '';
+    for (const line of splitJsonlLines(jsonl)) {
+        const data = tryParse(line);
+        // Skip headers, invalid lines and non-printable/prompt-hidden messages
+        if (!isPlainObject(data) || data.is_system || !data.mes) {
+            continue;
+        }
+        const message = String(data?.extra?.display_text || data.mes).replace(/\r?\n/g, '\n');
+        buffer += `${data.name}: ${message}\n\n`;
+    }
+    return buffer;
+}
+
+/**
+ * Stable signature of a chat's messages (headers are ignored because their
+ * bookkeeping fields change without the conversation changing).
+ * @param {string[]} lines JSONL lines
+ * @returns {string}
+ */
+function getChatMessagesSignature(lines) {
+    const hash = crypto.createHash('sha256');
+    for (const line of lines) {
+        const data = tryParse(line);
+        if (!isPlainObject(data) || isChatHeaderObject(data)) {
+            continue;
+        }
+        hash.update(JSON.stringify(data));
+        hash.update('\n');
+    }
+    return hash.digest('hex');
+}
+
+/**
+ * Finds a chat file path that does not exist yet.
+ * @param {string} directory Target directory
+ * @param {string} baseName File name without extension
+ * @param {Set<string>} [reserved] Path keys already claimed in this operation
+ * @returns {string}
+ */
+function getAvailableChatPath(directory, baseName, reserved = undefined) {
+    for (let attempt = 1; attempt <= 1000; attempt++) {
+        const suffix = attempt === 1 ? '' : ` (${attempt})`;
+        const candidate = path.join(directory, `${baseName}${suffix}.jsonl`);
+        if (!fs.existsSync(candidate) && !reserved?.has(toPathKey(candidate))) {
+            return candidate;
+        }
+    }
+    throw new Error(`Could not allocate a unique chat file name for ${baseName}`);
+}
+
+function listJsonlFiles(directory) {
+    try {
+        return fs.readdirSync(directory, { withFileTypes: true })
+            .filter(entry => entry.isFile() && path.extname(entry.name) === '.jsonl')
+            .map(entry => entry.name)
+            .sort((a, b) => a.localeCompare(b));
+    } catch (error) {
+        if (error?.code === 'ENOENT') {
+            return [];
+        }
+        throw error;
+    }
+}
+
+/**
+ * Reads all group definitions of a user.
+ * @param {import('../users.js').UserDirectoryList} directories User directories
+ * @returns {Map<string, {id: string, filePath: string, data: any, chats: string[], members: string[]}>}
+ */
+function readUserGroups(directories) {
+    const groups = new Map();
+    let files = [];
+    try {
+        files = fs.readdirSync(directories.groups).filter(name => path.extname(name) === '.json');
+    } catch (error) {
+        if (error?.code !== 'ENOENT') {
+            throw error;
+        }
+    }
+
+    for (const file of files) {
+        const filePath = path.join(directories.groups, file);
+        try {
+            const data = tryParse(fs.readFileSync(filePath, 'utf8'));
+            if (!isPlainObject(data)) {
+                continue;
+            }
+            const id = path.parse(file).name;
+            groups.set(id, {
+                id,
+                filePath,
+                data,
+                chats: Array.isArray(data.chats) ? data.chats.map(String) : [],
+                members: Array.isArray(data.members) ? data.members.map(String) : [],
+            });
+        } catch (error) {
+            console.warn(`Could not read group file ${file}:`, error);
+        }
+    }
+    return groups;
+}
+
+function normalizeChatFileName(value) {
+    let name = String(value ?? '');
+    if (!name.endsWith('.jsonl')) {
+        name += '.jsonl';
+    }
+    return isSafeEntryName(name) ? name : null;
+}
+
+/**
+ * Resolves which chats a bulk export should contain.
+ * @param {import('express').Request} request Request
+ * @param {{scope: 'all'|'selection', targets: any[], includeCards: boolean}} options Export options
+ */
+function collectChatExportPlan(request, { scope, targets, includeCards }) {
+    const directories = request.user.directories;
+    const userGroups = readUserGroups(directories);
+    const chats = [];
+    const seenChats = new Set();
+    const groups = new Map();
+    const cards = new Set();
+
+    const addCharacterChats = (dirName, files) => {
+        if (!isSafeEntryName(dirName)) {
+            throw new ChatTransferError(400, 'invalid_target', '无效的角色');
+        }
+        const folder = path.join(directories.chats, dirName);
+        const available = listJsonlFiles(folder);
+        const availableSet = new Set(available);
+        const selected = files === null ? available : files.map(normalizeChatFileName);
+        for (const file of selected) {
+            const filePath = path.join(folder, String(file));
+            if (!file || !availableSet.has(file) || seenChats.has(toPathKey(filePath))) {
+                continue;
+            }
+            seenChats.add(toPathKey(filePath));
+            chats.push({ kind: 'character', owner: dirName, ownerName: dirName, file, filePath });
+            if (includeCards) {
+                cards.add(`${dirName}.png`);
+            }
+        }
+    };
+
+    const addGroupChats = (group, chatIds) => {
+        const selected = chatIds === null
+            ? group.chats
+            : chatIds.map(id => String(id).replace(/\.jsonl$/, '')).filter(id => group.chats.includes(id));
+        for (const id of selected) {
+            const file = normalizeChatFileName(id);
+            if (!file) {
+                continue;
+            }
+            const filePath = path.join(directories.groupChats, file);
+            if (!fs.existsSync(filePath) || seenChats.has(toPathKey(filePath))) {
+                continue;
+            }
+            seenChats.add(toPathKey(filePath));
+            chats.push({ kind: 'group', owner: group.id, ownerName: String(group.data.name || group.id), file, filePath });
+        }
+        groups.set(group.id, group);
+        if (includeCards) {
+            group.members.forEach(member => cards.add(member));
+        }
+    };
+
+    if (scope === 'all') {
+        let entries = [];
+        try {
+            entries = fs.readdirSync(directories.chats, { withFileTypes: true });
+        } catch (error) {
+            if (error?.code !== 'ENOENT') {
+                throw error;
+            }
+        }
+        for (const entry of entries) {
+            if (entry.isDirectory() && isSafeEntryName(entry.name)) {
+                addCharacterChats(entry.name, null);
+            }
+        }
+        for (const group of userGroups.values()) {
+            addGroupChats(group, null);
+        }
+    } else {
+        if (!Array.isArray(targets) || targets.length === 0) {
+            throw new ChatTransferError(400, 'invalid_target', '请选择要导出的对话');
+        }
+        if (targets.length > CHAT_TRANSFER_LIMITS.maxExportTargets) {
+            throw new ChatTransferError(400, 'too_many_targets', '一次选择的导出目标过多');
+        }
+        for (const target of targets) {
+            const files = Array.isArray(target?.files) ? target.files : null;
+            if (target?.type === 'group') {
+                const group = userGroups.get(String(target.id ?? ''));
+                if (!group) {
+                    throw new ChatTransferError(404, 'group_not_found', '找不到要导出的群聊');
+                }
+                addGroupChats(group, files);
+            } else {
+                addCharacterChats(String(target?.avatar ?? '').replace(/\.png$/i, ''), files);
+            }
+        }
+    }
+
+    const cardFiles = [...cards].filter(file => isSafeEntryName(file) && path.extname(file) === '.png'
+        && fs.existsSync(path.join(directories.characters, file)));
+    return { chats, groups: [...groups.values()], cardFiles };
+}
+
+/**
+ * Builds unique, human readable folder names for plain-text exports.
+ * @param {{kind: string, owner: string, ownerName: string}[]} chats Planned chats
+ * @returns {Map<string, string>} Owner key -> folder name
+ */
+function getTextExportFolders(chats) {
+    const folders = new Map();
+    const used = new Set();
+    for (const chat of chats) {
+        const key = `${chat.kind}\0${chat.owner}`;
+        if (folders.has(key)) {
+            continue;
+        }
+        const baseName = sanitize(chat.kind === 'group' ? `群聊 - ${chat.ownerName}` : chat.ownerName) || chat.owner;
+        let name = baseName;
+        for (let attempt = 2; used.has(name.toLowerCase()); attempt++) {
+            name = `${baseName} (${attempt})`;
+        }
+        used.add(name.toLowerCase());
+        folders.set(key, name);
+    }
+    return folders;
+}
+
+/**
+ * Detects an optional single top-level folder that wraps the user data layout.
+ * @param {{path: string}[]} entries Archive entries
+ * @returns {string|null} Root prefix ('' or 'folder/') or null when no data is present
+ */
+function detectArchiveRoot(entries) {
+    const votes = new Map();
+    for (const { path: entryPath } of entries) {
+        const segments = entryPath.split('/');
+        if (segments.length > 1 && ARCHIVE_ROOT_MARKERS.includes(segments[0])) {
+            votes.set('', (votes.get('') ?? 0) + 1);
+        } else if (segments.length > 2 && ARCHIVE_ROOT_MARKERS.includes(segments[1])) {
+            const prefix = `${segments[0]}/`;
+            votes.set(prefix, (votes.get(prefix) ?? 0) + 1);
+        }
+    }
+    let best = null;
+    let bestVotes = 0;
+    for (const [prefix, count] of votes) {
+        if (count > bestVotes) {
+            best = prefix;
+            bestVotes = count;
+        }
+    }
+    return best;
+}
+
+/**
+ * Groups archive entries into restorable chats, groups and character cards.
+ * @param {{path: string, entry: any}[]} entries Archive entries
+ */
+function classifyChatArchive(entries) {
+    const layout = {
+        characterChats: new Map(),
+        groupChats: new Map(),
+        groups: new Map(),
+        characters: new Map(),
+    };
+    const root = detectArchiveRoot(entries);
+    if (root === null) {
+        return layout;
+    }
+
+    const getChatRecord = (map, dir, file) => {
+        const key = `${dir}/${file}`;
+        if (!map.has(key)) {
+            map.set(key, { dir, file, main: null, sidecar: null, shards: [] });
+        }
+        return map.get(key);
+    };
+
+    for (const item of entries) {
+        if (!item.path.startsWith(root)) {
+            continue;
+        }
+        const relativePath = item.path.slice(root.length);
+        for (const [kind, pattern] of CHAT_ARCHIVE_PATTERNS) {
+            const match = pattern.exec(relativePath);
+            if (!match) {
+                continue;
+            }
+            const names = match.slice(1).filter(Boolean);
+            if (!names.every(isSafeEntryName)) {
+                break;
+            }
+            const [, dir, file, shard] = match;
+            switch (kind) {
+                case 'characterChat':
+                case 'groupChat':
+                    getChatRecord(kind === 'groupChat' ? layout.groupChats : layout.characterChats, dir, file).main = item;
+                    break;
+                case 'characterSidecar':
+                case 'groupSidecar':
+                    getChatRecord(kind === 'groupSidecar' ? layout.groupChats : layout.characterChats, dir, file).sidecar = item;
+                    break;
+                case 'characterShard':
+                case 'groupShard':
+                    getChatRecord(kind === 'groupShard' ? layout.groupChats : layout.characterChats, dir, file).shards.push({ name: shard, item });
+                    break;
+                case 'group':
+                    layout.groups.set(path.parse(match[1]).name, item);
+                    break;
+                case 'character':
+                    layout.characters.set(match[1], item);
+                    break;
+            }
+            break;
+        }
+    }
+
+    for (const map of [layout.characterChats, layout.groupChats]) {
+        for (const [key, record] of map) {
+            record.shards.sort((a, b) => a.name.localeCompare(b.name));
+            // Metadata sidecars alone are not conversations.
+            if (!record.main && record.shards.length === 0) {
+                map.delete(key);
+            }
+        }
+    }
+    return layout;
+}
+
+/**
+ * Rebuilds one archived chat (legacy file or chunked layout) into a legacy JSONL document.
+ * @param {{dir: string, file: string, main: any, sidecar: any, shards: {item: any}[]}} record Archived chat parts
+ * @param {boolean} isGroup Whether this is a group chat
+ * @param {(item: any, maxBytes: number) => Promise<Buffer>} readEntry Bounded entry reader
+ * @param {{invalidLines: number}} summary Restore summary
+ * @returns {Promise<{content: string, signature: string}>}
+ */
+async function assembleArchivedChat(record, isGroup, readEntry, summary) {
+    const readLines = async (item, maxBytes) => splitJsonlLines((await readEntry(item, maxBytes)).toString('utf8'));
+    const mainLines = record.main ? await readLines(record.main, CHAT_TRANSFER_LIMITS.maxChatPartBytes) : [];
+    const sidecar = record.sidecar
+        ? tryParse((await readEntry(record.sidecar, CHAT_TRANSFER_LIMITS.maxSidecarBytes)).toString('utf8'))
+        : null;
+
+    let header = isChatHeaderObject(sidecar) ? sidecar : null;
+    let messageLines = mainLines;
+    if (record.shards.length > 0) {
+        // Chunked layout: the main file only holds the header.
+        const fileHeader = tryParse(mainLines[0] ?? '');
+        header ??= isChatHeaderObject(fileHeader) ? fileHeader : null;
+        messageLines = [];
+        let assembledBytes = 0;
+        for (const shard of record.shards) {
+            const lines = await readLines(shard.item, CHAT_TRANSFER_LIMITS.maxChatPartBytes);
+            assembledBytes += lines.reduce((total, line) => total + line.length + 1, 0);
+            if (assembledBytes > CHAT_TRANSFER_LIMITS.maxChatBytes) {
+                throw new ChatTransferError(413, 'chat_too_large', `对话过大，无法恢复：${record.file}`);
+            }
+            messageLines.push(...lines);
+        }
+    }
+
+    const messages = [];
+    for (const [index, line] of messageLines.entries()) {
+        const data = tryParse(line);
+        if (!isPlainObject(data)) {
+            summary.invalidLines++;
+            continue;
+        }
+        if (index === 0 && isChatHeaderObject(data)) {
+            header ??= data;
+            continue;
+        }
+        messages.push(JSON.stringify(data));
+    }
+
+    header ??= isGroup
+        ? { chat_metadata: {}, user_name: 'unused', character_name: 'unused' }
+        : { user_name: 'User', character_name: record.dir, create_date: humanizedISO8601DateTime(), chat_metadata: {} };
+    const lines = [JSON.stringify(header), ...messages];
+    return { content: lines.join('\n'), signature: getChatMessagesSignature(lines) };
+}
+
+/**
+ * Picks where a restored chat goes: skip identical copies, otherwise keep the
+ * original name or add a " (restored N)" suffix. Existing files are never overwritten.
+ * @returns {Promise<{action: 'create'|'rename'|'skip', filePath: string}>}
+ */
+async function resolveChatRestoreTarget(request, { directory, baseName, signature, isGroup, reserved }) {
+    for (let attempt = 0; attempt < CHAT_TRANSFER_LIMITS.maxRenameAttempts; attempt++) {
+        const suffix = attempt === 0 ? '' : attempt === 1 ? ' (restored)' : ` (restored ${attempt})`;
+        const candidate = path.join(directory, `${baseName}${suffix}.jsonl`);
+        if (reserved.has(toPathKey(candidate))) {
+            continue;
+        }
+        if (!fs.existsSync(candidate)) {
+            return { action: attempt === 0 ? 'create' : 'rename', filePath: candidate };
+        }
+        const existing = await chatStorageMutex.runExclusive(getChatStorageLockKey(request, candidate),
+            () => readChatJsonl(candidate, isGroup));
+        if (getChatMessagesSignature(splitJsonlLines(existing)) === signature) {
+            return { action: 'skip', filePath: candidate };
+        }
+    }
+    throw new ChatTransferError(409, 'restore_name_conflict', `同名对话过多，无法恢复：${baseName}`);
+}
+
+/**
+ * Restores chats, groups and (optionally) missing character cards from an
+ * exported chat bundle or a full user backup. The restore is additive and
+ * atomic: nothing existing is overwritten except group chat lists that gain
+ * restored entries, and either every file is written or none is.
+ * @param {import('express').Request} request Request
+ * @param {string} zipPath Uploaded archive path
+ * @param {{includeCharacters: boolean}} options Restore options
+ */
+async function restoreChatArchive(request, zipPath, { includeCharacters }) {
+    const directories = request.user.directories;
+    const summary = {
+        chats: { imported: 0, renamed: 0, skipped: 0 },
+        groupChats: { imported: 0, renamed: 0, skipped: 0, orphaned: 0 },
+        groups: { created: 0, updated: 0 },
+        characters: { imported: 0, skipped: 0, invalid: 0, notSelected: 0 },
+        invalidLines: 0,
+        missingCharacters: [],
+    };
+
+    const reader = await openZipFileReader(zipPath);
+    const transaction = new FileTransaction(directories.root);
+    try {
+        const layout = classifyChatArchive(reader.entries);
+        if (layout.characterChats.size === 0 && layout.groupChats.size === 0 && layout.groups.size === 0 && layout.characters.size === 0) {
+            throw new ChatTransferError(400, 'no_chat_data', '压缩包中没有找到可恢复的对话数据，请选择「导出全部对话」或「下载备份」得到的 ZIP 文件');
+        }
+
+        const quota = await canConsumeStorage(request.user.profile, directories, 0);
+        const remainingBytes = quota.config.enabled ? quota.remainingBytes : Number.POSITIVE_INFINITY;
+        const reserved = new Set();
+        let readBytes = 0;
+        let stagedBytes = 0;
+
+        const readEntry = async (item, maxBytes) => {
+            const buffer = await reader.read(item, { maxBytes, maxCompressionRatio: CHAT_TRANSFER_LIMITS.maxCompressionRatio });
+            readBytes += buffer.length;
+            if (readBytes > CHAT_TRANSFER_LIMITS.maxTotalReadBytes) {
+                throw new ChatTransferError(413, 'archive_size_limit_exceeded', ARCHIVE_ERROR_MESSAGES.archive_size_limit_exceeded);
+            }
+            return buffer;
+        };
+        const stage = async (targetPath, data) => {
+            const previousSize = fs.existsSync(targetPath) ? fs.statSync(targetPath).size : 0;
+            stagedBytes += Math.max(0, Buffer.byteLength(data) - previousSize);
+            if (stagedBytes > remainingBytes) {
+                throw new ChatTransferError(403, 'storage_limit', '存储空间不足，无法恢复全部对话。请清理空间或扩容后重试');
+            }
+            await transaction.stageFile(targetPath, data);
+            reserved.add(toPathKey(targetPath));
+        };
+
+        // Character cards first, so restored chats can be matched to them.
+        for (const [file, item] of layout.characters) {
+            const targetPath = path.join(directories.characters, file);
+            if (fs.existsSync(targetPath)) {
+                summary.characters.skipped++;
+                continue;
+            }
+            if (!includeCharacters) {
+                summary.characters.notSelected++;
+                continue;
+            }
+            const buffer = await readEntry(item, CHAT_TRANSFER_LIMITS.maxCardBytes);
+            try {
+                if (!isPlainObject(JSON.parse(readCharacterCard(buffer)))) {
+                    throw new TypeError('Character card is not an object.');
+                }
+            } catch {
+                summary.characters.invalid++;
+                continue;
+            }
+            await stage(targetPath, buffer);
+            summary.characters.imported++;
+        }
+
+        const missingCharacters = new Set();
+        for (const record of layout.characterChats.values()) {
+            const assembled = await assembleArchivedChat(record, false, readEntry, summary);
+            const target = await resolveChatRestoreTarget(request, {
+                directory: path.join(directories.chats, record.dir),
+                baseName: path.parse(record.file).name,
+                signature: assembled.signature,
+                isGroup: false,
+                reserved,
+            });
+            if (target.action === 'skip') {
+                summary.chats.skipped++;
+                continue;
+            }
+            await stage(target.filePath, assembled.content);
+            summary.chats[target.action === 'rename' ? 'renamed' : 'imported']++;
+
+            const cardPath = path.join(directories.characters, `${record.dir}.png`);
+            if (!fs.existsSync(cardPath) && !reserved.has(toPathKey(cardPath))) {
+                missingCharacters.add(record.dir);
+            }
+        }
+        summary.missingCharacters = [...missingCharacters].slice(0, CHAT_TRANSFER_LIMITS.maxReportedMissingCharacters);
+
+        // Group chats are only visible through a group definition.
+        const localGroups = readUserGroups(directories);
+        const archivedGroups = new Map();
+        for (const [id, item] of layout.groups) {
+            const data = tryParse((await readEntry(item, CHAT_TRANSFER_LIMITS.maxGroupBytes)).toString('utf8'));
+            if (isPlainObject(data)) {
+                archivedGroups.set(id, data);
+            }
+        }
+        const chatOwners = new Map();
+        for (const [id, group] of localGroups) {
+            group.chats.forEach(chatId => chatOwners.set(chatId, id));
+        }
+        for (const [id, data] of archivedGroups) {
+            (Array.isArray(data.chats) ? data.chats : []).forEach(chatId => chatOwners.set(String(chatId), id));
+        }
+
+        const finalChatIds = new Map();
+        const restoredChatsByGroup = new Map();
+        for (const record of layout.groupChats.values()) {
+            const originalId = path.parse(record.file).name;
+            const groupId = chatOwners.get(originalId);
+            if (!groupId) {
+                summary.groupChats.orphaned++;
+                continue;
+            }
+            const assembled = await assembleArchivedChat(record, true, readEntry, summary);
+            const target = await resolveChatRestoreTarget(request, {
+                directory: directories.groupChats,
+                baseName: originalId,
+                signature: assembled.signature,
+                isGroup: true,
+                reserved,
+            });
+            const finalId = path.parse(target.filePath).name;
+            finalChatIds.set(originalId, finalId);
+            if (!restoredChatsByGroup.has(groupId)) {
+                restoredChatsByGroup.set(groupId, []);
+            }
+            restoredChatsByGroup.get(groupId).push(finalId);
+            if (target.action === 'skip') {
+                summary.groupChats.skipped++;
+                continue;
+            }
+            await stage(target.filePath, assembled.content);
+            summary.groupChats[target.action === 'rename' ? 'renamed' : 'imported']++;
+        }
+
+        const groupIds = new Set([...archivedGroups.keys(), ...restoredChatsByGroup.keys()]);
+        for (const groupId of groupIds) {
+            const restoredIds = restoredChatsByGroup.get(groupId) ?? [];
+            const localGroup = localGroups.get(groupId);
+            if (localGroup) {
+                const chats = [...localGroup.chats];
+                for (const chatId of restoredIds) {
+                    if (!chats.includes(chatId)) {
+                        chats.push(chatId);
+                    }
+                }
+                if (chats.length !== localGroup.chats.length) {
+                    await stage(localGroup.filePath, JSON.stringify({ ...localGroup.data, chats }, null, 4));
+                    summary.groups.updated++;
+                }
+                continue;
+            }
+
+            const archived = archivedGroups.get(groupId);
+            if (!archived || !isSafeEntryName(`${groupId}.json`)) {
+                continue;
+            }
+            const chats = (Array.isArray(archived.chats) ? archived.chats : [])
+                .map(chatId => finalChatIds.get(String(chatId)))
+                .filter(Boolean);
+            const chatId = finalChatIds.get(String(archived.chat_id)) ?? chats[chats.length - 1] ?? groupId;
+            if (!chats.includes(chatId)) {
+                chats.push(chatId);
+            }
+            const groupData = { ...archived, id: groupId, chats, chat_id: chatId };
+            delete groupData.past_metadata;
+            await stage(path.join(directories.groups, `${groupId}.json`), JSON.stringify(groupData, null, 4));
+            summary.groups.created++;
+        }
+
+        // Re-check against the live directory size right before committing.
+        const additionalBytes = await transaction.getAdditionalBytes();
+        const capacity = await canConsumeStorage(request.user.profile, directories, additionalBytes);
+        if (!capacity.allowed) {
+            throw new ChatTransferError(403, 'storage_limit', '存储空间不足，无法恢复全部对话。请清理空间或扩容后重试');
+        }
+        await transaction.commit();
+        return summary;
+    } finally {
+        reader.close();
+        await transaction.dispose();
+    }
+}
+
+/**
+ * Adds one entry and waits until archiver has consumed it, so large exports
+ * stream one chat at a time instead of buffering everything in memory.
+ * @param {import('archiver').Archiver} archive Archive
+ * @param {import('express').Response} response Response the archive is piped to
+ * @param {() => void} addEntry Callback that appends exactly one entry
+ * @returns {Promise<void>}
+ */
+function appendArchiveEntry(archive, response, addEntry) {
+    return new Promise((resolve, reject) => {
+        const cleanup = () => {
+            archive.off('entry', onEntry);
+            archive.off('error', onError);
+            response.off('close', onClose);
+        };
+        const onEntry = () => {
+            cleanup();
+            resolve();
+        };
+        const onError = (error) => {
+            cleanup();
+            reject(error);
+        };
+        const onClose = () => {
+            cleanup();
+            reject(Object.assign(new Error('Client closed the export stream.'), { code: 'CLIENT_CLOSED' }));
+        };
+        archive.on('entry', onEntry);
+        archive.once('error', onError);
+        response.once('close', onClose);
+        addEntry();
+    });
+}
+
+router.post('/export-bundle', async function (request, response) {
+    const format = request.body?.format === 'txt' ? 'txt' : 'jsonl';
+    const scope = request.body?.scope === 'all' ? 'all' : 'selection';
+    const includeCards = format === 'jsonl' && request.body?.include_cards === true;
+
+    let plan;
+    try {
+        plan = collectChatExportPlan(request, { scope, targets: request.body?.targets, includeCards });
+    } catch (error) {
+        return sendChatTransferError(response, error, 'chat_export_failed');
+    }
+    if (plan.chats.length === 0) {
+        return response.status(404).json({ error: 'no_chats', message: '没有找到可导出的对话' });
+    }
+
+    const archive = archiver('zip', { zlib: { level: 6 } });
+    let completed = false;
+    response.once('finish', () => {
+        completed = true;
+    });
+    response.once('close', () => {
+        if (!completed) {
+            archive.abort();
+        }
+    });
+    archive.on('warning', warning => console.warn('Chat export warning:', warning));
+    archive.on('error', error => {
+        console.error('Chat export archive failed:', error);
+        response.destroy(error);
+    });
+
+    // No Content-Disposition: the client names and saves the file itself.
+    // Download managers (IDM, Thunder, ...) hijack "attachment" responses and
+    // hand the page an empty 204 instead of the archive.
+    response.setHeader('Content-Type', 'application/zip');
+    response.setHeader('Cache-Control', 'private, no-store, max-age=0');
+    archive.pipe(response);
+
+    try {
+        const textFolders = format === 'txt' ? getTextExportFolders(plan.chats) : null;
+        const failed = [];
+        let exported = 0;
+        for (const chat of plan.chats) {
+            let content;
+            try {
+                content = await chatStorageMutex.runExclusive(getChatStorageLockKey(request, chat.filePath),
+                    () => readChatJsonl(chat.filePath, chat.kind === 'group'));
+            } catch (error) {
+                console.warn(`Could not export chat ${chat.filePath}:`, error);
+                failed.push(`${chat.ownerName}/${chat.file}`);
+                continue;
+            }
+
+            let name;
+            if (format === 'txt') {
+                content = chatJsonlToText(content);
+                name = `${textFolders.get(`${chat.kind}\0${chat.owner}`)}/${path.parse(chat.file).name}.txt`;
+            } else {
+                name = chat.kind === 'group' ? `group chats/${chat.file}` : `chats/${chat.owner}/${chat.file}`;
+            }
+            await appendArchiveEntry(archive, response, () => archive.append(content, { name }));
+            exported++;
+        }
+
+        if (format === 'jsonl') {
+            for (const group of plan.groups) {
+                await appendArchiveEntry(archive, response,
+                    () => archive.file(group.filePath, { name: `groups/${path.basename(group.filePath)}` }));
+            }
+            for (const file of plan.cardFiles) {
+                await appendArchiveEntry(archive, response,
+                    () => archive.file(path.join(request.user.directories.characters, file), { name: `characters/${file}` }));
+            }
+            const manifest = JSON.stringify({
+                format: 'sillytavern-chat-bundle',
+                version: 1,
+                exportedAt: new Date().toISOString(),
+                chats: exported,
+                groups: plan.groups.length,
+                characters: plan.cardFiles.length,
+                failed,
+            }, null, 4);
+            await appendArchiveEntry(archive, response, () => archive.append(manifest, { name: 'manifest.json' }));
+        } else if (failed.length > 0) {
+            const report = `以下对话读取失败，未包含在导出中：\n${failed.join('\n')}\n`;
+            await appendArchiveEntry(archive, response, () => archive.append(report, { name: '导出失败的对话.txt' }));
+        }
+
+        await archive.finalize();
+    } catch (error) {
+        if (!completed) {
+            if (error?.code === 'CLIENT_CLOSED') {
+                console.warn('Chat bundle export cancelled by the client.');
+            } else {
+                console.error('Chat bundle export failed:', error);
+            }
+            archive.abort();
+            response.destroy();
+        }
+    }
+});
+
+router.post('/import-archive', async function (request, response) {
+    if (!request.file) {
+        return response.status(400).json({ error: 'missing_file', message: '请选择要恢复的 ZIP 文件' });
+    }
+
+    const uploadPath = path.join(request.file.destination, request.file.filename);
+    const handle = request.user.profile.handle;
+    try {
+        const summary = await chatStorageMutex.runExclusive(`chat-restore\0${handle}`, () => restoreChatArchive(request, uploadPath, {
+            includeCharacters: String(request.body?.include_characters ?? 'true') !== 'false',
+        }));
+        invalidateCharacterListCache(handle);
+        invalidateRecentChatsCache(handle);
+        return response.send({ ok: true, summary });
+    } catch (error) {
+        return sendChatTransferError(response, error, 'chat_restore_failed');
+    } finally {
+        await fs.promises.rm(uploadPath, { force: true }).catch(() => undefined);
+    }
+});
+
 router.post('/export', validateAvatarUrlMiddleware, async function (request, response) {
     if (!request.body.file || (!request.body.avatar_url && request.body.is_group === false)) {
         return response.sendStatus(400);
     }
-    const pathToFolder = request.body.is_group
+    const isGroup = Boolean(request.body.is_group);
+    const pathToFolder = isGroup
         ? request.user.directories.groupChats
         : path.join(request.user.directories.chats, String(request.body.avatar_url).replace('.png', ''));
     const filename = path.join(pathToFolder, sanitize(request.body.file));
-    if (!request.body.is_group && !isPathUnderParent(request.user.directories.chats, filename)) {
+    if (!isGroup && !isPathUnderParent(request.user.directories.chats, filename)) {
         return response.sendStatus(400);
     }
     let exportfilename = request.body.exportfilename;
@@ -2180,96 +3092,20 @@ router.post('/export', validateAvatarUrlMiddleware, async function (request, res
         return response.status(404).json(errorMessage);
     }
     try {
-        // Short path for JSONL files
-        if (request.body.format === 'jsonl') {
-            try {
-                let rawFile;
-                if (chatChunkingEnabled && isChunkedChat(filename)) {
-                    const header = await readChatHeader(filename);
-                    const index = await ensureChatIndex(filename);
-                    const lines = [];
-                    if (header) {
-                        lines.push(JSON.stringify(header));
-                    }
-                    if (index?.shards?.length) {
-                        for (const shard of index.shards) {
-                            const shardPath = path.join(getChatChunkDir(filename), shard.file);
-                            const shardLines = await readShardLines(shardPath);
-                            lines.push(...shardLines);
-                        }
-                    }
-                    rawFile = lines.join('\n');
-                } else {
-                    rawFile = fs.readFileSync(filename, 'utf8');
-                }
-                const successMessage = {
-                    message: `Chat saved to ${exportfilename}`,
-                    result: rawFile,
-                };
-
-                console.info(`Chat exported as ${exportfilename}`);
-                return response.status(200).json(successMessage);
-            } catch (err) {
-                console.error(err);
-                const errorMessage = {
-                    message: `Could not read JSONL file to export. Source chat file: ${filename}.`,
-                };
-                console.error(errorMessage.message);
-                return response.status(500).json(errorMessage);
-            }
-        }
-
-        let buffer = '';
-        const handleLine = (line) => {
-            const data = JSON.parse(line);
-            // Skip non-printable/prompt-hidden messages
-            if (data.is_system) {
-                return;
-            }
-            if (data.mes) {
-                const name = data.name;
-                const message = (data?.extra?.display_text || data?.mes || '').replace(/\r?\n/g, '\n');
-                buffer += (`${name}: ${message}\n\n`);
-            }
+        const rawFile = await chatStorageMutex.runExclusive(getChatStorageLockKey(request, filename),
+            () => readChatJsonl(filename, isGroup));
+        const successMessage = {
+            message: `Chat saved to ${exportfilename}`,
+            result: request.body.format === 'jsonl' ? rawFile : chatJsonlToText(rawFile),
         };
-
-        if (chatChunkingEnabled && isChunkedChat(filename)) {
-            const index = await ensureChatIndex(filename);
-            if (index?.shards?.length) {
-                for (const shard of index.shards) {
-                    const shardPath = path.join(getChatChunkDir(filename), shard.file);
-                    const shardLines = await readShardLines(shardPath);
-                    for (const line of shardLines) {
-                        handleLine(line);
-                    }
-                }
-            }
-            const successMessage = {
-                message: `Chat saved to ${exportfilename}`,
-                result: buffer,
-            };
-            console.info(`Chat exported as ${exportfilename}`);
-            return response.status(200).json(successMessage);
-        }
-
-        const readStream = fs.createReadStream(filename);
-        const rl = readline.createInterface({
-            input: readStream,
-        });
-        rl.on('line', (line) => {
-            handleLine(line);
-        });
-        rl.on('close', () => {
-            const successMessage = {
-                message: `Chat saved to ${exportfilename}`,
-                result: buffer,
-            };
-            console.info(`Chat exported as ${exportfilename}`);
-            return response.status(200).json(successMessage);
-        });
+        console.info(`Chat exported as ${exportfilename}`);
+        return response.status(200).json(successMessage);
     } catch (err) {
         console.error('chat export failed.', err);
-        return response.sendStatus(400);
+        const errorMessage = {
+            message: `Could not read JSONL file to export. Source chat file: ${filename}.`,
+        };
+        return response.status(500).json(errorMessage);
     }
 });
 
@@ -2281,7 +3117,6 @@ router.post('/group/import', async function (request, response) {
             return response.sendStatus(400);
         }
 
-        const chatname = humanizedDateTime();
         const pathToUpload = path.join(filedata.destination, filedata.filename);
         const uploadSize = fs.statSync(pathToUpload).size;
         const storageError = await ensureChatStorageCapacity(request, response, uploadSize);
@@ -2289,7 +3124,14 @@ router.post('/group/import', async function (request, response) {
             fs.unlinkSync(pathToUpload);
             return storageError;
         }
-        const pathToNewFile = path.join(request.user.directories.groupChats, `${chatname}.jsonl`);
+        const firstLine = await readFirstLine(pathToUpload);
+        if (!isPlainObject(tryParse(firstLine))) {
+            fs.unlinkSync(pathToUpload);
+            console.error('Incorrect group chat format .jsonl');
+            return response.send({ error: true });
+        }
+        const pathToNewFile = getAvailableChatPath(request.user.directories.groupChats, humanizedDateTime());
+        const chatname = path.parse(pathToNewFile).name;
         fs.copyFileSync(pathToUpload, pathToNewFile);
         fs.unlinkSync(pathToUpload);
         if (chatChunkingEnabled) {
@@ -2359,8 +3201,8 @@ router.post('/import', validateAvatarUrlMiddleware, async function (request, res
             }
 
             const handleChat = async (chat) => {
-                const fileName = `${safeCharacterName} - ${humanizedDateTime()} imported.jsonl`;
-                const filePath = path.join(directoryPath, fileName);
+                const filePath = getAvailableChatPath(directoryPath, `${safeCharacterName} - ${humanizedDateTime()} imported`);
+                const fileName = path.basename(filePath);
                 fileNames.push(fileName);
                 if (chatChunkingEnabled) {
                     const lines = String(chat).split('\n').filter(line => line.length > 0);
@@ -2411,8 +3253,8 @@ router.post('/import', validateAvatarUrlMiddleware, async function (request, res
                 console.warn('Failed to flatten Chub Chat data: ', error);
             }
 
-            const fileName = `${safeCharacterName} - ${humanizedDateTime()} imported.jsonl`;
-            const filePath = path.join(directoryPath, fileName);
+            const filePath = getAvailableChatPath(directoryPath, `${safeCharacterName} - ${humanizedDateTime()} imported`);
+            const fileName = path.basename(filePath);
             fileNames.push(fileName);
             if (chatChunkingEnabled) {
                 const lines = String(flattenedChat ?? '').split('\n').filter(line => line.length > 0);

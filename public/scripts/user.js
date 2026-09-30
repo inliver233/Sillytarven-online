@@ -1307,6 +1307,14 @@ async function openUserProfile() {
     }
 
     template.find('.userSettingsSnapshotsButton').on('click', () => viewSettingsSnapshots());
+    template.find('.userChatTransferButton').on('click', async () => {
+        const { openChatTransferPanel } = await import('./chat-transfer.js');
+        await openChatTransferPanel({ tab: 'export', scope: 'all' });
+    });
+    template.find('.userRestoreBackupButton').on('click', async () => {
+        const { openChatTransferPanel } = await import('./chat-transfer.js');
+        await openChatTransferPanel({ tab: 'restore' });
+    });
     template.find('.userChangeNameButton').on('click', async () => changeName(currentUser.handle, currentUser.name, async () => {
         await getCurrentUser();
         template.find('.userName').text(currentUser.name);

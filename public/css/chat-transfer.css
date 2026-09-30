@@ -1,0 +1,658 @@
+/* 对话导入 / 导出面板 */
+.chatTransfer {
+    --ct-accent: var(--st-primary, #3b82f6);
+    --ct-accent-soft: color-mix(in srgb, var(--ct-accent) 14%, transparent);
+    --ct-border: var(--SmartThemeBorderColor, rgba(255, 255, 255, 0.12));
+    --ct-surface: color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 5%, transparent);
+    --ct-surface-hover: color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 9%, transparent);
+    --ct-muted: color-mix(in srgb, var(--SmartThemeBodyColor, #fff) 62%, transparent);
+    --ct-success: #22c55e;
+    --ct-danger: #ef4444;
+    --ct-warning: #f59e0b;
+
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    width: 100%;
+    max-width: 720px;
+    margin: 0 auto;
+    text-align: left;
+    color: var(--SmartThemeBodyColor);
+}
+
+.chatTransfer [hidden] {
+    display: none !important;
+}
+
+.chatTransfer.busy .chatTransfer-tab,
+.chatTransfer.busy .chatTransfer-drop {
+    pointer-events: none;
+    opacity: 0.6;
+}
+
+/* Header & tabs */
+.chatTransfer-head {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.chatTransfer-title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 1.2em;
+    font-weight: 600;
+}
+
+.chatTransfer-title i {
+    color: var(--ct-accent);
+}
+
+.chatTransfer-tabs {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 4px;
+    padding: 4px;
+    border: 1px solid var(--ct-border);
+    border-radius: 12px;
+    background: var(--ct-surface);
+}
+
+.chatTransfer-tab {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    min-height: 38px;
+    padding: 6px 10px;
+    border: none;
+    border-radius: 9px;
+    background: transparent;
+    color: var(--ct-muted);
+    font: inherit;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.chatTransfer-tab:hover {
+    color: var(--SmartThemeBodyColor);
+    background: var(--ct-surface-hover);
+}
+
+.chatTransfer-tab.active {
+    color: var(--SmartThemeBodyColor);
+    background: var(--ct-accent-soft);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ct-accent) 45%, transparent);
+    font-weight: 600;
+}
+
+.chatTransfer-tab.active i {
+    color: var(--ct-accent);
+}
+
+/* Panels & fields */
+.chatTransfer-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+}
+
+.chatTransfer-field {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.chatTransfer-label {
+    font-size: 0.85em;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: var(--ct-muted);
+}
+
+.chatTransfer-field select.text_pole,
+.chatTransfer-field input.text_pole {
+    width: 100%;
+    margin: 0;
+}
+
+.chatTransfer-muted {
+    font-size: 0.85em;
+    color: var(--ct-muted);
+}
+
+/* Scope choices */
+.chatTransfer-choices {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.chatTransfer-choice {
+    position: relative;
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px;
+    border: 1px solid var(--ct-border);
+    border-radius: 10px;
+    background: var(--ct-surface);
+    cursor: pointer;
+    transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.chatTransfer-choice:hover {
+    background: var(--ct-surface-hover);
+}
+
+.chatTransfer-choice input {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+}
+
+.chatTransfer-choice > i {
+    margin-top: 2px;
+    width: 1.2em;
+    text-align: center;
+    color: var(--ct-muted);
+}
+
+.chatTransfer-choice:has(input:checked) {
+    border-color: var(--ct-accent);
+    background: var(--ct-accent-soft);
+}
+
+.chatTransfer-choice:has(input:checked) > i {
+    color: var(--ct-accent);
+}
+
+.chatTransfer-choice:has(input:focus-visible) {
+    outline: 2px solid var(--ct-accent);
+    outline-offset: 2px;
+}
+
+.chatTransfer-choice.disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.chatTransfer-choiceText,
+.chatTransfer-segmented span,
+.chatTransfer-check span {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.chatTransfer-choiceText small,
+.chatTransfer-segmented small,
+.chatTransfer-check small {
+    font-size: 0.8em;
+    color: var(--ct-muted);
+    overflow-wrap: anywhere;
+}
+
+/* Format selector */
+.chatTransfer-segmented {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.chatTransfer-segmented label {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border: 1px solid var(--ct-border);
+    border-radius: 10px;
+    background: var(--ct-surface);
+    cursor: pointer;
+}
+
+.chatTransfer-segmented label:has(input:checked) {
+    border-color: var(--ct-accent);
+    background: var(--ct-accent-soft);
+}
+
+.chatTransfer-segmented input {
+    accent-color: var(--ct-accent);
+    margin: 0;
+}
+
+.chatTransfer-check {
+    align-items: flex-start;
+    gap: 10px;
+}
+
+.chatTransfer-check input {
+    margin-top: 3px;
+}
+
+/* Chat picker */
+.chatTransfer-pickerBar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.chatTransfer-pickerBar input {
+    flex: 1;
+    min-width: 0;
+}
+
+.chatTransfer-pickerBar .menu_button {
+    width: auto;
+    margin: 0;
+    padding: 5px 12px;
+    white-space: nowrap;
+}
+
+.chatTransfer-chatList {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: min(320px, 40vh);
+    overflow-y: auto;
+    padding: 4px;
+    border: 1px solid var(--ct-border);
+    border-radius: 10px;
+    background: var(--ct-surface);
+}
+
+.chatTransfer-chat {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background-color 0.15s ease;
+}
+
+.chatTransfer-chat:hover {
+    background: var(--ct-surface-hover);
+}
+
+.chatTransfer-chat.selected {
+    background: var(--ct-accent-soft);
+}
+
+.chatTransfer-chat input {
+    flex-shrink: 0;
+    margin: 0;
+    accent-color: var(--ct-accent);
+}
+
+.chatTransfer-chatText {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.chatTransfer-chatText b {
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.chatTransfer-chatText small {
+    font-size: 0.8em;
+    color: var(--ct-muted);
+}
+
+.chatTransfer-badge {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 0 6px;
+    border-radius: 999px;
+    background: var(--ct-accent);
+    color: #fff;
+    font-size: 0.75em;
+    font-weight: 600;
+    vertical-align: 1px;
+}
+
+.chatTransfer-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 24px 12px;
+    color: var(--ct-muted);
+}
+
+/* Actions */
+.chatTransfer-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding-top: 12px;
+    border-top: 1px solid var(--ct-border);
+}
+
+.chatTransfer .menu_button.chatTransfer-primary {
+    width: auto;
+    margin: 0;
+    gap: 8px;
+    padding: 8px 18px;
+    border-color: transparent;
+    background: var(--ct-accent);
+    color: #fff;
+    filter: none;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.chatTransfer .menu_button.chatTransfer-primary:not(.disabled):not([disabled]):hover {
+    background: color-mix(in srgb, var(--ct-accent) 85%, #000);
+}
+
+.chatTransfer .menu_button.chatTransfer-primary.disabled,
+.chatTransfer .menu_button.chatTransfer-primary[disabled] {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+/* Drop zones */
+.chatTransfer-drop {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 28px 16px;
+    border: 2px dashed var(--ct-border);
+    border-radius: 12px;
+    background: var(--ct-surface);
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.chatTransfer-drop > i {
+    font-size: 2em;
+    color: var(--ct-accent);
+    margin-bottom: 4px;
+}
+
+.chatTransfer-drop small {
+    max-width: 480px;
+    font-size: 0.8em;
+    color: var(--ct-muted);
+}
+
+.chatTransfer-drop:hover,
+.chatTransfer-drop:focus-visible,
+.chatTransfer-drop.dragover {
+    border-color: var(--ct-accent);
+    background: var(--ct-accent-soft);
+    outline: none;
+}
+
+.chatTransfer-drop.disabled {
+    pointer-events: none;
+    opacity: 0.5;
+}
+
+/* Import results */
+.chatTransfer-results {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.chatTransfer-results li {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    border: 1px solid var(--ct-border);
+    border-radius: 8px;
+    background: var(--ct-surface);
+}
+
+.chatTransfer-resultName {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.chatTransfer-results small {
+    font-size: 0.8em;
+    color: var(--ct-muted);
+    text-align: right;
+}
+
+.chatTransfer-results li.is-success i {
+    color: var(--ct-success);
+}
+
+.chatTransfer-results li.is-error {
+    border-color: color-mix(in srgb, var(--ct-danger) 45%, transparent);
+}
+
+.chatTransfer-results li.is-error i,
+.chatTransfer-results li.is-error small {
+    color: var(--ct-danger);
+}
+
+/* Restore */
+.chatTransfer-note,
+.chatTransfer-warning {
+    display: flex;
+    gap: 12px;
+    padding: 12px 14px;
+    border-radius: 10px;
+    font-size: 0.9em;
+    line-height: 1.6;
+}
+
+.chatTransfer-note {
+    border: 1px solid color-mix(in srgb, var(--ct-accent) 35%, transparent);
+    background: var(--ct-accent-soft);
+}
+
+.chatTransfer-note > i {
+    margin-top: 4px;
+    color: var(--ct-accent);
+}
+
+.chatTransfer-note p,
+.chatTransfer-note ul {
+    margin: 0;
+}
+
+.chatTransfer-note ul {
+    margin-top: 4px;
+    padding-left: 1.2em;
+}
+
+.chatTransfer-warning {
+    border: 1px solid color-mix(in srgb, var(--ct-warning) 45%, transparent);
+    background: color-mix(in srgb, var(--ct-warning) 12%, transparent);
+}
+
+.chatTransfer-warning > i {
+    margin-top: 4px;
+    color: var(--ct-warning);
+}
+
+.chatTransfer-file {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 14px;
+    border: 1px solid var(--ct-border);
+    border-radius: 12px;
+    background: var(--ct-surface);
+}
+
+.chatTransfer-file > i {
+    font-size: 1.6em;
+    color: var(--ct-accent);
+}
+
+.chatTransfer-fileInfo {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.chatTransfer-fileInfo b {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.chatTransfer-fileInfo small {
+    color: var(--ct-muted);
+}
+
+.chatTransfer-file .menu_button {
+    width: auto;
+    margin: 0;
+    padding: 6px 12px;
+    white-space: nowrap;
+}
+
+.chatTransfer-progress {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.chatTransfer-progressBar {
+    height: 8px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: var(--ct-surface-hover);
+}
+
+.chatTransfer-progressBar > div {
+    width: 0;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--ct-accent);
+    transition: width 0.2s ease;
+}
+
+.chatTransfer-progress.indeterminate .chatTransfer-progressBar > div {
+    animation: chatTransferPulse 1.2s ease-in-out infinite;
+}
+
+.chatTransfer-progress small {
+    color: var(--ct-muted);
+}
+
+@keyframes chatTransferPulse {
+    0%,
+    100% {
+        opacity: 1;
+    }
+
+    50% {
+        opacity: 0.45;
+    }
+}
+
+.chatTransfer-summary {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 14px;
+    border: 1px solid color-mix(in srgb, var(--ct-success) 40%, transparent);
+    border-radius: 12px;
+    background: color-mix(in srgb, var(--ct-success) 8%, transparent);
+}
+
+.chatTransfer-summaryTitle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-weight: 600;
+}
+
+.chatTransfer-summaryTitle i {
+    color: var(--ct-success);
+}
+
+.chatTransfer-summaryRow {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 0.9em;
+}
+
+.chatTransfer-summaryRow span {
+    color: var(--ct-muted);
+}
+
+.chatTransfer-summaryRow b {
+    font-weight: 500;
+    text-align: right;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .chatTransfer-progress.indeterminate .chatTransfer-progressBar > div {
+        animation: none;
+    }
+}
+
+@media (max-width: 600px) {
+    .chatTransfer-choices,
+    .chatTransfer-segmented {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .chatTransfer-tab span {
+        font-size: 0.9em;
+    }
+
+    .chatTransfer-actions {
+        flex-direction: column-reverse;
+        align-items: stretch;
+    }
+
+    .chatTransfer .menu_button.chatTransfer-primary {
+        width: 100%;
+    }
+
+    .chatTransfer-file {
+        flex-wrap: wrap;
+    }
+
+    .chatTransfer-fileInfo {
+        flex-basis: calc(100% - 3em);
+    }
+
+    .chatTransfer .chatTransfer-file .menu_button {
+        flex: 1 1 0;
+    }
+
+    .chatTransfer .chatTransfer-file .menu_button.chatTransfer-primary {
+        width: auto;
+    }
+}
+
+@media (max-width: 480px) {
+    .chatTransfer-tab {
+        gap: 0;
+        padding: 6px 4px;
+    }
+
+    .chatTransfer-tab i {
+        display: none;
+    }
+}

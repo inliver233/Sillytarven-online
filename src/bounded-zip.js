@@ -119,6 +119,103 @@ function openEntryStream(zipfile, entry) {
     });
 }
 
+function openZipFile(filePath) {
+    return new Promise((resolve, reject) => {
+        yauzl.open(filePath, {
+            lazyEntries: true,
+            autoClose: false,
+            decodeStrings: true,
+            validateEntrySizes: false,
+        }, (error, zipfile) => {
+            if (error || !zipfile) {
+                reject(invalidArchive('The uploaded file is not a valid ZIP archive.', error));
+                return;
+            }
+            resolve(zipfile);
+        });
+    });
+}
+
+/**
+ * Opens a ZIP file on disk for selective reads. Only the central directory is
+ * loaded up front; entry contents are streamed on demand under explicit limits,
+ * so large archives (e.g. full user backups) never have to fit in memory.
+ * Entries whose paths are unsafe or that are directories are omitted.
+ * @param {string} filePath Path to the ZIP file
+ * @param {{maxScannedEntries?: number}} [options] Central directory limits
+ * @returns {Promise<{entries: {path: string, entry: import('yauzl').Entry}[], read: (item: {path: string, entry: import('yauzl').Entry}, limits: {maxBytes: number, maxCompressionRatio?: number}) => Promise<Buffer>, close: () => void}>}
+ */
+export async function openZipFileReader(filePath, { maxScannedEntries = 200_000 } = {}) {
+    const zipfile = await openZipFile(filePath);
+    try {
+        if (zipfile.entryCount > maxScannedEntries) {
+            throw new ArchiveReadError(413, 'archive_entry_limit_exceeded', 'The archive contains too many entries.');
+        }
+        const rawEntries = await readCentralDirectory(zipfile);
+        const entries = [];
+        for (const entry of rawEntries) {
+            if (/\/$/.test(entry.fileName)) {
+                continue;
+            }
+            const normalizedPath = normalizeArchiveEntryPath(entry.fileName);
+            if (normalizedPath) {
+                entries.push({ path: normalizedPath, entry });
+            }
+        }
+
+        return {
+            entries,
+            async read(item, { maxBytes, maxCompressionRatio = DEFAULT_ARCHIVE_LIMITS.maxCompressionRatio }) {
+                const { entry } = item;
+                if (!Number.isSafeInteger(entry.compressedSize) || !Number.isSafeInteger(entry.uncompressedSize)) {
+                    throw invalidArchive('The archive contains an entry with an invalid size.');
+                }
+                if (entry.isEncrypted?.()) {
+                    throw invalidArchive('Encrypted ZIP entries are not supported.');
+                }
+                if (entry.uncompressedSize > maxBytes) {
+                    throw new ArchiveReadError(413, 'archive_entry_too_large', 'An archive entry exceeds the configured size limit.');
+                }
+                const ratio = entry.compressedSize === 0
+                    ? (entry.uncompressedSize === 0 ? 0 : Number.POSITIVE_INFINITY)
+                    : entry.uncompressedSize / entry.compressedSize;
+                if (ratio > maxCompressionRatio) {
+                    throw new ArchiveReadError(413, 'archive_compression_ratio_exceeded', 'An archive entry exceeds the configured compression ratio.');
+                }
+
+                const stream = await openEntryStream(zipfile, entry);
+                const chunks = [];
+                let actualBytes = 0;
+                try {
+                    for await (const chunk of stream) {
+                        actualBytes += chunk.length;
+                        if (actualBytes > maxBytes) {
+                            stream.destroy();
+                            throw new ArchiveReadError(413, 'archive_entry_too_large', 'An archive entry exceeds the configured size limit.');
+                        }
+                        chunks.push(chunk);
+                    }
+                } catch (error) {
+                    if (error instanceof ArchiveReadError) {
+                        throw error;
+                    }
+                    throw invalidArchive(`Could not decompress ZIP entry: ${entry.fileName}`, error);
+                }
+                if (actualBytes !== entry.uncompressedSize) {
+                    throw invalidArchive(`ZIP entry size does not match the central directory: ${entry.fileName}`);
+                }
+                return Buffer.concat(chunks, actualBytes);
+            },
+            close() {
+                zipfile.close();
+            },
+        };
+    } catch (error) {
+        zipfile.close();
+        throw error;
+    }
+}
+
 /**
  * Extracts a ZIP archive under both declared-size and actual-stream limits.
  * @param {ArrayBufferLike|Buffer} archiveBuffer ZIP archive bytes
