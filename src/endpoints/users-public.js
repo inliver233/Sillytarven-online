@@ -5,7 +5,7 @@ import express from 'express';
 import { RateLimiterMemory, RateLimiterRes } from 'rate-limiter-flexible';
 import { getIpFromRequest, getRealIpFromHeader } from '../express-common.js';
 import { color, Cache, getConfigValue } from '../util.js';
-import { KEY_PREFIX, getUserAvatar, toKey, getPasswordHash, getPasswordSalt, getAllUserHandles, getUserDirectories, ensurePublicDirectoriesExist, makeUserAccountPermanent, normalizeHandle } from '../users.js';
+import { KEY_PREFIX, getUserAvatar, toKey, getPasswordHash, getPasswordSalt, getAllUserHandles, getUserDirectories, ensurePublicDirectoriesExist, ensureUserDirectoriesExist, makeUserAccountPermanent, normalizeHandle } from '../users.js';
 import { validateInvitationCode, useInvitationCode } from '../invitation-codes.js';
 import { isUserIssuedInvitation } from '../user-invitation-policy.js';
 import { checkForNewContent, CONTENT_TYPES } from './content-manager.js';
@@ -181,6 +181,8 @@ router.post('/login', async (request, response) => {
                 });
             }
         }
+
+        await ensureUserDirectoriesExist(user.handle);
 
         if (!request.session) {
             console.error('Session not available');

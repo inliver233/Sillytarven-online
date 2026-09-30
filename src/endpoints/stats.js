@@ -166,6 +166,50 @@ export async function recreateStats(handle, chatsPath, charactersPath) {
 }
 
 /**
+ * In-flight stats loads, shared by startup and by requests that arrive before
+ * startup has reached the user.
+ * @type {Map<string, Promise<void>>}
+ */
+const STATS_LOADING = new Map();
+
+/**
+ * Loads one user's stats file into memory. If the file doesn't exist or is
+ * invalid, initializes stats by collecting them from the user's chats.
+ * @param {string} handle User handle
+ */
+async function loadUserStats(handle) {
+    const directories = getUserDirectories(handle);
+    try {
+        const statsFilePath = path.join(directories.root, STATS_FILE);
+        const statsFileContent = await readFile(statsFilePath, 'utf-8');
+        STATS.set(handle, JSON.parse(statsFileContent));
+    } catch (err) {
+        // If the file doesn't exist or is invalid, initialize stats
+        if (err.code === 'ENOENT' || err instanceof SyntaxError) {
+            await recreateStats(handle, directories.chats, directories.characters);
+        } else {
+            console.error(`Error loading stats for user ${handle}:`, err);
+        }
+    }
+}
+
+/**
+ * Ensures a user's stats are in memory before they are read or replaced.
+ * Startup loads stats in the background, so a request may arrive first.
+ * @param {string} handle User handle
+ * @returns {Promise<void>}
+ */
+function ensureUserStatsLoaded(handle) {
+    if (STATS.has(handle)) {
+        return Promise.resolve();
+    }
+    if (!STATS_LOADING.has(handle)) {
+        STATS_LOADING.set(handle, loadUserStats(handle).finally(() => STATS_LOADING.delete(handle)));
+    }
+    return STATS_LOADING.get(handle);
+}
+
+/**
  * Loads the stats file into memory. If the file doesn't exist or is invalid,
  * initializes stats by collecting and creating them for each character.
  */
@@ -186,21 +230,7 @@ export async function init() {
             const batch = userHandles.slice(i, i + BATCH_SIZE);
 
             // 并发处理当前批次
-            await Promise.all(batch.map(async (handle) => {
-                const directories = getUserDirectories(handle);
-                try {
-                    const statsFilePath = path.join(directories.root, STATS_FILE);
-                    const statsFileContent = await readFile(statsFilePath, 'utf-8');
-                    STATS.set(handle, JSON.parse(statsFileContent));
-                } catch (err) {
-                    // If the file doesn't exist or is invalid, initialize stats
-                    if (err.code === 'ENOENT' || err instanceof SyntaxError) {
-                        await recreateStats(handle, directories.chats, directories.characters);
-                    } else {
-                        console.error(`Error loading stats for user ${handle}:`, err);
-                    }
-                }
-            }));
+            await Promise.all(batch.map(handle => ensureUserStatsLoaded(handle)));
 
             processed += batch.length;
             if (totalUsers > 20) {
@@ -511,7 +541,8 @@ export const router = express.Router();
 /**
  * Handle a POST request to get the stats object
  */
-router.post('/get', function (request, response) {
+router.post('/get', async function (request, response) {
+    await ensureUserStatsLoaded(request.user.profile.handle);
     const stats = STATS.get(request.user.profile.handle) || {};
     response.send(stats);
 });
@@ -532,7 +563,7 @@ router.post('/recreate', async function (request, response) {
 /**
  * Handle a POST request to update the stats object
 */
-router.post('/update', function (request, response) {
+router.post('/update', async function (request, response) {
     if (!request.body) return response.sendStatus(400);
 
     const contentLength = Number(request.get('content-length'));
@@ -549,6 +580,8 @@ router.post('/update', function (request, response) {
         return response.status(400).send('Invalid stats payload');
     }
 
+    // Never let an update race ahead of the stored stats it is meant to replace.
+    await ensureUserStatsLoaded(request.user.profile.handle);
     setCharStats(request.user.profile.handle, request.body);
     return response.sendStatus(200);
 });

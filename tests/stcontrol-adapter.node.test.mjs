@@ -382,7 +382,7 @@ test('idle sessions become durable tombstones, revoke only their exact lease, an
     }
 });
 
-test('a stale managed page remains readable but cannot write', async () => {
+test('a stale managed page remains readable, including settings/get, but cannot write', async () => {
     const previousDataRoot = globalThis.DATA_ROOT;
     const previousEnabled = process.env.SILLYTAVERN_STCONTROL_ENABLED;
     const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sillytavern-stcontrol-stale-'));
@@ -431,6 +431,16 @@ test('a stale managed page remains readable but cannot write', async () => {
         await stcontrolRequestTracker(makeRequest('GET'), response, () => reads++);
         assert.equal(reads, 1);
         response.emit('finish');
+
+        const settingsReadResponse = new EventEmitter();
+        settingsReadResponse.status = status => { settingsReadResponse.statusCode = status; return settingsReadResponse; };
+        settingsReadResponse.json = body => { settingsReadResponse.body = body; return settingsReadResponse; };
+        const settingsReadRequest = makeRequest('POST');
+        settingsReadRequest.path = '/api/settings/get';
+        await stcontrolRequestTracker(settingsReadRequest, settingsReadResponse, () => reads++);
+        assert.equal(reads, 2, 'the read-only settings POST was fenced as a write');
+        assert.equal(settingsReadResponse.statusCode, undefined);
+        settingsReadResponse.emit('finish');
 
         const writeResponse = new EventEmitter();
         writeResponse.status = status => { writeResponse.statusCode = status; return writeResponse; };

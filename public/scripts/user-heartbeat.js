@@ -3,6 +3,31 @@
  * 定期向服务器发送心跳信号，确保在线状态统计的准确性
  */
 
+/**
+ * sessionStorage can throw (e.g. blocked storage in private browsing).
+ * @param {string} key Storage key
+ * @returns {string}
+ */
+function readSessionValue(key) {
+    try {
+        return window.sessionStorage?.getItem(key) || '';
+    } catch {
+        return '';
+    }
+}
+
+/**
+ * @param {string} key Storage key
+ * @param {string} value Value to store
+ */
+function writeSessionValue(key, value) {
+    try {
+        window.sessionStorage?.setItem(key, value);
+    } catch {
+        // Best effort only; the in-memory state still covers this page.
+    }
+}
+
 class UserHeartbeat {
     constructor() {
         this.heartbeatInterval = null;
@@ -196,6 +221,8 @@ class UserHeartbeat {
             this.heartbeatIntervalMs = validInterval(policy.foregroundHeartbeatMs, this.heartbeatIntervalMs);
             this.hiddenHeartbeatIntervalMs = validInterval(policy.backgroundHeartbeatMs, this.hiddenHeartbeatIntervalMs);
             this.stcontrolControllerUrl = typeof controllerUrl === 'string' && /^https?:\/\//i.test(controllerUrl) ? controllerUrl : '';
+            writeSessionValue('stcontrolManagedSession', 'true');
+            if (this.stcontrolControllerUrl) writeSessionValue('stcontrolControllerUrl', this.stcontrolControllerUrl);
             // A successful /api/users/me response proves a new authenticated
             // page and is the only in-page operation allowed to clear stale.
             this.stcontrolSessionStale = false;
@@ -217,8 +244,9 @@ class UserHeartbeat {
         if (typeof window.dispatchEvent === 'function' && typeof CustomEvent === 'function') {
             window.dispatchEvent(new CustomEvent('stcontrol-session-stale'));
         }
-        if (this.stcontrolControllerUrl && typeof window.location?.assign === 'function') {
-            setTimeout(() => window.location.assign(this.stcontrolControllerUrl), 0);
+        const controllerUrl = this.stcontrolControllerUrl || readSessionValue('stcontrolControllerUrl');
+        if (controllerUrl && typeof window.location?.assign === 'function') {
+            setTimeout(() => window.location.assign(controllerUrl), 0);
         }
     }
 
@@ -374,6 +402,8 @@ if (typeof window !== 'undefined') {
         start: startUserHeartbeat,
         stop: stopUserHeartbeat,
         setStcontrolEnabled: (enabled, policy, controllerUrl) => initUserHeartbeat().setStcontrolEnabled(enabled, policy, controllerUrl),
+        handleStcontrolSessionStale: () => initUserHeartbeat().handleStcontrolSessionStale(),
+        isStcontrolManagedPage: () => Boolean(userHeartbeat?.stcontrolEnabled) || readSessionValue('stcontrolManagedSession') === 'true',
         instance: () => userHeartbeat,
         forceStart: () => {
             if (isStcontrolAdminOnlyPage()) return null;

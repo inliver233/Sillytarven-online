@@ -145,13 +145,7 @@ export async function ensurePublicDirectoriesExist() {
         const batch = directoriesList.slice(i, i + BATCH_SIZE);
 
         // 并发处理当前批次
-        await Promise.all(batch.map(async (userDirectories) => {
-            for (const dir of Object.values(userDirectories)) {
-                if (!fs.existsSync(dir)) {
-                    fs.mkdirSync(dir, { recursive: true });
-                }
-            }
-        }));
+        await Promise.all(batch.map(ensureUserDirectoriesExist));
 
         if (totalUsers > 20) {
             const processed = Math.min(i + BATCH_SIZE, totalUsers);
@@ -164,6 +158,66 @@ export async function ensurePublicDirectoriesExist() {
     }
 
     return directoriesList;
+}
+
+/**
+ * Renames over an existing file. Windows refuses to replace a file that is
+ * momentarily open by a reader, so retry briefly there (as graceful-fs does).
+ * @param {string} source Source path
+ * @param {string} destination Destination path
+ */
+async function renameReplacingFile(source, destination) {
+    for (let attempt = 0; ; attempt++) {
+        try {
+            return await fs.promises.rename(source, destination);
+        } catch (error) {
+            const retryable = process.platform === 'win32' && ['EPERM', 'EACCES', 'EBUSY'].includes(error?.code);
+            if (!retryable || attempt >= 20) {
+                throw error;
+            }
+            await delay(Math.min(10 * 2 ** attempt, 100));
+        }
+    }
+}
+
+/**
+ * Atomically replaces a node-persist record. The temporary file name starts
+ * with a dot because node-persist skips dot files when it lists the storage
+ * directory, so a half-written temporary file is never parsed as a record.
+ * @param {string} file Destination record path
+ * @param {string} data Serialized record
+ * @param {BufferEncoding} encoding File encoding
+ */
+async function writeStorageFileAtomic(file, data, encoding) {
+    const temporaryFile = path.join(path.dirname(file), `.${path.basename(file)}.${process.pid}.${crypto.randomUUID()}.tmp`);
+    let handle;
+    try {
+        handle = await fs.promises.open(temporaryFile, 'wx');
+        await handle.writeFile(data, { encoding });
+        await handle.sync();
+        await handle.close();
+        handle = null;
+        await renameReplacingFile(temporaryFile, file);
+    } catch (error) {
+        await handle?.close().catch(() => undefined);
+        await fs.promises.rm(temporaryFile, { force: true }).catch(() => undefined);
+        throw error;
+    }
+}
+
+/**
+ * Ensures the complete standard directory tree exists for one user.
+ * This is intentionally independent of the account index so restore/takeover
+ * paths can repair a partially present home without scanning every account.
+ * @param {string|UserDirectoryList} user User handle or resolved directories
+ * @returns {Promise<UserDirectoryList>} The prepared directory list
+ */
+export async function ensureUserDirectoriesExist(user) {
+    const userDirectories = typeof user === 'string' ? getUserDirectories(user) : user;
+    for (const dir of Object.values(userDirectories)) {
+        await fs.promises.mkdir(dir, { recursive: true });
+    }
+    return userDirectories;
 }
 
 /**
@@ -684,6 +738,16 @@ export async function initUserStorage(dataRoot) {
         ttl: false, // Never expire
         expiredInterval: 0,
     });
+
+    // node-persist writes directly to the destination path. A concurrent read
+    // can therefore observe a truncated JSON document and terminate the whole
+    // server. Keep its queueing semantics, but publish each record atomically.
+    storage.defaultInstance.writeFile = function (file, content) {
+        return this.limit(async () => {
+            await writeStorageFileAtomic(file, this.stringify(content), this.options.encoding);
+            return { file, content };
+        });
+    };
 
     const keys = await getAllUserHandles();
 

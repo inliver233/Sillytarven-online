@@ -1103,12 +1103,21 @@ export async function noteStcontrolPageHeartbeat(request) {
     }, { persist: false });
 }
 
+const STCONTROL_READ_ONLY_POST_PATHS = new Set([
+    '/api/settings/get',
+]);
+
+function isStcontrolWriteRequest(request) {
+    if (['GET', 'HEAD', 'OPTIONS'].includes(request.method)) return false;
+    return !(request.method === 'POST' && STCONTROL_READ_ONLY_POST_PATHS.has(request.path));
+}
+
 export async function stcontrolRequestTracker(request, response, next) {
     if (!isStcontrolEnabled() || !request.user?.profile?.handle) return next();
     if (request.session?.stcontrolAdmin) return next();
     const handle = request.user.profile.handle;
     const preProofEnvelope = request.session?.stcontrol?.sessionId ? request.session.stcontrol : null;
-    const isWrite = !['GET', 'HEAD', 'OPTIONS'].includes(request.method);
+    const isWrite = isStcontrolWriteRequest(request);
     const preProofState = loadStateSync();
     const preProofSession = preProofEnvelope ? preProofState?.sessions?.[preProofEnvelope.sessionId] : null;
     let ownershipProof = null;

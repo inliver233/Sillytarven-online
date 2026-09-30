@@ -79,6 +79,7 @@ import { initializeUserInvitationSystem } from './user-invitations.js';
 import { getRegistrationMethodConfig } from './registration-policy.js';
 import { beginEndpointPerformance, finalizeRequestPerformance, performanceRequestStartMiddleware } from './performance-monitor.js';
 import { stcontrolOAuthGuard, stcontrolPublicAccountGuard } from './stcontrol.js';
+import { DISCORD_PUBLIC_PAGES, handleDiscordInteraction, isDiscordApplicationEnabled } from './discord-public-endpoints.js';
 
 // Work around a node v20.0.0, v20.1.0, and v20.2.0 bug. The issue was fixed in v20.3.0.
 // https://github.com/nodejs/node/issues/47822#issuecomment-1564708870
@@ -112,6 +113,13 @@ app.use(helmet({
 app.use(compression());
 app.use(responseTime(finalizeRequestPerformance));
 app.use(performanceRequestStartMiddleware);
+
+const discordApplicationEnabled = isDiscordApplicationEnabled();
+if (discordApplicationEnabled) {
+    // Discord signs the exact request bytes, so this must run before the global
+    // JSON parser and CSRF middleware.
+    app.post('/api/discord/interactions', express.raw({ type: 'application/json', limit: '1mb' }), handleDiscordInteraction);
+}
 
 const globalJsonParser = bodyParser.json({ limit: '500mb' });
 app.use((request, response, next) => {
@@ -318,6 +326,15 @@ app.get('/public-characters', (request, response) => {
     return response.sendFile('public-characters.html', { root: path.join(serverDirectory, 'public') });
 });
 
+if (discordApplicationEnabled) {
+    // Discord requires public linked-roles, terms and privacy URLs.
+    for (const [route, file] of Object.entries(DISCORD_PUBLIC_PAGES)) {
+        app.get(route, (_request, response) => {
+            return response.sendFile(file, { root: path.join(serverDirectory, 'default', 'discord') });
+        });
+    }
+}
+
 // Host frontend assets
 const webpackMiddleware = getWebpackServeMiddleware();
 app.use(webpackMiddleware);
@@ -450,14 +467,16 @@ async function preSetupTasks() {
     migrateAccessLog();
 
     await settingsInit();
-    await statsInit();
+    // Rebuilding missing per-user stats may scan thousands of accounts. Do not
+    // hold the HTTP listener (and the stcontrol adapter) offline while it runs.
+    void statsInit();
 
     const pluginsDirectory = path.join(serverDirectory, 'plugins');
     const cleanupPlugins = await loadPlugins(app, pluginsDirectory);
     const consoleTitle = process.title;
 
     let isExiting = false;
-    const exitProcess = async () => {
+    const exitProcess = async (exitCode = 0) => {
         if (isExiting) return;
         isExiting = true;
         await statsOnExit();
@@ -466,15 +485,16 @@ async function preSetupTasks() {
         }
         diskCache.dispose();
         setWindowTitle(consoleTitle);
-        process.exit();
+        process.exit(exitCode);
     };
 
     // Set up event listeners for a graceful shutdown
-    process.on('SIGINT', exitProcess);
-    process.on('SIGTERM', exitProcess);
+    // Signal listeners receive the signal name; never pass it on as an exit code.
+    process.on('SIGINT', () => exitProcess(0));
+    process.on('SIGTERM', () => exitProcess(0));
     process.on('uncaughtException', (err) => {
         console.error('Uncaught exception:', err);
-        exitProcess();
+        exitProcess(1);
     });
 
     // Add request proxy.

@@ -837,17 +837,39 @@ $.ajaxPrefilter((options, originalOptions, xhr) => {
  */
 function setupFetchInterceptor() {
     const originalFetch = window.fetch;
+
+    const isLocalApiRequest = (input) => {
+        try {
+            const rawUrl = typeof input === 'string' || input instanceof URL ? String(input) : input?.url;
+            if (!rawUrl) return false;
+            const url = new URL(rawUrl, window.location.href);
+            return url.origin === window.location.origin && url.pathname.startsWith('/api/');
+        } catch {
+            return false;
+        }
+    };
+
+    const handleStaleSession = (status, data, input) => {
+        if (!isLocalApiRequest(input)) return;
+        const staleLease = status === 409 && data?.code === 'stale_writer_session';
+        const missingSession = status === 401 && ['未登录', 'Not authenticated', 'User not found', '用户不存在'].includes(data?.error);
+        const managedPage = Boolean(window.userHeartbeat?.isStcontrolManagedPage?.());
+        if (staleLease || missingSession && managedPage) {
+            window.userHeartbeat?.handleStcontrolSessionStale?.();
+        }
+    };
+
     window.fetch = async function(...args) {
         const response = await originalFetch.apply(this, args);
 
-        // 只处理401状态码
-        if (response.status === 401) {
+        if (response.status === 401 || response.status === 409) {
             try {
                 // 克隆响应以便可以多次读取
                 const clonedResponse = response.clone();
                 const data = await clonedResponse.json();
+                handleStaleSession(response.status, data, args[0]);
                 // 检查是否为用户过期错误
-                if (data.expired === true) {
+                if (response.status === 401 && data.expired === true) {
                     console.log('User account expired, redirecting to login...');
                     // 存储过期信息到sessionStorage
                     sessionStorage.setItem('accountExpired', 'true');
@@ -869,6 +891,21 @@ function setupFetchInterceptor() {
 
         return response;
     };
+
+    // Some legacy endpoints still use jQuery AJAX instead of fetch. Apply the
+    // same managed-session fail-fast behavior without changing their payloads.
+    $(document).ajaxError((_event, xhr, settings) => {
+        if (xhr.status !== 401 && xhr.status !== 409) return;
+        let data = xhr.responseJSON;
+        if (!data && xhr.responseText) {
+            try {
+                data = JSON.parse(xhr.responseText);
+            } catch {
+                return;
+            }
+        }
+        handleStaleSession(xhr.status, data, settings?.url);
+    });
 }
 
 /**

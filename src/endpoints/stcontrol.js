@@ -39,7 +39,7 @@ import systemMonitor from '../system-monitor.js';
 import {
     applyUserOAuthIdentities,
     canonicalOAuthSubject,
-    ensurePublicDirectoriesExist,
+    ensureUserDirectoriesExist,
     getAllUserHandles,
     getPasswordHash,
     getUserDirectories,
@@ -215,7 +215,13 @@ router.post('/api/stcontrol/internal/users/restore', async (request, response) =
             };
             applyUserOAuthIdentities(user, input.oauth_provider ? { [input.oauth_provider]: input.oauth_subject } : {});
             await storage.setItem(key, user);
-            if (!existing) await initializeUserDirectories(user);
+            if (existing) {
+                // Repair a partially present home, but never re-apply the
+                // default template: it would overwrite the user's own files.
+                await ensureUserDirectoriesExist(user.handle);
+            } else {
+                await initializeUserDirectories(user);
+            }
             return { ok: true, handle: user.handle, local_user_id: user.handle };
         });
         return response.json(result);
@@ -635,6 +641,7 @@ export async function stcontrolHandoffHandler(request, response) {
             }
         }
         if (kind === 'user') delete request.session.stcontrolAdmin;
+        await ensureUserDirectoriesExist(user.handle);
         request.session.handle = user.handle;
         request.session.userId = user.id || user.handle;
         if (kind === 'user') await registerStcontrolSession(request, claims, STCONTROL_MODES.MANAGED);
@@ -801,8 +808,7 @@ function reclaimProvisionedOAuthOrphan(user, input) {
 }
 
 async function initializeUserDirectories(user) {
-    await ensurePublicDirectoriesExist();
-    const directories = getUserDirectories(user.handle);
+    const directories = await ensureUserDirectoriesExist(user.handle);
     await checkForNewContent([directories], [CONTENT_TYPES.SETTINGS]);
     applyDefaultTemplateToUser(directories, { userName: user.name });
 }
