@@ -66,8 +66,8 @@ function initTransporter() {
         if (!useSSL && emailConfig.port === 587) {
             transportConfig.requireTLS = true;
             transportConfig.tls = {
-                ciphers: 'SSLv3',
-                rejectUnauthorized: false,
+                minVersion: 'TLSv1.2',
+                rejectUnauthorized: true,
             };
         }
 
@@ -550,4 +550,3 @@ export async function testEmailConfig(testEmail) {
         };
     }
 }
-

@@ -48,6 +48,7 @@ import { isClientTelemetryJsonPath } from './body-parser-routing.js';
 import initRequestProxy from './request-proxy.js';
 import cacheBuster from './middleware/cacheBuster.js';
 import corsProxyMiddleware from './middleware/corsProxy.js';
+import publicPingMiddleware from './middleware/publicPing.js';
 import hostWhitelistMiddleware from './middleware/hostWhitelist.js';
 import {
     getVersion,
@@ -218,6 +219,8 @@ if (!cliArgs.disableCsrf) {
         }
         // 豁免特定路径
         if (req.path.startsWith('/api/public-characters') ||
+            req.path === '/api/stcontrol/internal' ||
+            req.path.startsWith('/api/stcontrol/internal/') ||
             req.path === '/api/users/me' ||
             req.path === '/api/users/heartbeat' ||
             req.path === '/api/invitation-codes/status' ||
@@ -348,9 +351,7 @@ app.use('/api/users', usersPublicRouter);
 app.use('/api/public-config', publicConfigRouter);
 
 // 无需认证的延迟探测端点(供总控注册页测节点延迟)
-app.get('/api/ping-public', (request, response) => {
-    response.sendStatus(204);
-});
+app.get('/api/ping-public', publicPingMiddleware);
 
 // OAuth routes (no auth required for initial flow)
 app.use('/api/oauth', oauthRouter);

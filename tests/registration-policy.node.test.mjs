@@ -404,7 +404,10 @@ test('Discord guild rule blocks unverified new users but not already-bound login
         password: null,
         salt: null,
         oauthProvider: 'discord',
-        oauthUserId: 'discord_88',
+        // Controller-managed nodes store the raw provider subject while older
+        // native registrations used the provider-qualified form. Both must
+        // resolve to the same account.
+        oauthUserId: '88',
     });
     const loginSession = {};
     const loginResponse = createRedirectResponse();

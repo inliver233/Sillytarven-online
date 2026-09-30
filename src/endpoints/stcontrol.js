@@ -7,6 +7,7 @@ import fetch from 'node-fetch';
 import storage from 'node-persist';
 
 import { applyDefaultTemplateToUser } from '../default-template.js';
+import { getDiscordGuildMembershipConfig } from '../discord-registration-policy.js';
 import { useInvitationCode } from '../invitation-codes.js';
 import { getRegistrationMethodConfig } from '../registration-policy.js';
 import {
@@ -23,20 +24,26 @@ import {
     getStcontrolSessionTelemetry,
     isStcontrolEnabled,
     markUserSynchronized,
+    noteStcontrolLogout,
+    releaseUserDataFaultGate,
     registerStcontrolSession,
     releaseSnapshotWriteGate,
     renewSnapshotWriteGate,
     requireStcontrolAgent,
     runIdempotentStcontrolOperation,
     signStcontrolRequest,
+    stcontrolRegistrationPolicyVersion,
     stcontrolInventoryRevision,
 } from '../stcontrol.js';
 import systemMonitor from '../system-monitor.js';
 import {
+    applyUserOAuthIdentities,
+    canonicalOAuthSubject,
     ensurePublicDirectoriesExist,
     getAllUserHandles,
     getPasswordHash,
     getUserDirectories,
+    getUserOAuthIdentities,
     normalizeHandle,
     toKey,
 } from '../users.js';
@@ -46,10 +53,17 @@ import { checkForNewContent, CONTENT_TYPES } from './content-manager.js';
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_INVENTORY_USERS = 10_000;
 const MAX_INVENTORY_PAGE_USERS = 250;
-const INVENTORY_LOAD_BATCH = 100;
+// Large legacy nodes can hold thousands of users. Account metadata reads are
+// cheap and independent, while directory hashing is I/O bound; these bounded
+// pools keep a Controller-requested 50-user work unit below common proxy
+// deadlines without allowing an unbounded Promise fan-out.
+const INVENTORY_LOAD_BATCH = 250;
+const INVENTORY_DIRECTORY_CONCURRENCY = 16;
 const MAX_HANDOFF_CODE_LENGTH = 512;
 const MAX_CONTROLLER_RESPONSE_BYTES = 64 * 1024;
-const QUIESCE_TIMEOUT_MS = 15_000;
+const DEFAULT_WRITE_DRAIN_TIMEOUT_MS = 15_000;
+const MIN_WRITE_DRAIN_TIMEOUT_MS = 50;
+const MAX_WRITE_DRAIN_TIMEOUT_MS = 60_000;
 const ALLOWED_OAUTH_PROVIDERS = new Set(['discord', 'linuxdo']);
 
 export const router = express.Router();
@@ -67,9 +81,13 @@ router.post('/api/stcontrol/internal/health', async (_request, response) => {
     });
 });
 
-router.post('/api/stcontrol/internal/registration-policy', (_request, response) => {
-    const policy = currentRegistrationPolicy();
-    return response.json({ ok: true, mode: policy.mode, version: policy.version });
+router.post('/api/stcontrol/internal/registration-policy', async (_request, response) => {
+    try {
+        const policy = await currentRegistrationPolicy();
+        return response.json({ ok: true, mode: policy.mode, version: policy.version, methods: policy.methods });
+    } catch (error) {
+        return adapterError(response, error);
+    }
 });
 
 router.post('/api/stcontrol/internal/control-mode', async (request, response) => {
@@ -119,23 +137,36 @@ router.post('/api/stcontrol/internal/users/provision', async (request, response)
             const key = toKey(input.handle);
             const existing = await storage.getItem(key);
             if (existing) {
-                if (!matchesProvisionedAccount(existing, input)) {
-                    throw new AdapterRequestError(409, 'user_already_exists');
+                if (matchesProvisionedAccount(existing, input)) {
+                    await initializeUserDirectories(existing);
+                    return { ok: true, handle: existing.handle, local_user_id: existing.handle, replayed: true };
                 }
-                await initializeUserDirectories(existing);
-                return { ok: true, handle: existing.handle, local_user_id: existing.handle, replayed: true };
+                if (!canReclaimProvisionedOAuthOrphan(existing, input)) {
+                    throw new AdapterRequestError(409, 'handle_conflict');
+                }
             }
 
-            const policy = currentRegistrationPolicy();
-            if (input.policy_version !== policy.version || policy.mode === 'closed') {
-                throw new AdapterRequestError(409, 'registration_policy_changed');
+            const policy = await currentRegistrationPolicy();
+            const method = input.oauth_provider || 'password';
+            const methodPolicy = policy.methods[method];
+            if (input.policy_version !== policy.version) {
+                throw new AdapterRequestError(409, 'policy_changed');
             }
-            if (policy.mode === 'invitation_required') {
+            if (!methodPolicy?.enabled) {
+                throw new AdapterRequestError(409, 'registration_closed');
+            }
+            if (methodPolicy.invitation_required) {
                 const used = await useInvitationCode(input.invitation_code, input.handle, null, {
                     required: true,
                     claimId: input.registration_id,
                 });
-                if (!used.success) throw new AdapterRequestError(403, 'invalid_invitation_code');
+                if (!used.success) throw new AdapterRequestError(403, 'invitation_invalid');
+            }
+            if (existing) {
+                reclaimProvisionedOAuthOrphan(existing, input);
+                await storage.setItem(key, existing);
+                await initializeUserDirectories(existing);
+                return { ok: true, handle: existing.handle, local_user_id: existing.handle, reclaimed: true };
             }
             const newUser = makeUserRecord(input, {
                 stcontrolRegistrationId: input.registration_id,
@@ -179,11 +210,10 @@ router.post('/api/stcontrol/internal/users/restore', async (request, response) =
                 expiresAt: null,
                 password: input.password_hash || '',
                 salt: input.password_salt || '',
-                oauthProvider: input.oauth_provider || undefined,
-                oauthUserId: input.oauth_subject || undefined,
                 stcontrolGlobalUserId: input.global_user_id,
                 stcontrolAccountVersion: input.account_version,
             };
+            applyUserOAuthIdentities(user, input.oauth_provider ? { [input.oauth_provider]: input.oauth_subject } : {});
             await storage.setItem(key, user);
             if (!existing) await initializeUserDirectories(user);
             return { ok: true, handle: user.handle, local_user_id: user.handle };
@@ -199,32 +229,94 @@ router.post('/api/stcontrol/internal/users/password', async (request, response) 
         const input = request.body || {};
         requireUUID(input.operation_id, 'invalid_operation_id');
         const handle = requireHandle(input.handle);
-        const removing = input.remove === true;
-        if (!removing && (!isHashMaterial(input.password_hash, input.password_salt) || !Number.isSafeInteger(input.version) || input.version <= 0)) {
+        const remove = input.remove === true;
+        if (!Number.isSafeInteger(input.version) || input.version <= 0 ||
+            (remove
+                ? Boolean((input.password_hash ?? '') || (input.password_salt ?? ''))
+                : !isHashMaterial(input.password_hash, input.password_salt))) {
             throw new AdapterRequestError(400, 'invalid_password_material');
         }
-        const normalized = { ...input, handle };
+        const normalized = { ...input, handle, remove };
         const result = await runIdempotentStcontrolOperation('password', input.operation_id, normalized, async () => {
             const key = toKey(handle);
             const user = await storage.getItem(key);
             if (!user) throw new AdapterRequestError(404, 'user_not_found');
-            if (removing) {
-                // Password identity was unbound on the control plane; drop the
-                // node-local verifier so the old password stops working here.
-                delete user.password;
-                delete user.salt;
-                delete user.stcontrolPasswordVersion;
-                await storage.setItem(key, user);
-                return { ok: true };
-            }
-            if (Number(user.stcontrolPasswordVersion || 0) > input.version) {
+            const currentVersion = Number(user.stcontrolPasswordVersion || 0);
+            if (currentVersion > input.version) {
                 throw new AdapterRequestError(409, 'password_version_rollback');
             }
-            user.password = input.password_hash;
-            user.salt = input.password_salt;
+            const currentHash = String(user.password || '');
+            const currentSalt = String(user.salt || '');
+            if (currentVersion === input.version) {
+                const sameMaterial = remove
+                    ? currentHash === '' && currentSalt === ''
+                    : currentHash === String(input.password_hash) && currentSalt === String(input.password_salt);
+                if (!sameMaterial) throw new AdapterRequestError(409, 'password_version_conflict');
+                return { ok: true };
+            }
+            user.password = remove ? '' : input.password_hash;
+            user.salt = remove ? '' : input.password_salt;
             user.stcontrolPasswordVersion = input.version;
             await storage.setItem(key, user);
             return { ok: true };
+        });
+        return response.json(result);
+    } catch (error) {
+        return adapterError(response, error);
+    }
+});
+
+router.post('/api/stcontrol/internal/users/oauth', async (request, response) => {
+    try {
+        const input = request.body || {};
+        requireUUID(input.operation_id, 'invalid_operation_id');
+        const handle = requireHandle(input.handle);
+        const provider = input.provider;
+        const subject = input.subject;
+        const remove = input.remove === true;
+        if (!ALLOWED_OAUTH_PROVIDERS.has(provider) || typeof subject !== 'string' || !subject ||
+            subject.length > 512 || subject.trim() !== subject || /[\x00-\x1f\x7f]/.test(subject) ||
+            !Number.isSafeInteger(input.version) || input.version <= 0) {
+            throw new AdapterRequestError(400, 'invalid_oauth_identity');
+        }
+        const normalized = { operation_id: input.operation_id, handle, provider, subject, remove, version: input.version };
+        const result = await runIdempotentStcontrolOperation('oauth-identity', input.operation_id, normalized, async () => {
+            const key = toKey(handle);
+            const user = await storage.getItem(key);
+            if (!user) throw new AdapterRequestError(404, 'user_not_found');
+
+            const identities = getUserOAuthIdentities(user);
+            const states = user.stcontrolOAuthIdentityStates && typeof user.stcontrolOAuthIdentityStates === 'object' &&
+                !Array.isArray(user.stcontrolOAuthIdentityStates) ? { ...user.stcontrolOAuthIdentityStates } : {};
+            const prior = states[provider] && typeof states[provider] === 'object' ? states[provider] : {};
+            const currentVersion = Number(prior.version || 0);
+            const currentSubject = identities[provider];
+            const canonicalSubject = canonicalOAuthSubject(provider, subject);
+            const canonicalCurrentSubject = canonicalOAuthSubject(provider, currentSubject);
+            const canonicalPriorSubject = canonicalOAuthSubject(provider, prior.subject);
+            if (currentVersion > input.version) {
+                throw new AdapterRequestError(409, 'oauth_identity_version_rollback');
+            }
+            if (currentVersion === input.version && currentVersion > 0) {
+                const sameSubject = canonicalPriorSubject === canonicalSubject;
+                const samePresence = remove
+                    ? !currentSubject && prior.present === false
+                    : canonicalCurrentSubject === canonicalSubject && prior.present === true;
+                if (!sameSubject || !samePresence) throw new AdapterRequestError(409, 'oauth_identity_version_conflict');
+                return { ok: true, provider, version: input.version };
+            }
+            if ((currentSubject && canonicalCurrentSubject !== canonicalSubject) ||
+                (!currentSubject && prior.subject && canonicalPriorSubject !== canonicalSubject)) {
+                throw new AdapterRequestError(409, 'oauth_identity_subject_conflict');
+            }
+
+            if (remove) delete identities[provider];
+            else identities[provider] = currentSubject || subject;
+            states[provider] = { version: input.version, subject: canonicalSubject, present: !remove };
+            applyUserOAuthIdentities(user, identities);
+            user.stcontrolOAuthIdentityStates = states;
+            await storage.setItem(key, user);
+            return { ok: true, provider, version: input.version };
         });
         return response.json(result);
     } catch (error) {
@@ -268,19 +360,25 @@ router.post('/api/stcontrol/internal/users/scan', async (request, response) => {
         }
         if (input.cursor > accounts.length) throw new AdapterRequestError(409, 'inventory_changed');
         const end = Math.min(input.cursor + input.limit, accounts.length);
-        const users = [];
-        for (const account of accounts.slice(input.cursor, end)) {
-            const inventory = await inventoryDirectory(getUserDirectories(account.handle).root);
-            users.push({
-                local_user_id: account.localUserId,
-                handle: account.handle,
-                size_bytes: inventory.size,
-                directory_fingerprint: inventory.digest,
-                has_password: account.hasPassword,
-                oauth_identities: account.oauthIdentities,
-                is_admin: account.isAdmin,
-            });
-        }
+        // Hashing old user directories is the expensive part of inventory.
+        // Keep result order stable while using a bounded worker pool so a
+        // 250-user page does not serialize hundreds of independent disk walks.
+        const users = await mapInventoryPage(
+            accounts.slice(input.cursor, end),
+            INVENTORY_DIRECTORY_CONCURRENCY,
+            async (account) => {
+                const inventory = await inventoryDirectory(getUserDirectories(account.handle).root);
+                return {
+                    local_user_id: account.localUserId,
+                    handle: account.handle,
+                    size_bytes: inventory.size,
+                    directory_fingerprint: inventory.digest,
+                    has_password: account.hasPassword,
+                    oauth_identities: account.oauthIdentities,
+                    is_admin: account.isAdmin,
+                };
+            },
+        );
         const hasMore = end < accounts.length;
         return response.json({
             ok: true,
@@ -344,7 +442,7 @@ router.post('/api/stcontrol/internal/snapshots/quiesce', async (request, respons
             throw new AdapterRequestError(409, 'user_already_quiescing');
         }
         const gate = established.gate;
-        const deadline = Date.now() + QUIESCE_TIMEOUT_MS;
+        const deadline = Date.now() + getWriteDrainTimeoutMs();
         while (Date.now() < deadline) {
             const active = getStcontrolSessionTelemetry().filter(user => user.handle === input.handle);
             const inFlight = active.reduce((total, user) => total + user.in_flight_reads + user.in_flight_writes, 0);
@@ -396,30 +494,79 @@ router.post('/api/stcontrol/internal/snapshots/release', async (request, respons
 
 router.post('/api/stcontrol/internal/data-faults/freeze', async (request, response) => {
     try {
-        const input = validateDataFaultRequest(request.body);
-        const established = await establishUserDataFaultGate(input.handle, input.fault_id, input.activity_epoch);
-        if (established.status === 'fault_id_conflict') {
-            throw new AdapterRequestError(409, 'data_fault_scope_mismatch');
-        }
-        if (established.status === 'write_gate_conflict') {
-            throw new AdapterRequestError(409, 'user_write_gate_conflict');
-        }
-
-        const deadline = Date.now() + QUIESCE_TIMEOUT_MS;
-        while (Date.now() < deadline) {
-            const active = getStcontrolSessionTelemetry().filter(user => user.handle === input.handle);
-            const inFlight = active.reduce((total, user) => total + user.in_flight_reads + user.in_flight_writes, 0);
-            if (inFlight === 0) {
-                return response.json({ ok: true, frozen: true, drained: true });
+        const input = validateDataFaultRequest(request.body, { requireOperationId: true, requireControllerGeneration: true });
+        const result = await runIdempotentStcontrolOperation('data-fault-freeze', input.operation_id, input, async () => {
+            const established = await establishUserDataFaultGate(
+                input.handle,
+                input.fault_id,
+                input.global_user_id,
+                input.activity_epoch,
+                {
+                    allowLegacyScopeAdoption: await allowLegacyDataFaultScope(input.handle, input.global_user_id),
+                    controllerGeneration: input.controller_generation,
+                },
+            );
+            if (established.status === 'controller_generation_mismatch') {
+                throw new AdapterRequestError(409, established.status);
             }
-            await new Promise(resolve => setTimeout(resolve, 50));
-        }
+            if (established.status === 'fault_id_conflict') {
+                throw new AdapterRequestError(409, 'data_fault_scope_mismatch');
+            }
+            if (established.status === 'write_gate_conflict') {
+                throw new AdapterRequestError(409, 'user_write_gate_conflict');
+            }
 
-        // Unlike a snapshot gate, a fault gate must remain closed after a
-        // drain timeout. A later idempotent command observes the same gate and
-        // retries the drain without reopening a potentially corrupt home.
-        throw new AdapterRequestError(409, 'write_drain_timeout');
+            const deadline = Date.now() + getWriteDrainTimeoutMs();
+            while (Date.now() < deadline) {
+                const active = getStcontrolSessionTelemetry().filter(user => user.handle === input.handle);
+                const inFlight = active.reduce((total, user) => total + user.in_flight_reads + user.in_flight_writes, 0);
+                if (inFlight === 0) {
+                    return {
+                        ok: true,
+                        operation_id: input.operation_id,
+                        controller_generation: input.controller_generation,
+                        fault_id: input.fault_id,
+                        global_user_id: input.global_user_id,
+                        handle: input.handle,
+                        activity_epoch: input.activity_epoch,
+                        frozen: true,
+                        drained: true,
+                    };
+                }
+                await new Promise(resolve => setTimeout(resolve, 50));
+            }
+
+            // Unlike a snapshot gate, a fault gate must remain closed after a
+            // drain timeout. A later idempotent command observes the same gate
+            // and retries the drain without reopening a potentially corrupt home.
+            throw new AdapterRequestError(409, 'write_drain_timeout');
+        });
+        return response.json(result);
     } catch (error) {
+        if (error?.message === 'Operation id payload conflict') {
+            return adapterError(response, new AdapterRequestError(409, 'operation_id_payload_conflict'));
+        }
+        return adapterError(response, error);
+    }
+});
+
+router.post('/api/stcontrol/internal/data-faults/release', async (request, response) => {
+    try {
+        const input = validateDataFaultRequest(request.body, { requireOperationId: true, requireControllerGeneration: true });
+        const released = await releaseUserDataFaultGate({
+            operationId: input.operation_id,
+            controllerGeneration: input.controller_generation,
+            faultId: input.fault_id,
+            globalUserId: input.global_user_id,
+            handle: input.handle,
+            activityEpoch: input.activity_epoch,
+        }, { allowLegacyGlobalUserIdMatch: await allowLegacyDataFaultScope(input.handle, input.global_user_id) });
+        if (released?.ok !== true || released.released !== true) throw new AdapterRequestError(409, released.status);
+        return response.json(released);
+    } catch (error) {
+        if (error?.message === 'Operation id payload conflict') {
+            return adapterError(response, new AdapterRequestError(409, 'operation_id_payload_conflict'));
+        }
         return adapterError(response, error);
     }
 });
@@ -453,15 +600,15 @@ export async function stcontrolHandoffHandler(request, response) {
             if (!Number.isSafeInteger(claims.admin_id) || claims.admin_id <= 0 || !user.admin || claims.permission_version !== permissionVersion) {
                 throw new AdapterRequestError(403, 'administrator_permission_changed');
             }
+            if (request.session?.stcontrol?.sessionId) {
+                await noteStcontrolLogout(request);
+                delete request.session.stcontrol;
+            }
             request.session.stcontrolAdmin = {
                 adminId: claims.admin_id,
                 permissionVersion: claims.permission_version,
                 controllerGeneration: claims.controller_generation,
             };
-            // Drop any user-session envelope left by a previous user handoff in
-            // this same browser session, so it cannot leak back once the admin
-            // marker is gone.
-            delete request.session.stcontrol;
         } else if (!UUID_PATTERN.test(claims.user_uuid || '') || !UUID_PATTERN.test(claims.session_id || '') ||
             !Number.isSafeInteger(claims.user_id) || claims.user_id <= 0 ||
             !Number.isSafeInteger(claims.activity_epoch) || claims.activity_epoch <= 0 ||
@@ -487,16 +634,10 @@ export async function stcontrolHandoffHandler(request, response) {
                 await storage.setItem(toKey(handle), user);
             }
         }
+        if (kind === 'user') delete request.session.stcontrolAdmin;
         request.session.handle = user.handle;
         request.session.userId = user.id || user.handle;
-        if (kind === 'user') {
-            // Redeeming a user handoff must restore the write fences: clear any
-            // stale admin passthrough marker left by an earlier admin handoff
-            // in this same browser session, otherwise the session would bypass
-            // lease/gate fencing forever.
-            delete request.session.stcontrolAdmin;
-            await registerStcontrolSession(request, claims, STCONTROL_MODES.MANAGED);
-        }
+        if (kind === 'user') await registerStcontrolSession(request, claims, STCONTROL_MODES.MANAGED);
         systemMonitor.recordUserLogin(user.handle, { userName: user.name });
         systemMonitor.updateUserActivity(user.handle, { userName: user.name, isHeartbeat: false });
         return response.redirect(303, kind === 'admin' ? '/?stcontrol_admin=1' : '/');
@@ -523,12 +664,31 @@ function adapterError(response, error) {
     return response.status(status).json({ error: code, code });
 }
 
-function currentRegistrationPolicy() {
-    const config = getRegistrationMethodConfig('password');
-    const mode = !config.enabled ? 'closed' : config.requireInvitationCode ? 'invitation_required' : 'open';
-    const digest = crypto.createHash('sha256').update(JSON.stringify({ mode })).digest();
-    const version = digest.readUInt32BE(0) || 1;
-    return { mode, version };
+async function currentRegistrationPolicy() {
+    const methods = Object.fromEntries(['password', 'github', 'discord', 'linuxdo'].map(method => {
+        const config = getRegistrationMethodConfig(method);
+        const policy = {
+            enabled: config.enabled,
+            invitation_required: config.requireInvitationCode,
+        };
+        if (method === 'discord') {
+            const guild = getDiscordGuildMembershipConfig();
+            const guildEnabled = config.enabled && guild.enabled;
+            policy.guild_membership = {
+                enabled: guildEnabled,
+                guild_id: guildEnabled ? guild.guildId : '',
+                guild_name: guildEnabled ? guild.guildName : '',
+                minimum_days: guildEnabled ? guild.minimumDays : 0,
+            };
+        }
+        return [method, policy];
+    }));
+    const enabled = Object.values(methods).filter(method => method.enabled);
+    const mode = enabled.length === 0
+        ? 'closed'
+        : enabled.every(method => method.invitation_required) ? 'invitation_required' : 'open';
+    const version = await stcontrolRegistrationPolicyVersion({ methods });
+    return { mode, version, methods };
 }
 
 function requireUUID(value, code) {
@@ -573,29 +733,71 @@ function validateAccountRequest(raw, provision) {
 }
 
 function makeUserRecord(input, extra = {}) {
-    return {
+    const user = {
         handle: input.handle,
         name: input.name,
         created: Date.now(),
         password: input.password_hash || '',
         salt: input.password_salt || '',
-        oauthProvider: input.oauth_provider || undefined,
-        oauthUserId: input.oauth_subject || undefined,
         admin: false,
         enabled: true,
         expiresAt: null,
         ...extra,
     };
+    return applyUserOAuthIdentities(user, input.oauth_provider ? { [input.oauth_provider]: input.oauth_subject } : {});
 }
 
 function matchesProvisionedAccount(user, input) {
+    const identities = getUserOAuthIdentities(user);
+    const currentSubject = input.oauth_provider ? identities[input.oauth_provider] : '';
     return user.stcontrolRegistrationId === input.registration_id &&
         user.handle === input.handle &&
         user.name === input.name &&
         String(user.password || '') === String(input.password_hash || '') &&
         String(user.salt || '') === String(input.password_salt || '') &&
-        String(user.oauthProvider || '') === String(input.oauth_provider || '') &&
-        String(user.oauthUserId || '') === String(input.oauth_subject || '');
+        canonicalOAuthSubject(input.oauth_provider, currentSubject) ===
+            canonicalOAuthSubject(input.oauth_provider, input.oauth_subject) &&
+        Object.keys(identities).length === (input.oauth_provider ? 1 : 0);
+}
+
+function canReclaimProvisionedOAuthOrphan(user, input) {
+    if (!input.oauth_provider || !input.oauth_subject || !UUID_PATTERN.test(user?.stcontrolRegistrationId || '') ||
+        user.admin || String(user.password || '') || String(user.salt || '') ||
+        String(user.stcontrolGlobalUserId ?? '') || String(user.stcontrolGlobalUserUuid || '')) {
+        return false;
+    }
+    const identities = getUserOAuthIdentities(user);
+    const providers = Object.keys(identities);
+    return providers.length === 0 ||
+        providers.length === 1 && canonicalOAuthSubject(input.oauth_provider, identities[input.oauth_provider]) ===
+            canonicalOAuthSubject(input.oauth_provider, input.oauth_subject);
+}
+
+function reclaimProvisionedOAuthOrphan(user, input) {
+    user.name = input.name;
+    user.enabled = true;
+    user.expiresAt = null;
+    user.stcontrolRegistrationId = input.registration_id;
+    // This is a new Controller account lifecycle. Reset the local fence to the
+    // same initial version used by CompleteRegistrationWorkflow so subsequent
+    // password/OAuth convergence cannot be rejected as a rollback.
+    user.stcontrolAccountVersion = 1;
+    applyUserOAuthIdentities(user, { [input.oauth_provider]: input.oauth_subject });
+    // The abandoned lifecycle may have already received an OAuth removal
+    // tombstone (or a password removal) before the Controller rolled its
+    // registration back. Those provider-specific versions belong to the old
+    // global account. Carrying them into the replacement account makes the
+    // Controller's initial version=1 projection fail forever as a rollback or
+    // same-version presence conflict.
+    user.stcontrolOAuthIdentityStates = {
+        [input.oauth_provider]: {
+            version: 1,
+            subject: input.oauth_subject,
+            present: true,
+        },
+    };
+    delete user.stcontrolPasswordVersion;
+    user.stcontrolPermissionVersion = 1;
 }
 
 async function initializeUserDirectories(user) {
@@ -624,14 +826,35 @@ function validateSnapshotRequest(raw) {
     return input;
 }
 
-function validateDataFaultRequest(raw) {
+function validateDataFaultRequest(raw, options = {}) {
     const input = raw && typeof raw === 'object' ? raw : {};
+    if (options.requireOperationId === true) requireUUID(input.operation_id, 'invalid_operation_id');
+    else if (input.operation_id !== undefined) requireUUID(input.operation_id, 'invalid_operation_id');
+    if (options.requireControllerGeneration === true &&
+        (!Number.isSafeInteger(input.controller_generation) || input.controller_generation <= 0)) {
+        throw new AdapterRequestError(400, 'invalid_controller_generation');
+    }
     requireUUID(input.fault_id, 'invalid_fault_id');
     input.handle = requireHandle(input.handle);
-    if (!Number.isSafeInteger(input.activity_epoch) || input.activity_epoch < 0) {
+    if (!Number.isSafeInteger(input.global_user_id) || input.global_user_id <= 0) {
+        throw new AdapterRequestError(400, 'invalid_global_user_id');
+    }
+    if (!Number.isSafeInteger(input.activity_epoch) || input.activity_epoch <= 0) {
         throw new AdapterRequestError(400, 'invalid_activity_epoch');
     }
     return input;
+}
+
+function getWriteDrainTimeoutMs() {
+    const configured = Number(process.env.SILLYTAVERN_STCONTROL_WRITE_DRAIN_TIMEOUT_MS ??
+        getConfigValue('stcontrol.writeDrainTimeoutMs', DEFAULT_WRITE_DRAIN_TIMEOUT_MS, 'number'));
+    return Number.isSafeInteger(configured) && configured >= MIN_WRITE_DRAIN_TIMEOUT_MS &&
+        configured <= MAX_WRITE_DRAIN_TIMEOUT_MS ? configured : DEFAULT_WRITE_DRAIN_TIMEOUT_MS;
+}
+
+async function allowLegacyDataFaultScope(handle, globalUserId) {
+    const user = await storage.getItem(toKey(handle));
+    return Number(user?.stcontrolGlobalUserId) === globalUserId;
 }
 
 function safeTextEqual(left, right) {
@@ -670,11 +893,12 @@ async function loadInventoryAccounts() {
                 throw new AdapterRequestError(409, 'inventory_invalid_local_user_id');
             }
             const oauthIdentities = [];
-            if (ALLOWED_OAUTH_PROVIDERS.has(user.oauthProvider) && typeof user.oauthUserId === 'string' && user.oauthUserId) {
-                if (user.oauthUserId.length > 512 || user.oauthUserId.trim() !== user.oauthUserId || /[\x00-\x1f\x7f]/.test(user.oauthUserId)) {
+            for (const [provider, subject] of Object.entries(getUserOAuthIdentities(user))) {
+                if (!ALLOWED_OAUTH_PROVIDERS.has(provider)) continue;
+                if (subject.length > 512 || subject.trim() !== subject || /[\x00-\x1f\x7f]/.test(subject)) {
                     throw new AdapterRequestError(409, 'inventory_invalid_oauth_subject');
                 }
-                oauthIdentities.push({ provider: user.oauthProvider, subject: user.oauthUserId });
+                oauthIdentities.push({ provider, subject });
             }
             return {
                 localUserId,
@@ -702,6 +926,22 @@ function compareInventoryText(left, right) {
 
 function inventoryRevision(accounts) {
     return stcontrolInventoryRevision(JSON.stringify(accounts));
+}
+
+async function mapInventoryPage(accounts, concurrency, mapper) {
+    const results = new Array(accounts.length);
+    let cursor = 0;
+    const workers = Array.from(
+        { length: Math.min(concurrency, accounts.length) },
+        async () => {
+            while (cursor < accounts.length) {
+                const index = cursor++;
+                results[index] = await mapper(accounts[index]);
+            }
+        },
+    );
+    await Promise.all(workers);
+    return results;
 }
 
 async function inventoryDirectory(root) {
