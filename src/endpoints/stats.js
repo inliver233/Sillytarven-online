@@ -162,7 +162,9 @@ export async function recreateStats(handle, chatsPath, charactersPath) {
     console.info('Collecting and creating stats for user:', handle);
     const stats = await collectAndCreateStats(chatsPath, charactersPath);
     STATS.set(handle, stats);
-    await saveStatsToFile();
+    // Only this user's stats changed. Saving everyone would re-read the whole
+    // account store once per rebuilt user, which is quadratic at startup.
+    await saveUserStats(handle);
 }
 
 /**
@@ -186,7 +188,12 @@ async function loadUserStats(handle) {
     } catch (err) {
         // If the file doesn't exist or is invalid, initialize stats
         if (err.code === 'ENOENT' || err instanceof SyntaxError) {
-            await recreateStats(handle, directories.chats, directories.characters);
+            try {
+                await recreateStats(handle, directories.chats, directories.characters);
+            } catch (recreateError) {
+                // One broken account must not stop stats loading for everyone else.
+                console.error(`Error recreating stats for user ${handle}:`, recreateError);
+            }
         } else {
             console.error(`Error loading stats for user ${handle}:`, err);
         }
@@ -251,23 +258,32 @@ export async function init() {
  * Saves the current state of charStats to a file, only if the data has changed since the last save.
  */
 async function saveStatsToFile() {
-    const userHandles = await getAllUserHandles();
-    for (const handle of userHandles) {
-        if (!STATS.has(handle)) {
-            continue;
+    // Skip handles whose accounts were deleted, so their directories are not recreated.
+    const userHandles = new Set(await getAllUserHandles());
+    for (const handle of STATS.keys()) {
+        if (userHandles.has(handle)) {
+            await saveUserStats(handle);
         }
-        const charStats = STATS.get(handle);
-        const lastSaveTimestamp = TIMESTAMPS.get(handle) || 0;
-        if (charStats.timestamp > lastSaveTimestamp) {
-            try {
-                const directories = getUserDirectories(handle);
-                const statsFilePath = path.join(directories.root, STATS_FILE);
-                await writeFileAtomic(statsFilePath, JSON.stringify(charStats));
-                TIMESTAMPS.set(handle, Date.now());
-            } catch (error) {
-                console.error('Failed to save stats to file.', error);
-            }
-        }
+    }
+}
+
+/**
+ * Saves one user's stats to disk if they changed since the last save.
+ * @param {string} handle User handle
+ */
+async function saveUserStats(handle) {
+    const charStats = STATS.get(handle);
+    const lastSaveTimestamp = TIMESTAMPS.get(handle) || 0;
+    if (!charStats || !(charStats.timestamp > lastSaveTimestamp)) {
+        return;
+    }
+    try {
+        const directories = getUserDirectories(handle);
+        const statsFilePath = path.join(directories.root, STATS_FILE);
+        await writeFileAtomic(statsFilePath, JSON.stringify(charStats));
+        TIMESTAMPS.set(handle, Date.now());
+    } catch (error) {
+        console.error('Failed to save stats to file.', error);
     }
 }
 

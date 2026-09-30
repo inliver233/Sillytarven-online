@@ -68,7 +68,13 @@ async function backupSettings() {
         const userHandles = await getAllUserHandles();
 
         for (const handle of userHandles) {
-            backupUserSettings(handle, true);
+            try {
+                backupUserSettings(handle, true);
+            } catch (err) {
+                console.error(`Could not backup settings file for ${handle}`, err);
+            }
+            // Each backup is synchronous file I/O; yield so requests keep being served.
+            await new Promise(resolve => setImmediate(resolve));
         }
     } catch (err) {
         console.error('Could not backup settings file', err);
@@ -274,5 +280,8 @@ router.post('/restore-snapshot', getFileNameValidationFunction('name'), async (r
  * Initializes the settings endpoint
  */
 export async function init() {
-    await backupSettings();
+    // Backing up every user's settings reads and copies thousands of files on
+    // large installs. It is only a safety net, so it must not keep the HTTP
+    // listener offline during startup.
+    void backupSettings();
 }
