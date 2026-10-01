@@ -21,7 +21,7 @@ class FakeStyle {
     removeProperty(name) { this.values.delete(name); }
 }
 
-function createMessageNode(id, rect, { classes = [], editing = false, pendingImage = false } = {}) {
+function createMessageNode(id, rect, { classes = [], editing = false, pendingImage = false, iframe = false } = {}) {
     const classList = new FakeClassList();
     classes.forEach(value => classList.add(value));
     return {
@@ -31,7 +31,7 @@ function createMessageNode(id, rect, { classes = [], editing = false, pendingIma
         clientWidth: 640,
         getAttribute: name => name === 'mesid' ? String(id) : null,
         getBoundingClientRect: () => ({ height: rect.bottom - rect.top, width: 640, ...rect }),
-        querySelector: selector => editing && selector.includes('edit_textarea') ? {} : null,
+        querySelector: selector => (editing && selector.includes('edit_textarea')) || (iframe && selector === 'iframe') ? {} : null,
         querySelectorAll: selector => selector === 'img' && pendingImage ? [{ complete: false }] : [],
     };
 }
@@ -89,14 +89,15 @@ test('optimizer culls only distant messages and always protects the last four', 
     nodes.slice(-4).forEach(node => assert.equal(node.classList.contains('st-chat-content-culled'), false));
 });
 
-test('editing, streaming, selected, and pending-media messages are never culled', async () => {
+test('editing, streaming, selected, pending-media and embedded-frame messages are never culled', async () => {
     const far = { top: 1800, bottom: 1950 };
     const nodes = [
         createMessageNode(0, far, { editing: true }),
         createMessageNode(1, far, { classes: ['streaming'] }),
         createMessageNode(2, far, { classes: ['selected'] }),
         createMessageNode(3, far, { pendingImage: true }),
-        ...Array.from({ length: 4 }, (_, index) => createMessageNode(index + 4, far)),
+        createMessageNode(4, far, { iframe: true }),
+        ...Array.from({ length: 4 }, (_, index) => createMessageNode(index + 5, far)),
     ];
     const optimizer = new ChatRenderOptimizer({ ResizeObserverClass: undefined, frameProcessor: immediateFrameProcessor });
     const result = await optimizer.refresh(createChat(nodes), [{ mes: 'x'.repeat(60_000) }]);

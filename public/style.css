@@ -3979,8 +3979,10 @@ button.toast-close-button {
     display: none;
 }
 
-/* Preserve full message DOM semantics while allowing large off-screen history to skip paint work. */
-#chat > .mes.st-chat-content-culled {
+/* Preserve full message DOM semantics while allowing large off-screen history to skip paint work.
+   Messages with embedded frames (extension-rendered HTML status bars) are never skipped: the
+   frame sizes itself from inside and stops updating while its subtree is skipped. */
+#chat > .mes.st-chat-content-culled:not(:has(iframe)) {
     content-visibility: auto;
     contain: layout paint;
     contain-intrinsic-size: auto var(--st-cull-height, 180px);

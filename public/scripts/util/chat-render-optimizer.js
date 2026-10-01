@@ -50,6 +50,13 @@ export function makeChatHeightKey(chatId, messageId, chatWidth, layoutVersion) {
     return `${chatId}:${messageId}:${widthBucket}:${layoutVersion}`;
 }
 
+// Embedded frames (e.g. HTML status bars rendered by extensions) size themselves
+// from inside the frame. Chrome stops rendering frames in skipped subtrees, so a
+// culled frame keeps a stale height and leaves blank or overlapping blocks.
+function hasEmbeddedFrame(node) {
+    return typeof node?.querySelector === 'function' && Boolean(node.querySelector('iframe'));
+}
+
 function hasPendingMedia(node) {
     const images = typeof node?.querySelectorAll === 'function' ? [...node.querySelectorAll('img')] : [];
     return images.some(image => image.complete === false);
@@ -71,7 +78,7 @@ function isProtectedMessage(node, index, tailStartIndex, streamingActive) {
         || classList?.contains('selected')
         || node?.dataset?.scrollTarget === 'true';
 
-    return isEditing || isStreaming || isHighlighted || hasPendingMedia(node);
+    return isEditing || isStreaming || isHighlighted || hasPendingMedia(node) || hasEmbeddedFrame(node);
 }
 
 /**
