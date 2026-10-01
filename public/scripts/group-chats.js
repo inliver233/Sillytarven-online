@@ -89,6 +89,9 @@ import {
     setCachedChatPage,
     setChatPagingState,
     invalidateCurrentChatContext,
+    getChatHydration,
+    hydrateLoadedChat,
+    startChatHydration,
 } from '../script.js';
 import { printTagList, createTagMapFromList, applyTagsOnCharacterSelect, tag_map, applyTagsOnGroupSelect } from './tags.js';
 import { FILTER_TYPES, FilterHelper } from './filters.js';
@@ -340,6 +343,9 @@ export async function getGroupChat(groupId, reload = false, { signal: parentSign
                     revision: page.revision,
                 });
                 usedPaging = true;
+                if (page.hasMore) {
+                    startChatHydration({ isGroup: true, target: { id: chatId }, revision: page.revision });
+                }
                 if (!cached) {
                     setCachedChatPage({
                         isGroup: true,
@@ -412,6 +418,9 @@ export async function getGroupChat(groupId, reload = false, { signal: parentSign
             select_group_chats(groupId, true);
         }
 
+        // Listeners see the whole history with real message indices.
+        await hydrateLoadedChat({ isCurrent: () => !isStale() });
+        if (isStale()) return;
         await eventSource.emit(event_types.CHAT_CHANGED, chatId);
         if (freshChat) await eventSource.emit(event_types.GROUP_CHAT_CREATED);
     } catch (error) {
@@ -748,20 +757,75 @@ async function saveGroupChat(groupId, shouldSaveGroup, force = false) {
         character_name: 'unused',
     };
     const messages = chat.slice();
-    const saveRequest = createGroupChatSaveRequest({
-        chatId,
-        header: chatHeader,
-        messages,
-        pagingState: getChatPagingState(),
-        force,
-    });
-    const response = await fetch(saveRequest.url, {
-        method: 'POST',
-        headers: getRequestHeaders(),
-        body: JSON.stringify(saveRequest.body),
-    });
+    const pagingState = getChatPagingState();
+    const session = getChatHydration();
+    const useSession = Boolean(session && session.isGroup && session.target.id === chatId);
+    const wasHydrated = useSession && session.hydrated;
 
-    if (!response.ok) {
+    const runSave = async () => {
+        let prepared = null;
+        let saveRequest;
+        if (useSession && session.hydrated) {
+            // A snapshot taken before the hydration lacks the history it added.
+            prepared = session.prepareSave(wasHydrated ? messages : [...session.history, ...messages], { header: chatHeader, force });
+            saveRequest = { url: '/api/chats/group/save-patch', body: prepared.body, tail: true };
+        } else {
+            const request = createGroupChatSaveRequest({
+                chatId,
+                header: chatHeader,
+                messages,
+                pagingState: useSession ? { ...pagingState, revision: session.revision } : pagingState,
+                force,
+            });
+            saveRequest = { ...request, body: JSON.stringify(request.body) };
+        }
+        let response;
+        try {
+            response = await fetch(saveRequest.url, {
+                method: 'POST',
+                headers: getRequestHeaders(),
+                body: saveRequest.body,
+            });
+        } catch (error) {
+            prepared?.rollback();
+            throw error;
+        }
+        if (!response.ok) {
+            prepared?.rollback();
+            return { response };
+        }
+        if (saveRequest.tail) {
+            const responseData = await response.json().catch(() => null);
+            if (typeof responseData?.revision !== 'string') {
+                prepared?.rollback();
+                toastr.error(t`Check the server connection and reload the page to prevent data loss.`, t`Group Chat could not be saved`);
+                return { saved: false };
+            }
+            prepared?.commit(responseData.revision);
+            if (useSession) {
+                session.noteRevision(responseData.revision);
+            }
+            if (!useSession || session === getChatHydration()) {
+                setChatPagingState({ revision: responseData.revision });
+            }
+        }
+        return { saved: true };
+    };
+
+    let outcome;
+    try {
+        outcome = useSession ? await session.enqueue(runSave) : await runSave();
+    } catch (error) {
+        console.error('Group chat could not be saved', error);
+        toastr.error(t`Check the server connection and reload the page to prevent data loss.`, t`Group Chat could not be saved`);
+        return false;
+    }
+    if (outcome.saved === false) {
+        return false;
+    }
+    const response = outcome.response;
+
+    if (response && !response.ok) {
         let errorData = null;
         try {
             errorData = await response.json();
@@ -802,26 +866,6 @@ async function saveGroupChat(groupId, shouldSaveGroup, force = false) {
         }
 
         return await saveGroupChat(groupId, shouldSaveGroup, true);
-    }
-
-    if (saveRequest.tail) {
-        const responseData = await response.json();
-        if (typeof responseData?.revision !== 'string') {
-            toastr.error(t`Check the server connection and reload the page to prevent data loss.`, t`Group Chat could not be saved`);
-            return false;
-        }
-        setChatPagingState({ revision: responseData.revision });
-        const pagingState = getChatPagingState();
-        setCachedChatPage({
-            isGroup: true,
-            chatId,
-            messages,
-            header: chatHeader,
-            cursor: pagingState.cursor,
-            messageOffset: pagingState.messageOffset,
-            hasMore: pagingState.hasMore,
-            revision: pagingState.revision,
-        });
     }
 
     if (shouldSaveGroup) {
@@ -2507,6 +2551,32 @@ export async function saveGroupBookmarkChat(groupId, name, metadata, mesId) {
         user_name: 'unused',
         character_name: 'unused',
     };
+
+    const session = getChatHydration();
+    if (session?.hydrated && session.isGroup && session.target.id === group.chat_id) {
+        if (!await saveGroupChat(groupId, false)) {
+            return false;
+        }
+        const count = (mesId !== undefined && mesId >= 0 && mesId < chat.length) ? Number(mesId) + 1 : chat.length;
+        const copyResponse = await fetch('/api/chats/group/copy-prefix', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({ id: group.chat_id, target: name, count, header: chatHeader }),
+        });
+        if (!copyResponse.ok) {
+            const errorData = await copyResponse.json().catch(() => null);
+            if (errorData?.error === 'storage_limit') {
+                toastr.error(errorData.message || '存储空间不足，无法保存群聊记录。请删除内容或使用激活码扩容。', '存储空间不足');
+                return false;
+            }
+            toastr.error(t`Check the server connection and reload the page to prevent data loss.`, t`Group chat could not be saved`);
+            console.error('Group chat could not be copied', copyResponse);
+            return false;
+        }
+        group.chats.push(name);
+        await editGroup(groupId, true, false);
+        return true;
+    }
 
     /** @type {ChatMessage[]} */
     let sourceChat = chat.slice();

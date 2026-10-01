@@ -2061,6 +2061,486 @@ router.post('/get-range', validateAvatarUrlMiddleware, async function (request, 
     }
 });
 
+// ---------------------------------------------------------------------------
+// Chat hydration: lets the client hold the whole chat (every message, correct
+// indices) without downloading the bulky fields of old messages. Old messages
+// arrive as a "light" copy plus a list of omitted fields (path + content hash);
+// omitted fields are fetched on demand, and saves send only what changed.
+// Requires chunked storage; without it the client keeps the paged behaviour.
+// ---------------------------------------------------------------------------
+
+/** Values up to this many JSON characters are always sent with the light copy. */
+const HYDRATION_LIGHT_CHARS = 2048;
+/** Light characters per hydration page, and a raw-read cap so huge chats stay bounded. */
+const HYDRATION_PAGE_LIGHT_CHARS = 3 * 1024 * 1024;
+const HYDRATION_PAGE_RAW_CHARS = 48 * 1024 * 1024;
+const HYDRATION_PAGE_MAX_MESSAGES = 2000;
+const HYDRATION_FIELDS_MAX_ITEMS = 1000;
+/** Media keys stay inline: the client migrates them as soon as a message is loaded. */
+const HYDRATION_INLINE_EXTRA_KEYS = new Set(['media', 'files', 'file', 'image', 'video', 'image_swipes', 'media_display', 'media_index', 'type']);
+const HYDRATION_FORBIDDEN_KEYS = new Set(['__proto__', 'prototype', 'constructor']);
+
+class HydrationUnsupportedError extends Error {}
+
+function hashHydrationValue(json) {
+    return crypto.createHash('sha1').update(json).digest('base64url').slice(0, 22);
+}
+
+function isHeaderLikeLine(value) {
+    return Boolean(value?.user_name && value?.character_name && !value?.name) || isGroupChatHeader(value);
+}
+
+/**
+ * Splits a stored message into the copy sent eagerly and the specs of omitted fields.
+ * @param {object} message Parsed message
+ * @returns {{item: any[], lightChars: number}}
+ */
+function splitMessageForHydration(message) {
+    const light = {};
+    const lazy = [];
+    let lightChars = 2;
+    for (const [key, value] of Object.entries(message)) {
+        const json = JSON.stringify(value);
+        if (json === undefined) {
+            continue;
+        }
+        if (key === 'mes' || json.length <= HYDRATION_LIGHT_CHARS) {
+            light[key] = value;
+            lightChars += key.length + json.length + 4;
+            continue;
+        }
+        if (key === 'extra' && isPlainObject(value)) {
+            const lightExtra = {};
+            for (const [subKey, subValue] of Object.entries(value)) {
+                const subJson = JSON.stringify(subValue);
+                if (subJson === undefined) {
+                    continue;
+                }
+                if (HYDRATION_INLINE_EXTRA_KEYS.has(subKey) || subJson.length <= HYDRATION_LIGHT_CHARS) {
+                    lightExtra[subKey] = subValue;
+                    lightChars += subKey.length + subJson.length + 4;
+                } else {
+                    lazy.push([['extra', subKey], hashHydrationValue(subJson), subJson.length]);
+                }
+            }
+            light.extra = lightExtra;
+            lightChars += 12;
+            continue;
+        }
+        lazy.push([[key], hashHydrationValue(json), json.length]);
+    }
+    if (!lazy.length) {
+        return { item: [light], lightChars };
+    }
+    // Original key order, so omitted fields keep their place on the client.
+    const order = [Object.keys(message)];
+    if (isPlainObject(message.extra) && lazy.some(spec => spec[0].length === 2)) {
+        order.push(Object.keys(message.extra));
+    }
+    return { item: [light, lazy, order], lightChars };
+}
+
+function getChatShardRanges(index) {
+    const ranges = [];
+    let offset = 0;
+    for (const shard of index?.shards ?? []) {
+        const count = Math.max(0, Number(shard?.count) || 0);
+        ranges.push({ shard, start: offset, end: offset + count });
+        offset += count;
+    }
+    return ranges;
+}
+
+/**
+ * Number of leading header lines inside the chunk files (0 or 1).
+ * @param {string} filePath Chat file
+ * @param {boolean} isGroup Group chat
+ * @returns {Promise<number>}
+ */
+async function getHydrationBaseLine(filePath, isGroup) {
+    if (isGroup) {
+        return Number((await readGroupChatHeaderInfo(filePath)).embeddedHeaderCount) || 0;
+    }
+    const firstLines = await readChunkedChatLinesRange(filePath, 0, 1);
+    return firstLines.length && isHeaderLikeLine(tryParse(firstLines[0])) ? 1 : 0;
+}
+
+/**
+ * Reads specific chunk lines, touching only the shards that hold them.
+ * @param {string} filePath Chat file
+ * @param {object} index Chunk index
+ * @param {Iterable<number>} lineNumbers Line numbers to read
+ * @returns {Promise<Map<number, string>>}
+ */
+async function readChunkLinesByNumber(filePath, index, lineNumbers) {
+    const wanted = [...new Set(lineNumbers)].sort((a, b) => a - b);
+    const result = new Map();
+    if (!wanted.length) {
+        return result;
+    }
+    let cursor = 0;
+    for (const range of getChatShardRanges(index)) {
+        if (cursor >= wanted.length) {
+            break;
+        }
+        if (wanted[cursor] >= range.end) {
+            continue;
+        }
+        const lines = await readShardLines(path.join(getChatChunkDir(filePath), range.shard.file));
+        while (cursor < wanted.length && wanted[cursor] < range.end) {
+            const line = lines[wanted[cursor] - range.start];
+            if (line !== undefined) {
+                result.set(wanted[cursor], line);
+            }
+            cursor++;
+        }
+    }
+    return result;
+}
+
+/**
+ * Prepares a chunked chat for hydration requests.
+ * @returns {Promise<{index: object, baseLine: number, total: number}>}
+ */
+async function openHydrationChat(filePath, isGroup) {
+    if (!chatChunkingEnabled) {
+        throw new HydrationUnsupportedError('chunking_disabled');
+    }
+    if (!isChunkedChat(filePath)) {
+        await convertLegacyChatToChunks(filePath);
+    }
+    const index = await ensureChatIndex(filePath);
+    if (!index || !Array.isArray(index.shards)) {
+        throw new HydrationUnsupportedError('no_index');
+    }
+    const baseLine = await getHydrationBaseLine(filePath, isGroup);
+    const total = Math.max(0, (Number(index.message_count) || 0) - baseLine);
+    return { index, baseLine, total };
+}
+
+function resolveHydrationChatPath(request, isGroup) {
+    if (isGroup) {
+        const id = String(request.body?.id ?? '');
+        if (!id) return null;
+        const filePath = path.join(request.user.directories.groupChats, `${id}.jsonl`);
+        return isPathUnderParent(request.user.directories.groupChats, filePath) ? filePath : null;
+    }
+    if (!request.body?.file_name) return null;
+    const directoryName = String(request.body.avatar_url).replace('.png', '');
+    const filePath = path.join(request.user.directories.chats, directoryName, sanitize(`${String(request.body.file_name)}.jsonl`));
+    return isPathUnderParent(request.user.directories.chats, filePath) ? filePath : null;
+}
+
+function isValidHydrationPath(value) {
+    return Array.isArray(value)
+        && value.length >= 1
+        && value.length <= 4
+        && value.every(part => typeof part === 'string' && part.length > 0 && !HYDRATION_FORBIDDEN_KEYS.has(part));
+}
+
+function getValueAtPath(object, valuePath) {
+    let current = object;
+    for (const part of valuePath) {
+        if (!isPlainObject(current) || !Object.hasOwn(current, part)) {
+            return undefined;
+        }
+        current = current[part];
+    }
+    return current;
+}
+
+function applyHydrationOp(message, op) {
+    const valuePath = op?.p;
+    if (!isValidHydrationPath(valuePath)) {
+        throw new HydrationUnsupportedError('invalid_op');
+    }
+    let parent = message;
+    for (const part of valuePath.slice(0, -1)) {
+        if (!isPlainObject(parent[part])) {
+            if (op.d) return;
+            parent[part] = {};
+        }
+        parent = parent[part];
+    }
+    const key = valuePath[valuePath.length - 1];
+    if (op.d) {
+        delete parent[key];
+    } else if (Object.hasOwn(op, 'v')) {
+        parent[key] = op.v;
+    } else {
+        throw new HydrationUnsupportedError('invalid_op');
+    }
+}
+
+function sendHydrationError(response, error, fallbackCode) {
+    if (error instanceof HydrationUnsupportedError) {
+        return response.status(422).send({ error: 'hydration_unsupported', reason: error.message });
+    }
+    console.error(fallbackCode, error);
+    return response.status(500).send({ error: fallbackCode });
+}
+
+async function handleHydratePage(request, response, isGroup) {
+    const filePath = resolveHydrationChatPath(request, isGroup);
+    if (!filePath) return response.sendStatus(400);
+    if (!fs.existsSync(filePath)) {
+        return response.send({ revision: null, total: 0, start: 0, items: [] });
+    }
+    try {
+        return await chatStorageMutex.runExclusive(getChatStorageLockKey(request, filePath), async () => {
+            const { index, baseLine, total } = await openHydrationChat(filePath, isGroup);
+            // The first page is addressed by the chunk line where the loaded page starts.
+            const requestedBefore = Number.isInteger(request.body?.beforeLine)
+                ? request.body.beforeLine - baseLine
+                : Number(request.body?.before);
+            const before = Number.isInteger(requestedBefore) ? Math.max(0, Math.min(requestedBefore, total)) : total;
+            const endLine = baseLine + before;
+            const collected = [];
+            let lightChars = 0;
+            let rawChars = 0;
+            const ranges = getChatShardRanges(index);
+            outer: for (let shardIndex = ranges.length - 1; shardIndex >= 0; shardIndex--) {
+                const range = ranges[shardIndex];
+                if (range.start >= endLine) continue;
+                if (range.end <= baseLine) break;
+                const lines = await readShardLines(path.join(getChatChunkDir(filePath), range.shard.file));
+                for (let line = Math.min(range.end, endLine) - 1; line >= Math.max(range.start, baseLine); line--) {
+                    const text = lines[line - range.start];
+                    const message = text === undefined ? null : tryParse(text);
+                    if (!isPlainObject(message) || isHeaderLikeLine(message)) {
+                        throw new HydrationUnsupportedError('unexpected_line');
+                    }
+                    const split = splitMessageForHydration(message);
+                    collected.push(split.item);
+                    lightChars += split.lightChars;
+                    rawChars += text.length;
+                    if (collected.length >= HYDRATION_PAGE_MAX_MESSAGES
+                        || lightChars >= HYDRATION_PAGE_LIGHT_CHARS
+                        || rawChars >= HYDRATION_PAGE_RAW_CHARS) {
+                        break outer;
+                    }
+                }
+            }
+            collected.reverse();
+            return response.send({
+                revision: readChatRevision(filePath),
+                total,
+                start: before - collected.length,
+                items: collected,
+            });
+        });
+    } catch (error) {
+        return sendHydrationError(response, error, 'chat_hydrate_page_failed');
+    }
+}
+
+async function handleHydrateFields(request, response, isGroup) {
+    const filePath = resolveHydrationChatPath(request, isGroup);
+    const items = request.body?.items;
+    if (!filePath || !Array.isArray(items) || items.length === 0 || items.length > HYDRATION_FIELDS_MAX_ITEMS) {
+        return response.sendStatus(400);
+    }
+    if (!fs.existsSync(filePath)) {
+        return response.send({ values: items.map(() => null) });
+    }
+    try {
+        return await chatStorageMutex.runExclusive(getChatStorageLockKey(request, filePath), async () => {
+            const { index, baseLine, total } = await openHydrationChat(filePath, isGroup);
+            const candidatesFor = (item) => [item?.[0], item?.[3]]
+                .filter(candidate => Number.isInteger(candidate) && candidate >= 0 && candidate < total);
+            const lineNumbers = items.flatMap(item => candidatesFor(item).map(candidate => baseLine + candidate));
+            const lines = await readChunkLinesByNumber(filePath, index, lineNumbers);
+            const parsed = new Map();
+            const values = items.map((item) => {
+                const valuePath = item?.[1];
+                const hash = item?.[2];
+                if (!isValidHydrationPath(valuePath) || typeof hash !== 'string') {
+                    return null;
+                }
+                for (const candidate of candidatesFor(item)) {
+                    const lineNumber = baseLine + candidate;
+                    if (!parsed.has(lineNumber)) {
+                        parsed.set(lineNumber, tryParse(lines.get(lineNumber) ?? ''));
+                    }
+                    const value = getValueAtPath(parsed.get(lineNumber), valuePath);
+                    if (value === undefined) continue;
+                    const json = JSON.stringify(value);
+                    if (json !== undefined && hashHydrationValue(json) === hash) {
+                        return json;
+                    }
+                }
+                return null;
+            });
+            return response.send({ values });
+        });
+    } catch (error) {
+        return sendHydrationError(response, error, 'chat_hydrate_fields_failed');
+    }
+}
+
+/**
+ * Patch items: {r: [a, b]} keeps stored messages a..b, {p: a, o: ops} keeps
+ * message a with field changes, {m: message} writes a message as sent.
+ */
+function collectPatchReferences(items, total) {
+    const references = [];
+    for (const item of items) {
+        if (!isPlainObject(item)) throw new HydrationUnsupportedError('invalid_item');
+        if (Array.isArray(item.r)) {
+            const [first, last] = item.r;
+            if (!Number.isInteger(first) || !Number.isInteger(last) || first < 0 || last < first || last >= total) {
+                throw new HydrationUnsupportedError('invalid_reference');
+            }
+            for (let i = first; i <= last; i++) references.push(i);
+        } else if (Object.hasOwn(item, 'p')) {
+            if (!Number.isInteger(item.p) || item.p < 0 || item.p >= total || !Array.isArray(item.o)) {
+                throw new HydrationUnsupportedError('invalid_reference');
+            }
+            references.push(item.p);
+        } else if (!isPlainObject(item.m)) {
+            throw new HydrationUnsupportedError('invalid_item');
+        }
+    }
+    return references;
+}
+
+async function handleSavePatch(request, response, isGroup, performanceTimer) {
+    const filePath = resolveHydrationChatPath(request, isGroup);
+    const from = request.body?.from;
+    const items = request.body?.items;
+    if (!filePath || !Number.isInteger(from) || from < 0 || !Array.isArray(items)) {
+        return response.sendStatus(400);
+    }
+    if (!fs.existsSync(filePath)) {
+        return response.status(409).send({ error: 'revision_conflict', currentRevision: null });
+    }
+    const header = isPlainObject(request.body.header) ? request.body.header : null;
+    const backupName = isGroup ? String(request.body.id) : String(request.body.avatar_url).replace('.png', '');
+    const defaultHeader = isGroup
+        ? { chat_metadata: {}, user_name: 'unused', character_name: 'unused' }
+        : {
+            user_name: request.user.profile?.name ?? 'User',
+            character_name: String(request.body.ch_name ?? backupName),
+            create_date: humanizedISO8601DateTime(),
+            chat_metadata: {},
+        };
+    try {
+        return await chatStorageMutex.runExclusive(getChatStorageLockKey(request, filePath), async () => {
+            if (!validateExpectedChatRevision(request, response, filePath)) {
+                return response;
+            }
+            const { index, baseLine, total } = await openHydrationChat(filePath, isGroup);
+            if (from > total) {
+                throw new HydrationUnsupportedError('invalid_from');
+            }
+            const references = collectPatchReferences(items, total);
+            const lines = await readChunkLinesByNumber(filePath, index, references.map(i => baseLine + i));
+            const readStored = (messageIndex) => {
+                const message = tryParse(lines.get(baseLine + messageIndex) ?? '');
+                if (!isPlainObject(message)) {
+                    throw new HydrationUnsupportedError('missing_reference');
+                }
+                return message;
+            };
+            const messages = [];
+            for (const item of items) {
+                if (Array.isArray(item.r)) {
+                    for (let i = item.r[0]; i <= item.r[1]; i++) messages.push(readStored(i));
+                } else if (Object.hasOwn(item, 'p')) {
+                    const message = readStored(item.p);
+                    for (const op of item.o) applyHydrationOp(message, op);
+                    messages.push(message);
+                } else {
+                    messages.push(item.m);
+                }
+            }
+            performanceTimer.setCounter('messages', messages.length);
+            performanceTimer.setCounter('cursor', from);
+            const result = await persistChatTail({
+                request,
+                response,
+                filePath,
+                header,
+                messages,
+                beforeOffset: baseLine + from,
+                defaultHeader,
+                isGroup,
+                backupName,
+                performanceTimer,
+            });
+            return result ? response.send({ result: 'ok', revision: result.revision }) : response;
+        });
+    } catch (error) {
+        return sendHydrationError(response, error, 'chat_save_patch_failed');
+    }
+}
+
+/**
+ * Copies the first `count` messages of a chat into a new chat file, on the
+ * server, so branches of huge chats never pass through the browser.
+ */
+async function handleCopyPrefix(request, response, isGroup) {
+    const sourcePath = resolveHydrationChatPath(request, isGroup);
+    const count = request.body?.count;
+    const header = isPlainObject(request.body?.header) ? request.body.header : null;
+    if (!sourcePath || !Number.isInteger(count) || count < 0 || !header) {
+        return response.sendStatus(400);
+    }
+    const targetName = String(request.body?.target ?? '');
+    const targetPath = isGroup
+        ? path.join(request.user.directories.groupChats, `${targetName}.jsonl`)
+        : path.join(path.dirname(sourcePath), sanitize(`${targetName}.jsonl`));
+    const targetParent = isGroup ? request.user.directories.groupChats : request.user.directories.chats;
+    if (!targetName || !isPathUnderParent(targetParent, targetPath) || toPathKey(targetPath) === toPathKey(sourcePath)) {
+        return response.sendStatus(400);
+    }
+    if (!fs.existsSync(sourcePath)) {
+        return response.sendStatus(404);
+    }
+    if (fs.existsSync(targetPath)) {
+        return response.status(409).send({ error: 'target_exists' });
+    }
+    try {
+        const messages = await chatStorageMutex.runExclusive(getChatStorageLockKey(request, sourcePath), async () => {
+            const { baseLine, total } = await openHydrationChat(sourcePath, isGroup);
+            const lines = await readChunkedChatLinesRange(sourcePath, baseLine, Math.min(count, total));
+            return lines.map(line => tryParse(line)).filter(message => isPlainObject(message) && !isHeaderLikeLine(message));
+        });
+        const backupName = isGroup ? targetName : String(request.body.avatar_url).replace('.png', '');
+        return await chatStorageMutex.runExclusive(getChatStorageLockKey(request, targetPath), async () => {
+            if (fs.existsSync(targetPath)) {
+                return response.status(409).send({ error: 'target_exists' });
+            }
+            const result = await persistFullChat({ request, response, filePath: targetPath, header, messages, isGroup, backupName });
+            return result ? response.send({ result: 'ok', revision: result.revision, count: messages.length }) : response;
+        });
+    } catch (error) {
+        return sendHydrationError(response, error, 'chat_copy_prefix_failed');
+    }
+}
+
+function createSavePatchRoute(isGroup) {
+    return async function (request, response) {
+        const performanceTimer = beginEndpointPerformance(request, isGroup ? 'group-chat-save-patch' : 'chat-save-patch');
+        performanceTimer.setCacheState('bypass');
+        const stopWriteTimer = performanceTimer.startPhase('write');
+        try {
+            return await handleSavePatch(request, response, isGroup, performanceTimer);
+        } finally {
+            stopWriteTimer();
+        }
+    };
+}
+
+router.post('/hydrate-page', validateAvatarUrlMiddleware, (request, response) => handleHydratePage(request, response, false));
+router.post('/hydrate-fields', validateAvatarUrlMiddleware, (request, response) => handleHydrateFields(request, response, false));
+router.post('/save-patch', validateAvatarUrlMiddleware, createSavePatchRoute(false));
+router.post('/copy-prefix', validateAvatarUrlMiddleware, (request, response) => handleCopyPrefix(request, response, false));
+router.post('/group/hydrate-page', (request, response) => handleHydratePage(request, response, true));
+router.post('/group/hydrate-fields', (request, response) => handleHydrateFields(request, response, true));
+router.post('/group/save-patch', createSavePatchRoute(true));
+router.post('/group/copy-prefix', (request, response) => handleCopyPrefix(request, response, true));
+
 router.post('/rename', validateAvatarUrlMiddleware, async function (request, response) {
     try {
         if (!request.body || !request.body.original_file || !request.body.renamed_file) {

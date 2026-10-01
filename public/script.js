@@ -284,6 +284,7 @@ import { event_types, eventSource } from './scripts/events.js';
 import { initAccessibility } from './scripts/a11y.js';
 import { processItemsWithFrameBudget } from './scripts/util/frame-budget.js';
 import { chatRenderOptimizer } from './scripts/util/chat-render-optimizer.js';
+import { ChatHydrationSession, copyMessageForPrompt } from './scripts/chat-hydration.js';
 import { scrollCoordinator, ScrollPriority } from './scripts/util/scroll-coordinator.js';
 import { drawerSwitchCoordinator, getInlineDrawerDuration } from './scripts/util/drawer-switch-coordinator.js';
 import { requireSettingsSaveSuccess, SettingsSaveQueue, SettingsSaveTracker } from './scripts/util/settings-save-tracker.js';
@@ -429,6 +430,8 @@ const CHAT_LOAD_MORE_FRAME_BUDGET_MS = 8;
 const CHAT_PAGING_ENABLED = false;
 const CHAT_RENDER_OPTIMIZATION_ENABLED = true;
 const CHAT_CACHE_TTL_MS = 20_000;
+// Opened chats are hydrated into tracked messages bound to one session, so pages are not reused.
+const CHAT_PAGE_CACHE_ENABLED = false;
 const CHAT_CACHE_MAX_ENTRIES = 50;
 const chatPagingState = {
     active: false,
@@ -630,6 +633,7 @@ export function setChatPagingState(nextState = {}) {
 }
 
 export function resetChatPagingState({ isGroup = false, chatId = null } = {}) {
+    chatHydration = null;
     chatPagingLoadGeneration++;
     chatPagingLoadController?.abort();
     chatPagingLoadController = null;
@@ -643,6 +647,140 @@ export function resetChatPagingState({ isGroup = false, chatId = null } = {}) {
     chatPagingState.messageOffset = null;
     chatPagingState.revision = null;
     chatPagingState.loading = false;
+}
+
+/**
+ * Hydration of the open paged chat: older messages are loaded into `chat` as
+ * light, tracked messages so the whole history is readable (see chat-hydration.js).
+ * @type {ChatHydrationSession|null}
+ */
+let chatHydration = null;
+let missingHistoryReported = false;
+
+function reportMissingChatHistory() {
+    if (missingHistoryReported) {
+        return;
+    }
+    missingHistoryReported = true;
+    toastr.error(t`Chat changed in another tab. Reloading to prevent data loss.`, t`Chat changed`);
+    setTimeout(() => window.location.reload(), 1500);
+}
+
+/**
+ * Starts a hydration session for a chat that was just opened with a paged load.
+ * @param {{isGroup: boolean, target: object, revision: string|null}} options
+ * @returns {ChatHydrationSession}
+ */
+export function startChatHydration({ isGroup, target, revision }) {
+    chatHydration = new ChatHydrationSession({
+        isGroup,
+        target,
+        revision,
+        getHeaders: () => getRequestHeaders(),
+        normalizeMessage: ensureMessageMediaIsArray,
+        onMissingData: reportMissingChatHistory,
+    });
+    return chatHydration;
+}
+
+/** @returns {ChatHydrationSession|null} */
+export function getChatHydration() {
+    return chatHydration;
+}
+
+/** Waits until a running hydration of the open chat has finished (or given up). */
+export async function waitForChatHydration() {
+    await chatHydration?.ready;
+}
+
+/**
+ * Loads the rest of a paged chat into `chat`, without rendering it.
+ * On failure the chat simply stays paged, as before.
+ * @param {object} [options]
+ * @param {() => boolean} [options.isCurrent] Whether the load is still current
+ */
+export async function hydrateLoadedChat({ isCurrent = () => true } = {}) {
+    const session = chatHydration;
+    if (!session || session.hydrated || session.failed || !chatPagingState.active || !chatPagingState.hasMore) {
+        return;
+    }
+    const identity = getCurrentChatIdentity();
+    const startedAt = performance.now();
+    let resolveReady = () => { };
+    session.ready = new Promise(resolve => { resolveReady = resolve; });
+    chatPagingState.loading = true;
+    let loaded = 0;
+    try {
+        await session.enqueue(async () => {
+            const isActive = () => session === chatHydration && isCurrent() && getCurrentChatIdentity() === identity;
+            const beforeLine = chatPagingState.cursor;
+            if (!isActive() || !Number.isFinite(beforeLine) || beforeLine <= 0) {
+                session.failed = true;
+                return;
+            }
+            let history = null;
+            try {
+                history = await session.loadHistory({ beforeLine });
+            } catch (error) {
+                console.warn('Could not load the full chat history; the chat stays paged.', error);
+            }
+            if (!history || !isActive()) {
+                session.failed = true;
+                return;
+            }
+            chat.unshift(...history);
+            shiftDisplayedMessageIds(history.length);
+            session.history = history;
+            session.serverOrder = chat.slice();
+            session.hydrated = true;
+            loaded = history.length;
+            chatPagingState.hasMore = false;
+            chatPagingState.messageOffset = 0;
+            chatPagingState.cursor = 0;
+            const button = $('#show_more_messages');
+            if (chat.length > chatElement.children('.mes').length) {
+                if (button.length) {
+                    button.text('显示更多消息');
+                } else {
+                    chatElement.prepend('<div id="show_more_messages">显示更多消息</div>');
+                }
+            } else {
+                button.remove();
+            }
+        });
+    } finally {
+        if (session === chatHydration) {
+            chatPagingState.loading = false;
+        }
+        resolveReady();
+        recordPerformanceSample('chat-full-hydration', performance.now() - startedAt, {
+            messages: loaded,
+            failed: Number(!session.hydrated),
+        });
+    }
+}
+
+/**
+ * Messages the prompt can use. A hydrated chat holds its whole history; only the
+ * part the context can hold is worth processing, as with paged prompt backfill.
+ * @returns {ChatMessage[]}
+ */
+function getPromptHistorySource() {
+    if (!chatHydration?.hydrated) {
+        return chat;
+    }
+    const budget = Math.max(Number(getMaxContextSize()) || 0, 4096) * PROMPT_BACKFILL_CHARS_PER_TOKEN;
+    let chars = 0;
+    let start = chat.length;
+    while (start > 0) {
+        const length = String(chat[start - 1]?.mes ?? '').length;
+        if (start < chat.length && chars + length > budget) {
+            break;
+        }
+        chars += length;
+        start--;
+    }
+    return start === 0 ? chat : chat.slice(start);
 }
 
 function scheduleChatRenderOptimization() {
@@ -674,6 +812,9 @@ function getChatCacheKey({ isGroup = false, chatId = null } = {}) {
  * @returns {ChatPageCacheEntry|null}
  */
 export function getCachedChatPage({ isGroup = false, chatId = null } = {}) {
+    if (!CHAT_PAGE_CACHE_ENABLED) {
+        return null;
+    }
     const key = getChatCacheKey({ isGroup, chatId });
     if (!key) return null;
     const cached = chatPageCache.get(key);
@@ -698,6 +839,9 @@ export function clearCachedChatPage({ isGroup = false, chatId = null } = {}) {
  * @param {ChatPageCacheParams} [options]
  */
 export function setCachedChatPage({ isGroup = false, chatId = null, messages, header, cursor, messageOffset, hasMore, revision } = {}) {
+    if (!CHAT_PAGE_CACHE_ENABLED) {
+        return;
+    }
     const key = getChatCacheKey({ isGroup, chatId });
     if (!key) return;
     chatPageCache.delete(key);
@@ -2086,7 +2230,7 @@ export async function printMessages() {
     const renderIdentity = getCurrentChatIdentity();
     let startIndex = 0;
     let count = power_user.chat_truncation || Number.MAX_SAFE_INTEGER;
-    const pagingActive = chatPagingState.active;
+    const pagingActive = chatPagingState.active && !chatHydration?.hydrated;
     chatElement.find('#show_more_messages').remove();
 
     if (pagingActive) {
@@ -4899,6 +5043,9 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
     // Prevent generation from shallow characters
     await unshallowCharacter(this_chid);
 
+    // Message indices must not shift under a running generation.
+    await waitForChatHydration();
+
     // Occurs every time, even if the generation is aborted due to slash commands execution
     await eventSource.emit(event_types.GENERATION_STARTED, type, { automatic_trigger, force_name2, quiet_prompt, quietToLoud, skipWIAN, force_chid, signal, quietImage }, dryRun);
 
@@ -5107,7 +5254,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
     const canPerformToolCalls = !dryRun && ToolManager.canPerformToolCalls(type) && depth < ToolManager.RECURSE_LIMIT;
     // Chat paging keeps older messages out of `chat`; read them for the prompt without rendering them.
     const promptBackfillMessages = await getPromptBackfillMessages({ cachedOnly: dryRun });
-    let coreChat = [...promptBackfillMessages, ...chat].filter(x => !x.is_system || (canUseTools && Array.isArray(x.extra?.tool_invocations)));
+    let coreChat = [...promptBackfillMessages, ...getPromptHistorySource()].filter(x => !x.is_system || (canUseTools && Array.isArray(x.extra?.tool_invocations)));
     if (type === 'swipe') {
         coreChat.pop();
     }
@@ -5135,19 +5282,17 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
             regexedMessage = `${regexedMessage}\n\n${titles.join('\n\n')}`;
         }
 
-        return {
-            ...chatItem,
+        return copyMessageForPrompt(chatItem, {
             mes: regexedMessage,
             index,
-        };
+        });
     }));
 
     const promptReasoning = new PromptReasoning();
     for (let i = coreChat.length - 1; i >= 0; i--) {
         const depth = coreChat.length - i - (isContinue ? 2 : 1);
         const isPrefix = isContinue && i === coreChat.length - 1;
-        coreChat[i] = {
-            ...coreChat[i],
+        coreChat[i] = copyMessageForPrompt(coreChat[i], {
             mes: promptReasoning.addToMessage(
                 coreChat[i].mes,
                 getRegexedString(
@@ -5158,7 +5303,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
                 isPrefix,
                 coreChat[i].extra?.reasoning_duration,
             ),
-        };
+        });
         if (promptReasoning.isLimitReached()) {
             break;
         }
@@ -7979,22 +8124,25 @@ async function ensureStorageAvailableForChatAction() {
  * @param {Partial<SaveChatTailOptions>} [options]
  */
 async function saveChatTail(options = {}) {
-    const { fileName, header, messages, force = false } = options;
+    const { fileName, header, messages, force = false, session = null } = options;
     if (!fileName || !header || !Array.isArray(messages)) {
         return;
     }
+    const before = Number.isFinite(options.before) ? options.before
+        : Number.isFinite(chatPagingState.cursor) ? chatPagingState.cursor : 0;
+    const expectedRevision = session ? session.revision : chatPagingState.revision;
     const result = await fetch('/api/chats/save-tail', {
         method: 'POST',
         cache: 'no-cache',
         headers: getRequestHeaders(),
         body: JSON.stringify({
-            ch_name: characters[this_chid].name,
+            ch_name: session?.target.ch_name ?? characters[this_chid].name,
             file_name: fileName,
-            avatar_url: characters[this_chid].avatar,
+            avatar_url: session?.target.avatar_url ?? characters[this_chid].avatar,
             header,
             messages,
-            before: Number.isFinite(chatPagingState.cursor) ? chatPagingState.cursor : 0,
-            expectedRevision: typeof chatPagingState.revision === 'string' ? chatPagingState.revision : null,
+            before,
+            expectedRevision: typeof expectedRevision === 'string' ? expectedRevision : null,
             force: force,
         }),
     });
@@ -8004,7 +8152,10 @@ async function saveChatTail(options = {}) {
         if (typeof responseData?.revision !== 'string') {
             throw new Error('Chat tail save response did not include a revision.');
         }
-        chatPagingState.revision = responseData.revision;
+        session?.noteRevision(responseData.revision);
+        if (!session || session === chatHydration) {
+            chatPagingState.revision = responseData.revision;
+        }
         if (chatPagingState.active) {
             setCachedChatPage({
                 isGroup: false,
@@ -8055,7 +8206,107 @@ async function saveChatTail(options = {}) {
         return;
     }
 
-    await saveChatTail({ fileName, header, messages, force: true });
+    await saveChatTail({ ...options, force: true });
+}
+
+/**
+ * Saves a hydrated chat: only changed messages are sent, the rest is kept on the server.
+ * @param {object} options
+ * @param {ChatHydrationSession} options.session Hydration session of the chat
+ * @param {ChatMessage[]} options.messages Whole chat, as it is now
+ * @param {object} options.header Chat header
+ * @param {boolean} [options.force] Override an integrity mismatch
+ * @returns {Promise<void>}
+ */
+async function saveChatPatch({ session, messages, header, force = false }) {
+    const prepared = session.prepareSave(messages, { header, force });
+    let result;
+    try {
+        result = await fetch(`${session.baseUrl}/save-patch`, {
+            method: 'POST',
+            cache: 'no-cache',
+            headers: getRequestHeaders(),
+            body: prepared.body,
+        });
+    } catch (error) {
+        prepared.rollback();
+        throw error;
+    }
+
+    if (result.ok) {
+        const responseData = await result.json().catch(() => null);
+        if (typeof responseData?.revision !== 'string') {
+            prepared.rollback();
+            throw new Error('Chat save response did not include a revision.');
+        }
+        prepared.commit(responseData.revision);
+        if (session === chatHydration) {
+            chatPagingState.revision = responseData.revision;
+        }
+        return;
+    }
+
+    prepared.rollback();
+    const errorData = await result.json().catch(() => null);
+    if (result.status === 409 && errorData?.error === 'revision_conflict') {
+        toastr.error(t`Chat changed in another tab. Reloading to prevent data loss.`, t`Chat changed`);
+        window.location.reload();
+        return;
+    }
+    if (errorData?.error === 'storage_limit') {
+        toastr.error(errorData.message || '存储空间不足，无法保存聊天记录。请删除内容或使用激活码扩容。', '存储空间不足');
+        return;
+    }
+    if (errorData?.error !== 'integrity' || force) {
+        throw new Error(result.statusText);
+    }
+
+    const popupResult = await Popup.show.input(
+        t`ERROR: Chat integrity check failed while saving the file.`,
+        t`<p>After you click OK, the page will be reloaded to prevent data corruption.</p>
+          <p>To confirm an overwrite (and potentially <b>LOSE YOUR DATA</b>), enter <code>OVERWRITE</code> (in all caps) in the box below before clicking OK.</p>`,
+        '',
+        { okButton: 'OK', cancelButton: false },
+    );
+    if (popupResult !== 'OVERWRITE') {
+        console.warn('Chat integrity check failed, and user did not confirm the overwrite. Reloading the page.');
+        window.location.reload();
+        return;
+    }
+    await saveChatPatch({ session, messages, header, force: true });
+}
+
+/**
+ * Saves the open paged chat through its hydration session, so saves and the
+ * hydration never overlap and a hydrated chat is saved as a patch.
+ * @param {object} options
+ * @param {string} options.fileName Chat file
+ * @param {object} options.header Chat header
+ * @param {ChatMessage[]} options.messages Chat messages as they are now
+ * @param {boolean} [options.force] Override an integrity mismatch
+ * @returns {Promise<void>}
+ */
+async function savePagedChat({ fileName, header, messages, force = false }) {
+    const session = chatHydration;
+    if (!session) {
+        await saveChatTail({ fileName, header, messages, force });
+        return;
+    }
+    const wasHydrated = session.hydrated;
+    const before = chatPagingState.cursor;
+    await session.enqueue(async () => {
+        if (session.hydrated) {
+            // A snapshot taken before the hydration lacks the history it added.
+            const allMessages = wasHydrated ? messages : [...session.history, ...messages];
+            await saveChatPatch({ session, messages: allMessages, header, force });
+            return;
+        }
+        if (session !== chatHydration) {
+            console.warn('Skipped a queued save of a chat that is no longer open.');
+            return;
+        }
+        await saveChatTail({ fileName, header, messages, force, session, before });
+    });
 }
 
 /**
@@ -8067,11 +8318,37 @@ async function saveChatTail(options = {}) {
 async function saveChatCopyFromPagedChat({ fileName, metadata, mesId }) {
     const character = characters[this_chid];
     const sourceFile = character.chat;
-    await saveChatTail({
-        fileName: sourceFile,
-        header: { user_name: name1, character_name: name2, create_date: chat_create_date, chat_metadata },
-        messages: chat.slice(),
-    });
+    const session = chatHydration;
+    const sourceHeader = { user_name: name1, character_name: name2, create_date: chat_create_date, chat_metadata };
+    const header = {
+        user_name: name1,
+        character_name: name2,
+        create_date: chat_create_date,
+        chat_metadata: metadata,
+    };
+    if (session?.hydrated) {
+        // The whole chat is here with real indices: commit it, then copy on the server.
+        const messages = chat.slice();
+        const count = (mesId !== undefined && mesId >= 0 && mesId < messages.length) ? Number(mesId) + 1 : messages.length;
+        await session.enqueue(() => saveChatPatch({ session, messages, header: sourceHeader }));
+        const copyResult = await fetch('/api/chats/copy-prefix', {
+            method: 'POST',
+            cache: 'no-cache',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({ ...session.target, target: fileName, count, header }),
+        });
+        if (copyResult.ok) {
+            return;
+        }
+        const copyError = await copyResult.json().catch(() => null);
+        if (copyError?.error === 'storage_limit') {
+            toastr.error(copyError.message || '存储空间不足，无法保存聊天记录。请删除内容或使用激活码扩容。', '存储空间不足');
+            return;
+        }
+        throw new Error(copyResult.statusText);
+    }
+
+    await savePagedChat({ fileName: sourceFile, header: sourceHeader, messages: chat.slice() });
 
     const sourceResponse = await fetch('/api/chats/get', {
         method: 'POST',
@@ -8089,12 +8366,6 @@ async function saveChatCopyFromPagedChat({ fileName, metadata, mesId }) {
         ? getFullGroupMessageIndex(mesId, chatPagingState.messageOffset, fullMessages, chat)
         : fullMessages.length - 1;
 
-    const header = {
-        user_name: name1,
-        character_name: name2,
-        create_date: chat_create_date,
-        chat_metadata: metadata,
-    };
     const result = await fetch('/api/chats/save', {
         method: 'POST',
         cache: 'no-cache',
@@ -8181,7 +8452,7 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false } 
 
     if (chatPagingState.active) {
         try {
-            await saveChatTail({ fileName, header, messages: trimmedChat, force });
+            await savePagedChat({ fileName, header, messages: trimmedChat, force });
             return;
         } catch (error) {
             console.error(error);
@@ -8489,6 +8760,13 @@ export async function getChat({ signal: parentSignal, isCurrent: parentIsCurrent
                 chatPagingState.revision = typeof paged.revision === 'string' ? paged.revision : null;
                 chatPagingState.active = true;
                 usedPaging = true;
+                if (chatPagingState.hasMore) {
+                    startChatHydration({
+                        isGroup: false,
+                        target: { ch_name: characters[characterId].name, avatar_url: characterAvatar, file_name: characterChat },
+                        revision: chatPagingState.revision,
+                    });
+                }
                 chat.forEach(ensureMessageMediaIsArray);
                 setCachedChatPage({
                     isGroup: false,
@@ -8582,6 +8860,8 @@ async function getChatResult({ characterId = this_chid, isCurrent = () => true }
     if (!isCurrent()) return false;
     select_selected_character(characterId);
 
+    // Listeners see the whole history with real message indices.
+    await hydrateLoadedChat({ isCurrent });
     if (!isCurrent()) return false;
     await eventSource.emit(event_types.CHAT_CHANGED, characters[characterId].chat);
     if (!isCurrent()) return false;
