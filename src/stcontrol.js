@@ -839,6 +839,8 @@ export async function stcontrolPublicAccountGuard(request, response, next) {
     }
     const allowed = new Set(['/list', '/logout', '/heartbeat', '/registration-config', '/me']);
     if (allowed.has(routePath)) return next();
+    // Backups are private routes mounted after login; let them through to it.
+    if (isStcontrolBackupRequest(request)) return next();
     return writeAccessError(response);
 }
 
@@ -857,6 +859,16 @@ export function isStcontrolSafeBackupRequest(request) {
     if (request.method === 'POST') return /^\/backup(?:\/start)?$/.test(request.path);
     if (request.method === 'DELETE') return /^\/backup\/[^/]+$/.test(request.path);
     return false;
+}
+
+/**
+ * Any backup request: the safe actions above plus reading estimates, job status and downloads.
+ * @param {import('express').Request} request
+ * @returns {boolean}
+ */
+function isStcontrolBackupRequest(request) {
+    if (['GET', 'HEAD'].includes(request.method)) return /^\/backup\/(?:estimate|status\/[^/]+|download\/[^/]+)$/.test(request.path);
+    return isStcontrolSafeBackupRequest(request);
 }
 
 export function stcontrolPrivateAccountGuard(request, response, next) {

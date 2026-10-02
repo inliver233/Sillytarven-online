@@ -214,6 +214,8 @@ test('a managed node still lets users download their own full backup end to end'
 
     const app = express();
     app.use(express.json());
+    // Same order as the server: public account routes come before login.
+    app.use('/api/users', routers.publicUsers.router);
     app.use((request, _response, next) => {
         request.user = { profile: { handle, name: handle, admin: false }, directories };
         next();
@@ -240,6 +242,10 @@ test('a managed node still lets users download their own full backup end to end'
             archive.readEntry();
         }));
         assert.ok(names.includes('chats/Bot/a.jsonl'), names.join(','));
+
+        const estimate = await fetch(`${base}/backup/estimate`);
+        assert.equal(estimate.status, 200);
+        assert.ok((await estimate.json()).estimatedBytes > 0);
 
         // Account changes stay with the controller.
         const changePassword = await post('/change-password', { handle, newPassword: 'x' });
