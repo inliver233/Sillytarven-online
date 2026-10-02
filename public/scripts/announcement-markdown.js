@@ -39,6 +39,13 @@ function getConverter() {
  * @param {DocumentFragment} fragment
  */
 function decorateFragment(fragment) {
+    // 折叠块里 showdown 会在 <summary> 两侧留下空段落
+    fragment.querySelectorAll('details p').forEach((paragraph) => {
+        if (!paragraph.childNodes.length) {
+            paragraph.remove();
+        }
+    });
+
     fragment.querySelectorAll('a[href]').forEach((link) => {
         const href = link.getAttribute('href') || '';
         if (!href.startsWith('#')) {
@@ -88,7 +95,8 @@ function decorateFragment(fragment) {
  */
 export function renderAnnouncementMarkdown(markdown) {
     const source = typeof markdown === 'string' ? markdown : String(markdown ?? '');
-    const html = getConverter().makeHtml(source);
+    // 折叠块 <details> 里的内容也按 Markdown 解析，写公告时不用另加 markdown="1"
+    const html = getConverter().makeHtml(source.replace(/<details(?![^>]*markdown=)([^>]*)>/gi, '<details markdown="1"$1>'));
     const fragment = DOMPurify.sanitize(html, {
         RETURN_DOM_FRAGMENT: true,
         USE_PROFILES: { html: true },

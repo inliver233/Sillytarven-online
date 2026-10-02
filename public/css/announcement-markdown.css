@@ -182,3 +182,26 @@
 .announcementPreview[hidden] {
     display: none;
 }
+
+/* 折叠段落：<details><summary>标题</summary>内容</details> */
+.announcement-markdown details {
+    margin: 0.35em 0;
+    padding: 0.4em 0.7em;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--SmartThemeBodyColor) 4%, transparent);
+}
+
+.announcement-markdown summary {
+    cursor: pointer;
+    font-weight: 600;
+    line-height: 1.5;
+}
+
+.announcement-markdown details[open] > summary {
+    margin-bottom: 0.3em;
+}
+
+.announcement-markdown details > :last-child {
+    margin-bottom: 0.2em;
+}

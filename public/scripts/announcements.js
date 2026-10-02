@@ -113,17 +113,15 @@ function showAnnouncementsPopup(announcements) {
 
 // 创建公告弹窗HTML
 function createAnnouncementsPopupHtml(announcements) {
-    const announcementsHtml = announcements.map(announcement => `
-        <div class="announcement-item">
-            <div class="announcement-header">
-                <h3 class="announcement-title">${escapeHtml(announcement.title)}</h3>
-            </div>
+    // 最新一条展开，较早的收成一行标题，保证小屏幕上每条公告都能一眼看到。
+    const announcementsHtml = announcements.map((announcement, index) => `
+        <div class="announcement-item${index > 0 ? ' collapsed' : ''}">
+            <button type="button" class="announcement-header" aria-expanded="${index === 0}">
+                <span class="announcement-title">${escapeHtml(announcement.title)}</span>
+                <small class="announcement-time">${new Date(announcement.createdAt).toLocaleDateString('zh-CN')}</small>
+                <i class="fa-solid fa-chevron-down announcement-chevron" aria-hidden="true"></i>
+            </button>
             <div class="announcement-content"></div>
-            <div class="announcement-footer">
-                <small class="announcement-time">
-                    发布时间: ${new Date(announcement.createdAt).toLocaleString('zh-CN')}
-                </small>
-            </div>
         </div>
     `).join('');
 
@@ -162,6 +160,21 @@ function bindAnnouncementPopupEvents() {
     if (confirmBtn) {
         confirmBtn.addEventListener('click', closeAnnouncementsPopup);
     }
+
+    // 点击标题展开/收起；一次只展开一条，其余标题始终留在视野内
+    const headers = popup ? [...popup.querySelectorAll('.announcement-header')] : [];
+    headers.forEach(header => {
+        header.addEventListener('click', () => {
+            const item = header.closest('.announcement-item');
+            const expand = item.classList.contains('collapsed');
+            for (const other of headers) {
+                const otherItem = other.closest('.announcement-item');
+                const open = expand && otherItem === item;
+                otherItem.classList.toggle('collapsed', !open);
+                other.setAttribute('aria-expanded', String(open));
+            }
+        });
+    });
 
     // 点击遮罩层关闭
     if (popup) {
