@@ -398,3 +398,41 @@
         border-width: 2px;
     }
 }
+
+/* 公告末尾的按钮固定在卡片底部，不随正文滚动 */
+.announcement-actions {
+    flex: 0 0 auto;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding-top: 8px;
+}
+
+.announcement-actions a.announcement-button {
+    margin: 0;
+}
+
+.announcement-item.collapsed .announcement-actions {
+    display: none;
+}
+
+/* 正文还能往下滚：底部渐隐提示 */
+.announcement-content.has-more {
+    -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent);
+    mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent);
+}
+
+/* 极矮屏（小手机横屏）：右上角 ✕ 和点遮罩都能关闭，省掉底栏把空间留给公告 */
+@media (max-height: 420px) {
+    .announcements-popup-footer {
+        display: none;
+    }
+
+    .announcements-popup-header {
+        padding: 4px 12px;
+    }
+
+    .announcements-close-btn {
+        padding: 2px 6px;
+    }
+}

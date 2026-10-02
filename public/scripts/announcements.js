@@ -95,6 +95,8 @@ function showAnnouncementsPopup(announcements) {
     // 渲染 Markdown 内容
     document.querySelectorAll('#announcementsPopup .announcement-content').forEach((element, index) => {
         renderAnnouncementMarkdownInto(element, announcements[index]?.content);
+        pinTrailingButtons(element);
+        element.addEventListener('scroll', () => updateScrollFade(element), { passive: true });
     });
 
     // 绑定事件
@@ -105,6 +107,7 @@ function showAnnouncementsPopup(announcements) {
     if (popup) {
         popup.style.display = 'flex';
         fitAnnouncementsToPopup(popup);
+        refreshScrollFades(popup);
         // 添加动画效果
         setTimeout(() => {
             popup.classList.add('show');
@@ -146,6 +149,38 @@ function createAnnouncementsPopupHtml(announcements) {
             </div>
         </div>
     `;
+}
+
+/**
+ * 公告末尾只有按钮的那一段移到正文外、固定在卡片底部：正文需要滚动时按钮也始终可见。
+ * @param {HTMLElement} content 公告正文容器
+ */
+function pinTrailingButtons(content) {
+    const last = content.lastElementChild;
+    if (!last || last.tagName !== 'P') {
+        return;
+    }
+    const buttons = [...last.querySelectorAll('a.announcement-button')];
+    const onlyButtons = buttons.length > 0 && [...last.childNodes].every(node =>
+        buttons.includes(node) || (node.nodeType === Node.TEXT_NODE && !node.textContent.trim()) || node.nodeName === 'BR');
+    if (!onlyButtons) {
+        return;
+    }
+    const actions = document.createElement('div');
+    actions.className = 'announcement-actions announcement-markdown';
+    actions.append(...buttons);
+    last.remove();
+    content.after(actions);
+}
+
+function refreshScrollFades(popup) {
+    popup.querySelectorAll('.announcement-content').forEach(updateScrollFade);
+}
+
+/** 正文还能往下滚时在底部加一层渐隐，提示还有内容。 */
+function updateScrollFade(content) {
+    const more = content.scrollHeight - content.clientHeight - content.scrollTop > 4;
+    content.classList.toggle('has-more', more);
 }
 
 function setAnnouncementExpanded(item, expanded) {
@@ -199,6 +234,7 @@ function bindAnnouncementPopupEvents() {
                     }
                 }
             }
+            refreshScrollFades(popup);
         });
     });
 
