@@ -401,6 +401,7 @@ async function openBackupHub() {
                     <span class="backupHub-text">
                         <b>下载全量备份</b>
                         <span>角色、对话、世界书、设置等全部数据，打包成一个 ZIP</span>
+                        <small class="backupHub-size" hidden></small>
                     </span>
                 </button>
                 <button type="button" class="backupHub-card" data-transfer-tab="export">
@@ -428,6 +429,10 @@ async function openBackupHub() {
         </div>`);
     const popup = new Popup(root, POPUP_TYPE.TEXT, '', { okButton: '关闭', allowVerticalScrolling: true });
     bindOwnFullBackupButton(root);
+    void loadFullBackupEstimate().then(estimate => {
+        const label = root.find('.backupHub-size');
+        label.text(estimate).prop('hidden', !estimate);
+    });
     root.find('[data-transfer-tab]').on('click', async function () {
         const tab = String($(this).data('transfer-tab'));
         await popup.completeCancelled();
@@ -441,6 +446,36 @@ async function openBackupHub() {
  * Asks the user what to include in their own full backup.
  * @returns {Promise<{includeSecrets: boolean}|null>} Options, or null when cancelled
  */
+/** @type {{at: number, promise: Promise<string>}|null} */
+let fullBackupEstimate = null;
+
+function formatDownloadSize(bytes) {
+    const units = ['B', 'KB', 'MB', 'GB'];
+    let value = Number(bytes) || 0;
+    let unit = 0;
+    while (value >= 1024 && unit < units.length - 1) {
+        value /= 1024;
+        unit++;
+    }
+    return `${unit === 0 ? value : value.toFixed(value < 10 ? 1 : 0)} ${units[unit]}`;
+}
+
+/**
+ * Estimated download size of the current user's full backup, e.g. "约 85 MB".
+ * Resolves to '' when it cannot be estimated.
+ * @returns {Promise<string>}
+ */
+function loadFullBackupEstimate() {
+    if (!fullBackupEstimate || Date.now() - fullBackupEstimate.at > 60_000) {
+        const promise = fetch('/api/users/backup/estimate', { headers: getRequestHeaders(), cache: 'no-store' })
+            .then(response => response.ok ? response.json() : null)
+            .then(data => Number.isFinite(data?.estimatedBytes) ? `约 ${formatDownloadSize(data.estimatedBytes)}` : '')
+            .catch(() => '');
+        fullBackupEstimate = { at: Date.now(), promise };
+    }
+    return fullBackupEstimate.promise;
+}
+
 async function askFullBackupOptions() {
     const inputId = 'backupIncludeSecrets';
     let includeSecrets = false;
@@ -449,10 +484,16 @@ async function askFullBackupOptions() {
     title.textContent = '下载全量备份';
     const text = document.createElement('p');
     text.textContent = '备份会打包你的全部数据（角色、对话、世界书、设置等）。完成后会自动开始下载。';
+    const size = document.createElement('p');
+    size.className = 'backupEstimate';
+    size.textContent = '预计下载大小：计算中…';
+    void loadFullBackupEstimate().then(estimate => {
+        size.textContent = estimate ? `预计下载大小：${estimate}` : '';
+    });
     const note = document.createElement('p');
     note.className = 'notes';
     note.textContent = 'API 密钥默认不会放进备份。只有勾选下面的选项才会一起打包，请妥善保管含密钥的备份文件，不要发给别人。';
-    content.append(title, text, note);
+    content.append(title, text, size, note);
     const popup = new Popup(content, POPUP_TYPE.CONFIRM, null, {
         okButton: '开始备份',
         cancelButton: '取消',

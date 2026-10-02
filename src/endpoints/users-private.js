@@ -275,6 +275,38 @@ router.post('/backup/start', async (request, response) => {
     }
 });
 
+/** Full-backup size estimates, reused briefly so reopening the dialog does not rescan. */
+const BACKUP_ESTIMATE_TTL_MS = 60 * 1000;
+const backupEstimates = new Map();
+
+router.get('/backup/estimate', async (request, response) => {
+    try {
+        const handle = normalizeHandle(String(request.query.handle ?? request.user.profile.handle));
+        if (!handle) {
+            return response.status(400).json({ error: 'Missing or invalid handle' });
+        }
+        if (handle !== request.user.profile.handle && !request.user.profile.admin) {
+            return response.status(403).json({ error: 'Unauthorized' });
+        }
+        const includeSecrets = request.query.include_secrets === '1' && handle === request.user.profile.handle;
+        const key = `${handle}\0${includeSecrets}`;
+        const cached = backupEstimates.get(key);
+        if (cached && Date.now() - cached.at < BACKUP_ESTIMATE_TTL_MS) {
+            return response.json(cached.estimate);
+        }
+        const { estimateUserDataArchive } = await import('../user-data-archive.js');
+        const estimate = await estimateUserDataArchive({ rootPath: getUserDirectories(handle).root, includeSecrets });
+        backupEstimates.set(key, { at: Date.now(), estimate });
+        while (backupEstimates.size > 500) {
+            backupEstimates.delete(backupEstimates.keys().next().value);
+        }
+        return response.json(estimate);
+    } catch (error) {
+        console.error('Failed to estimate backup size:', error);
+        return response.status(500).json({ error: 'Failed to estimate backup size' });
+    }
+});
+
 router.get('/backup/status/:jobId', async (request, response) => {
     const job = userBackupManager.getStatus(
         request.params.jobId,

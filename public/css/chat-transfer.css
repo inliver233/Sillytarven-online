@@ -756,3 +756,9 @@
     color: var(--bh-muted);
     font-size: 0.8em;
 }
+
+.backupHub-text .backupHub-size {
+    color: var(--bh-accent);
+    font-size: 0.8em;
+    font-weight: 600;
+}

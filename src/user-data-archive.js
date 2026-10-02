@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { CHAT_STORAGE_LAYOUT, isChunkedChatFile, readChatForBackup } from './endpoints/chats.js';
+import { CHAT_STORAGE_LAYOUT, getChatSamplePaths, getChatStoredBytes, isChunkedChatFile, readChatForBackup } from './endpoints/chats.js';
+import { estimateZipBytes } from './zip-size-estimate.js';
 
 export class ArchiveCancelledError extends Error {
     constructor() {
@@ -70,23 +71,17 @@ function appendAndWait(archive, content, data) {
 }
 
 /**
- * Adds a user's data directory to a ZIP archive in the upstream SillyTavern
- * layout: every chat is one complete .jsonl file. Chats stored in this fork's
- * chunked layout are reassembled, and the chunk directories and storage
- * sidecars are left out, so the archive can be extracted into an upstream
- * SillyTavern data directory as-is. Everything else is copied unchanged.
- * @param {import('archiver').Archiver} archive Archive to append to
+ * Walks a user's data directory exactly as it goes into a backup: chunk
+ * directories and storage sidecars are skipped (chunked chats are reported
+ * once, to be reassembled), and API keys are left out unless requested.
  * @param {object} options Options
- * @param {string} options.handle User handle (used for chat storage locks)
  * @param {string} options.rootPath User data root
  * @param {() => boolean} [options.isCancelled] Stops the walk when it returns true
  * @param {boolean} [options.includeSecrets] Include the user's API keys (secrets.json)
- * @returns {Promise<void>}
+ * @returns {AsyncGenerator<{name: string, absolutePath: string, chunked: boolean, isGroup: boolean}>}
  */
-export async function appendUserDataToArchive(archive, { handle, rootPath, isCancelled = () => false, includeSecrets = false }) {
-    const root = path.resolve(rootPath);
-
-    async function walk(directory, relativeDirectory) {
+export async function* walkUserData({ rootPath, isCancelled = () => false, includeSecrets = false }) {
+    async function* walk(directory, relativeDirectory) {
         const { isChatDirectory, isGroup } = describeDirectory(relativeDirectory);
         let entries;
         try {
@@ -113,7 +108,7 @@ export async function appendUserDataToArchive(archive, { handle, rootPath, isCan
                 if (isChatDirectory && entry.name.endsWith(CHAT_STORAGE_LAYOUT.chunkDirectorySuffix)) {
                     continue;
                 }
-                await walk(absolutePath, name);
+                yield* walk(absolutePath, name);
                 continue;
             }
             if (!entry.isFile()) {
@@ -122,30 +117,70 @@ export async function appendUserDataToArchive(archive, { handle, rootPath, isCan
             if (!includeSecrets && isSecretsEntry(name)) {
                 continue;
             }
-
-            if (isChatDirectory) {
-                if (CHAT_STORAGE_LAYOUT.sidecarSuffixes.some(suffix => entry.name.endsWith(suffix))) {
-                    continue;
-                }
-                if (entry.name.endsWith('.jsonl') && isChunkedChatFile(absolutePath)) {
-                    let stats = null;
-                    try {
-                        stats = await fs.promises.stat(absolutePath);
-                    } catch (error) {
-                        if (error?.code === 'ENOENT') {
-                            continue;
-                        }
-                        throw error;
-                    }
-                    const content = await readChatForBackup(handle, absolutePath, isGroup);
-                    await appendAndWait(archive, content, { name, date: stats.mtime });
-                    continue;
-                }
+            if (isChatDirectory && CHAT_STORAGE_LAYOUT.sidecarSuffixes.some(suffix => entry.name.endsWith(suffix))) {
+                continue;
             }
-
-            archive.file(absolutePath, { name });
+            const chunked = isChatDirectory && entry.name.endsWith('.jsonl') && isChunkedChatFile(absolutePath);
+            yield { name, absolutePath, chunked, isGroup };
         }
     }
 
-    await walk(root, '');
+    yield* walk(path.resolve(rootPath), '');
+}
+
+/**
+ * Adds a user's data directory to a ZIP archive in the upstream SillyTavern
+ * layout: every chat is one complete .jsonl file. Chats stored in this fork's
+ * chunked layout are reassembled, and the chunk directories and storage
+ * sidecars are left out, so the archive can be extracted into an upstream
+ * SillyTavern data directory as-is. Everything else is copied unchanged.
+ * @param {import('archiver').Archiver} archive Archive to append to
+ * @param {object} options Options
+ * @param {string} options.handle User handle (used for chat storage locks)
+ * @param {string} options.rootPath User data root
+ * @param {() => boolean} [options.isCancelled] Stops the walk when it returns true
+ * @param {boolean} [options.includeSecrets] Include the user's API keys (secrets.json)
+ * @returns {Promise<void>}
+ */
+export async function appendUserDataToArchive(archive, { handle, rootPath, isCancelled = () => false, includeSecrets = false }) {
+    for await (const { name, absolutePath, chunked, isGroup } of walkUserData({ rootPath, isCancelled, includeSecrets })) {
+        if (!chunked) {
+            archive.file(absolutePath, { name });
+            continue;
+        }
+        let stats = null;
+        try {
+            stats = await fs.promises.stat(absolutePath);
+        } catch (error) {
+            if (error?.code === 'ENOENT') {
+                continue;
+            }
+            throw error;
+        }
+        const content = await readChatForBackup(handle, absolutePath, isGroup);
+        await appendAndWait(archive, content, { name, date: stats.mtime });
+    }
+}
+
+/**
+ * Estimated download size of the user's full backup (same files, same
+ * compression level as the backup job).
+ * @param {object} options Options
+ * @param {string} options.rootPath User data root
+ * @param {boolean} [options.includeSecrets] Include the user's API keys
+ * @returns {Promise<{files: number, rawBytes: number, estimatedBytes: number}>}
+ */
+export async function estimateUserDataArchive({ rootPath, includeSecrets = false }) {
+    const entries = [];
+    for await (const { name, absolutePath, chunked } of walkUserData({ rootPath, includeSecrets })) {
+        try {
+            const size = chunked ? getChatStoredBytes(absolutePath) : (await fs.promises.stat(absolutePath)).size;
+            entries.push({ name, size, samplePath: chunked ? getChatSamplePaths(absolutePath) : absolutePath });
+        } catch (error) {
+            if (error?.code !== 'ENOENT') {
+                throw error;
+            }
+        }
+    }
+    return estimateZipBytes(entries, 1);
 }

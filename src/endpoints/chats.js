@@ -31,6 +31,7 @@ import { FileTransaction } from '../file-transaction.js';
 import { ArchiveReadError, openZipFileReader } from '../bounded-zip.js';
 import { read as readCharacterCard } from '../character-card-parser.js';
 import { BackupQuotaError, consumeBackupQuota } from '../backup-limits.js';
+import { chatLinesToText, estimateZipBytes } from '../zip-size-estimate.js';
 import { invalidateRecentChatsCache, RecentChatsCache, registerRecentChatsCache } from '../recent-chats-cache.js';
 
 const isBackupEnabled = !!getConfigValue('backups.chat.enabled', true, 'boolean');
@@ -635,6 +636,36 @@ function getChatTotalBytes(filePath) {
         }
     }
     return fs.statSync(filePath).size;
+}
+
+/**
+ * Files holding a chat's oldest and newest messages, for sampling its content.
+ * @param {string} filePath Chat file
+ * @returns {string[]} Paths to read
+ */
+export function getChatSamplePaths(filePath) {
+    if (!isChunkedChat(filePath)) {
+        return [filePath];
+    }
+    const shards = listShardFiles(filePath);
+    if (!shards.length) {
+        return [filePath];
+    }
+    const picked = shards.length === 1 ? shards : [shards[0], shards[shards.length - 1]];
+    return picked.map(shard => path.join(getChatChunkDir(filePath), shard));
+}
+
+/**
+ * Size of a chat as one .jsonl file (header + every message), without reading it.
+ * @param {string} filePath Chat file
+ * @returns {number} Bytes
+ */
+export function getChatStoredBytes(filePath) {
+    const headerBytes = fs.statSync(filePath).size;
+    if (!isChunkedChat(filePath)) {
+        return headerBytes;
+    }
+    return headerBytes + getChatTotalBytes(filePath);
 }
 
 function ensureChatChunkDir(filePath) {
@@ -3459,6 +3490,36 @@ function appendArchiveEntry(archive, response, addEntry) {
         addEntry();
     });
 }
+
+router.post('/export-estimate', async function (request, response) {
+    const format = request.body?.format === 'txt' ? 'txt' : 'jsonl';
+    const scope = request.body?.scope === 'all' ? 'all' : 'selection';
+    const includeCards = format === 'jsonl' && request.body?.include_cards === true;
+    try {
+        const plan = collectChatExportPlan(request, { scope, targets: request.body?.targets, includeCards });
+        const entries = [];
+        const sizeOf = (filePath) => { try { return fs.statSync(filePath).size; } catch { return 0; } };
+        for (const chat of plan.chats) {
+            let size = 0;
+            try { size = getChatStoredBytes(chat.filePath); } catch { size = 0; }
+            const samplePath = getChatSamplePaths(chat.filePath);
+            entries.push(format === 'txt'
+                ? { name: chat.file, size, samplePath, transform: chatLinesToText }
+                : { name: chat.file, size, samplePath });
+        }
+        if (includeCards) {
+            for (const group of plan.groups) {
+                entries.push({ name: group.filePath, size: sizeOf(group.filePath) });
+            }
+            for (const file of plan.cardFiles) {
+                entries.push({ name: file, size: sizeOf(path.join(request.user.directories.characters, file)) });
+            }
+        }
+        return response.json({ chats: plan.chats.length, ...estimateZipBytes(entries, 6) });
+    } catch (error) {
+        return sendChatTransferError(response, error, 'chat_export_estimate_failed');
+    }
+});
 
 router.post('/export-bundle', async function (request, response) {
     const format = request.body?.format === 'txt' ? 'txt' : 'jsonl';

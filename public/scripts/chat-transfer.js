@@ -333,6 +333,9 @@ class ChatTransferPanel {
         this.dataChanged = false;
         /** @type {{mode: string, limit: number|null, used: number, remaining: number|null}|null} */
         this.bundleQuota = null;
+        /** Size estimate of the current export, keyed by its request. */
+        this.estimate = { key: null, text: '' };
+        this.estimateTimer = null;
 
         this.bind();
         this.renderTargets();
@@ -376,6 +379,7 @@ class ChatTransferPanel {
         this.root.querySelectorAll('input[name="chatTransferFormat"]').forEach(input => {
             input.addEventListener('change', () => this.updateExportState());
         });
+        this.$('include-cards').querySelector('input').addEventListener('change', () => this.updateExportState());
 
         const exportTarget = /** @type {HTMLSelectElement} */ (this.$('export-target'));
         exportTarget.addEventListener('change', () => {
@@ -645,6 +649,10 @@ class ChatTransferPanel {
             const count = this.scope === 'target' ? this.chats.length : this.selectedFiles.size;
             hint = `将 ${count} 段对话打包为 ZIP`;
         }
+        const estimateText = this.requestExportEstimate(plan);
+        if (estimateText) {
+            hint += ` · ${estimateText}`;
+        }
 
         // Bundles count against the daily export quota set by the administrator.
         let quotaBlocked = false;
@@ -667,6 +675,56 @@ class ChatTransferPanel {
         const disabled = this.busy || !plan || quotaBlocked;
         button.classList.toggle('disabled', disabled);
         button.toggleAttribute('disabled', disabled);
+    }
+
+    /**
+     * Download size of the export as planned now; fetched in the background and
+     * shown in the export hint once known.
+     * @param {object|null} plan Export plan
+     * @returns {string} Text for the hint, or '' while unknown
+     */
+    requestExportEstimate(plan) {
+        if (!plan) {
+            return '';
+        }
+        const format = this.format;
+        let body;
+        if (plan.kind === 'single') {
+            const target = plan.target;
+            const targetBody = target.type === 'group'
+                ? { type: 'group', id: target.id, files: [plan.file] }
+                : { type: 'character', avatar: target.avatar, files: [plan.file] };
+            body = { scope: 'selection', targets: [targetBody], format, include_cards: false };
+        } else {
+            const includeCards = format === 'jsonl' && /** @type {HTMLInputElement} */ (this.$('include-cards').querySelector('input')).checked;
+            body = { ...plan.body, format, include_cards: includeCards };
+        }
+        const key = `${plan.kind}\0${JSON.stringify(body)}`;
+        if (this.estimate.key === key) {
+            return this.estimate.text;
+        }
+        this.estimate = { key, text: '' };
+        clearTimeout(this.estimateTimer);
+        this.estimateTimer = setTimeout(async () => {
+            try {
+                const response = await fetch('/api/chats/export-estimate', {
+                    method: 'POST',
+                    headers: getRequestHeaders(),
+                    body: JSON.stringify(body),
+                });
+                if (!response.ok || this.estimate.key !== key) return;
+                const data = await response.json();
+                // A single chat downloads as a plain file; bundles are compressed ZIPs.
+                const bytes = plan.kind === 'single' ? data.rawBytes : data.estimatedBytes;
+                if (Number.isFinite(bytes)) {
+                    this.estimate = { key, text: `约 ${formatBytes(bytes)}` };
+                    this.updateExportState();
+                }
+            } catch {
+                // The size hint is optional.
+            }
+        }, 300);
+        return '';
     }
 
     chatListRequestPending() {
