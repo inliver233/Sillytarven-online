@@ -161,11 +161,48 @@ export class BackupQuotaError extends Error {
 const KIND_LABELS = Object.freeze({ full: '全量备份', partial: '批量导出' });
 
 /**
+ * Failed or cancelled exports give their quota back, but each one still costs
+ * the server work. After this many failures within the window, further
+ * attempts wait until the oldest failure leaves the window.
+ */
+export const BACKUP_FAILURE_LIMIT = 5;
+export const BACKUP_FAILURE_WINDOW_MS = 30 * 60 * 1000;
+
+/** @type {Map<string, number[]>} Recent failure times per `${handle}\0${kind}` (in memory). */
+const recentFailures = new Map();
+
+function failureKey(handle, kind) {
+    return `${handle}\0${kind}`;
+}
+
+function getRecentFailures(handle, kind, now = Date.now()) {
+    const key = failureKey(handle, kind);
+    const kept = (recentFailures.get(key) ?? []).filter(time => now - time < BACKUP_FAILURE_WINDOW_MS);
+    if (kept.length) {
+        recentFailures.set(key, kept);
+    } else {
+        recentFailures.delete(key);
+    }
+    return kept;
+}
+
+function recordBackupFailure(handle, kind) {
+    const now = Date.now();
+    recentFailures.set(failureKey(handle, kind), [...getRecentFailures(handle, kind, now), now]);
+}
+
+/** Test hook: forget recorded failures. */
+export function resetBackupFailuresForTests() {
+    recentFailures.clear();
+}
+
+/**
  * Atomically checks and consumes one use of today's quota.
  * @param {{handle: string, admin?: boolean}} profile Requesting user's profile
  * @param {BackupKind} kind Export kind
- * @returns {Promise<{release: () => Promise<void>}>} Call release() if the export did not happen
- * @throws {BackupQuotaError} When the export is disabled or today's quota is used up
+ * @returns {Promise<{release: (options?: {failed?: boolean}) => Promise<void>}>} Call release() if the
+ *     export did not happen; pass `{ failed: false }` when nothing was attempted (e.g. joining a running job)
+ * @throws {BackupQuotaError} When the export is disabled, today's quota is used up, or it failed too often recently
  */
 export function consumeBackupQuota(profile, kind) {
     if (!BACKUP_KINDS.includes(kind)) {
@@ -188,6 +225,11 @@ export function consumeBackupQuota(profile, kind) {
         if (policy.mode === 'limited' && used >= policy.perDay) {
             throw new BackupQuotaError('backup_quota_exceeded', `今日${label}次数已用完（${used}/${policy.perDay}），请明天再试`, quota);
         }
+        const failures = getRecentFailures(profile.handle, kind);
+        if (failures.length >= BACKUP_FAILURE_LIMIT) {
+            const waitMinutes = Math.max(1, Math.ceil((failures[0] + BACKUP_FAILURE_WINDOW_MS - Date.now()) / 60000));
+            throw new BackupQuotaError('backup_retry_throttled', `${label}最近失败次数过多，请约 ${waitMinutes} 分钟后再试`, quota);
+        }
 
         // Usage is recorded in every mode so administrators can see real demand.
         const date = usage.date;
@@ -195,12 +237,18 @@ export function consumeBackupQuota(profile, kind) {
         await writeJson(USAGE_FILE, usage);
         let released = false;
         return {
-            release: () => serialize(async () => {
-                const current = loadUsage();
-                if (released || current.date !== date) {
+            release: ({ failed = true } = {}) => serialize(async () => {
+                if (released) {
                     return;
                 }
                 released = true;
+                if (failed) {
+                    recordBackupFailure(profile.handle, kind);
+                }
+                const current = loadUsage();
+                if (current.date !== date) {
+                    return;
+                }
                 const currentCounts = current.users[profile.handle] ?? {};
                 current.users[profile.handle] = { ...currentCounts, [kind]: Math.max(0, (currentCounts[kind] ?? 0) - 1) };
                 await writeJson(USAGE_FILE, current);

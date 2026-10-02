@@ -257,8 +257,8 @@ router.post('/backup/start', async (request, response) => {
             throw error;
         }
         if (job.reused) {
-            // Joining an already running backup does not start a new one.
-            await quota.release();
+            // Joining an already running backup does not start a new one, and is not a failure.
+            await quota.release({ failed: false });
         }
 
         return response.status(job.reused ? 200 : 202).json(job);
