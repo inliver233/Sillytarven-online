@@ -448,6 +448,8 @@ async function openBackupHub() {
  */
 /** @type {{at: number, promise: Promise<string>}|null} */
 let fullBackupEstimate = null;
+/** How long a backup waits for a free slot before giving up. */
+const BACKUP_BUSY_MAX_WAIT_MS = 15 * 60 * 1000;
 
 function formatDownloadSize(bytes) {
     const units = ['B', 'KB', 'MB', 'GB'];
@@ -513,6 +515,7 @@ async function askFullBackupOptions() {
  */
 async function backupUserData(handle, callback, { includeSecrets = false } = {}) {
     let progressToast;
+    let waitCancelled = false;
     try {
         progressToast = toastr.info('正在后台整理文件，请保持页面打开。', '正在生成全量备份', {
             timeOut: 0,
@@ -520,11 +523,46 @@ async function backupUserData(handle, callback, { includeSecrets = false } = {})
             tapToDismiss: false,
         });
 
-        const response = await fetch('/api/users/backup/start', {
-            method: 'POST',
-            headers: getRequestHeaders(),
-            body: JSON.stringify({ handle, include_secrets: includeSecrets }),
-        });
+        // While two other backups are being built the server answers "busy";
+        // wait for a free slot here instead of making the user retry by hand.
+        const waitStartedAt = Date.now();
+        let response;
+        while (true) {
+            response = await fetch('/api/users/backup/start', {
+                method: 'POST',
+                headers: getRequestHeaders(),
+                body: JSON.stringify({ handle, include_secrets: includeSecrets }),
+            });
+            if (response.status !== 429) {
+                break;
+            }
+            const data = await response.clone().json().catch(() => ({}));
+            if (data.code !== 'BACKUP_BUSY' || Date.now() - waitStartedAt > BACKUP_BUSY_MAX_WAIT_MS) {
+                break;
+            }
+            if (waitCancelled) {
+                toastr.info('已取消备份');
+                return;
+            }
+            if (!progressToast.find('.backupWaitCancel').length) {
+                const cancel = $('<button type="button" class="menu_button backupWaitCancel">取消等待</button>')
+                    .on('click', () => {
+                        waitCancelled = true;
+                        cancel.remove();
+                        progressToast.find('.toast-message').text('正在取消…');
+                    });
+                progressToast.find('.toast-message').after(cancel);
+            }
+            const waitedSeconds = Math.round((Date.now() - waitStartedAt) / 1000);
+            progressToast.find('.toast-message').text(`前面有人在生成备份，正在排队等待（已等待 ${waitedSeconds} 秒）…`);
+            await new Promise(resolve => setTimeout(resolve, 4000 + Math.random() * 2000));
+            if (waitCancelled) {
+                toastr.info('已取消备份');
+                return;
+            }
+        }
+        progressToast.find('.backupWaitCancel').remove();
+        progressToast.find('.toast-message').text('正在后台整理文件，请保持页面打开。');
 
         if (!response.ok) {
             const data = await response.json().catch(() => ({}));
@@ -575,7 +613,8 @@ async function backupUserData(handle, callback, { includeSecrets = false } = {})
         toastr.error(error.message || '备份失败，请稍后重试', '全量备份失败');
     } finally {
         if (progressToast) {
-            toastr.clear(progressToast);
+            // Forced: a clicked "cancel wait" button keeps focus, which otherwise keeps the toast open.
+            toastr.clear(progressToast, { force: true });
         }
         if (typeof callback === 'function') {
             callback();

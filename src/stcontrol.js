@@ -1278,6 +1278,36 @@ export async function stcontrolRequestTracker(request, response, next) {
     return next();
 }
 
+/**
+ * Keeps a write request in flight after its response has been sent, for work
+ * that continues in the background (restoring an uploaded backup). Snapshots
+ * and handoffs wait for it exactly as they wait for a running request. Call it
+ * before the response is sent, so the write never appears finished in between.
+ * @param {import('express').Request} request Request that admitted the write
+ * @returns {Promise<() => void>} Releases the write
+ */
+export async function holdStcontrolWrite(request) {
+    const sessionId = request.session?.stcontrol?.sessionId;
+    if (!isStcontrolEnabled() || !sessionId || request.session?.stcontrolAdmin) return () => undefined;
+    const held = await mutateState(current => {
+        const session = current.sessions[sessionId];
+        if (!session || session.loggedOutAt) return false;
+        session.inFlightWrites = Number(session.inFlightWrites || 0) + 1;
+        return true;
+    }, { persist: false });
+    let released = !held;
+    return () => {
+        if (released) return;
+        released = true;
+        void mutateState((current, control) => {
+            const session = current.sessions[sessionId];
+            if (!session) return;
+            session.inFlightWrites = Math.max(0, Number(session.inFlightWrites) - 1);
+            updateSessionActivity(session, control, Date.now());
+        }, { persist: false }).catch(() => undefined);
+    };
+}
+
 export function getStcontrolSessionTelemetry() {
     const state = loadStateSync();
     const now = Date.now();

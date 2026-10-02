@@ -237,6 +237,11 @@ router.post('/backup/start', async (request, response) => {
             return response.status(200).json(activeJob);
         }
 
+        // Waiting pages retry while the server is busy; answer them without touching the quota.
+        if (userBackupManager.isBusy()) {
+            return response.status(429).json({ error: '服务器正在处理其他备份，请稍后重试', code: 'BACKUP_BUSY' });
+        }
+
         const quota = await consumeBackupQuota(request.user.profile, 'full');
         let job;
         try {

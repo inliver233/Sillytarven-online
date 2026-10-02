@@ -16,6 +16,7 @@ import {
     getStcontrolSessionTelemetry,
     getStcontrolState,
     getStcontrolPendingSyncUsers,
+    holdStcontrolWrite,
     markUserSynchronized,
     noteStcontrolPageHeartbeat,
     resetStcontrolStateForTests,
@@ -1568,6 +1569,52 @@ test('an independent write requires a matching durable session, rejecting forged
         resetStcontrolStateForTests();
         globalThis.DATA_ROOT = previousDataRoot;
         restoreEnv(previous);
+        fs.rmSync(dataRoot, { recursive: true, force: true });
+    }
+});
+
+test('a background write stays in flight until released, so snapshots wait for it', async () => {
+    const previousDataRoot = globalThis.DATA_ROOT;
+    const previousEnabled = process.env.SILLYTAVERN_STCONTROL_ENABLED;
+    const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sillytavern-stcontrol-hold-'));
+    const sessionId = '33333333-3333-4333-8333-333333333333';
+    globalThis.DATA_ROOT = dataRoot;
+    process.env.SILLYTAVERN_STCONTROL_ENABLED = 'true';
+    resetStcontrolStateForTests();
+    try {
+        const state = getStcontrolState();
+        state.sessions[sessionId] = {
+            handle: 'alice',
+            loginMode: STCONTROL_MODES.MANAGED,
+            activityEpoch: 1,
+            controllerGeneration: 1,
+            lastSeenAt: Date.now(),
+            lastPageAt: Date.now(),
+            lastRequestAt: Date.now(),
+            inFlightReads: 0,
+            inFlightWrites: 0,
+        };
+        fs.mkdirSync(path.join(dataRoot, '_stcontrol'), { recursive: true });
+        fs.writeFileSync(path.join(dataRoot, '_stcontrol', 'adapter-state.json'), JSON.stringify(state));
+        resetStcontrolStateForTests();
+        const writesInFlight = () => getStcontrolSessionTelemetry().find(user => user.handle === 'alice')?.in_flight_writes;
+
+        const release = await holdStcontrolWrite({ session: { stcontrol: { sessionId } } });
+        assert.equal(writesInFlight(), 1);
+        release();
+        release();
+        await new Promise(resolve => setTimeout(resolve, 20));
+        assert.equal(writesInFlight(), 0, 'released once, never below zero');
+
+        const noSession = await holdStcontrolWrite({ session: {} });
+        noSession();
+        assert.equal(writesInFlight(), 0);
+    } finally {
+        await new Promise(resolve => setTimeout(resolve, 20));
+        resetStcontrolStateForTests();
+        globalThis.DATA_ROOT = previousDataRoot;
+        if (previousEnabled === undefined) delete process.env.SILLYTAVERN_STCONTROL_ENABLED;
+        else process.env.SILLYTAVERN_STCONTROL_ENABLED = previousEnabled;
         fs.rmSync(dataRoot, { recursive: true, force: true });
     }
 });

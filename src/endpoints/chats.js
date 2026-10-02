@@ -33,6 +33,9 @@ import { ArchiveReadError, openZipFileReader } from '../bounded-zip.js';
 import { read as readCharacterCard } from '../character-card-parser.js';
 import { BackupQuotaError, consumeBackupQuota } from '../backup-limits.js';
 import { chatLinesToText, estimateZipBytes } from '../zip-size-estimate.js';
+import { RestoreUploadError, RestoreUploadManager } from '../chat-restore-uploads.js';
+import { getUploadLimits } from '../upload-middleware.js';
+import { holdStcontrolWrite } from '../stcontrol.js';
 import { invalidateRecentChatsCache, RecentChatsCache, registerRecentChatsCache } from '../recent-chats-cache.js';
 
 const isBackupEnabled = !!getConfigValue('backups.chat.enabled', true, 'boolean');
@@ -2905,14 +2908,32 @@ function chatJsonlToText(jsonl) {
 }
 
 /**
+ * Lets other requests run between slices of a long pass over a large chat
+ * (restoring a 100 MB chat would otherwise hold the server for about a second).
+ * @returns {(bytes: number) => Promise<void>} Call with the bytes just processed
+ */
+function createEventLoopYielder() {
+    let pending = 0;
+    return async bytes => {
+        pending += bytes;
+        if (pending >= 2 * 1024 * 1024) {
+            pending = 0;
+            await new Promise(resolve => setImmediate(resolve));
+        }
+    };
+}
+
+/**
  * Stable signature of a chat's messages (headers are ignored because their
  * bookkeeping fields change without the conversation changing).
  * @param {string[]} lines JSONL lines
- * @returns {string}
+ * @returns {Promise<string>}
  */
-function getChatMessagesSignature(lines) {
+async function getChatMessagesSignature(lines) {
     const hash = crypto.createHash('sha256');
+    const yieldEventLoop = createEventLoopYielder();
     for (const line of lines) {
+        await yieldEventLoop(line.length);
         const data = tryParse(line);
         if (!isPlainObject(data) || isChatHeaderObject(data)) {
             continue;
@@ -3260,7 +3281,9 @@ async function assembleArchivedChat(record, isGroup, readEntry, summary) {
     }
 
     const messages = [];
+    const yieldEventLoop = createEventLoopYielder();
     for (const [index, line] of messageLines.entries()) {
+        await yieldEventLoop(line.length);
         const data = tryParse(line);
         if (!isPlainObject(data)) {
             summary.invalidLines++;
@@ -3277,7 +3300,7 @@ async function assembleArchivedChat(record, isGroup, readEntry, summary) {
         ? { chat_metadata: {}, user_name: 'unused', character_name: 'unused' }
         : { user_name: 'User', character_name: record.dir, create_date: humanizedISO8601DateTime(), chat_metadata: {} };
     const lines = [JSON.stringify(header), ...messages];
-    return { content: lines.join('\n'), signature: getChatMessagesSignature(lines) };
+    return { content: lines.join('\n'), signature: await getChatMessagesSignature(lines) };
 }
 
 /**
@@ -3297,7 +3320,7 @@ async function resolveChatRestoreTarget(request, { directory, baseName, signatur
         }
         const existing = await chatStorageMutex.runExclusive(getChatStorageLockKey(request, candidate),
             () => readChatJsonl(candidate, isGroup));
-        if (getChatMessagesSignature(splitJsonlLines(existing)) === signature) {
+        if (await getChatMessagesSignature(splitJsonlLines(existing)) === signature) {
             return { action: 'skip', filePath: candidate };
         }
     }
@@ -3700,6 +3723,113 @@ router.post('/import-archive', async function (request, response) {
         return sendChatTransferError(response, error, 'chat_restore_failed');
     } finally {
         await fs.promises.rm(uploadPath, { force: true }).catch(() => undefined);
+    }
+});
+
+/** @type {RestoreUploadManager|null} */
+let restoreUploads = null;
+
+/** Chunked backup uploads, created on first use (it owns and clears its directory). */
+function getRestoreUploads() {
+    restoreUploads ??= new RestoreUploadManager({
+        directory: path.join(globalThis.DATA_ROOT, '_restore-uploads'),
+        maxFileBytes: getUploadLimits().fileSize,
+    });
+    return restoreUploads;
+}
+
+function sendRestoreUploadError(response, error) {
+    if (error instanceof RestoreUploadError) {
+        return response.status(error.status).json({ error: error.code, message: error.message, ...error.details });
+    }
+    return sendChatTransferError(response, error, 'chat_restore_failed');
+}
+
+/**
+ * User-facing form of a restore failure, kept for the page to poll.
+ * @param {unknown} error Error
+ * @returns {unknown}
+ */
+function toRestoreUploadError(error) {
+    if (error instanceof ChatTransferError) {
+        return new RestoreUploadError(error.status, error.code, error.message);
+    }
+    if (error instanceof ArchiveReadError) {
+        return new RestoreUploadError(error.status, error.code, ARCHIVE_ERROR_MESSAGES[error.code] ?? '无法读取压缩包');
+    }
+    return error;
+}
+
+router.post('/restore-upload/start', async function (request, response) {
+    try {
+        const upload = await getRestoreUploads().start(request.user.profile.handle, Number(request.body?.size));
+        return response.json(upload);
+    } catch (error) {
+        return sendRestoreUploadError(response, error);
+    }
+});
+
+router.put('/restore-upload/:id', async function (request, response) {
+    try {
+        const result = await getRestoreUploads().writeChunk(
+            request.user.profile.handle,
+            request.params.id,
+            Number(request.query.offset),
+            Number(request.headers['content-length']),
+            request,
+        );
+        return response.json(result);
+    } catch (error) {
+        return sendRestoreUploadError(response, error);
+    }
+});
+
+router.post('/restore-upload/:id/finish', async function (request, response) {
+    try {
+        const handle = request.user.profile.handle;
+        const manager = getRestoreUploads();
+        if (manager.get(handle, request.params.id).state !== 'uploading') {
+            return response.json(manager.status(handle, request.params.id));
+        }
+        const includeCharacters = request.body?.include_characters !== false;
+        // The restore outlives this request; the controller must still see it as a running write.
+        const releaseWrite = await holdStcontrolWrite(request);
+        let status;
+        try {
+            status = manager.finish(handle, request.params.id, async filePath => {
+                try {
+                    return await chatStorageMutex.runExclusive(`chat-restore\0${handle}`, () => restoreChatArchive(request, filePath, { includeCharacters }));
+                } catch (error) {
+                    throw toRestoreUploadError(error);
+                } finally {
+                    invalidateCharacterListCache(handle);
+                    invalidateRecentChatsCache(handle);
+                }
+            }, releaseWrite);
+        } catch (error) {
+            releaseWrite();
+            throw error;
+        }
+        return response.status(202).json(status);
+    } catch (error) {
+        return sendRestoreUploadError(response, error);
+    }
+});
+
+router.get('/restore-upload/:id', function (request, response) {
+    try {
+        return response.json(getRestoreUploads().status(request.user.profile.handle, request.params.id));
+    } catch (error) {
+        return sendRestoreUploadError(response, error);
+    }
+});
+
+router.delete('/restore-upload/:id', async function (request, response) {
+    try {
+        await getRestoreUploads().cancel(request.user.profile.handle, request.params.id);
+        return response.json({ ok: true });
+    } catch (error) {
+        return sendRestoreUploadError(response, error);
     }
 });
 

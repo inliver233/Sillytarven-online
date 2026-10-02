@@ -13,6 +13,10 @@ import { callGenericPopup, POPUP_TYPE } from './popup.js';
 import { timestampToMoment } from './utils.js';
 
 const TABS = Object.freeze(['export', 'import', 'restore']);
+/** How long a restore waits for the server to accept a new upload. */
+const RESTORE_BUSY_MAX_WAIT_MS = 15 * 60 * 1000;
+/** Attempts per chunk after the first, about a minute of backoff in total. */
+const RESTORE_CHUNK_RETRIES = 6;
 const SCOPES = Object.freeze(['current', 'target', 'selection', 'all']);
 const IMPORT_EXTENSIONS = Object.freeze(['jsonl', 'json']);
 
@@ -949,6 +953,7 @@ class ChatTransferPanel {
         const progress = this.$('restore-progress');
         const bar = /** @type {HTMLElement} */ (this.$('restore-progress-bar'));
         const progressText = this.$('restore-progress-text');
+        const file = this.restoreFile;
         progress.hidden = false;
         progress.classList.remove('indeterminate');
         bar.style.width = '0%';
@@ -956,23 +961,57 @@ class ChatTransferPanel {
         this.$('restore-summary').hidden = true;
         this.setBusy(true, button, '正在恢复…');
 
+        /** @type {string|null} */
+        let uploadId = null;
+        let restoreQueued = false;
         try {
             await saveChatConditional();
-            const formData = new FormData();
-            formData.set('avatar', this.restoreFile);
-            formData.set('include_characters', String(includeCharacters));
-            const result = await this.uploadWithProgress('/api/chats/import-archive', formData, fraction => {
-                if (fraction < 1) {
-                    bar.style.width = `${Math.round(fraction * 100)}%`;
-                    progressText.textContent = `正在上传… ${Math.round(fraction * 100)}%`;
-                } else {
-                    progress.classList.add('indeterminate');
-                    bar.style.width = '100%';
-                    progressText.textContent = '上传完成，正在恢复数据…';
+            // The file goes up in small chunks (Cloudflare refuses large
+            // requests) and is restored in the background (it also cuts off
+            // long requests), so any size within the server limit works.
+            const upload = await this.startRestoreUpload(file.size, text => { progressText.textContent = text; });
+            uploadId = upload.id;
+            let offset = 0;
+            while (offset < file.size) {
+                const chunkStart = offset;
+                const chunkEnd = Math.min(file.size, chunkStart + upload.chunkBytes);
+                offset = await this.uploadRestoreChunk(uploadId, file.slice(chunkStart, chunkEnd), chunkStart, fraction => {
+                    const sent = chunkStart + fraction * (chunkEnd - chunkStart);
+                    const percent = Math.min(99, Math.floor(sent / file.size * 100));
+                    bar.style.width = `${percent}%`;
+                    progressText.textContent = `正在上传… ${percent}%（${formatBytes(sent)} / ${formatBytes(file.size)}）`;
+                });
+            }
+
+            progress.classList.add('indeterminate');
+            bar.style.width = '100%';
+            progressText.textContent = '上传完成，正在恢复数据…';
+            const statusUrl = `/api/chats/restore-upload/${encodeURIComponent(uploadId)}`;
+            let status = await this.restoreRequest('POST', `${statusUrl}/finish`, { include_characters: includeCharacters });
+            restoreQueued = true;
+            let pollFailures = 0;
+            while (status.state === 'queued' || status.state === 'restoring') {
+                progressText.textContent = status.state === 'queued' && status.queuePosition > 1
+                    ? `上传完成，排队等待恢复（前面还有 ${status.queuePosition - 1} 个）…`
+                    : '上传完成，正在恢复数据，请保持页面打开…';
+                await new Promise(resolve => setTimeout(resolve, 1500));
+                try {
+                    status = await this.restoreRequest('GET', statusUrl);
+                    pollFailures = 0;
+                } catch (error) {
+                    if (error.status === 404) {
+                        throw new Error('服务器在恢复过程中重启了，恢复可能没有完成。可以重新恢复同一个文件，已经恢复的对话会自动跳过，不会重复');
+                    }
+                    // Brief network trouble: the restore keeps running on the server.
+                    if (++pollFailures > 20) throw error;
                 }
-            });
+            }
+            if (status.state !== 'done') {
+                throw new Error(status.error?.message || '恢复失败');
+            }
+
             progress.hidden = true;
-            this.renderRestoreSummary(result.summary);
+            this.renderRestoreSummary(status.summary);
             this.dataChanged = true;
             this.restoreFile = null;
             this.$('restore-file').hidden = true;
@@ -985,6 +1024,10 @@ class ChatTransferPanel {
         } catch (error) {
             console.error('Chat restore failed', error);
             progress.hidden = true;
+            if (uploadId && !restoreQueued) {
+                // Do not leave the partial upload on the server.
+                void fetch(`/api/chats/restore-upload/${encodeURIComponent(uploadId)}`, { method: 'DELETE', headers: getRequestHeaders() }).catch(() => undefined);
+            }
             toastr.error(error.message || '恢复失败');
         } finally {
             this.setBusy(false, button);
@@ -992,41 +1035,102 @@ class ChatTransferPanel {
     }
 
     /**
-     * @param {string} url
-     * @param {FormData} formData
-     * @param {(fraction: number) => void} onProgress
+     * JSON request to the restore upload API.
+     * @param {string} method HTTP method
+     * @param {string} url URL
+     * @param {object} [body] JSON body
      * @returns {Promise<any>}
      */
-    uploadWithProgress(url, formData, onProgress) {
-        return new Promise((resolve, reject) => {
-            const request = new XMLHttpRequest();
-            request.open('POST', url);
-            for (const [header, value] of Object.entries(getRequestHeaders({ omitContentType: true }))) {
-                request.setRequestHeader(header, String(value));
+    async restoreRequest(method, url, body) {
+        let response;
+        try {
+            response = await fetch(url, {
+                method,
+                headers: getRequestHeaders(),
+                cache: 'no-store',
+                ...(body ? { body: JSON.stringify(body) } : {}),
+            });
+        } catch {
+            throw Object.assign(new Error('网络错误，请检查网络后重试'), { status: 0 });
+        }
+        const data = await response.json().catch(() => null);
+        if (!response.ok) {
+            throw Object.assign(new Error(data?.message || `恢复失败（HTTP ${response.status}）`), { status: response.status, data });
+        }
+        return data;
+    }
+
+    /**
+     * Starts an upload, waiting while the server is busy with other restores.
+     * @param {number} size File size
+     * @param {(text: string) => void} onWait Shows the waiting state
+     * @returns {Promise<{id: string, chunkBytes: number}>}
+     */
+    async startRestoreUpload(size, onWait) {
+        const startedAt = Date.now();
+        while (true) {
+            try {
+                return await this.restoreRequest('POST', '/api/chats/restore-upload/start', { size });
+            } catch (error) {
+                if (error.status !== 429 || error.data?.error !== 'restore_busy' || Date.now() - startedAt > RESTORE_BUSY_MAX_WAIT_MS) {
+                    throw error;
+                }
+                onWait(`服务器正在处理其他恢复，排队等待中（已等待 ${Math.round((Date.now() - startedAt) / 1000)} 秒）…`);
+                await new Promise(resolve => setTimeout(resolve, 4000 + Math.random() * 2000));
             }
-            request.upload.addEventListener('progress', event => {
-                if (event.lengthComputable) onProgress(event.loaded / event.total);
-            });
-            request.upload.addEventListener('load', () => onProgress(1));
-            request.addEventListener('load', () => {
-                let data = null;
-                try {
-                    data = JSON.parse(request.responseText);
-                } catch {
-                    // Non-JSON error bodies fall through to the generic message.
+        }
+    }
+
+    /**
+     * Uploads one chunk, retrying through brief network or server trouble.
+     * @param {string} uploadId Upload id
+     * @param {Blob} chunk Chunk bytes
+     * @param {number} offset Position of the chunk in the file
+     * @param {(fraction: number) => void} onProgress Upload progress of this chunk
+     * @returns {Promise<number>} Bytes the server has received so far
+     */
+    async uploadRestoreChunk(uploadId, chunk, offset, onProgress) {
+        const url = `/api/chats/restore-upload/${encodeURIComponent(uploadId)}?offset=${offset}`;
+        for (let attempt = 0; ; attempt++) {
+            const { status, data } = await new Promise(resolve => {
+                const request = new XMLHttpRequest();
+                request.open('PUT', url);
+                for (const [header, value] of Object.entries(getRequestHeaders({ omitContentType: true }))) {
+                    request.setRequestHeader(header, String(value));
                 }
-                if (request.status >= 200 && request.status < 300 && data?.ok) {
-                    resolve(data);
-                } else if (data?.error === 'upload_file_too_large') {
-                    reject(new Error('文件超过服务器允许的上传大小'));
-                } else {
-                    reject(new Error(data?.message || data?.error || `恢复失败（HTTP ${request.status}）`));
-                }
+                request.setRequestHeader('Content-Type', 'application/octet-stream');
+                request.timeout = 5 * 60 * 1000;
+                request.upload.addEventListener('progress', event => {
+                    if (event.lengthComputable) onProgress(event.loaded / event.total);
+                });
+                request.addEventListener('load', () => {
+                    let body = null;
+                    try {
+                        body = JSON.parse(request.responseText);
+                    } catch {
+                        // Non-JSON error page (e.g. from the proxy).
+                    }
+                    resolve({ status: request.status, data: body });
+                });
+                request.addEventListener('error', () => resolve({ status: 0, data: null }));
+                request.addEventListener('timeout', () => resolve({ status: 0, data: null }));
+                request.send(chunk);
             });
-            request.addEventListener('error', () => reject(new Error('网络错误，上传失败')));
-            request.addEventListener('abort', () => reject(new Error('上传已取消')));
-            request.send(formData);
-        });
+            if (status >= 200 && status < 300 && Number.isSafeInteger(data?.received)) {
+                return data.received;
+            }
+            // The server already has this chunk or more: carry on from there.
+            if (status === 409 && data?.error === 'chunk_out_of_order' && Number.isSafeInteger(data.received)) {
+                return data.received;
+            }
+            const retryable = status === 0 || status === 408 || status === 423 || status === 429 || status >= 500 ||
+                (status === 409 && data?.error === 'chunk_in_progress');
+            if (!retryable || attempt >= RESTORE_CHUNK_RETRIES) {
+                throw new Error(data?.message || (status === 0 ? '网络错误，上传失败' : `上传失败（HTTP ${status}）`));
+            }
+            onProgress(0);
+            await new Promise(resolve => setTimeout(resolve, Math.min(15000, 1000 * 2 ** attempt)));
+        }
     }
 
     renderRestoreSummary(summary) {

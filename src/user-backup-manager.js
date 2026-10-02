@@ -78,6 +78,14 @@ export class UserBackupManager {
      *   onSettled is called once with the final status of a newly started job ('ready', 'failed' or 'cancelled').
      * @returns {Promise<object>} Public job status
      */
+    /**
+     * Whether a new job would be refused right now because all slots are taken.
+     * @returns {boolean}
+     */
+    isBusy() {
+        return this.activeJobs >= this.maxConcurrent;
+    }
+
     async startJob({ handle, requestedBy, rootPath, includeSecrets = false, onSettled }) {
         await this.cleanupExpiredJobs();
 
