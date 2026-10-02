@@ -20,6 +20,8 @@ export default function getWebpackServeMiddleware() {
             // lib.js is generated under DATA_ROOT and bypasses express.static.
             // Give it the same short freshness window as other scripts.
             res.setHeader('Cache-Control', 'public, max-age=300, must-revalidate');
+            // Same as express.static in server-main.js: no per-Origin CDN copies.
+            res.removeHeader('Vary');
             return res.sendFile(outputFile, { root: outputPath });
         }
 

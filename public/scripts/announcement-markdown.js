@@ -33,12 +33,86 @@ function getConverter() {
     return converter;
 }
 
+/** <font size> 1–7 对应的字号 */
+const FONT_SIZE_STEPS = ['0.75em', '0.85em', '1em', '1.15em', '1.35em', '1.6em', '2em'];
+const MIN_FONT_SIZE_EM = 0.75;
+const MAX_FONT_SIZE_EM = 2;
+
+/**
+ * 把字号限制在 0.75em–2em（px 按 16px 换算），避免公告撑破弹窗。
+ * @param {string} value CSS 字号
+ * @returns {string} 限制后的字号，无法识别时返回空串
+ */
+function clampFontSize(value) {
+    const match = /^(\d*\.?\d+)(px|em|rem|%)$/i.exec(String(value).trim());
+    if (!match) {
+        return '';
+    }
+    const amount = Number(match[1]);
+    const unit = match[2].toLowerCase();
+    const em = unit === 'px' ? amount / 16 : unit === '%' ? amount / 100 : amount;
+    const clamped = Math.min(MAX_FONT_SIZE_EM, Math.max(MIN_FONT_SIZE_EM, em));
+    return `${Number(clamped.toFixed(3))}em`;
+}
+
+/**
+ * 公告里的内联样式只保留文字外观（颜色、背景色、字号、粗细、斜体、下划线等），
+ * 去掉定位、尺寸、浮层等可能遮挡页面的属性。
+ * @param {HTMLElement} element
+ */
+function sanitizeInlineStyle(element) {
+    const style = element.style;
+    const kept = {
+        color: style.color,
+        'background-color': style.backgroundColor,
+        'font-size': clampFontSize(style.fontSize),
+        'font-weight': style.fontWeight,
+        'font-style': style.fontStyle,
+        'text-decoration': style.textDecorationLine && style.textDecorationLine !== 'none' ? style.textDecorationLine : '',
+        'text-align': ['left', 'center', 'right'].includes(style.textAlign) ? style.textAlign : '',
+    };
+    element.removeAttribute('style');
+    for (const [property, value] of Object.entries(kept)) {
+        if (value) {
+            element.style.setProperty(property, value);
+        }
+    }
+    if (!element.getAttribute('style')) {
+        element.removeAttribute('style');
+    }
+}
+
+/**
+ * <font color size> 换成等价的 <span>，再走同一套样式限制。
+ * @param {DocumentFragment} fragment
+ */
+function convertFontTags(fragment) {
+    fragment.querySelectorAll('font').forEach((font) => {
+        const span = document.createElement('span');
+        const color = font.getAttribute('color');
+        if (color) {
+            span.style.color = color;
+        }
+        const size = Number.parseInt(font.getAttribute('size') || '', 10);
+        if (size >= 1 && size <= 7) {
+            span.style.fontSize = FONT_SIZE_STEPS[size - 1];
+        }
+        span.append(...font.childNodes);
+        font.replaceWith(span);
+    });
+}
+
 /**
  * 对净化后的 DOM 做后处理：外链新窗口打开、按钮链接、图片懒加载。
  * 不使用 DOMPurify 全局 hook，避免影响聊天消息等其他渲染路径。
  * @param {DocumentFragment} fragment
  */
 function decorateFragment(fragment) {
+    convertFontTags(fragment);
+    fragment.querySelectorAll('[style]').forEach((element) => {
+        sanitizeInlineStyle(/** @type {HTMLElement} */ (element));
+    });
+
     // 折叠块里 showdown 会在 <summary> 两侧留下空段落
     fragment.querySelectorAll('details p').forEach((paragraph) => {
         if (!paragraph.childNodes.length) {

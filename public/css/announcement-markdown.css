@@ -205,3 +205,11 @@
 .announcement-markdown details > :last-child {
     margin-bottom: 0.2em;
 }
+
+/* <mark> 高亮：半透明黄底，深浅主题都能看清 */
+.announcement-markdown mark {
+    background: rgba(255, 200, 0, 0.32);
+    color: inherit;
+    padding: 0 0.15em;
+    border-radius: 3px;
+}

@@ -139,6 +139,23 @@ const CORS = cors({
 
 app.use(CORS);
 
+/**
+ * The CORS header above is a constant ('null'), so its "Vary: Origin" only makes
+ * CDNs keep one copy of each static file per Origin. Browsers send Origin when
+ * loading JS modules, so purging a file left the module copy stale.
+ * @param {import('express').Response} res
+ */
+function dropVaryOrigin(res) {
+    const vary = res.getHeader('Vary');
+    if (!vary) return;
+    const parts = String(vary).split(',').map(part => part.trim()).filter(part => part && part.toLowerCase() !== 'origin');
+    if (parts.length) {
+        res.setHeader('Vary', parts.join(', '));
+    } else {
+        res.removeHeader('Vary');
+    }
+}
+
 if (cliArgs.listen && cliArgs.basicAuthMode) {
     app.use(basicAuthMiddleware);
 }
@@ -345,6 +362,7 @@ app.use(express.static(publicDirectory, {
     etag: true,
     lastModified: true,
     setHeaders: (res, filePath) => {
+        dropVaryOrigin(res);
         const extension = path.extname(filePath).toLowerCase();
         const isTemplate = extension === '.html' && isPathUnderParent(templatesDirectory, filePath);
 
