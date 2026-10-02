@@ -199,3 +199,52 @@ test('browser-facing login, register and LinuxDo compatibility callback use the 
     assert.match(source, /app\.get\('\/register', stcontrolPublicAccountGuard,/);
     assert.match(source, /app\.get\('\/oauth', stcontrolOAuthGuard,/);
 });
+
+test('a managed node still lets users download their own full backup end to end', async () => {
+    const { default: express } = await import('express');
+    const { default: storage } = await import('node-persist');
+    const { default: yauzl } = await import('yauzl');
+    await users.initUserStorage(root);
+    const handle = 'backup-managed-user';
+    await storage.setItem(users.toKey(handle), { handle, name: handle, admin: false, enabled: true, created: 1 });
+    const directories = await users.ensureUserDirectoriesExist(handle);
+    fs.writeFileSync(path.join(directories.root, 'settings.json'), '{}');
+    fs.mkdirSync(path.join(directories.chats, 'Bot'), { recursive: true });
+    fs.writeFileSync(path.join(directories.chats, 'Bot', 'a.jsonl'), '{"user_name":"U","character_name":"Bot"}\n{"name":"U","is_user":true,"mes":"hi"}');
+
+    const app = express();
+    app.use(express.json());
+    app.use((request, _response, next) => {
+        request.user = { profile: { handle, name: handle, admin: false }, directories };
+        next();
+    });
+    app.use('/api/users', routers.privateUsers.router);
+    const server = await new Promise(resolve => { const listener = app.listen(0, '127.0.0.1', () => resolve(listener)); });
+    const base = `http://127.0.0.1:${server.address().port}/api/users`;
+    const post = (route, body) => fetch(`${base}${route}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    try {
+        const started = await post('/backup/start', { handle });
+        assert.ok([200, 202].includes(started.status), `start returned ${started.status}`);
+        let job = await started.json();
+        for (let i = 0; i < 200 && ['queued', 'running'].includes(job.status); i++) {
+            await new Promise(resolve => setTimeout(resolve, 25));
+            job = await (await fetch(`${base}/backup/status/${job.id}`)).json();
+        }
+        assert.equal(job.status, 'ready');
+        const zip = Buffer.from(await (await fetch(`${base}/backup/download/${job.id}`)).arrayBuffer());
+        const names = await new Promise((resolve, reject) => yauzl.fromBuffer(zip, { lazyEntries: true }, (error, archive) => {
+            if (error) return reject(error);
+            const entries = [];
+            archive.on('entry', entry => { entries.push(entry.fileName); archive.readEntry(); });
+            archive.on('end', () => resolve(entries));
+            archive.readEntry();
+        }));
+        assert.ok(names.includes('chats/Bot/a.jsonl'), names.join(','));
+
+        // Account changes stay with the controller.
+        const changePassword = await post('/change-password', { handle, newPassword: 'x' });
+        assert.equal(changePassword.status, 423);
+    } finally {
+        await new Promise(resolve => server.close(resolve));
+    }
+});
