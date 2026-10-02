@@ -273,16 +273,12 @@ onDrain(async () => {
  * Saves the current state of charStats to a file, only if the data has changed since the last save.
  */
 async function saveStatsToFile() {
-    const changed = [...STATS.keys()].filter(handle => STATS.get(handle)?.timestamp > (TIMESTAMPS.get(handle) || 0));
-    if (changed.length === 0) {
-        return;
-    }
-    // Skip handles whose accounts were deleted, so their directories are not recreated.
-    const userHandles = new Set(await getAllUserHandles());
-    for (const handle of changed) {
-        if (userHandles.has(handle)) {
-            await saveUserStats(handle);
-        }
+    // Skip accounts that were deleted (their directory is gone), so it is not recreated.
+    const changed = [...STATS.keys()].filter(handle => STATS.get(handle)?.timestamp > (TIMESTAMPS.get(handle) || 0) &&
+        fs.existsSync(getUserDirectories(handle).root));
+    // A few at a time: each save is an fsync, and a hot reload waits for this.
+    for (let i = 0; i < changed.length; i += 8) {
+        await Promise.all(changed.slice(i, i + 8).map(handle => saveUserStats(handle)));
     }
 }
 
