@@ -122,8 +122,13 @@ test('abandoned, replaced and leftover uploads do not keep using disk space', as
     assert.deepEqual(files(manager), [], 'stalled uploads are dropped');
     await manager.start('carol', 30);
 
-    fs.writeFileSync(path.join(manager.directory, 'leftover.zip'), 'x');
+    const leftover = path.join(manager.directory, 'leftover.zip');
+    fs.writeFileSync(leftover, 'x');
+    const longAgo = new Date(Date.now() - 60 * 60 * 1000);
+    fs.utimesSync(leftover, longAgo, longAgo);
+    fs.writeFileSync(path.join(manager.directory, 'recent.zip'), 'x');
     const restarted = new RestoreUploadManager({ directory: manager.directory, maxFileBytes: 1024 });
     managers.push(restarted);
-    assert.deepEqual(files(restarted), [], 'files from before a restart are removed');
+    assert.ok(!files(restarted).includes('leftover.zip'), 'files from before a restart are removed');
+    assert.ok(files(restarted).includes('recent.zip'), 'recent files may still belong to a server being replaced');
 });

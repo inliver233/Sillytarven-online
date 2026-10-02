@@ -9,6 +9,7 @@ const readFile = fs.promises.readFile;
 const readdir = fs.promises.readdir;
 
 import { getAllUserHandles, getUserDirectories } from '../users.js';
+import { canPersistSharedState, onDrain } from '../process-lifecycle.js';
 
 const STATS_FILE = 'stats.json';
 const MAX_STATS_BODY_SIZE = 1024 * 1024;
@@ -252,8 +253,17 @@ export async function init() {
         console.error('Failed to initialize stats:', err);
     }
     // Save stats every 5 minutes
-    setInterval(saveStatsToFile, 5 * 60 * 1000);
+    saveTimer ??= setInterval(saveStatsToFile, 5 * 60 * 1000);
 }
+
+/** @type {NodeJS.Timeout|undefined} */
+let saveTimer;
+
+// Hot reload: save before handing over, so the new server loads current numbers.
+onDrain(async () => {
+    clearInterval(saveTimer);
+    await saveStatsToFile();
+});
 /**
  * Saves the current state of charStats to a file, only if the data has changed since the last save.
  */
@@ -272,6 +282,9 @@ async function saveStatsToFile() {
  * @param {string} handle User handle
  */
 async function saveUserStats(handle) {
+    if (!canPersistSharedState()) {
+        return;
+    }
     const charStats = STATS.get(handle);
     const lastSaveTimestamp = TIMESTAMPS.get(handle) || 0;
     if (!charStats || !(charStats.timestamp > lastSaveTimestamp)) {

@@ -4,6 +4,7 @@ import path from 'node:path';
 import writeFileAtomic from 'write-file-atomic';
 
 import { getLocalDateKey } from './storage-quota.js';
+import { canPersistSharedState, onActivate } from './process-lifecycle.js';
 
 /**
  * Daily limits for data exports, configured by administrators.
@@ -29,6 +30,10 @@ const DEFAULT_POLICY = Object.freeze({
 let queue = Promise.resolve();
 /** @type {{date: string, users: Record<string, Record<string, number>>}|null} */
 let usageCache = null;
+// Hot reload: read the counts the previous server wrote.
+onActivate(() => {
+    usageCache = null;
+});
 
 function storagePath(file) {
     return path.join(globalThis.DATA_ROOT, STORAGE_DIRECTORY, file);
@@ -52,6 +57,8 @@ function readJson(file, fallback) {
 }
 
 async function writeJson(file, value) {
+    // During a hot reload only the serving process owns these files.
+    if (!canPersistSharedState()) return;
     await fs.promises.mkdir(path.dirname(storagePath(file)), { recursive: true });
     await writeFileAtomic(storagePath(file), JSON.stringify(value, null, 2), 'utf8');
 }

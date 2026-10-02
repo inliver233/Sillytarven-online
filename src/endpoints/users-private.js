@@ -11,6 +11,8 @@ import { BackupJobError, UserBackupManager } from '../user-backup-manager.js';
 import { matchesAccountResetUsername } from '../account-reset.js';
 import { noteStcontrolLogout, stcontrolPrivateAccountGuard } from '../stcontrol.js';
 import { BackupQuotaError, consumeBackupQuota } from '../backup-limits.js';
+import { recordBackupActivity, registerBackupLiveSource } from '../backup-activity.js';
+import { onDrain } from '../process-lifecycle.js';
 
 const userBackupManager = new UserBackupManager({
     directory: path.join(globalThis.DATA_ROOT, '_exports'),
@@ -19,6 +21,14 @@ const userBackupManager = new UserBackupManager({
         const { appendUserDataToArchive } = await import('../user-data-archive.js');
         await appendUserDataToArchive(archive, job);
     },
+});
+
+// Hot reload: pages poll the new server, which cannot see this server's jobs.
+onDrain(() => userBackupManager.cancelActiveJobs());
+
+registerBackupLiveSource(() => {
+    const { active, stored } = userBackupManager.describeJobs();
+    return stored.files > 0 ? [...active, { kind: 'stored', files: stored.files, bytes: stored.bytes }] : active;
 });
 
 export const router = express.Router();
@@ -242,7 +252,16 @@ router.post('/backup/start', async (request, response) => {
             return response.status(429).json({ error: '服务器正在处理其他备份，请稍后重试', code: 'BACKUP_BUSY' });
         }
 
-        const quota = await consumeBackupQuota(request.user.profile, 'full');
+        const admin = Boolean(request.user.profile.admin);
+        let quota;
+        try {
+            quota = await consumeBackupQuota(request.user.profile, 'full');
+        } catch (error) {
+            if (error instanceof BackupQuotaError) {
+                recordBackupActivity({ u: handle, a: admin, k: 'full', s: 'rejected', r: error.message });
+            }
+            throw error;
+        }
         let job;
         try {
             job = await userBackupManager.startJob({
@@ -250,11 +269,21 @@ router.post('/backup/start', async (request, response) => {
                 requestedBy: request.user.profile.handle,
                 rootPath: getUserDirectories(handle).root,
                 includeSecrets,
-                // A backup that never becomes downloadable does not use up the daily quota.
-                onSettled: status => {
+                onSettled: (status, settled) => {
+                    // A backup that never becomes downloadable does not use up the daily quota.
                     if (status !== 'ready') {
                         void quota.release();
                     }
+                    recordBackupActivity({
+                        id: settled.id,
+                        u: handle,
+                        a: admin,
+                        k: 'full',
+                        s: status === 'ready' ? 'ok' : status === 'cancelled' ? 'cancelled' : 'failed',
+                        b: settled.size ?? undefined,
+                        ms: settled.updatedAt - settled.createdAt,
+                        r: status === 'ready' ? undefined : settled.error ?? undefined,
+                    });
                 },
             });
         } catch (error) {
@@ -339,6 +368,11 @@ router.get('/backup/download/:jobId', async (request, response) => {
         return response.status(404).json({ error: 'Backup is not ready or has expired' });
     }
 
+    response.once('finish', () => {
+        if (response.statusCode === 200 || response.statusCode === 206) {
+            recordBackupActivity({ id: request.params.jobId, u: request.user.profile.handle, k: 'full', s: 'downloaded' });
+        }
+    });
     response.setHeader('Cache-Control', 'private, no-store, max-age=0');
     response.setHeader('Accept-Ranges', 'bytes');
     return response.download(download.filePath, download.filename, {

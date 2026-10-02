@@ -22,6 +22,7 @@ import { getContentOfType } from './endpoints/content-manager.js';
 import systemMonitor from './system-monitor.js';
 import { serverDirectory } from './server-directory.js';
 import { isStcontrolEnabled } from './stcontrol.js';
+import { isKeeperWorker } from './process-lifecycle.js';
 
 export const KEY_PREFIX = 'user:';
 const AVATAR_PREFIX = 'avatar:';
@@ -283,9 +284,18 @@ export function cleanUploads() {
             }
 
             console.debug(`Cleaning uploads folder (${uploads.length} files)`);
+            // Under the hot-reload keeper the previous server may still be receiving
+            // uploads here, so only leftovers are removed.
+            const cutoff = isKeeperWorker ? Date.now() - 60 * 60 * 1000 : Infinity;
             uploads.forEach(file => {
                 const pathToFile = path.join(uploadsPath, file);
-                fs.unlinkSync(pathToFile);
+                try {
+                    if (fs.statSync(pathToFile).mtimeMs < cutoff) {
+                        fs.unlinkSync(pathToFile);
+                    }
+                } catch (error) {
+                    if (error?.code !== 'ENOENT') throw error;
+                }
             });
         }
     } catch (err) {

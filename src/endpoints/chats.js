@@ -36,6 +36,7 @@ import { chatLinesToText, estimateZipBytes } from '../zip-size-estimate.js';
 import { RestoreUploadError, RestoreUploadManager } from '../chat-restore-uploads.js';
 import { getUploadLimits } from '../upload-middleware.js';
 import { holdStcontrolWrite } from '../stcontrol.js';
+import { recordBackupActivity, registerBackupLiveSource } from '../backup-activity.js';
 import { invalidateRecentChatsCache, RecentChatsCache, registerRecentChatsCache } from '../recent-chats-cache.js';
 
 const isBackupEnabled = !!getConfigValue('backups.chat.enabled', true, 'boolean');
@@ -3603,11 +3604,14 @@ router.post('/export-bundle', async function (request, response) {
         return response.status(404).json({ error: 'no_chats', message: '没有找到可导出的对话' });
     }
 
+    const exportStartedAt = Date.now();
+    const activity = { u: request.user.profile.handle, a: Boolean(request.user.profile.admin), k: 'partial' };
     let quota;
     try {
         quota = await consumeBackupQuota(request.user.profile, 'partial');
     } catch (error) {
         if (error instanceof BackupQuotaError) {
+            recordBackupActivity({ ...activity, s: 'rejected', r: error.message });
             const status = error.code === 'backup_disabled' ? 403 : 429;
             return response.status(status).json({ error: error.code, message: error.message, quota: error.quota });
         }
@@ -3618,6 +3622,7 @@ router.post('/export-bundle', async function (request, response) {
     let completed = false;
     response.once('finish', () => {
         completed = true;
+        recordBackupActivity({ ...activity, s: 'ok', b: archive.pointer(), ms: Date.now() - exportStartedAt });
     });
     response.once('close', () => {
         if (!completed) {
@@ -3692,8 +3697,10 @@ router.post('/export-bundle', async function (request, response) {
         if (!completed) {
             if (error?.code === 'CLIENT_CLOSED') {
                 console.warn('Chat bundle export cancelled by the client.');
+                recordBackupActivity({ ...activity, s: 'cancelled', ms: Date.now() - exportStartedAt, r: '用户中途取消下载' });
             } else {
                 console.error('Chat bundle export failed:', error);
+                recordBackupActivity({ ...activity, s: 'failed', ms: Date.now() - exportStartedAt, r: String(error?.message ?? error).slice(0, 200) });
             }
             archive.abort();
             response.destroy();
@@ -3712,14 +3719,18 @@ router.post('/import-archive', async function (request, response) {
 
     const uploadPath = path.join(request.file.destination, request.file.filename);
     const handle = request.user.profile.handle;
+    const activity = { u: handle, a: Boolean(request.user.profile.admin), k: 'restore', b: request.file.size };
+    const startedAt = Date.now();
     try {
         const summary = await chatStorageMutex.runExclusive(`chat-restore\0${handle}`, () => restoreChatArchive(request, uploadPath, {
             includeCharacters: String(request.body?.include_characters ?? 'true') !== 'false',
         }));
         invalidateCharacterListCache(handle);
         invalidateRecentChatsCache(handle);
+        recordBackupActivity({ ...activity, s: 'ok', ms: Date.now() - startedAt });
         return response.send({ ok: true, summary });
     } catch (error) {
+        recordBackupActivity({ ...activity, s: 'failed', ms: Date.now() - startedAt, r: describeRestoreFailure(error) });
         return sendChatTransferError(response, error, 'chat_restore_failed');
     } finally {
         await fs.promises.rm(uploadPath, { force: true }).catch(() => undefined);
@@ -3736,6 +3747,19 @@ function getRestoreUploads() {
         maxFileBytes: getUploadLimits().fileSize,
     });
     return restoreUploads;
+}
+
+registerBackupLiveSource(() => restoreUploads?.describeUploads() ?? []);
+
+/**
+ * Short reason for the admin panel's restore log.
+ * @param {unknown} error Error
+ * @returns {string}
+ */
+function describeRestoreFailure(error) {
+    if (error instanceof ChatTransferError) return error.message;
+    if (error instanceof ArchiveReadError) return ARCHIVE_ERROR_MESSAGES[error.code] ?? '无法读取压缩包';
+    return '服务器处理失败';
 }
 
 function sendRestoreUploadError(response, error) {
@@ -3792,14 +3816,19 @@ router.post('/restore-upload/:id/finish', async function (request, response) {
             return response.json(manager.status(handle, request.params.id));
         }
         const includeCharacters = request.body?.include_characters !== false;
+        const activity = { u: handle, a: Boolean(request.user.profile.admin), k: 'restore', b: manager.get(handle, request.params.id).size };
         // The restore outlives this request; the controller must still see it as a running write.
         const releaseWrite = await holdStcontrolWrite(request);
         let status;
         try {
             status = manager.finish(handle, request.params.id, async filePath => {
+                const startedAt = Date.now();
                 try {
-                    return await chatStorageMutex.runExclusive(`chat-restore\0${handle}`, () => restoreChatArchive(request, filePath, { includeCharacters }));
+                    const summary = await chatStorageMutex.runExclusive(`chat-restore\0${handle}`, () => restoreChatArchive(request, filePath, { includeCharacters }));
+                    recordBackupActivity({ ...activity, s: 'ok', ms: Date.now() - startedAt });
+                    return summary;
                 } catch (error) {
+                    recordBackupActivity({ ...activity, s: 'failed', ms: Date.now() - startedAt, r: describeRestoreFailure(error) });
                     throw toRestoreUploadError(error);
                 } finally {
                     invalidateCharacterListCache(handle);

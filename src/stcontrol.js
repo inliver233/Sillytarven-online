@@ -7,6 +7,7 @@ import fetch from 'node-fetch';
 import { sync as writeFileAtomicSync } from 'write-file-atomic';
 
 import { getConfigValue } from './util.js';
+import { canPersistSharedState, onActivate } from './process-lifecycle.js';
 
 export const STCONTROL_MODES = Object.freeze({
     MANAGED: 'managed',
@@ -336,6 +337,8 @@ function validateLoadedState(value) {
 }
 
 function persistState(state) {
+    // During a hot reload only the serving process owns the adapter state.
+    if (!canPersistSharedState()) return;
     const filePath = statePath();
     fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
     writeFileAtomicSync(filePath, JSON.stringify(state, null, 2), { encoding: 'utf8', mode: 0o600 });
@@ -448,6 +451,13 @@ export function resetStcontrolStateForTests() {
     cachedStatePath = undefined;
     stateQueue = Promise.resolve();
 }
+
+// Hot reload: take over the state the previous server saved, as on a fresh start
+// (the new runtime instance id resets its in-flight counters).
+onActivate(() => {
+    cachedState = undefined;
+    cachedStatePath = undefined;
+});
 
 // Keep adapter durability data outside node-persist's record namespace. Move
 // the early WIP location before node-persist can interpret it as an account.

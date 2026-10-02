@@ -99,21 +99,27 @@ function buildView(block) {
 
     const usage = element('section', 'backupLimits-usage');
     const usageHead = element('div', 'backupLimits-usageHead');
-    const usageTitle = element('h4', '', '今日使用情况');
-    const usageDate = element('small', 'backupLimits-muted');
-    usageTitle.append(' ', usageDate);
+    const usageTitle = element('h4', '', '备份记录');
+    const daySelect = element('select', 'text_pole backupLimits-day');
+    daySelect.setAttribute('aria-label', '选择日期');
     const refresh = element('button', 'menu_button menu_button_icon backupLimits-refresh');
     refresh.type = 'button';
     refresh.title = '刷新';
     refresh.append(element('i', 'fa-fw fa-solid fa-rotate'), element('span', '', '刷新'));
-    usageHead.append(usageTitle, refresh);
+    const headTools = element('div', 'backupLimits-usageTools');
+    headTools.append(daySelect, refresh);
+    usageHead.append(usageTitle, headTools);
+    const live = element('div', 'backupLimits-live');
     const tiles = element('div', 'backupLimits-tiles');
-    const table = element('div', 'backupLimits-table');
-    usage.append(usageHead, tiles, table);
+    const usersTitle = element('h5', 'backupLimits-subhead', '按用户');
+    const table = element('div', 'backupLimits-table backupLimits-userTable');
+    const recentTitle = element('h5', 'backupLimits-subhead', '最近记录');
+    const recent = element('div', 'backupLimits-table backupLimits-recent');
+    usage.append(usageHead, live, tiles, usersTitle, table, recentTitle, recent);
 
     root.append(header, cards, actions, usage);
     block.replaceChildren(root);
-    return { root, status, save, refresh, usageDate, tiles, table };
+    return { root, status, save, refresh, daySelect, live, tiles, table, recent };
 }
 
 function renderPolicy(view, policy) {
@@ -139,38 +145,171 @@ function readPolicy(view) {
     return policy;
 }
 
-function renderUsage(view, usage) {
-    view.usageDate.textContent = usage?.date ?? '';
-    const tiles = [
-        ['全量备份', usage?.totals?.full ?? 0, '次'],
-        ['批量导出', usage?.totals?.partial ?? 0, '次'],
-        ['使用人数', usage?.totals?.users ?? 0, '人'],
-    ];
-    view.tiles.replaceChildren(...tiles.map(([label, value, unit]) => {
+const ACTIVITY_KINDS = Object.freeze({ full: '全量备份', partial: '批量导出', restore: '恢复' });
+const ACTIVITY_STATUS = Object.freeze({
+    ok: ['成功', 'ok'],
+    failed: ['失败', 'error'],
+    cancelled: ['已取消', 'muted'],
+    rejected: ['被拒绝', 'warn'],
+});
+
+function formatBytes(bytes) {
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let value = Number(bytes) || 0;
+    let unit = 0;
+    while (value >= 1024 && unit < units.length - 1) {
+        value /= 1024;
+        unit++;
+    }
+    return `${unit === 0 ? value : value.toFixed(value < 10 ? 1 : 0)} ${units[unit]}`;
+}
+
+function formatDuration(ms) {
+    const seconds = Math.round((Number(ms) || 0) / 1000);
+    if (seconds < 1) return '<1 秒';
+    if (seconds < 60) return `${seconds} 秒`;
+    return `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`;
+}
+
+function formatTime(at) {
+    const date = new Date(at);
+    return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+}
+
+/** "2 成功 · 1 失败" style counts for one kind, empty parts left out. */
+function describeCounts(counts, { withDownloads = false } = {}) {
+    const parts = [];
+    if (counts.ok) parts.push(`${counts.ok} 成功`);
+    if (counts.failed) parts.push(`${counts.failed} 失败`);
+    if (counts.cancelled) parts.push(`${counts.cancelled} 取消`);
+    if (counts.rejected) parts.push(`${counts.rejected} 被拒`);
+    if (withDownloads && counts.ok) parts.push(`${counts.downloaded} 已下载`);
+    return parts.join(' · ') || '—';
+}
+
+function badge(status) {
+    const [label, tone] = ACTIVITY_STATUS[status] ?? [status, 'muted'];
+    const node = element('span', `backupLimits-badge is-${tone}`, label);
+    return node;
+}
+
+function describeLive(item) {
+    if (item.kind === 'stored') {
+        return `服务器暂存 ${item.files} 个已生成的备份，共 ${formatBytes(item.bytes)}（等待下载，24 小时后自动删除）`;
+    }
+    if (item.kind === 'full') {
+        return item.state === 'queued'
+            ? `${item.handle} 的全量备份正在排队`
+            : `${item.handle} 正在生成全量备份，已处理 ${formatBytes(item.processedBytes)}，已写入 ${formatBytes(item.archiveBytes)}`;
+    }
+    if (item.kind === 'restore') {
+        if (item.state === 'uploading') {
+            const percent = item.size ? Math.floor(item.received / item.size * 100) : 0;
+            return `${item.handle} 正在上传恢复文件 ${percent}%（${formatBytes(item.received)} / ${formatBytes(item.size)}）`;
+        }
+        if (item.state === 'queued') {
+            return `${item.handle} 的恢复正在排队（第 ${item.queuePosition} 位，${formatBytes(item.size)}）`;
+        }
+        return `${item.handle} 正在恢复数据（${formatBytes(item.size)}）`;
+    }
+    return '';
+}
+
+function renderActivity(view, activity) {
+    const days = Array.isArray(activity?.days) ? activity.days : [];
+    const selected = activity?.date ?? '';
+    view.daySelect.replaceChildren(...days.map(day => {
+        const option = element('option', '', day === activity.today ? `今天（${day}）` : day);
+        option.value = day;
+        option.selected = day === selected;
+        return option;
+    }));
+
+    // In-progress work is about now, so it is only shown with today's records.
+    const live = Array.isArray(activity?.live) && selected === activity.today ? activity.live : [];
+    view.live.hidden = live.length === 0;
+    view.live.replaceChildren(...live.map(item => {
+        const row = element('div', 'backupLimits-liveItem');
+        const icon = element('i', `fa-fw fa-solid ${item.kind === 'stored' ? 'fa-hard-drive' : 'fa-spinner fa-spin-pulse'}`);
+        row.append(icon, element('span', '', describeLive(item)));
+        return row;
+    }));
+
+    const totals = activity?.totals ?? {};
+    view.tiles.replaceChildren(...Object.entries(ACTIVITY_KINDS).map(([kind, label]) => {
+        const counts = totals[kind] ?? {};
         const tile = element('div', 'backupLimits-tile');
-        const number = element('b', '', String(value));
-        number.append(element('small', '', unit));
-        tile.append(element('span', '', label), number);
+        const number = element('b', '', String(counts.ok ?? 0));
+        number.append(element('small', '', '次成功'));
+        const detail = element('span', 'backupLimits-tileDetail');
+        const extra = [];
+        if (counts.failed) extra.push(`失败 ${counts.failed}`);
+        if (counts.cancelled) extra.push(`取消 ${counts.cancelled}`);
+        if (counts.rejected) extra.push(`被拒 ${counts.rejected}`);
+        if (counts.bytes) extra.push(`共 ${formatBytes(counts.bytes)}`);
+        if (kind === 'full' && counts.ok) extra.push(`已下载 ${counts.downloaded}`);
+        detail.textContent = extra.join(' · ');
+        tile.append(element('span', '', label), number, detail);
         return tile;
     }));
 
-    const users = Array.isArray(usage?.topUsers) ? usage.topUsers : [];
+    const users = Array.isArray(activity?.users) ? activity.users : [];
     if (users.length === 0) {
-        view.table.replaceChildren(element('p', 'backupLimits-empty', '今天还没有普通用户使用过备份功能'));
+        view.table.replaceChildren(element('p', 'backupLimits-empty', '这一天没有备份、导出或恢复记录'));
+    } else {
+        const head = element('div', 'backupLimits-row backupLimits-rowHead');
+        ['用户', '全量备份', '批量导出', '恢复', '总大小'].forEach(text => head.append(element('span', '', text)));
+        view.table.replaceChildren(head, ...users.map(user => {
+            const row = element('div', 'backupLimits-row');
+            const handle = element('span', 'backupLimits-handle', user.handle);
+            if (user.admin) handle.append(element('small', 'backupLimits-adminTag', '管理员'));
+            row.append(handle);
+            for (const [kind, label] of Object.entries(ACTIVITY_KINDS)) {
+                const cell = element('span', '', describeCounts(user[kind] ?? {}, { withDownloads: kind === 'full' }));
+                cell.dataset.label = label;
+                row.append(cell);
+            }
+            const size = element('span', 'backupLimits-size', formatBytes(user.bytes));
+            size.dataset.label = '总大小';
+            row.append(size);
+            return row;
+        }));
+    }
+
+    const recent = Array.isArray(activity?.recent) ? activity.recent : [];
+    if (recent.length === 0) {
+        view.recent.replaceChildren(element('p', 'backupLimits-empty', '暂无记录'));
         return;
     }
-    const head = element('div', 'backupLimits-row backupLimits-rowHead');
-    head.append(element('span', '', '用户'), element('span', '', '全量备份'), element('span', '', '批量导出'));
-    const rows = users.map(user => {
-        const row = element('div', 'backupLimits-row');
-        const full = element('span', '', String(user.full));
-        full.dataset.label = '全量备份';
-        const partial = element('span', '', String(user.partial));
-        partial.dataset.label = '批量导出';
-        row.append(element('span', 'backupLimits-handle', user.handle), full, partial);
+    view.recent.replaceChildren(...recent.map(event => {
+        const row = element('div', 'backupLimits-event');
+        const main = element('div', 'backupLimits-eventMain');
+        main.append(
+            element('span', 'backupLimits-eventTime', formatTime(event.at)),
+            element('span', 'backupLimits-handle', event.handle),
+            element('span', 'backupLimits-eventKind', ACTIVITY_KINDS[event.kind] ?? event.kind),
+            badge(event.status),
+        );
+        if (event.downloaded) main.append(element('span', 'backupLimits-badge is-muted', '已下载'));
+        const meta = [];
+        if (event.bytes) meta.push(formatBytes(event.bytes));
+        if (event.durationMs) meta.push(`用时 ${formatDuration(event.durationMs)}`);
+        if (event.reason) meta.push(event.reason);
+        row.append(main);
+        if (meta.length) row.append(element('div', 'backupLimits-eventMeta', meta.join(' · ')));
         return row;
-    });
-    view.table.replaceChildren(head, ...rows);
+    }));
+}
+
+async function loadActivity(view, date) {
+    const query = date ? `?date=${encodeURIComponent(date)}` : '';
+    const response = await fetch(`/api/backup-limits/activity${query}`, { headers: getRequestHeaders(), cache: 'no-store' });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+        throw new Error(data?.error || `请求失败（HTTP ${response.status}）`);
+    }
+    renderActivity(view, data);
+    return data;
 }
 
 async function request(method, body) {
@@ -210,12 +349,16 @@ function startUsageAutoRefresh(block, view) {
         if (running || document.hidden || block.offsetParent === null) {
             return;
         }
+        // Past days do not change; only today's view follows new activity.
+        const selected = view.daySelect.value;
+        if (selected && view.daySelect.selectedIndex > 0) {
+            return;
+        }
         running = true;
         try {
-            const data = await request('GET');
-            renderUsage(view, data.usage);
+            await loadActivity(view, selected);
         } catch (error) {
-            console.warn('Backup usage refresh failed:', error);
+            console.warn('Backup activity refresh failed:', error);
         } finally {
             running = false;
         }
@@ -248,7 +391,6 @@ export async function openBackupLimitsAdmin(block) {
             try {
                 const data = await request('POST', { policy });
                 renderPolicy(view, data.policy);
-                renderUsage(view, data.usage);
                 setStatus(view, '已保存，立即生效', 'ok');
             } catch (error) {
                 setStatus(view, error.message, 'error');
@@ -257,14 +399,16 @@ export async function openBackupLimitsAdmin(block) {
             }
         });
         view.refresh.addEventListener('click', () => void openBackupLimitsAdmin(block));
+        view.daySelect.addEventListener('change', () => {
+            loadActivity(view, view.daySelect.value).catch(error => setStatus(view, error.message, 'error'));
+        });
         startUsageAutoRefresh(block, view);
     }
 
     setStatus(view, '正在加载…');
     try {
-        const data = await request('GET');
+        const [data] = await Promise.all([request('GET'), loadActivity(view, view.daySelect.value)]);
         renderPolicy(view, data.policy);
-        renderUsage(view, data.usage);
         setStatus(view, '');
     } catch (error) {
         setStatus(view, error.message, 'error');

@@ -4,6 +4,8 @@ import path from 'node:path';
 import { Transform } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 
+import { trackBackgroundWork } from './keeper-worker.js';
+
 /**
  * Backup ZIPs are uploaded for restoring in chunks, because Cloudflare rejects
  * request bodies over 100 MB, and restored in the background, because it also
@@ -93,9 +95,18 @@ export class RestoreUploadManager {
         this.maxFileBytes = maxFileBytes;
         this.limits = { ...RESTORE_UPLOAD_DEFAULTS, ...limits };
         fs.mkdirSync(this.directory, { recursive: true });
-        // Files left by a previous process can never be finished.
+        // Files left by a previous process can never be finished. During a hot
+        // reload the previous server may still be using recent ones.
+        const cutoff = Date.now() - this.limits.idleMs;
         for (const name of fs.readdirSync(this.directory)) {
-            fs.rmSync(path.join(this.directory, name), { force: true, recursive: true });
+            const filePath = path.join(this.directory, name);
+            try {
+                if (fs.statSync(filePath).mtimeMs < cutoff) {
+                    fs.rmSync(filePath, { force: true, recursive: true });
+                }
+            } catch {
+                // Already gone.
+            }
         }
         this.cleanupTimer = setInterval(() => void this.cleanup(), 60 * 1000);
         this.cleanupTimer.unref?.();
@@ -264,15 +275,27 @@ export class RestoreUploadManager {
         };
     }
 
+    /**
+     * Uploads and restores in progress, for the admin panel.
+     * @returns {object[]}
+     */
+    describeUploads() {
+        return [...this.uploads.values()]
+            .filter(upload => ['uploading', 'queued', 'restoring'].includes(upload.state))
+            .map(upload => ({ kind: 'restore', handle: upload.handle, state: upload.state, size: upload.size, received: upload.received, ...(upload.state === 'queued' ? { queuePosition: this.queue.indexOf(upload) + 1 } : {}) }));
+    }
+
     /** Starts queued restores while there is room. */
     pump() {
         while (this.runningRestores < this.limits.maxConcurrentRestores && this.queue.length > 0) {
             const upload = this.queue.shift();
             this.runningRestores++;
-            void this.restore(upload).finally(() => {
+            const work = this.restore(upload).finally(() => {
                 this.runningRestores--;
                 this.pump();
             });
+            // A server being replaced finishes the restore before it exits.
+            trackBackgroundWork(work);
         }
     }
 

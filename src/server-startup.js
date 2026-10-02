@@ -2,6 +2,8 @@ import https from 'node:https';
 import http from 'node:http';
 import fs from 'node:fs';
 import { color, urlHostnameToIPv6, getHasIP } from './util.js';
+import { isKeeperWorker } from './process-lifecycle.js';
+import { registerKeeperServer, requestListenHandle } from './keeper-worker.js';
 
 // Express routers
 import { router as userDataRouter } from './users.js';
@@ -296,13 +298,27 @@ export class ServerStartup {
 
             let host = url.hostname;
             if (ipVersion === 6) host = urlHostnameToIPv6(url.hostname);
-            server.listen({
-                host: host,
-                port: Number(url.port || 443),
-                // see https://nodejs.org/api/net.html#serverlisten for why ipv6Only is used
-                ipv6Only: true,
-            });
+            this.#listen(server, host, Number(url.port || 443), ipVersion).catch(reject);
         });
+    }
+
+    /**
+     * Starts listening, on a socket borrowed from the hot-reload keeper when it runs this server.
+     * @param {import('node:net').Server} server Server
+     * @param {string} host Host
+     * @param {number} port Port
+     * @param {number} ipVersion IP version
+     * @returns {Promise<void>}
+     */
+    async #listen(server, host, port, ipVersion) {
+        if (isKeeperWorker) {
+            const handle = await requestListenHandle(host.replace(/^\[|\]$/g, ''), port, ipVersion === 6 ? 6 : 4);
+            registerKeeperServer(/** @type {import('node:http').Server} */ (server));
+            server.listen(handle);
+            return;
+        }
+        // see https://nodejs.org/api/net.html#serverlisten for why ipv6Only is used
+        server.listen({ host, port, ipv6Only: true });
     }
 
     /**
@@ -319,12 +335,7 @@ export class ServerStartup {
 
             let host = url.hostname;
             if (ipVersion === 6) host = urlHostnameToIPv6(url.hostname);
-            server.listen({
-                host: host,
-                port: Number(url.port || 80),
-                // see https://nodejs.org/api/net.html#serverlisten for why ipv6Only is used
-                ipv6Only: true,
-            });
+            this.#listen(server, host, Number(url.port || 80), ipVersion).catch(reject);
         });
     }
 

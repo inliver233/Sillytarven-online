@@ -79,6 +79,47 @@ export class UserBackupManager {
      * @returns {Promise<object>} Public job status
      */
     /**
+     * Backups being built, and finished ones still kept for download, for the admin panel.
+     * @returns {{active: object[], stored: {files: number, bytes: number}}}
+     */
+    describeJobs() {
+        const active = [];
+        const stored = { files: 0, bytes: 0 };
+        for (const job of this.jobs.values()) {
+            if (['queued', 'running'].includes(job.status)) {
+                active.push({ kind: 'full', handle: job.handle, state: job.status, startedAt: job.createdAt, processedBytes: job.processedBytes, archiveBytes: job.archiveBytes });
+            } else if (job.status === 'ready') {
+                stored.files++;
+                stored.bytes += Number(job.size) || 0;
+            }
+        }
+        return { active, stored };
+    }
+
+    /**
+     * Cancels every backup being built and waits briefly for them to stop.
+     * Used when this server is replaced: its jobs cannot be reached any more.
+     * @param {number} [timeoutMs] Longest wait
+     * @returns {Promise<void>}
+     */
+    async cancelActiveJobs(timeoutMs = 3000) {
+        for (const job of this.jobs.values()) {
+            if (['queued', 'running'].includes(job.status)) {
+                job.status = 'cancelled';
+                job.updatedAt = Date.now();
+                job.archive?.abort();
+                job.output?.destroy();
+            }
+        }
+        const deadline = Date.now() + timeoutMs;
+        while (this.activeJobs > 0 && Date.now() < deadline) {
+            await new Promise(resolve => setTimeout(resolve, 20));
+        }
+        // Let the settle callbacks give their quota back before state is handed over.
+        await new Promise(resolve => setTimeout(resolve, 50));
+    }
+
+    /**
      * Whether a new job would be refused right now because all slots are taken.
      * @returns {boolean}
      */
@@ -218,7 +259,7 @@ export class UserBackupManager {
             const onSettled = job.onSettled;
             job.onSettled = null;
             try {
-                onSettled?.(job.status);
+                onSettled?.(job.status, this.toPublicJob(job));
             } catch (error) {
                 console.error('Backup job settle callback failed:', error);
             }

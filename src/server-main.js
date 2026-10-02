@@ -69,6 +69,8 @@ import { router as usersPublicRouter } from './endpoints/users-public.js';
 import { router as publicConfigRouter } from './endpoints/public-config.js';
 import { router as oauthRouter, linuxdoCallbackHandler } from './endpoints/oauth.js';
 import { init as statsInit, onExit as statsOnExit } from './endpoints/stats.js';
+import { isKeeperWorker, onActivate } from './process-lifecycle.js';
+import { notifyServing, setupKeeperWorker, trackPendingWrites, waitForActivation } from './keeper-worker.js';
 import { checkForNewContent } from './endpoints/content-manager.js';
 import { init as settingsInit } from './endpoints/settings.js';
 import { redirectDeprecatedEndpoints, ServerStartup, setupPrivateEndpoints } from './server-startup.js';
@@ -104,6 +106,8 @@ if (!cliArgs.enableIPv6 && !cliArgs.enableIPv4) {
 }
 
 const app = express();
+// Under the hot-reload keeper, a handover lets requests that write finish first.
+app.use(trackPendingWrites);
 // Only trust forwarding headers from the local reverse proxy. This prevents a
 // direct connection to the Node port from spoofing its client IP.
 app.set('trust proxy', 'loopback');
@@ -454,6 +458,9 @@ app.get('/version', async function (request, response) {
 redirectDeprecatedEndpoints(app);
 setupPrivateEndpoints(app);
 
+/** @type {(exitCode?: number) => Promise<void>} */
+let exitProcessRef = async (exitCode = 0) => process.exit(exitCode);
+
 /**
  * Tasks that need to be run before the server starts listening.
  * @returns {Promise<void>}
@@ -487,14 +494,19 @@ async function preSetupTasks() {
     await settingsInit();
     // Rebuilding missing per-user stats may scan thousands of accounts. Do not
     // hold the HTTP listener (and the stcontrol adapter) offline while it runs.
-    void statsInit();
+    if (isKeeperWorker) {
+        // A server starting next to a running one loads statistics once it takes over.
+        onActivate(() => void statsInit());
+    } else {
+        void statsInit();
+    }
 
     const pluginsDirectory = path.join(serverDirectory, 'plugins');
     const cleanupPlugins = await loadPlugins(app, pluginsDirectory);
     const consoleTitle = process.title;
 
     let isExiting = false;
-    const exitProcess = async (exitCode = 0) => {
+    const exitProcess = exitProcessRef = async (exitCode = 0) => {
         if (isExiting) return;
         isExiting = true;
         await statsOnExit();
@@ -634,5 +646,11 @@ migrateLegacyFreeGeminiChannels()
     .then(verifySecuritySettings)
     .then(preSetupTasks)
     .then(apply404Middleware)
+    // Under the hot-reload keeper: fully started, wait for the running server to hand over.
+    .then(waitForActivation)
     .then(() => new ServerStartup(app, cliArgs).start())
-    .then(postSetupTasks);
+    .then(result => {
+        setupKeeperWorker(exitProcessRef);
+        notifyServing();
+        return postSetupTasks(result);
+    });

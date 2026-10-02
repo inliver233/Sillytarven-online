@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import yaml from 'yaml';
 import { getAllUserHandles, getUserDirectories } from './users.js';
+import { onDrain } from './process-lifecycle.js';
 
 /**
  * 定时任务管理器
@@ -266,6 +267,9 @@ class ScheduledTasksManager {
 
 // 创建全局定时任务管理器实例
 const scheduledTasksManager = new ScheduledTasksManager();
+
+// Hot reload: the new server runs the tasks from now on.
+onDrain(() => scheduledTasksManager.stopAllTasks());
 
 // 进程退出时停止所有任务
 process.on('SIGINT', () => {

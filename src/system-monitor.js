@@ -1,6 +1,7 @@
 import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
+import { canPersistSharedState, onActivate, onDrain } from './process-lifecycle.js';
 
 /**
  * 系统负载监控器
@@ -992,6 +993,10 @@ class SystemMonitor {
      * 保存数据到磁盘
      */
     saveDataToDisk() {
+        // A server starting next to (or replaced by) another must not overwrite its numbers.
+        if (!canPersistSharedState()) {
+            return;
+        }
         try {
             // 保存用户统计数据
             const userStatsObj = Object.fromEntries(this.userLoadStats);
@@ -1071,6 +1076,14 @@ class SystemMonitor {
 
 // 创建全局系统监控器实例
 const systemMonitor = new SystemMonitor();
+
+// Hot reload: the new server picks up the numbers the old one saved when it handed over.
+onActivate(() => systemMonitor.loadPersistedData());
+onDrain(() => {
+    systemMonitor.saveDataToDisk();
+    clearInterval(systemMonitor.saveInterval);
+    clearInterval(systemMonitor.userUpdateInterval);
+});
 
 // 进程退出时保存数据
 process.on('SIGINT', () => {

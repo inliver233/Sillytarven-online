@@ -2,6 +2,7 @@ import express from 'express';
 
 import { requireAdminMiddleware } from '../users.js';
 import { getBackupLimitPolicy, getBackupQuotaStatus, getBackupUsageSummary, saveBackupLimitPolicy } from '../backup-limits.js';
+import { getBackupActivitySummary } from '../backup-activity.js';
 
 export const router = express.Router();
 
@@ -14,6 +15,12 @@ router.get('/status', (request, response) => {
 router.get('/config', requireAdminMiddleware, (_request, response) => {
     response.setHeader('Cache-Control', 'private, no-store, max-age=0');
     return response.json({ policy: getBackupLimitPolicy(), usage: getBackupUsageSummary() });
+});
+
+// One day of backups, exports and restores: outcome, size and who ran them.
+router.get('/activity', requireAdminMiddleware, (request, response) => {
+    response.setHeader('Cache-Control', 'private, no-store, max-age=0');
+    return response.json(getBackupActivitySummary(String(request.query.date ?? '')));
 });
 
 router.post('/config', requireAdminMiddleware, async (request, response) => {
