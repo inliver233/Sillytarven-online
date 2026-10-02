@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import crypto from 'node:crypto';
 import path from 'node:path';
 import readline from 'node:readline';
+import { Readable } from 'node:stream';
 import process from 'node:process';
 
 import archiver from 'archiver';
@@ -2828,17 +2829,60 @@ export function isChunkedChatFile(filePath) {
 }
 
 /**
- * Reads a chat as one upstream-compatible JSONL document for backups, under
- * the same lock that chat saves take, so a concurrent save is never half read.
+ * Streams a chat as one upstream-compatible JSONL document for backups, one
+ * chunk at a time, so huge chats never sit in memory whole. The chat lock is
+ * held until `consume` has finished with the stream.
  * @param {string} handle Owner of the chat
  * @param {string} filePath Chat .jsonl path
  * @param {boolean} isGroup Whether this is a group chat
- * @returns {Promise<string>}
+ * @param {(stream: import('node:stream').Readable) => Promise<void>} consume Reads the stream to the end
+ * @returns {Promise<void>}
  */
-export async function readChatForBackup(handle, filePath, isGroup) {
+export async function streamChatForBackup(handle, filePath, isGroup, consume) {
     const lockOwner = { user: { profile: { handle } } };
-    return await chatStorageMutex.runExclusive(getChatStorageLockKey(lockOwner, filePath),
-        () => readChatJsonl(filePath, isGroup));
+    await chatStorageMutex.runExclusive(getChatStorageLockKey(lockOwner, filePath), async () => {
+        if (!isChunkedChat(filePath)) {
+            await consume(fs.createReadStream(filePath));
+            return;
+        }
+        const index = await ensureChatIndex(filePath);
+        let header;
+        let skipLines = 0;
+        if (isGroup) {
+            const headerInfo = await readGroupChatHeaderInfo(filePath);
+            header = headerInfo.header;
+            skipLines = headerInfo.embeddedHeaderCount;
+        } else {
+            header = await readChatHeader(filePath);
+        }
+        const chunkDirectory = getChatChunkDir(filePath);
+        // Line by line: a single chunk of a huge chat can be tens of megabytes.
+        async function* pieces() {
+            let started = false;
+            if (header) {
+                yield JSON.stringify(header);
+                started = true;
+            }
+            for (const shard of index?.shards ?? []) {
+                const lines = readline.createInterface({
+                    input: fs.createReadStream(path.join(chunkDirectory, shard.file), { encoding: 'utf8' }),
+                    crlfDelay: Infinity,
+                });
+                for await (const line of lines) {
+                    if (!line) {
+                        continue;
+                    }
+                    if (skipLines > 0) {
+                        skipLines--;
+                        continue;
+                    }
+                    yield started ? `\n${line}` : line;
+                    started = true;
+                }
+            }
+        }
+        await consume(Readable.from(pieces()));
+    });
 }
 
 /**
@@ -3515,7 +3559,7 @@ router.post('/export-estimate', async function (request, response) {
                 entries.push({ name: file, size: sizeOf(path.join(request.user.directories.characters, file)) });
             }
         }
-        return response.json({ chats: plan.chats.length, ...estimateZipBytes(entries, 6) });
+        return response.json({ chats: plan.chats.length, ...await estimateZipBytes(entries, 6) });
     } catch (error) {
         return sendChatTransferError(response, error, 'chat_export_estimate_failed');
     }

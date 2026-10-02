@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { CHAT_STORAGE_LAYOUT, getChatSamplePaths, getChatStoredBytes, isChunkedChatFile, readChatForBackup } from './endpoints/chats.js';
+import { CHAT_STORAGE_LAYOUT, getChatSamplePaths, getChatStoredBytes, isChunkedChatFile, streamChatForBackup } from './endpoints/chats.js';
 import { estimateZipBytes } from './zip-size-estimate.js';
 
 export class ArchiveCancelledError extends Error {
@@ -44,7 +44,7 @@ function describeDirectory(relativeDirectory) {
  * Appends one in-memory entry and waits until archiver has consumed it, so
  * assembling many large chats never buffers them all at once.
  * @param {import('archiver').Archiver} archive Archive
- * @param {string} content Entry content
+ * @param {string|import('node:stream').Readable} content Entry content
  * @param {import('archiver').EntryData} data Entry data
  * @returns {Promise<void>}
  */
@@ -157,8 +157,8 @@ export async function appendUserDataToArchive(archive, { handle, rootPath, isCan
             }
             throw error;
         }
-        const content = await readChatForBackup(handle, absolutePath, isGroup);
-        await appendAndWait(archive, content, { name, date: stats.mtime });
+        await streamChatForBackup(handle, absolutePath, isGroup,
+            stream => appendAndWait(archive, stream, { name, date: stats.mtime }));
     }
 }
 
@@ -182,5 +182,5 @@ export async function estimateUserDataArchive({ rootPath, includeSecrets = false
             }
         }
     }
-    return estimateZipBytes(entries, 1);
+    return await estimateZipBytes(entries, 1);
 }

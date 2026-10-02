@@ -25,7 +25,7 @@ function deflated(entries, level, transform) {
     }, 0);
 }
 
-test('large files are measured from their own content, media is counted as stored', () => {
+test('large files are measured from their own content, media is counted as stored', async () => {
     const lines = Array.from({ length: 6000 }, (_, i) => JSON.stringify({
         name: i % 2 ? 'User' : 'Bot',
         mes: `${crypto.randomBytes(24).toString('base64')} ${'对话内容'.repeat(i % 7)}`,
@@ -33,14 +33,14 @@ test('large files are measured from their own content, media is counted as store
     }));
     const chat = write('a.jsonl', lines.join('\n'));
     const photo = write('b.jpg', crypto.randomBytes(300_000));
-    const estimate = estimateZipBytes([chat, photo], 6);
+    const estimate = await estimateZipBytes([chat, photo], 6);
 
     const actual = deflated([chat], 6) + photo.size;
     assert.ok(Math.abs(estimate.estimatedBytes / actual - 1) < 0.15, `${estimate.estimatedBytes} vs ${actual}`);
     assert.equal(estimate.files, 2);
     assert.equal(estimate.rawBytes, chat.size + photo.size);
 
-    const txt = estimateZipBytes([{ ...chat, transform: chatLinesToText }], 6);
+    const txt = await estimateZipBytes([{ ...chat, transform: chatLinesToText }], 6);
     const txtActual = deflated([chat], 6, chatLinesToText);
     assert.ok(Math.abs(txt.estimatedBytes / txtActual - 1) < 0.25, `${txt.estimatedBytes} vs ${txtActual}`);
     assert.ok(txt.estimatedBytes < estimate.estimatedBytes);

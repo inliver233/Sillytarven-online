@@ -1,6 +1,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import zlib from 'node:zlib';
+
+// Async deflate runs on the libuv thread pool, so estimating never blocks other requests.
+const deflateRaw = promisify(zlib.deflateRaw);
 
 /**
  * Download size of a ZIP before it is built, for the size hints shown next to
@@ -51,24 +55,29 @@ export function chatLinesToText(jsonl) {
 /**
  * Reads a sample of a file: its start and end (card PNGs keep their data at the
  * end), or only whole lines from the start when the lines will be parsed.
- * @param {string} filePath File
+ * @param {string|string[]} filePath File, or several files sampled equally
  * @param {boolean} linesOnly Sample whole lines from the start only
- * @returns {Buffer}
+ * @returns {Promise<Buffer>}
  */
-function readSample(filePath, linesOnly) {
+async function readSample(filePath, linesOnly) {
     if (Array.isArray(filePath)) {
         // Several files (e.g. a chat's first and last chunk): an equal share of each.
-        return Buffer.concat(filePath.map(part => readSample(part, linesOnly)));
+        const parts = [];
+        for (const part of filePath) {
+            parts.push(await readSample(part, linesOnly));
+        }
+        return Buffer.concat(parts);
     }
-    const handle = fs.openSync(filePath, 'r');
+    const handle = await fs.promises.open(filePath, 'r');
     try {
-        const size = fs.fstatSync(handle).size;
-        const read = (position, length) => {
+        const { size } = await handle.stat();
+        const read = async (position, length) => {
             const buffer = Buffer.alloc(length);
-            return buffer.subarray(0, fs.readSync(handle, buffer, 0, length, position));
+            const { bytesRead } = await handle.read(buffer, 0, length, position);
+            return buffer.subarray(0, bytesRead);
         };
         if (linesOnly) {
-            let sample = read(0, SAMPLE_PART_BYTES * 2);
+            let sample = await read(0, SAMPLE_PART_BYTES * 2);
             if (sample.length === SAMPLE_PART_BYTES * 2) {
                 const end = sample.lastIndexOf(0x0A);
                 if (end > 0) {
@@ -78,11 +87,11 @@ function readSample(filePath, linesOnly) {
             return sample;
         }
         if (size <= SAMPLE_PART_BYTES * 2) {
-            return read(0, size);
+            return await read(0, size);
         }
-        return Buffer.concat([read(0, SAMPLE_PART_BYTES), read(size - SAMPLE_PART_BYTES, SAMPLE_PART_BYTES)]);
+        return Buffer.concat([await read(0, SAMPLE_PART_BYTES), await read(size - SAMPLE_PART_BYTES, SAMPLE_PART_BYTES)]);
     } finally {
-        fs.closeSync(handle);
+        await handle.close();
     }
 }
 
@@ -98,9 +107,9 @@ function readSample(filePath, linesOnly) {
  * Estimates the ZIP size of the given entries.
  * @param {EstimateEntry[]} entries Entries
  * @param {1|6} level Deflate level used by the archive
- * @returns {{files: number, rawBytes: number, estimatedBytes: number}}
+ * @returns {Promise<{files: number, rawBytes: number, estimatedBytes: number}>}
  */
-export function estimateZipBytes(entries, level) {
+export async function estimateZipBytes(entries, level) {
     const defaults = DEFAULT_RATIOS[level] ?? DEFAULT_RATIOS[6];
     let budget = SAMPLE_BUDGET_BYTES;
     /** Measured ratios per kind, used once the sampling budget runs out. */
@@ -122,11 +131,11 @@ export function estimateZipBytes(entries, level) {
         let ratio = null;
         if (entry.samplePath && size >= SAMPLE_MIN_FILE_BYTES && budget > 0) {
             try {
-                const sample = readSample(entry.samplePath, Boolean(entry.transform));
+                const sample = await readSample(entry.samplePath, Boolean(entry.transform));
                 if (sample.length > 0) {
                     budget -= sample.length;
                     const input = entry.transform ? Buffer.from(entry.transform(sample.toString('utf8'))) : sample;
-                    const compressed = zlib.deflateRawSync(input, { level }).length;
+                    const compressed = (await deflateRaw(input, { level })).length;
                     ratio = Math.min(1, compressed / sample.length);
                     measured[kind][0] += sample.length;
                     measured[kind][1] += compressed;
