@@ -27,8 +27,9 @@
     border: 1px solid var(--SmartThemeBorderColor);
     border-radius: 10px;
     box-shadow: 0 0 20px rgba(0, 0, 0, 0.3);
-    max-width: 600px;
-    max-height: 80vh;
+    max-width: 640px;
+    max-height: 88vh;
+    max-height: 88dvh;
     width: 90%;
     display: flex;
     flex-direction: column;
@@ -84,7 +85,7 @@
     overflow-y: auto;
     flex: 1;
     min-height: 0;
-    max-height: 60vh;
+    max-height: none;
     display: flex;
     flex-direction: column;
 }
@@ -218,8 +219,8 @@
         width: 95%;
         max-width: 95%;
         /* 使用视口高度计算，但留出空间 */
-        max-height: 85vh;
-        max-height: 85dvh;
+        max-height: 90vh;
+        max-height: 90dvh;
         margin: 10px auto;
         border-radius: 8px;
         /* 保持flex布局但调整高度限制 */
@@ -246,8 +247,8 @@
         overflow-y: auto;
         flex: 1; /* 让内容区域填充剩余空间 */
         /* 使用动态高度计算 */
-        max-height: calc(85vh - 120px); /* 减去头部和底部的大概高度 */
-        max-height: calc(85dvh - 120px);
+        max-height: none;
+
         min-height: 0; /* 允许 flexbox 正确收缩 */
     }
 
@@ -269,13 +270,13 @@
     /* 处理小屏幕设备的额外调整 */
     @media (max-height: 600px) {
         .announcements-popup {
-            max-height: 90vh;
-            max-height: 90dvh;
+            max-height: 94vh;
+            max-height: 94dvh;
         }
 
         .announcements-popup-content {
-            max-height: calc(90vh - 100px);
-            max-height: calc(90dvh - 100px);
+            max-height: none;
+
         }
 
         .announcements-popup-header,
@@ -299,8 +300,8 @@
 
     .announcements-popup-content {
         padding: 10px 14px;
-        max-height: calc(94vh - 90px);
-        max-height: calc(94dvh - 90px);
+        max-height: none;
+
     }
 
     .announcements-popup-header,

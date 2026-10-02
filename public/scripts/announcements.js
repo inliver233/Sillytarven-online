@@ -104,6 +104,7 @@ function showAnnouncementsPopup(announcements) {
     const popup = document.getElementById('announcementsPopup');
     if (popup) {
         popup.style.display = 'flex';
+        fitAnnouncementsToPopup(popup);
         // 添加动画效果
         setTimeout(() => {
             popup.classList.add('show');
@@ -113,10 +114,10 @@ function showAnnouncementsPopup(announcements) {
 
 // 创建公告弹窗HTML
 function createAnnouncementsPopupHtml(announcements) {
-    // 最新一条展开，较早的收成一行标题，保证小屏幕上每条公告都能一眼看到。
-    const announcementsHtml = announcements.map((announcement, index) => `
-        <div class="announcement-item${index > 0 ? ' collapsed' : ''}">
-            <button type="button" class="announcement-header" aria-expanded="${index === 0}">
+    // 默认全部展开；放不下时由 fitAnnouncementsToPopup 把较早的收成一行标题。
+    const announcementsHtml = announcements.map((announcement) => `
+        <div class="announcement-item">
+            <button type="button" class="announcement-header" aria-expanded="true">
                 <span class="announcement-title">${escapeHtml(announcement.title)}</span>
                 <small class="announcement-time">${new Date(announcement.createdAt).toLocaleDateString('zh-CN')}</small>
                 <i class="fa-solid fa-chevron-down announcement-chevron" aria-hidden="true"></i>
@@ -147,6 +148,29 @@ function createAnnouncementsPopupHtml(announcements) {
     `;
 }
 
+function setAnnouncementExpanded(item, expanded) {
+    item.classList.toggle('collapsed', !expanded);
+    item.querySelector('.announcement-header')?.setAttribute('aria-expanded', String(expanded));
+}
+
+/** 所有展开的公告都完整显示（没有被压缩成需要滚动），且整体没有溢出。 */
+function announcementsFit(popup) {
+    const body = popup.querySelector('.announcements-popup-content');
+    if (!body || body.scrollHeight > body.clientHeight + 1) {
+        return false;
+    }
+    return [...popup.querySelectorAll('.announcement-item:not(.collapsed) .announcement-content')]
+        .every(content => content.scrollHeight <= content.clientHeight + 1);
+}
+
+/** 放不下时从最早的公告开始收起，最新一条始终展开。 */
+function fitAnnouncementsToPopup(popup) {
+    const items = [...popup.querySelectorAll('.announcement-item')];
+    for (let index = items.length - 1; index > 0 && !announcementsFit(popup); index--) {
+        setAnnouncementExpanded(items[index], false);
+    }
+}
+
 // 绑定公告弹窗事件
 function bindAnnouncementPopupEvents() {
     const popup = document.getElementById('announcementsPopup');
@@ -161,17 +185,19 @@ function bindAnnouncementPopupEvents() {
         confirmBtn.addEventListener('click', closeAnnouncementsPopup);
     }
 
-    // 点击标题展开/收起；一次只展开一条，其余标题始终留在视野内
+    // 点击标题展开/收起；展开后放不下时，把其他展开的公告收起，保证内容完整可读
     const headers = popup ? [...popup.querySelectorAll('.announcement-header')] : [];
     headers.forEach(header => {
         header.addEventListener('click', () => {
             const item = header.closest('.announcement-item');
             const expand = item.classList.contains('collapsed');
-            for (const other of headers) {
-                const otherItem = other.closest('.announcement-item');
-                const open = expand && otherItem === item;
-                otherItem.classList.toggle('collapsed', !open);
-                other.setAttribute('aria-expanded', String(open));
+            setAnnouncementExpanded(item, expand);
+            if (expand && !announcementsFit(popup)) {
+                for (const other of popup.querySelectorAll('.announcement-item:not(.collapsed)')) {
+                    if (other !== item) {
+                        setAnnouncementExpanded(other, false);
+                    }
+                }
             }
         });
     });
