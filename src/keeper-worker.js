@@ -176,6 +176,7 @@ async function waitForWrites(timeoutMs) {
 async function handOver(exit, maxDrainMs) {
     if (getProcessPhase() !== 'active') return;
     log('Handing over to the new server...');
+    const startedAt = Date.now();
     const closed = Promise.all([...servers].map(server => new Promise(resolve => server.close(() => resolve()))));
     for (const server of servers) {
         // Keep-alive connections would otherwise keep bringing new requests here.
@@ -185,8 +186,10 @@ async function handOver(exit, maxDrainMs) {
     if (!settled) {
         log(`${pendingWrites} write request(s) and ${unreadConnections.size} new connection(s) still pending after ${WRITE_SETTLE_MS} ms; handing over anyway.`, 'warn');
     }
+    const writesSettledAt = Date.now();
     await drainProcess();
     send({ type: 'keeper:handed-over' });
+    log(`Handed over in ${Date.now() - startedAt} ms (writes settled in ${writesSettledAt - startedAt} ms, state saved in ${Date.now() - writesSettledAt} ms).`);
 
     const deadline = new Promise(resolve => setTimeout(resolve, maxDrainMs));
     const finished = (async () => {

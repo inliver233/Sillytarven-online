@@ -185,7 +185,12 @@ async function loadUserStats(handle) {
     try {
         const statsFilePath = path.join(directories.root, STATS_FILE);
         const statsFileContent = await readFile(statsFilePath, 'utf-8');
-        STATS.set(handle, JSON.parse(statsFileContent));
+        const stats = JSON.parse(statsFileContent);
+        STATS.set(handle, stats);
+        // Just read from disk: nothing to save until it changes (changes get a newer
+        // timestamp). Without this every save, and a hot reload's handover, rewrote
+        // every user's stats file.
+        TIMESTAMPS.set(handle, Number(stats?.timestamp) || 0);
     } catch (err) {
         // If the file doesn't exist or is invalid, initialize stats
         if (err.code === 'ENOENT' || err instanceof SyntaxError) {
