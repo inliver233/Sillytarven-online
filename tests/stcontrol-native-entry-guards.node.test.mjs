@@ -97,7 +97,9 @@ test('managed mode classifies every actual native account route without an ident
 
     for (const route of actualRoutes(routers.privateUsers.router)) {
         const result = await invokeGuard(adapter.stcontrolPrivateAccountGuard, route.path, route.method);
-        const shouldPass = route.path === '/logout' || ['GET', 'HEAD', 'OPTIONS'].includes(route.method);
+        const isBackup = (route.method === 'POST' && ['/backup', '/backup/start'].includes(route.path))
+            || (route.method === 'DELETE' && route.path === '/backup/:jobId');
+        const shouldPass = route.path === '/logout' || isBackup || ['GET', 'HEAD', 'OPTIONS'].includes(route.method);
         assert.equal(result.nextCalled, shouldPass, `private ${route.method} ${route.path}`);
         if (!shouldPass) {
             assert.equal(result.statusCode, 423, `private ${route.method} ${route.path}`);

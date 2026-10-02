@@ -847,9 +847,22 @@ export function stcontrolOAuthGuard(request, response, next) {
     return writeAccessError(response, 'managed_oauth_required');
 }
 
+/**
+ * Backups only read and package the user's own data on this node; they never
+ * change the account, so they stay available under the controller.
+ * @param {import('express').Request} request
+ * @returns {boolean}
+ */
+export function isStcontrolSafeBackupRequest(request) {
+    if (request.method === 'POST') return /^\/backup(?:\/start)?$/.test(request.path);
+    if (request.method === 'DELETE') return /^\/backup\/[^/]+$/.test(request.path);
+    return false;
+}
+
 export function stcontrolPrivateAccountGuard(request, response, next) {
     if (!isStcontrolEnabled()) return next();
     if (request.path === '/logout' || ['GET', 'HEAD', 'OPTIONS'].includes(request.method)) return next();
+    if (isStcontrolSafeBackupRequest(request)) return next();
     return writeAccessError(response, 'managed_account_mutation');
 }
 
