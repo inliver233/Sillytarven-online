@@ -253,7 +253,8 @@ router.post('/backup/start', async (request, response) => {
                 },
             });
         } catch (error) {
-            await quota.release();
+            // A busy server is not the user's failure, so retrying never gets them throttled.
+            await quota.release({ failed: error?.code !== 'BACKUP_BUSY' });
             throw error;
         }
         if (job.reused) {
