@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
@@ -102,6 +103,53 @@ export function getDefaultPresetFile(filename) {
 }
 
 /**
+ * Earlier shipped versions of built-in files that are kept up to date. Content
+ * is copied to a user only once, so a user's copy that is still byte-identical
+ * to an earlier version was never edited and is replaced with the current one;
+ * edited copies are left alone. Add the outgoing version here when changing
+ * one of these files.
+ * @type {Readonly<Record<string, {size: number, sha256: string}[]>>}
+ */
+export const RETIRED_CONTENT_VERSIONS = Object.freeze({
+    'themes/inliver.json': [
+        { size: 24070, sha256: '0e35ad98212d247a0c8dc47cc3f5c3a11db13d5740992b1cff26da0a885d4229' },
+        { size: 31624, sha256: '5618a4ef74effb6fdaceb5074db8c74c7eedd89b64de42d2eafdf0c57ed61d74' },
+        { size: 31624, sha256: 'd0475e82fda065a7e0b5166134369afe0a80263a06b2a5ebc67b37f7c54cf075' },
+        { size: 31630, sha256: '13541ceb34ca1778e2625044d9d069148e78116df087199bc6d3af44650859a4' },
+    ],
+});
+
+/**
+ * Replaces a user's unedited copy of an earlier version of a built-in file.
+ * @param {ContentItem} contentItem Content item
+ * @param {string} targetPath User's copy
+ * @param {{size: number, sha256: string}[]} [retired] Earlier versions of the file
+ * @returns {boolean} Whether the copy was updated
+ */
+export function upgradeRetiredContent(contentItem, targetPath, retired = RETIRED_CONTENT_VERSIONS[contentItem.filename]) {
+    if (!retired || !contentItem.folder) {
+        return false;
+    }
+    let size;
+    try {
+        size = fs.statSync(targetPath).size;
+    } catch {
+        return false;
+    }
+    // Only files of a retired size are read, so this stays cheap for every user at startup.
+    if (!retired.some(version => version.size === size)) {
+        return false;
+    }
+    const hash = crypto.createHash('sha256').update(fs.readFileSync(targetPath)).digest('hex');
+    if (!retired.some(version => version.sha256 === hash)) {
+        return false;
+    }
+    writeFileAtomicSync(targetPath, fs.readFileSync(path.join(contentItem.folder, contentItem.filename)));
+    console.info(`Content file ${contentItem.filename} updated to the current version in ${path.dirname(targetPath)}`);
+    return true;
+}
+
+/**
  * Seeds content for a user.
  * @param {ContentItem[]} contentIndex Content index
  * @param {import('../users.js').UserDirectoryList} directories User directories
@@ -120,6 +168,13 @@ async function seedContentForUser(contentIndex, directories, forceCategories) {
     const initialContentLogLength = contentLog.length;
 
     for (const contentItem of contentIndex) {
+        if (RETIRED_CONTENT_VERSIONS[contentItem.filename]) {
+            const target = getTargetByType(contentItem.type, directories);
+            if (target && upgradeRetiredContent(contentItem, path.join(target, path.parse(contentItem.filename).base))) {
+                anyContentAdded = true;
+            }
+        }
+
         // If the content item is already in the log, skip it
         if (contentLog.includes(contentItem.filename) && !forceCategories?.includes(contentItem.type)) {
             continue;
