@@ -4,8 +4,14 @@ import path from 'node:path';
 
 import archiver from 'archiver';
 
-const DEFAULT_RETENTION_MS = 24 * 60 * 60 * 1000;
-const PARTIAL_FILE_RETENTION_MS = 60 * 60 * 1000;
+/** How long a finished backup waits to be downloaded. */
+const DEFAULT_RETENTION_MS = 12 * 60 * 60 * 1000;
+/**
+ * Files no job of this process knows about (left by a restart or a hot reload)
+ * can never be downloaded again, so they go much sooner. Not immediately: during
+ * a hot reload the previous server may still be finishing them.
+ */
+const ORPHAN_FILE_RETENTION_MS = 60 * 60 * 1000;
 const MINIMUM_FREE_SPACE_BYTES = 512 * 1024 * 1024;
 
 export class BackupJobError extends Error {
@@ -80,7 +86,7 @@ export class UserBackupManager {
      */
     /**
      * Backups being built, and finished ones still kept for download, for the admin panel.
-     * @returns {{active: object[], stored: {files: number, bytes: number}}}
+     * @returns {{active: object[], stored: {files: number, bytes: number, retentionMs: number}}}
      */
     describeJobs() {
         const active = [];
@@ -93,7 +99,7 @@ export class UserBackupManager {
                 stored.bytes += Number(job.size) || 0;
             }
         }
-        return { active, stored };
+        return { active, stored: { ...stored, retentionMs: this.retentionMs } };
     }
 
     /**
@@ -370,8 +376,7 @@ export class UserBackupManager {
                 return;
             }
 
-            const maxAge = entry.name.endsWith('.part') ? PARTIAL_FILE_RETENTION_MS : this.retentionMs;
-            if (now - stats.mtimeMs >= maxAge) {
+            if (now - stats.mtimeMs >= Math.min(ORPHAN_FILE_RETENTION_MS, this.retentionMs)) {
                 await fs.promises.rm(filePath, { force: true });
             }
         }));

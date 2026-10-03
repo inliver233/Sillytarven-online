@@ -128,3 +128,43 @@ test('backup cleanup removes expired orphaned exports without touching managed j
         await fs.promises.rm(testRoot, { recursive: true, force: true });
     }
 });
+
+test('backups no job knows about (left by a restart) are deleted after an hour, known ones after the retention time', async () => {
+    const testRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'sillytavern-backup-orphans-'));
+    const source = path.join(testRoot, 'source');
+    const exportsDirectory = path.join(testRoot, 'exports');
+    await fs.promises.mkdir(source, { recursive: true });
+    await fs.promises.writeFile(path.join(source, 'settings.json'), '{"ok":true}');
+    await fs.promises.mkdir(exportsDirectory, { recursive: true });
+    const setAge = async (file, ms) => {
+        const at = new Date(Date.now() - ms);
+        await fs.promises.utimes(file, at, at);
+    };
+
+    // Left by a previous run: unreachable, so an hour is enough; a newer one may still
+    // belong to a server being replaced by a hot reload.
+    const oldOrphan = path.join(exportsDirectory, 'old.zip');
+    const newOrphan = path.join(exportsDirectory, 'new.zip');
+    await fs.promises.writeFile(oldOrphan, 'x');
+    await fs.promises.writeFile(newOrphan, 'x');
+    await setAge(oldOrphan, 61 * 60 * 1000);
+    await setAge(newOrphan, 30 * 60 * 1000);
+
+    const manager = new UserBackupManager({ directory: exportsDirectory, maxConcurrent: 1 });
+    try {
+        await manager.cleanupOrphanedFiles();
+        assert.equal(fs.existsSync(oldOrphan), false);
+        assert.equal(fs.existsSync(newOrphan), true);
+
+        const started = await manager.startJob({ handle: 'orphan-test', requestedBy: 'orphan-test', rootPath: source });
+        const completed = await waitForBackup(manager, started.id, 'orphan-test');
+        const { filePath } = manager.getDownload(started.id, 'orphan-test', false);
+        await setAge(filePath, 2 * 60 * 60 * 1000);
+        await manager.cleanupOrphanedFiles();
+        assert.equal(fs.existsSync(filePath), true, 'a known backup stays for the retention time');
+        assert.equal(completed.expiresAt - completed.updatedAt, 12 * 60 * 60 * 1000);
+    } finally {
+        await manager.destroy();
+        await fs.promises.rm(testRoot, { recursive: true, force: true });
+    }
+});

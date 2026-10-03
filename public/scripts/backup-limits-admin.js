@@ -195,7 +195,8 @@ function badge(status) {
 
 function describeLive(item) {
     if (item.kind === 'stored') {
-        return `服务器暂存 ${item.files} 个已生成的备份，共 ${formatBytes(item.bytes)}（等待下载，24 小时后自动删除）`;
+        const hours = Math.round((Number(item.retentionMs) || 0) / 3600000);
+        return `服务器暂存 ${item.files} 个已生成的备份，共 ${formatBytes(item.bytes)}（等待下载，${hours > 0 ? `${hours} 小时后` : '到期'}自动删除）`;
     }
     if (item.kind === 'full') {
         return item.state === 'queued'

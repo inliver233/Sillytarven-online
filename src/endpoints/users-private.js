@@ -28,7 +28,7 @@ onDrain(() => userBackupManager.cancelActiveJobs());
 
 registerBackupLiveSource(() => {
     const { active, stored } = userBackupManager.describeJobs();
-    return stored.files > 0 ? [...active, { kind: 'stored', files: stored.files, bytes: stored.bytes }] : active;
+    return stored.files > 0 ? [...active, { kind: 'stored', ...stored }] : active;
 });
 
 export const router = express.Router();
