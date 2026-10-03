@@ -57,6 +57,23 @@ function hasEmbeddedFrame(node) {
     return typeof node?.querySelector === 'function' && Boolean(node.querySelector('iframe'));
 }
 
+/**
+ * Content-box height of a message: contain-intrinsic-size sizes the content box,
+ * so a placeholder built from the border-box height would add the padding twice.
+ * @param {Element} node Message element
+ * @param {number} borderBoxHeight Measured border-box height
+ * @returns {number} Content height
+ */
+function getContentHeight(node, borderBoxHeight) {
+    const style = typeof globalThis.getComputedStyle === 'function' ? globalThis.getComputedStyle(node) : null;
+    if (!style) {
+        return borderBoxHeight;
+    }
+    const extra = ['paddingTop', 'paddingBottom', 'borderTopWidth', 'borderBottomWidth']
+        .reduce((total, property) => total + (parseFloat(style[property]) || 0), 0);
+    return Math.max(0, borderBoxHeight - extra);
+}
+
 function hasPendingMedia(node) {
     const images = typeof node?.querySelectorAll === 'function' ? [...node.querySelectorAll('img')] : [];
     return images.some(image => image.complete === false);
@@ -237,7 +254,7 @@ export class ChatRenderOptimizer {
             const wasCulled = node.classList?.contains('st-chat-content-culled');
 
             if (!wasCulled && rect.height > 0) {
-                this.#setCachedHeight(key, Math.round(rect.height));
+                this.#setCachedHeight(key, Math.round(getContentHeight(node, rect.height)));
             }
 
             updates.push({

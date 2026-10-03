@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import test from 'node:test';
 
 import {
@@ -160,4 +161,33 @@ test('stale refreshes cancel before writes and dispose removes every artifact', 
     assert.equal(node.classList.contains('st-chat-content-culled'), false);
     assert.equal(node.style.values.has('--st-cull-height'), false);
     assert.equal(optimizer.getDebugState().trackedNodes, 0);
+});
+
+test('a culled message keeps the height it had, so the history above the viewport does not collapse', async () => {
+    // contain-intrinsic-size sizes the content box: the placeholder must leave out padding and border.
+    const previousGetComputedStyle = globalThis.getComputedStyle;
+    globalThis.getComputedStyle = () => ({ paddingTop: '10px', paddingBottom: '0px', borderTopWidth: '1px', borderBottomWidth: '1px' });
+    try {
+        const nodes = [
+            createMessageNode(0, { top: 1800, bottom: 2150 }),
+            ...Array.from({ length: 4 }, (_, index) => createMessageNode(index + 1, { top: 100, bottom: 200 })),
+        ];
+        const optimizer = new ChatRenderOptimizer({
+            ResizeObserverClass: undefined,
+            frameProcessor: immediateFrameProcessor,
+            getViewportHeight: () => 500,
+        });
+        optimizer.setChatContext('chat-height');
+        await optimizer.refresh(createChat(nodes), [{ mes: 'x'.repeat(60_000) }]);
+        assert.equal(nodes[0].classList.contains('st-chat-content-culled'), true);
+        assert.equal(nodes[0].style.values.get('--st-cull-height'), '338px');
+    } finally {
+        globalThis.getComputedStyle = previousGetComputedStyle;
+    }
+
+    // #chat is a flex column; a skipped message must not shrink to its padding.
+    const css = fs.readFileSync(new URL('../public/style.css', import.meta.url), 'utf8');
+    const rule = css.match(/#chat > \.mes\.st-chat-content-culled[^{]*\{([^}]*)\}/)?.[1] ?? '';
+    assert.match(rule, /contain-intrinsic-size:\s*auto var\(--st-cull-height/);
+    assert.match(rule, /flex-shrink:\s*0/);
 });

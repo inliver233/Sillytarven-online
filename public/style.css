@@ -3986,6 +3986,11 @@ button.toast-close-button {
     content-visibility: auto;
     contain: layout paint;
     contain-intrinsic-size: auto var(--st-cull-height, 180px);
+    /* #chat is a flex column: a skipped message has no content-based minimum
+       height, so without this it shrinks to its padding and the history above
+       the viewport collapses, then springs back (and the chat jumps) whenever
+       the browser lays it out again, e.g. when returning to the app. */
+    flex-shrink: 0;
 }
 
 #chat > .st-bottom-scroll-anchor {
