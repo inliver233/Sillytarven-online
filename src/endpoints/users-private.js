@@ -12,7 +12,7 @@ import { matchesAccountResetUsername } from '../account-reset.js';
 import { noteStcontrolLogout, stcontrolPrivateAccountGuard } from '../stcontrol.js';
 import { BackupQuotaError, consumeBackupQuota } from '../backup-limits.js';
 import { recordBackupActivity, registerBackupLiveSource } from '../backup-activity.js';
-import { onDrain } from '../process-lifecycle.js';
+import { onActivate, onDrain } from '../process-lifecycle.js';
 
 const userBackupManager = new UserBackupManager({
     directory: path.join(globalThis.DATA_ROOT, '_exports'),
@@ -25,6 +25,8 @@ const userBackupManager = new UserBackupManager({
 
 // Hot reload: pages poll the new server, which cannot see this server's jobs.
 onDrain(() => userBackupManager.cancelActiveJobs());
+// Hot reload: pick up backups the previous server finished while this one started.
+onActivate(() => userBackupManager.adoptPersistedJobs());
 
 registerBackupLiveSource(() => {
     const { active, stored } = userBackupManager.describeJobs();

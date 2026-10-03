@@ -168,3 +168,55 @@ test('backups no job knows about (left by a restart) are deleted after an hour, 
         await fs.promises.rm(testRoot, { recursive: true, force: true });
     }
 });
+
+test('a finished backup can still be downloaded after a restart, and goes away with its record', async () => {
+    const testRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'sillytavern-backup-persist-'));
+    const source = path.join(testRoot, 'source');
+    const exportsDirectory = path.join(testRoot, 'exports');
+    await fs.promises.mkdir(source, { recursive: true });
+    await fs.promises.writeFile(path.join(source, 'settings.json'), '{"ok":true}');
+    const managers = [];
+    const create = () => {
+        const manager = new UserBackupManager({ directory: exportsDirectory, maxConcurrent: 1 });
+        managers.push(manager);
+        return manager;
+    };
+    const backup = async (manager, handle) => {
+        const started = await manager.startJob({ handle, requestedBy: handle, rootPath: source });
+        await waitForBackup(manager, started.id, handle);
+        return started.id;
+    };
+
+    try {
+        const first = create();
+        const sameTime = create(); // e.g. the server starting next to it in a hot reload
+        const id = await backup(first, 'persist-user');
+        const record = path.join(exportsDirectory, `${id}.json`);
+        assert.ok(fs.existsSync(record));
+        assert.ok(fs.statSync(record).size < 1024, 'the record is tiny');
+
+        // Another process finds it on demand; a restarted one loads it at startup.
+        assert.ok(sameTime.getDownload(id, 'persist-user', false));
+        const restarted = create();
+        assert.equal(restarted.getStatus(id, 'persist-user', false).status, 'ready');
+        assert.equal(restarted.getDownload(id, 'other-user', false), null, 'only its owner may download it');
+        assert.equal(restarted.describeJobs().stored.files, 1);
+
+        // A new backup for the same user replaces the old one on disk.
+        const newer = await backup(restarted, 'persist-user');
+        assert.equal(fs.existsSync(path.join(exportsDirectory, `${id}.zip`)), false);
+        assert.equal(fs.existsSync(record), false);
+
+        // Expired: archive and record are removed together.
+        const newerRecord = path.join(exportsDirectory, `${newer}.json`);
+        const data = JSON.parse(fs.readFileSync(newerRecord, 'utf8'));
+        fs.writeFileSync(newerRecord, JSON.stringify({ ...data, readyAt: Date.now() - 13 * 60 * 60 * 1000 }));
+        const later = create();
+        assert.equal(later.getDownload(newer, 'persist-user', false), null);
+        assert.equal(fs.existsSync(path.join(exportsDirectory, `${newer}.zip`)), false);
+        assert.equal(fs.existsSync(newerRecord), false);
+    } finally {
+        for (const manager of managers) await manager.destroy();
+        await fs.promises.rm(testRoot, { recursive: true, force: true });
+    }
+});

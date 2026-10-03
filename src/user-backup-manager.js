@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import archiver from 'archiver';
+import writeFileAtomic from 'write-file-atomic';
 
 /** How long a finished backup waits to be downloaded. */
 const DEFAULT_RETENTION_MS = 12 * 60 * 60 * 1000;
@@ -12,6 +13,7 @@ const DEFAULT_RETENTION_MS = 12 * 60 * 60 * 1000;
  * a hot reload the previous server may still be finishing them.
  */
 const ORPHAN_FILE_RETENTION_MS = 60 * 60 * 1000;
+const JOB_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const MINIMUM_FREE_SPACE_BYTES = 512 * 1024 * 1024;
 
 export class BackupJobError extends Error {
@@ -50,6 +52,8 @@ export class UserBackupManager {
         this.maxConcurrent = maxConcurrent;
         fs.mkdirSync(this.directory, { recursive: true });
 
+        // Finished backups survive a restart: each one has a small "<id>.json" record.
+        this.adoptPersistedJobs();
         void this.cleanupOrphanedFiles().catch(error => {
             console.error('Failed to clean orphaned backup files:', error);
         });
@@ -84,6 +88,100 @@ export class UserBackupManager {
      *   onSettled is called once with the final status of a newly started job ('ready', 'failed' or 'cancelled').
      * @returns {Promise<object>} Public job status
      */
+    /**
+     * Records a finished backup next to its archive, so it can still be downloaded
+     * after a restart or hot reload. Without the record the archive is an orphan.
+     * @param {any} job Internal job
+     */
+    async persistJob(job) {
+        const record = {
+            version: 1,
+            id: job.id,
+            handle: job.handle,
+            requestedBy: job.requestedBy,
+            includeSecrets: job.includeSecrets,
+            filename: job.filename,
+            size: job.size,
+            createdAt: job.createdAt,
+            readyAt: job.updatedAt,
+        };
+        try {
+            await writeFileAtomic(job.metadataPath, JSON.stringify(record));
+        } catch (error) {
+            console.warn(`Could not record backup ${job.id}; it will not survive a restart:`, error.message);
+        }
+    }
+
+    /**
+     * Loads one persisted finished backup, or removes its files when it has expired
+     * or its archive is gone.
+     * @param {string} id Job ID
+     * @returns {any|null} Internal job
+     */
+    adoptPersistedJob(id) {
+        if (!JOB_ID_PATTERN.test(id)) {
+            return null;
+        }
+        const metadataPath = path.join(this.directory, `${id}.json`);
+        const filePath = path.join(this.directory, `${id}.zip`);
+        let record;
+        try {
+            record = JSON.parse(fs.readFileSync(metadataPath, 'utf8'));
+        } catch (error) {
+            if (error?.code !== 'ENOENT') {
+                fs.rmSync(metadataPath, { force: true });
+            }
+            return null;
+        }
+        const valid = record?.version === 1 && record.id === id && typeof record.handle === 'string' &&
+            typeof record.requestedBy === 'string' && typeof record.filename === 'string' &&
+            Number.isFinite(record.readyAt) && Number.isFinite(record.size);
+        if (!valid || Date.now() - record.readyAt >= this.retentionMs || !fs.existsSync(filePath)) {
+            fs.rmSync(metadataPath, { force: true });
+            fs.rmSync(filePath, { force: true });
+            return null;
+        }
+        const job = {
+            id,
+            handle: record.handle,
+            requestedBy: record.requestedBy,
+            rootPath: null,
+            includeSecrets: Boolean(record.includeSecrets),
+            status: 'ready',
+            createdAt: Number(record.createdAt) || record.readyAt,
+            updatedAt: record.readyAt,
+            processedBytes: record.size,
+            archiveBytes: record.size,
+            size: record.size,
+            error: null,
+            filename: record.filename,
+            partialPath: path.join(this.directory, `${id}.part`),
+            filePath,
+            metadataPath,
+            archive: null,
+            output: null,
+            onSettled: null,
+        };
+        this.jobs.set(id, job);
+        return job;
+    }
+
+    /** Loads every persisted finished backup not yet known to this process. */
+    adoptPersistedJobs() {
+        let names;
+        try {
+            names = fs.readdirSync(this.directory);
+        } catch {
+            return;
+        }
+        for (const name of names) {
+            const id = name.endsWith('.json') ? name.slice(0, -'.json'.length) : '';
+            if (id && !this.jobs.has(id)) {
+                this.adoptPersistedJob(id);
+            }
+        }
+    }
+
     /**
      * Backups being built, and finished ones still kept for download, for the admin panel.
      * @returns {{active: object[], stored: {files: number, bytes: number, retentionMs: number}}}
@@ -159,7 +257,9 @@ export class UserBackupManager {
             }
         }
 
-        // Keep at most one completed on-disk export for this requester/target.
+        // Keep at most one completed on-disk export for this requester/target,
+        // including ones another server process finished.
+        this.adoptPersistedJobs();
         for (const job of this.jobs.values()) {
             if (job.handle === handle && job.requestedBy === requestedBy && ['ready', 'failed', 'cancelled'].includes(job.status)) {
                 await this.removeJobFiles(job);
@@ -186,6 +286,7 @@ export class UserBackupManager {
             filename: `${handle}-${timestamp}.zip`,
             partialPath: path.join(this.directory, `${id}.part`),
             filePath: path.join(this.directory, `${id}.zip`),
+            metadataPath: path.join(this.directory, `${id}.json`),
             archive: null,
             output: null,
             onSettled: typeof onSettled === 'function' ? onSettled : null,
@@ -249,6 +350,7 @@ export class UserBackupManager {
             job.archiveBytes = stats.size;
             job.status = 'ready';
             job.updatedAt = Date.now();
+            await this.persistJob(job);
             console.info(`Backup ready for ${job.handle}: ${job.size} bytes`);
         } catch (error) {
             if (job.status !== 'cancelled' && error?.name !== 'ArchiveCancelledError') {
@@ -280,7 +382,8 @@ export class UserBackupManager {
      * @returns {any|null} Internal job
      */
     getAuthorizedJob(id, requestedBy, isAdmin) {
-        const job = this.jobs.get(id);
+        // Finished by another server process (e.g. just before a hot reload).
+        const job = this.jobs.get(id) ?? this.adoptPersistedJob(String(id));
         if (!job || (!isAdmin && job.requestedBy !== requestedBy)) {
             return null;
         }
@@ -340,7 +443,7 @@ export class UserBackupManager {
     }
 
     async removeJobFiles(job) {
-        await Promise.all([job.partialPath, job.filePath].map(filePath =>
+        await Promise.all([job.partialPath, job.filePath, job.metadataPath].map(filePath =>
             fs.promises.rm(filePath, { force: true }).catch(() => undefined),
         ));
     }
@@ -359,11 +462,13 @@ export class UserBackupManager {
     }
 
     async cleanupOrphanedFiles() {
+        this.adoptPersistedJobs();
         const now = Date.now();
         const managedFiles = new Set();
         for (const job of this.jobs.values()) {
             managedFiles.add(job.partialPath);
             managedFiles.add(job.filePath);
+            managedFiles.add(job.metadataPath);
         }
         const entries = await fs.promises.readdir(this.directory, { withFileTypes: true }).catch(() => []);
         await Promise.all(entries.filter(entry => entry.isFile()).map(async entry => {
