@@ -2271,8 +2271,10 @@ export async function printMessages() {
     chatElement.find('.mes').last().addClass('last_mes');
     refreshSwipeButtons();
     applyStylePins();
-    scrollChatToBottom();
-    delay(debounce_timeout.short).then(() => scrollOnMediaLoad());
+    // An opened chat always starts at its latest message. "Auto-scroll Chat" only
+    // decides whether the view follows messages that arrive afterwards.
+    scrollChatToBottom({ force: true });
+    delay(debounce_timeout.short).then(() => scrollOnMediaLoad({ force: true }));
     scheduleChatRenderOptimization();
     recordPerformanceSample('chat-initial-render', performance.now() - renderStartedAt, {
         messages: renderResult.inserted,
@@ -2281,7 +2283,12 @@ export async function printMessages() {
     });
 }
 
-export function scrollOnMediaLoad() {
+/**
+ * Scrolls to the bottom once the chat's images and media have loaded (within a second).
+ * @param {object} [options] Options
+ * @param {boolean} [options.force] Scroll even when "Auto-scroll Chat" is off (a chat was just opened)
+ */
+export function scrollOnMediaLoad({ force = false } = {}) {
     const started = Date.now();
     const media = chatElement.find('.mes_block img, .mes_block video, .mes_block audio').toArray();
     let mediaLoaded = 0;
@@ -2312,7 +2319,7 @@ export function scrollOnMediaLoad() {
         }
         mediaLoaded++;
         if (mediaLoaded === media.length) {
-            scrollChatToBottom({ waitForFrame: true });
+            scrollChatToBottom({ waitForFrame: true, force });
         }
     }
 }
@@ -3538,9 +3545,10 @@ function releaseScrollAfterSettle(token) {
  * Scrolls the chat to the bottom if configured to do so.
  * @param {object} [options] Options
  * @param {boolean} [options.waitForFrame] If true, waits for the animation frame before scrolling
+ * @param {boolean} [options.force] Scroll even when "Auto-scroll Chat" is off (used when a chat is opened)
  */
-export function scrollChatToBottom({ waitForFrame } = {}) {
-    if (!power_user.auto_scroll_chat_to_bottom) {
+export function scrollChatToBottom({ waitForFrame, force = false } = {}) {
+    if (!power_user.auto_scroll_chat_to_bottom && !force) {
         return;
     }
 
