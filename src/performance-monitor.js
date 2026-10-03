@@ -1,7 +1,12 @@
 import { Buffer } from 'node:buffer';
+import fs from 'node:fs';
+import path from 'node:path';
 import { performance } from 'node:perf_hooks';
 
+import writeFileAtomic from 'write-file-atomic';
+
 import { getConfigValue } from './util.js';
+import { canPersistSharedState, onActivate, onDrain } from './process-lifecycle.js';
 import {
     CLIENT_PERFORMANCE_COUNTERS,
     CLIENT_PERFORMANCE_OPERATIONS,
@@ -288,6 +293,56 @@ export class PerformanceMonitor {
         };
     }
 
+    /**
+     * The retained samples, to be restored after a restart or hot reload.
+     * Bounded like the samples themselves (per operation count and bytes).
+     * @returns {{version: number, startedAt: number, samples: Record<string, object[]>}}
+     */
+    exportSamples() {
+        return { version: 1, startedAt: this.startedAt, samples: Object.fromEntries(this.samples) };
+    }
+
+    /**
+     * Restores exported samples: unknown operations, malformed entries and samples
+     * older than maxAgeMs are dropped, and the usual per-operation bounds apply.
+     * @param {unknown} data Output of exportSamples()
+     * @param {{maxAgeMs?: number}} [options] Options
+     * @returns {number} Samples restored
+     */
+    importSamples(data, { maxAgeMs = 7 * 24 * 60 * 60 * 1000 } = {}) {
+        if (!data || typeof data !== 'object' || data.version !== 1 || !data.samples || typeof data.samples !== 'object') {
+            return 0;
+        }
+        const oldest = Date.now() - maxAgeMs;
+        let restored = 0;
+        for (const [operation, samples] of Object.entries(data.samples)) {
+            if (!Array.isArray(samples) || !(this.serverOperations.has(operation) || this.clientOperations.has(operation))) {
+                continue;
+            }
+            for (const sample of samples) {
+                const recordedAt = Number(sample?.recordedAt);
+                const durationMs = Number(sample?.durationMs);
+                if (!Number.isFinite(recordedAt) || recordedAt < oldest || !Number.isFinite(durationMs) || durationMs < 0) {
+                    continue;
+                }
+                restored += Number(this.#record(operation, {
+                    source: sample.source === 'client' ? 'client' : 'server',
+                    durationMs: clampNumber(durationMs, 0, 10 * 60 * 1000),
+                    statusCode: Math.floor(clampNumber(sample.statusCode, 0, 999)),
+                    requestBytes: Math.floor(clampNumber(sample.requestBytes, 0, Number.MAX_SAFE_INTEGER)),
+                    responseBytes: Math.floor(clampNumber(sample.responseBytes, 0, Number.MAX_SAFE_INTEGER)),
+                    phases: sanitizeNumberRecord(sample.phases, 10 * 60 * 1000),
+                    counters: sanitizeNumberRecord(sample.counters),
+                    cacheState: CACHE_STATES.has(sample.cacheState) ? sample.cacheState : null,
+                }, recordedAt));
+            }
+        }
+        if (restored > 0 && Number.isFinite(data.startedAt) && data.startedAt < this.startedAt) {
+            this.startedAt = data.startedAt;
+        }
+        return restored;
+    }
+
     /** Clear retained samples and rate-limit windows. */
     clear() {
         this.samples.clear();
@@ -296,9 +351,9 @@ export class PerformanceMonitor {
         this.startedAt = Date.now();
     }
 
-    #record(operation, sample) {
+    #record(operation, sample, recordedAt = Date.now()) {
         const bucket = this.samples.get(operation) ?? [];
-        const recorded = { ...sample, recordedAt: Date.now() };
+        const recorded = { ...sample, recordedAt };
         const recordedBytes = Buffer.byteLength(JSON.stringify(recorded), 'utf8');
         if (recordedBytes > this.capacityBytes) {
             return false;
@@ -446,6 +501,47 @@ const capacityBytes = getConfigValue('performance.telemetry.bytesPerOperation', 
 const clientSamplesPerMinute = getConfigValue('performance.telemetry.clientSamplesPerMinute', 120, 'number');
 
 export const performanceMonitor = new PerformanceMonitor({ enabled, capacity, capacityBytes, clientSamplesPerMinute });
+
+/**
+ * Samples survive restarts and hot reloads in one small file (it holds only the
+ * bounded set above, overwritten each time). Saved every few minutes and when
+ * handing over, by the serving process only; reloaded at startup and takeover.
+ */
+const SAMPLES_SAVE_INTERVAL_MS = 10 * 60 * 1000;
+
+function samplesFilePath() {
+    return globalThis.DATA_ROOT ? path.join(globalThis.DATA_ROOT, '_global', 'performance-samples.json') : null;
+}
+
+function loadPersistedSamples() {
+    const file = samplesFilePath();
+    if (!enabled || !file) return;
+    try {
+        performanceMonitor.clear();
+        performanceMonitor.importSamples(JSON.parse(fs.readFileSync(file, 'utf8')));
+    } catch (error) {
+        if (error?.code !== 'ENOENT') {
+            console.warn('Could not restore performance samples:', error.message);
+        }
+    }
+}
+
+async function savePersistedSamples() {
+    const file = samplesFilePath();
+    if (!enabled || !file || !canPersistSharedState()) return;
+    try {
+        await fs.promises.mkdir(path.dirname(file), { recursive: true });
+        // Asynchronous, so serving requests is not held up by the write.
+        await writeFileAtomic(file, JSON.stringify(performanceMonitor.exportSamples()));
+    } catch (error) {
+        console.warn('Could not save performance samples:', error.message);
+    }
+}
+
+loadPersistedSamples();
+onActivate(loadPersistedSamples);
+onDrain(savePersistedSamples);
+setInterval(() => void savePersistedSamples(), SAMPLES_SAVE_INTERVAL_MS).unref?.();
 
 /**
  * Capture a request start time before body parsing and authentication work.

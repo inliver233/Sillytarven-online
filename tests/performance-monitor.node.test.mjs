@@ -254,3 +254,28 @@ test('performance summary and clearing are administrator-only', async () => {
         await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     }
 });
+
+test('samples survive a restart within the usual bounds, without old or unknown entries', () => {
+    const source = new PerformanceMonitor({ capacity: 10, serverOperations: ['settings-get'], clientOperations: ['startup-step-boot'] });
+    for (let i = 0; i < 15; i++) {
+        source.recordServerSample('settings-get', { durationMs: i, statusCode: 200, responseBytes: 100 });
+    }
+    const exported = source.exportSamples();
+    assert.equal(exported.samples['settings-get'].length, 10, 'export keeps only the bounded set');
+
+    const old = Date.now() - 8 * 24 * 60 * 60 * 1000;
+    exported.samples['settings-get'].push({ durationMs: 999, recordedAt: old, source: 'server' });
+    exported.samples['not-an-operation'] = [{ durationMs: 1, recordedAt: Date.now() }];
+    exported.samples['startup-step-boot'] = [{ durationMs: 'bad', recordedAt: Date.now() }, { durationMs: 1200, recordedAt: Date.now(), source: 'client' }];
+
+    const restarted = new PerformanceMonitor({ capacity: 10, serverOperations: ['settings-get'], clientOperations: ['startup-step-boot'] });
+    const restored = restarted.importSamples(JSON.parse(JSON.stringify(exported)));
+    assert.equal(restored, 11);
+    const summary = restarted.getSummary();
+    const settings = summary.operations.find(o => o.operation === 'settings-get');
+    assert.equal(settings.count, 10);
+    assert.equal(settings.duration.max, 14, 'the week-old sample was dropped');
+    assert.equal(summary.operations.find(o => o.operation === 'startup-step-boot').count, 1);
+    assert.ok(!summary.operations.some(o => o.operation === 'not-an-operation'));
+    assert.equal(restarted.importSamples({ version: 2, samples: {} }), 0);
+});
