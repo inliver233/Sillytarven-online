@@ -254,6 +254,12 @@ router.post('/heartbeat', async (request, response) => {
             return response.status(401).json({ error: 'User not found' });
         }
 
+        // A controller administrator's session has no activity lease to renew
+        // and is not user activity; never answer it as a stale page.
+        if (request.session.stcontrolAdmin) {
+            return response.json({ status: 'ok', timestamp: Date.now() });
+        }
+
         const renewed = await noteStcontrolPageHeartbeat(request);
         if (isStcontrolEnabled() && !renewed) {
             return response.status(409).json({ error: '当前页面会话已过期，请重新登录', code: 'stale_writer_session' });

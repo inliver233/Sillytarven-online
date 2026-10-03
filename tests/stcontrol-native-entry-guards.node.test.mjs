@@ -254,3 +254,36 @@ test('a managed node still lets users download their own full backup end to end'
         await new Promise(resolve => server.close(resolve));
     }
 });
+
+test('a controller administrator page heartbeat is accepted instead of being answered as a stale user page', async () => {
+    const { default: express } = await import('express');
+    const { default: storage } = await import('node-persist');
+    await users.initUserStorage(root);
+    const handle = 'heartbeat-admin';
+    await storage.setItem(users.toKey(handle), { handle, name: handle, admin: true, enabled: true, created: 1 });
+
+    let session = {};
+    const app = express();
+    app.use(express.json());
+    app.use((request, _response, next) => {
+        request.session = session;
+        next();
+    });
+    app.use('/api/users', routers.publicUsers.router);
+    const server = await new Promise(resolve => { const listener = app.listen(0, '127.0.0.1', () => resolve(listener)); });
+    const heartbeat = () => fetch(`http://127.0.0.1:${server.address().port}/api/users/heartbeat`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    });
+    try {
+        session = { handle, stcontrolAdmin: { adminId: 1, permissionVersion: 1, controllerGeneration: 1 } };
+        assert.equal((await heartbeat()).status, 200);
+
+        // An ordinary page without a managed lease is still told it is stale.
+        session = { handle };
+        const stale = await heartbeat();
+        assert.equal(stale.status, 409);
+        assert.equal((await stale.json()).code, 'stale_writer_session');
+    } finally {
+        await new Promise(resolve => server.close(resolve));
+    }
+});

@@ -54,7 +54,9 @@ class UserHeartbeat {
      * 开始心跳
      */
     start() {
-        if (this.stcontrolSessionStale) return;
+        // The controller's admin-only page has no user activity lease: a heartbeat
+        // there is answered as stale and sent the administrator back to the controller.
+        if (this.stcontrolSessionStale || isStcontrolAdminOnlyPage()) return;
         if (this.heartbeatInterval) {
             // 如果已经在运行，立即发送一次心跳以确保状态更新
             this.sendHeartbeat();

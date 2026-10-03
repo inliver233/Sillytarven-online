@@ -170,3 +170,40 @@ test('admin-only stcontrol pages do not auto-start user heartbeat and user.js im
     assert.match(userSource, /import '\.\/user-heartbeat\.js';/);
     assert.match(userSource, /stcontrol_admin/);
 });
+
+test('the controller admin-only page never starts a heartbeat, so it is not sent back to the controller', () => {
+    const source = fs.readFileSync(new URL('../public/scripts/user-heartbeat.js', import.meta.url), 'utf8');
+    const listeners = new Map();
+    const document = {
+        hidden: false,
+        readyState: 'loading',
+        addEventListener(name, callback) { listeners.set(name, callback); },
+        querySelector() { return null; },
+    };
+    const window = {
+        location: { search: '?stcontrol_admin=1' },
+        addEventListener(name, callback) { listeners.set(name, callback); },
+    };
+    let requests = 0;
+    const context = {
+        Boolean,
+        Date,
+        console: { log() {}, warn() {} },
+        document,
+        fetch: async () => { requests++; return { ok: true }; },
+        navigator: { userAgent: 'test' },
+        setInterval: () => 1,
+        clearInterval() {},
+        setTimeout() {},
+        URLSearchParams,
+        window,
+    };
+    vm.runInNewContext(source, context, { filename: 'user-heartbeat.js' });
+
+    const heartbeat = window.userHeartbeat.init();
+    heartbeat.start();
+    heartbeat.recordActivity();
+    listeners.get('visibilitychange')?.();
+    assert.equal(requests, 0, 'a heartbeat was sent from the admin-only page');
+    assert.equal(window.userHeartbeat.forceStart(), null);
+});
