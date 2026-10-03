@@ -1,4 +1,5 @@
 import { DOMPurify, Popper } from '../lib.js';
+import { startupLap } from './performance-telemetry.js';
 
 import { eventSource, event_types, saveSettings, saveSettingsDebounced, getRequestHeaders, animation_duration, CLIENT_VERSION } from '../script.js';
 import { showLoader } from './loader.js';
@@ -1288,9 +1289,11 @@ export async function loadExtensionSettings(settings, versionChanged, enableAuto
     extensionNames = extensions.map(x => x.name);
     extensionTypes = Object.fromEntries(extensions.map(x => [x.name, x.type]));
     manifests = await getManifests(extensionNames);
+    startupLap('extensions-discover', { extensions: extensionNames.length });
 
     if (versionChanged && enableAutoUpdate) {
         await autoUpdateExtensions(false);
+        startupLap('extensions-update');
     }
 
     let resourcePreloads = null;
@@ -1316,6 +1319,10 @@ export async function loadExtensionSettings(settings, versionChanged, enableAuto
     } finally {
         resourcePreloads?.dispose();
     }
+    startupLap('extensions-activate', {
+        activated: activeExtensions.size,
+        third_party: [...activeExtensions].filter(name => name.startsWith('third-party/')).length,
+    });
     if (extension_settings.autoConnect && extension_settings.apiUrl) {
         connectToApi(extension_settings.apiUrl);
     }

@@ -15,6 +15,10 @@ let flushTimer = null;
 let initialized = false;
 let telemetryEnabled = false;
 let performanceObserver = null;
+/** Startup slices measured before the server said whether telemetry is on. */
+const bufferedStartupSteps = [];
+let lastStartupLapAt = null;
+let startupLapsFinished = false;
 
 function sanitizeCounters(operation, counters) {
     const result = {};
@@ -70,6 +74,7 @@ export async function flushPerformanceSamples() {
     }
 
     const samples = pendingSamples.splice(0, 20);
+    let failed = false;
     try {
         const response = await fetch('/api/performance/client', {
             method: 'POST',
@@ -100,6 +105,7 @@ export async function flushPerformanceSamples() {
             return;
         }
     } catch {
+        failed = true;
         pendingSamples.unshift(...samples);
         if (pendingSamples.length > MAX_PENDING_SAMPLES) {
             pendingSamples.length = MAX_PENDING_SAMPLES;
@@ -107,7 +113,9 @@ export async function flushPerformanceSamples() {
     }
 
     if (pendingSamples.length) {
-        scheduleFlush(10_000);
+        // The rest of a batch follows shortly (a page load produces a few dozen
+        // samples); only a failed upload waits longer before retrying.
+        scheduleFlush(failed ? 10_000 : 1000);
     }
 }
 
@@ -122,6 +130,8 @@ export function initializePerformanceTelemetry(headersProvider, enabled = true) 
         initialized = false;
         requestHeadersProvider = null;
         pendingSamples.length = 0;
+        bufferedStartupSteps.length = 0;
+        startupLapsFinished = true;
         recordedMilestones.clear();
         if (flushTimer) {
             clearTimeout(flushTimer);
@@ -138,6 +148,9 @@ export function initializePerformanceTelemetry(headersProvider, enabled = true) 
         return;
     }
     initialized = true;
+    for (const [operation, duration, counters] of bufferedStartupSteps.splice(0)) {
+        recordPerformanceSample(operation, duration, counters);
+    }
 
     if (!('PerformanceObserver' in window)) {
         return;
@@ -180,6 +193,38 @@ export function recordStartupMilestone(milestone) {
 }
 
 /**
+ * Ends one slice of the first page load: records the time since the previous
+ * slice (the first one counts from navigation start). One clock read and an
+ * array push, so it is safe on the startup path; samples go out with the
+ * normal batched upload. Only the first page load is measured.
+ * @param {string} step One of STARTUP_STEPS
+ * @param {Record<string, number>} [counters] Numeric counters allowed for the step
+ */
+export function startupLap(step, counters = {}) {
+    if (startupLapsFinished) {
+        return;
+    }
+    const now = performance.now();
+    const duration = now - (lastStartupLapAt ?? 0);
+    lastStartupLapAt = now;
+    const operation = `startup-step-${step}`;
+    if (telemetryEnabled) {
+        recordPerformanceSample(operation, duration, counters);
+    } else if (!initialized && bufferedStartupSteps.length < 40) {
+        bufferedStartupSteps.push([operation, duration, counters]);
+    }
+}
+
+/**
+ * Ends the last slice of the first page load; later laps are ignored.
+ * @param {string} step One of STARTUP_STEPS
+ */
+export function finishStartupLaps(step) {
+    startupLap(step);
+    startupLapsFinished = true;
+}
+
+/**
  * Queue a sanitized performance duration for the local administrator aggregate.
  * @param {string} operation Whitelisted operation
  * @param {number} durationMs Duration in milliseconds
@@ -200,7 +245,9 @@ export function recordPerformanceSample(operation, durationMs, counters = {}) {
         counters: sanitizedCounters,
     });
     if (pendingSamples.length > MAX_PENDING_SAMPLES) {
-        pendingSamples.splice(0, pendingSamples.length - MAX_PENDING_SAMPLES);
+        // Long tasks are plentiful on slow devices; drop those before the one-off startup timings.
+        const longTask = pendingSamples.findIndex(sample => sample.operation === 'ui-long-task');
+        pendingSamples.splice(longTask >= 0 ? longTask : 0, 1);
     }
     scheduleFlush();
 }

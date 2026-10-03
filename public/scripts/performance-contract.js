@@ -1,4 +1,22 @@
+/**
+ * Consecutive slices of the first page load, in order: each one is the time since
+ * the previous one, so together they add up to the whole startup.
+ */
+export const STARTUP_STEPS = Object.freeze([
+    'boot', 'csrf', 'ui-init', 'client-version', 'secrets', 'locales', 'core-init', 'presets',
+    'settings-fetch', 'settings-parse', 'settings-apply',
+    'extensions-discover', 'extensions-update', 'extensions-activate', 'settings-finish',
+    'ui-config', 'avatars', 'characters', 'backgrounds', 'tokenizers', 'personas', 'autocomplete',
+    'ui-panels', 'scrapers', 'ui-final', 'hide-loader', 'app-ready',
+]);
+
+const STARTUP_STEP_COUNTERS = Object.freeze({
+    'extensions-discover': Object.freeze(['extensions']),
+    'extensions-activate': Object.freeze(['activated', 'third_party']),
+});
+
 export const CLIENT_PERFORMANCE_COUNTERS = Object.freeze({
+    ...Object.fromEntries(STARTUP_STEPS.map(step => [`startup-step-${step}`, STARTUP_STEP_COUNTERS[step] ?? Object.freeze([])])),
     'startup-first-ui': Object.freeze([]),
     'startup-settings-ready': Object.freeze([]),
     'startup-characters-ready': Object.freeze([]),

@@ -249,7 +249,7 @@ import {
 } from './scripts/personas.js';
 import { getBackgrounds, initBackgrounds, loadBackgroundSettings, background_settings } from './scripts/backgrounds.js';
 import { hideLoader, showLoader, updateLoaderProgress } from './scripts/loader.js';
-import { initializePerformanceTelemetry, recordPerformanceSample, recordStartupMilestone } from './scripts/performance-telemetry.js';
+import { initializePerformanceTelemetry, recordPerformanceSample, recordStartupMilestone, startupLap, finishStartupLaps } from './scripts/performance-telemetry.js';
 import { BulkEditOverlay } from './scripts/BulkEditOverlay.js';
 import { initTextGenModels } from './scripts/textgen-models.js';
 import { appendFileContent, hasPendingFileAttachment, populateFileAttachment, decodeStyleTags, encodeStyleTags, isExternalMediaAllowed, preserveNeutralChat, restoreNeutralChat, formatCreatorNotes, initChatUtilities, addDOMPurifyHooks } from './scripts/chats.js';
@@ -1078,6 +1078,8 @@ export async function pingServer() {
 
 //MARK: firstLoadInit
 async function firstLoadInit() {
+    // Startup breakdown for the admin performance panel: each lap is the time since the previous one.
+    startupLap('boot');
     // 设置全局fetch拦截器，处理用户过期
     setupFetchInterceptor();
     updateLoaderProgress(10, '正在验证身份与安全 Token...');
@@ -1085,6 +1087,7 @@ async function firstLoadInit() {
         const tokenResponse = await fetch('/csrf-token');
         const tokenData = await tokenResponse.json();
         token = tokenData.token;
+        startupLap('csrf');
     } catch {
         toastr.error(t`Couldn't get CSRF token. Please refresh the page.`, t`Error`, { timeOut: 0, extendedTimeOut: 0, preventDuplicates: true });
         throw new Error('Initialization failed');
@@ -1099,11 +1102,15 @@ async function firstLoadInit() {
     addDOMPurifyHooks();
     reloadMarkdownProcessor();
     applyBrowserFixes();
+    startupLap('ui-init');
     await getClientVersion();
+    startupLap('client-version');
     updateLoaderProgress(35, '正在载入语言包与密钥配置...');
     await initSecrets();
     await readSecretState();
+    startupLap('secrets');
     await initLocales();
+    startupLap('locales');
     initChatUtilities();
     initDefaultSlashCommands();
     initTextGenModels();
@@ -1115,8 +1122,10 @@ async function firstLoadInit() {
     initExtensions();
     initExtensionSlashCommands();
     ToolManager.initToolSlashCommands();
+    startupLap('core-init');
     await initPresetManager();
     await initSystemMessages();
+    startupLap('presets');
     await getSettings();
     updateLoaderProgress(60, '正在装载标签、宏与界面配置...');
     initKeyboard();
@@ -1125,15 +1134,22 @@ async function firstLoadInit() {
     initBookmarks();
     initMacros();
     updateLoaderProgress(80, '正在同步角色卡与用户数据...');
+    startupLap('ui-config');
     await getUserAvatars(true, user_avatar);
+    startupLap('avatars');
     await getCharacters();
+    startupLap('characters');
     recordStartupMilestone('characters-ready');
     await getBackgrounds();
+    startupLap('backgrounds');
     await initTokenizers();
+    startupLap('tokenizers');
     initBackgrounds();
     initAuthorsNote();
     await initPersonas();
+    startupLap('personas');
     await initSlashCommandAutoComplete();
+    startupLap('autocomplete');
     initWorldInfo();
     initHorde();
     initRossMods();
@@ -1146,18 +1162,23 @@ async function firstLoadInit() {
     initBulkEdit();
     initReasoning();
     initWelcomeScreen();
+    startupLap('ui-panels');
     await initScrapers();
+    startupLap('scrapers');
     initCustomSelectedSamplers();
     initDataMaid();
     initItemizedPrompts();
     initAccessibility();
     addDebugFunctions();
     doDailyExtensionUpdatesCheck();
+    startupLap('ui-final');
     updateLoaderProgress(95, '正在构建界面面板与欢迎屏...');
     await hideLoader();
+    startupLap('hide-loader');
     recordStartupMilestone('first-ui');
     await fixViewport();
     await eventSource.emit(event_types.APP_READY);
+    finishStartupLaps('app-ready');
     recordStartupMilestone('chat-input-ready');
 }
 
@@ -9122,12 +9143,14 @@ export async function getSettings() {
     let response;
     try {
         response = await fetchSettingsWithRetry();
+        startupLap('settings-fetch');
     } catch {
         toastr.error(t`Settings could not be loaded after multiple attempts. Please try again later.`);
         throw new Error('Error getting settings');
     }
 
     const data = await response.json();
+    startupLap('settings-parse');
     initializePerformanceTelemetry(() => getRequestHeaders(), Boolean(data.telemetry_enabled));
     chatPagingState.enabled = Boolean(data.chat_paging_enabled);
     chatRenderOptimizer.setEnabled(data.long_chat_dom_render_optimization_enabled ?? CHAT_RENDER_OPTIMIZATION_ENABLED);
@@ -9222,6 +9245,7 @@ export async function getSettings() {
         if (data.enable_extensions) {
             const enableAutoUpdate = Boolean(data.enable_extensions_auto_update);
             const isVersionChanged = settings.currentVersion !== currentVersion;
+            startupLap('settings-apply');
             await loadExtensionSettings(settings, isVersionChanged, enableAutoUpdate);
             await eventSource.emit(event_types.EXTENSION_SETTINGS_LOADED);
         }
@@ -9237,6 +9261,7 @@ export async function getSettings() {
     await validateDisabledSamplers();
     settingsReady = true;
     await eventSource.emit(event_types.SETTINGS_LOADED);
+    startupLap('settings-finish');
     recordStartupMilestone('settings-ready');
 }
 

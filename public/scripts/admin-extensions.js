@@ -1837,6 +1837,97 @@ function formatPerformanceBytes(value) {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
+/** Slices of the first page load, grouped by the loading screen's progress. */
+const STARTUP_STEP_GROUPS = Object.freeze([
+    ['0–10%', [['boot', '下载并解析前端脚本'], ['csrf', '获取安全 Token']]],
+    ['10–35%', [['ui-init', '初始化界面组件'], ['client-version', '获取版本信息']]],
+    ['35–60%', [
+        ['secrets', '读取密钥状态'],
+        ['locales', '载入语言包'],
+        ['core-init', '初始化各 API 与命令'],
+        ['presets', '载入预设与系统消息'],
+        ['settings-fetch', '请求用户设置（服务器 + 网络）'],
+        ['settings-parse', '下载并解析设置数据'],
+        ['settings-apply', '应用设置'],
+        ['extensions-discover', '发现插件、读取清单'],
+        ['extensions-update', '自动更新插件（仅版本变化时）'],
+        ['extensions-activate', '加载并启动插件'],
+        ['settings-finish', '设置加载完成（插件回调）'],
+    ]],
+    ['60–95%', [
+        ['ui-config', '载入标签与宏'],
+        ['avatars', '载入用户头像'],
+        ['characters', '载入角色列表'],
+        ['backgrounds', '载入背景'],
+        ['tokenizers', '初始化分词器'],
+        ['personas', '载入用户人设'],
+        ['autocomplete', '初始化命令补全'],
+        ['ui-panels', '初始化界面面板'],
+        ['scrapers', '初始化数据抓取'],
+        ['ui-final', '收尾初始化'],
+    ]],
+    ['95–100%', [['hide-loader', '关闭加载画面'], ['app-ready', '应用就绪（插件回调）']]],
+]);
+
+function renderStartupBreakdown(operations) {
+    const container = document.getElementById('performanceStartupBreakdown');
+    if (!container) return;
+    const byName = new Map(operations.map(operation => [operation.operation, operation]));
+    const stepOf = step => byName.get(`startup-step-${step}`);
+    const steps = STARTUP_STEP_GROUPS.flatMap(([, entries]) => entries.map(([step]) => stepOf(step)));
+    const total = steps.reduce((sum, operation) => sum + (operation?.duration?.count ? Number(operation.duration.p50) : 0), 0);
+    if (!total) {
+        container.innerHTML = '<p class="notes">首屏加载分解：暂无样本（用户打开页面后才会产生）。</p>';
+        return;
+    }
+    const seconds = value => `${(Number(value) / 1000).toFixed(2)} s`;
+    const serverSettings = byName.get('settings-get');
+    const rows = STARTUP_STEP_GROUPS.map(([phase, entries]) => {
+        const phaseTotal = entries.reduce((sum, [step]) => sum + (stepOf(step)?.duration?.count ? Number(stepOf(step).duration.p50) : 0), 0);
+        const header = `<tr style="border-top:1px solid var(--SmartThemeBorderColor);background:var(--black30a);">
+            <td style="padding:6px 8px;font-weight:600;">加载进度 ${phase}</td>
+            <td style="padding:6px 8px;text-align:right;font-weight:600;">${seconds(phaseTotal)}</td><td></td>
+            <td style="padding:6px 8px;text-align:right;">${Math.round(phaseTotal / total * 100)}%</td><td></td></tr>`;
+        return header + entries.map(([step, label]) => {
+            const operation = stepOf(step);
+            const summary = operation?.duration;
+            if (!summary?.count) {
+                return `<tr><td style="padding:4px 8px 4px 20px;">${escapeHtml(label)}</td><td colspan="4" class="notes" style="padding:4px 8px;">暂无样本</td></tr>`;
+            }
+            const share = Number(summary.p50) / total;
+            let note = '';
+            if (step === 'settings-fetch' && serverSettings?.duration?.count) {
+                note = `服务器处理 ${Number(serverSettings.duration.p50).toFixed(0)} ms，响应 ${formatPerformanceBytes(serverSettings.responseBytes?.p50)}`;
+            } else if (step === 'extensions-activate' && operation.counters) {
+                const average = name => (Number(operation.counters[name]) || 0) / summary.count;
+                note = `平均启用 ${average('activated').toFixed(1)} 个插件（第三方 ${average('third_party').toFixed(1)} 个）`;
+            } else if (step === 'extensions-discover' && operation.counters) {
+                note = `平均发现 ${((Number(operation.counters.extensions) || 0) / summary.count).toFixed(1)} 个插件`;
+            }
+            return `<tr>
+                <td style="padding:4px 8px 4px 20px;">${escapeHtml(label)}${note ? `<div class="notes">${escapeHtml(note)}</div>` : ''}</td>
+                <td style="padding:4px 8px;text-align:right;white-space:nowrap;">${seconds(summary.p50)}</td>
+                <td style="padding:4px 8px;text-align:right;white-space:nowrap;">${seconds(summary.p95)}</td>
+                <td style="padding:4px 8px;min-width:90px;"><div style="height:8px;border-radius:4px;background:var(--SmartThemeQuoteColor);width:${Math.max(1, Math.round(share * 100))}%;"></div></td>
+                <td style="padding:4px 8px;text-align:right;">${Number(summary.count) || 0}</td>
+            </tr>`;
+        }).join('');
+    }).join('');
+    container.innerHTML = `<h4 style="margin:4px 0;">首屏加载分解</h4>
+        <p class="notes" style="text-align:left;">每一步是"距上一步"的耗时，按加载进度条分组，各步中位数相加约等于整个首屏加载时间（当前约 ${seconds(total)}）。只统计打开页面的第一次加载。</p>
+        <div style="overflow-x:auto;border:1px solid var(--SmartThemeBorderColor);border-radius:8px;">
+        <table class="wide100p" style="border-collapse:collapse;min-width:560px;text-align:left;">
+            <thead><tr>
+                <th style="padding:6px 8px;text-align:left;">步骤</th>
+                <th style="padding:6px 8px;text-align:right;">中位数</th>
+                <th style="padding:6px 8px;text-align:right;">P95</th>
+                <th style="padding:6px 8px;text-align:left;">占比（中位数）</th>
+                <th style="padding:6px 8px;text-align:right;">样本</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+        </table></div>`;
+}
+
 function renderPerformanceMetrics() {
     const rows = document.getElementById('performanceMetricsRows');
     const status = document.getElementById('performanceMetricsStatus');
@@ -1857,6 +1948,7 @@ function renderPerformanceMetrics() {
         ? `；最近聊天缓存：${Number(recentChatsCache.entries) || 0} 项 / ${formatPerformanceBytes(recentChatsCache.totalBytes)}`
         : '';
     status.textContent = `状态：${currentPerformanceData.enabled ? '已启用' : '已关闭'}；每项容量：${currentPerformanceData.capacity}${characterCacheText}${settingsCacheText}${recentChatsCacheText}；更新时间：${generatedAt}`;
+    renderStartupBreakdown(operations);
     if (!operations.length) {
         rows.innerHTML = '<tr><td colspan="5" style="padding:16px;text-align:center;">暂无样本</td></tr>';
         return;
