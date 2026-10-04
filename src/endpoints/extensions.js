@@ -7,6 +7,7 @@ import sanitize from 'sanitize-filename';
 import { CheckRepoActions, default as simpleGit } from 'simple-git';
 
 import { PUBLIC_DIRECTORIES } from '../constants.js';
+import { getExtensionModuleGraph } from '../extension-module-graph.js';
 
 /**
  * @type {Partial<import('simple-git').SimpleGitOptions>}
@@ -539,4 +540,19 @@ router.get('/discover', function (request, response) {
     console.debug('Extensions available for', request.user.profile.handle, allExtensions);
 
     return response.send(allExtensions);
+});
+
+/**
+ * The modules each extension imports from its own folder, so the client can
+ * preload them all at once instead of one import level at a time.
+ */
+router.post('/module-graph', async function (request, response) {
+    try {
+        const names = Array.isArray(request.body?.names) ? request.body.names : [];
+        const modules = await getExtensionModuleGraph(names, request.user.directories.extensions);
+        return response.send({ modules });
+    } catch (error) {
+        console.warn('Could not map extension modules:', error);
+        return response.send({ modules: {} });
+    }
 });

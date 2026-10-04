@@ -340,6 +340,28 @@ export async function disableExtension(name, reload = true) {
  * @param {string[]} names Array of extension names
  * @returns {Promise<Record<string, object>>} Object with extension names as keys and their manifests as values
  */
+/**
+ * The modules each extension imports from its own folder (see src/extension-module-graph.js).
+ * @param {string[]} names Extension names
+ * @returns {Promise<Record<string, string[]>|null>} Imported files per extension, or null if unavailable
+ */
+async function getExtensionModuleGraph(names) {
+    try {
+        const response = await fetch('/api/extensions/module-graph', {
+            method: 'POST',
+            headers: getRequestHeaders(),
+            body: JSON.stringify({ names }),
+        });
+        if (!response.ok) {
+            return null;
+        }
+        const data = await response.json();
+        return data?.modules && typeof data.modules === 'object' ? data.modules : null;
+    } catch {
+        return null;
+    }
+}
+
 async function getManifests(names) {
     const obj = {};
     const promises = [];
@@ -1288,6 +1310,10 @@ export async function loadExtensionSettings(settings, versionChanged, enableAuto
     const extensions = await discoverExtensions();
     extensionNames = extensions.map(x => x.name);
     extensionTypes = Object.fromEntries(extensions.map(x => [x.name, x.type]));
+    // Asked for alongside the manifests; it only feeds preload hints.
+    const moduleGraphRequest = power_user.extension_resource_preload === true
+        ? getExtensionModuleGraph(extensionNames)
+        : null;
     manifests = await getManifests(extensionNames);
     startupLap('extensions-discover', { extensions: extensionNames.length });
 
@@ -1309,6 +1335,9 @@ export async function loadExtensionSettings(settings, versionChanged, enableAuto
             resourcePreloads = preloadExtensionResources(manifests, {
                 eligibleExtensions,
             });
+            // Activation does not wait for it: hints that arrive late still help the extensions after.
+            const preloads = resourcePreloads;
+            void moduleGraphRequest?.then(moduleGraph => preloads.preloadModules(moduleGraph));
         } catch (error) {
             console.warn('Could not preload extension resources. Continuing with normal activation.', error);
         }

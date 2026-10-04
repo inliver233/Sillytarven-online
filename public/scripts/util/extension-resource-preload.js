@@ -1,4 +1,5 @@
 const DEFAULT_MAX_PRELOADS = 64;
+const DEFAULT_MAX_MODULE_PRELOADS = 400;
 export const EXTENSION_RESOURCE_PRELOAD_MIGRATION_VERSION = 1;
 
 /**
@@ -25,7 +26,7 @@ export function migrateExtensionResourcePreloadSettings(powerUserSettings) {
 
 function createDisposer(links) {
     let disposed = false;
-    return () => {
+    const dispose = () => {
         if (disposed) {
             return;
         }
@@ -38,6 +39,7 @@ function createDisposer(links) {
             }
         }
     };
+    return { dispose, isDisposed: () => disposed };
 }
 
 /**
@@ -47,13 +49,16 @@ function createDisposer(links) {
  * @param {string[]|Set<string>} [options.excludedExtensions] Extensions that must not be preloaded
  * @param {string[]|Set<string>} [options.eligibleExtensions] Extensions that passed activation eligibility
  * @param {number} [options.maxPreloads] Maximum number of resource hints to add
+ * @param {number} [options.maxModulePreloads] Maximum number of imported-module hints added by preloadModules()
  * @param {Document} [options.documentRef] Document used to create resource hints
- * @returns {{count: number, dispose: () => void}} Preload count and idempotent cleanup callback
+ * @returns {{count: number, dispose: () => void, preloadModules: (moduleGraph: Record<string, string[]>|null) => number}}
+ *   Preload count, idempotent cleanup callback, and a way to add the modules each extension imports
  */
 export function preloadExtensionResources(manifests, {
     excludedExtensions = [],
     eligibleExtensions = null,
     maxPreloads = DEFAULT_MAX_PRELOADS,
+    maxModulePreloads = DEFAULT_MAX_MODULE_PRELOADS,
     documentRef = globalThis.document,
 } = {}) {
     if (!manifests || typeof manifests !== 'object' || Array.isArray(manifests)) {
@@ -77,8 +82,12 @@ export function preloadExtensionResources(manifests, {
     const excluded = new Set(excludedExtensions);
     const eligible = eligibleExtensions === null ? null : new Set(eligibleExtensions);
     const limit = Math.floor(requestedLimit);
+    const moduleLimit = Math.max(0, Math.floor(Number(maxModulePreloads) || 0));
     const links = [];
-    const dispose = createDisposer(links);
+    const { dispose, isDisposed } = createDisposer(links);
+    /** Extensions whose resources may be preloaded, in loading order. */
+    const included = [];
+    const preloaded = new Set();
 
     try {
         const entries = Object.entries(manifests).sort(([leftName, left], [rightName, right]) => {
@@ -86,14 +95,15 @@ export function preloadExtensionResources(manifests, {
             return order || String(left?.display_name || leftName).localeCompare(String(right?.display_name || rightName));
         });
         for (const [name, manifest] of entries) {
-            if (links.length >= limit) {
-                break;
-            }
             if (excluded.has(name)
                 || (eligible && !eligible.has(name))
                 || !manifest
                 || typeof manifest !== 'object'
                 || Array.isArray(manifest)) {
+                continue;
+            }
+            included.push(name);
+            if (links.length >= limit) {
                 continue;
             }
 
@@ -114,9 +124,11 @@ export function preloadExtensionResources(manifests, {
                 if (resource.as) {
                     link.as = resource.as;
                 }
-                link.href = `/scripts/extensions/${name}/${resource.file}`;
+                const href = `/scripts/extensions/${name}/${resource.file}`;
+                link.href = href;
                 documentRef.head.appendChild(link);
                 links.push(link);
+                preloaded.add(href);
             }
         }
     } catch (error) {
@@ -124,5 +136,51 @@ export function preloadExtensionResources(manifests, {
         throw error;
     }
 
-    return { count: links.length, dispose };
+    let modulePreloads = 0;
+    /**
+     * Adds hints for the modules each extension imports from its folder. Without
+     * them the browser discovers those imports one level at a time, and only when
+     * the extension's turn to activate comes. Hints never execute anything.
+     * @param {Record<string, string[]>|null} moduleGraph Imported files per extension, relative to its folder
+     * @returns {number} Hints added
+     */
+    const preloadModules = (moduleGraph) => {
+        if (isDisposed() || !moduleGraph || typeof moduleGraph !== 'object' || Array.isArray(moduleGraph)) {
+            return 0;
+        }
+        let added = 0;
+        try {
+            for (const name of included) {
+                const files = moduleGraph[name];
+                if (!Array.isArray(files)) {
+                    continue;
+                }
+                for (const file of files) {
+                    if (modulePreloads >= moduleLimit) {
+                        return added;
+                    }
+                    if (typeof file !== 'string' || !file || file.startsWith('/') || file.split('/').includes('..')) {
+                        continue;
+                    }
+                    const href = `/scripts/extensions/${name}/${file}`;
+                    if (preloaded.has(href)) {
+                        continue;
+                    }
+                    const link = documentRef.createElement('link');
+                    link.rel = 'modulepreload';
+                    link.href = href;
+                    documentRef.head.appendChild(link);
+                    links.push(link);
+                    preloaded.add(href);
+                    modulePreloads++;
+                    added++;
+                }
+            }
+        } catch {
+            // Hints only: activation fetches anything that was not preloaded.
+        }
+        return added;
+    };
+
+    return { count: links.length, dispose, preloadModules };
 }

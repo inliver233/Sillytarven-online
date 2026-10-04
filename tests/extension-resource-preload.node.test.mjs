@@ -152,3 +152,29 @@ test('extension resource preloads validate public inputs', () => {
     assert.throws(() => preloadExtensionResources({}, { documentRef, maxPreloads: -1 }), /non-negative finite number/);
     assert.throws(() => preloadExtensionResources({}, { documentRef: {} }), /writable head/);
 });
+
+test('imported modules are preloaded for eligible extensions only, once, in loading order', () => {
+    const documentRef = createFakeDocument();
+    const result = preloadExtensionResources({
+        late: { js: 'index.js', loading_order: 20 },
+        early: { js: 'index.js', loading_order: 10 },
+        disabled: { js: 'index.js', loading_order: 0 },
+    }, { documentRef, eligibleExtensions: ['early', 'late'], maxModulePreloads: 4 });
+
+    const added = result.preloadModules({
+        disabled: ['a.js'],
+        late: ['src/b.js', '../escape.js', '/absolute.js', 'src/c.js'],
+        early: ['index.js', 'src/a.js', 'src/a.js'],
+    });
+    assert.equal(added, 3);
+    assert.deepEqual(documentRef.appended.slice(result.count).map(link => [link.rel, link.href]), [
+        ['modulepreload', '/scripts/extensions/early/src/a.js'],
+        ['modulepreload', '/scripts/extensions/late/src/b.js'],
+        ['modulepreload', '/scripts/extensions/late/src/c.js'],
+    ]);
+    assert.equal(result.preloadModules(null), 0);
+
+    result.dispose();
+    assert.equal(documentRef.appended.every(link => link.removed), true);
+    assert.equal(result.preloadModules({ early: ['src/late.js'] }), 0);
+});
