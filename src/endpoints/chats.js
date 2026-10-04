@@ -1467,6 +1467,45 @@ async function checkChatIntegrity(filePath, integritySlug) {
 }
 
 /**
+ * Refuses a save that would leave at most one message of a stored chat that holds
+ * more. That is what a client sends when it never loaded the chat (a failed load
+ * looks like an empty chat, which then gets the greeting), so it needs the
+ * client's word that it did load the chat (`allow_shrink`) or an explicit `force`.
+ * @param {import('express').Request} request Request
+ * @param {import('express').Response} response Response, answered when refused
+ * @param {string} filePath Chat file
+ * @param {number} nextMessageCount Messages the chat would hold after the save
+ * @param {boolean} isGroup Whether it is a group chat
+ * @returns {Promise<boolean>} Whether the save was refused
+ */
+async function rejectChatWipe(request, response, filePath, nextMessageCount, isGroup) {
+    if (nextMessageCount > 1 || request.body?.force || request.body?.allow_shrink === true || !fs.existsSync(filePath)) {
+        return false;
+    }
+    let storedMessageCount = 0;
+    try {
+        if (isChunkedChat(filePath)) {
+            const index = await ensureChatIndex(filePath);
+            const embeddedHeaderCount = isGroup ? Number((await readGroupChatHeaderInfo(filePath)).embeddedHeaderCount || 0) : 0;
+            storedMessageCount = Math.max(0, (Number(index?.message_count) || 0) - embeddedHeaderCount);
+        } else {
+            const lineCount = await countJsonlLines(filePath);
+            storedMessageCount = isGroup ? lineCount : Math.max(lineCount - 1, 0);
+        }
+    } catch (error) {
+        // Keep what cannot be counted: this save is suspicious to begin with.
+        console.warn(`Could not count the messages of ${filePath}:`, error);
+        storedMessageCount = Number.NaN;
+    }
+    if (storedMessageCount <= 1) {
+        return false;
+    }
+    console.warn(`Refused a save that would shrink ${filePath} from ${storedMessageCount} messages to ${nextMessageCount}.`);
+    response.status(409).send({ error: 'chat_wipe_rejected', storedMessageCount, nextMessageCount });
+    return true;
+}
+
+/**
  * @typedef {Object} ChatInfo
  * @property {string} [file_id] - The name of the chat file (without extension)
  * @property {string} [file_name] - The name of the chat file (with extension)
@@ -1676,6 +1715,10 @@ async function persistChatTail({
         }
     }
 
+    if (beforeOffset <= 0 && await rejectChatWipe(request, response, filePath, messages.length, isGroup)) {
+        return null;
+    }
+
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     const snapshot = createChatWriteSnapshot(filePath, request.user.directories.root);
     try {
@@ -1822,6 +1865,10 @@ async function persistFullChat({ request, response, filePath, header, messages, 
             response.status(400).send({ error: 'integrity' });
             return null;
         }
+    }
+
+    if (await rejectChatWipe(request, response, filePath, messages.length, isGroup)) {
+        return null;
     }
 
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
@@ -2026,7 +2073,8 @@ router.post('/get', validateAvatarUrlMiddleware, async function (request, respon
         return response.send(jsonData);
     } catch (error) {
         console.error(error);
-        return response.send({});
+        // Not `{}`: that means "no such chat yet", and the client would start it over.
+        return response.status(500).send({ error: 'chat_load_failed' });
     }
 });
 
@@ -4080,30 +4128,35 @@ router.post('/group/get', async (request, response) => {
     const id = request.body.id;
     const pathToFile = path.join(request.user.directories.groupChats, `${id}.jsonl`);
 
-    if (fs.existsSync(pathToFile)) {
-        if (chatChunkingEnabled && !isChunkedChat(pathToFile)) {
-            await convertLegacyChatToChunks(pathToFile);
-        }
-        if (chatChunkingEnabled && isChunkedChat(pathToFile)) {
-            const [headerInfo, storedMessages] = await Promise.all([
-                readGroupChatHeaderInfo(pathToFile),
-                readChunkedChatMessages(pathToFile),
-            ]);
-            const messages = headerInfo.embeddedHeaderCount ? storedMessages.slice(1) : storedMessages;
-            return response.send(headerInfo.header ? [headerInfo.header, ...messages] : messages);
-        }
+    try {
+        if (fs.existsSync(pathToFile)) {
+            if (chatChunkingEnabled && !isChunkedChat(pathToFile)) {
+                await convertLegacyChatToChunks(pathToFile);
+            }
+            if (chatChunkingEnabled && isChunkedChat(pathToFile)) {
+                const [headerInfo, storedMessages] = await Promise.all([
+                    readGroupChatHeaderInfo(pathToFile),
+                    readChunkedChatMessages(pathToFile),
+                ]);
+                const messages = headerInfo.embeddedHeaderCount ? storedMessages.slice(1) : storedMessages;
+                return response.send(headerInfo.header ? [headerInfo.header, ...messages] : messages);
+            }
 
-        const data = fs.readFileSync(pathToFile, 'utf8');
-        const lines = data.split('\n');
+            const data = fs.readFileSync(pathToFile, 'utf8');
+            const lines = data.split('\n');
 
-        // Iterate through the array of strings and parse each line as JSON
-        const jsonData = lines.map(line => tryParse(line)).filter(x => x);
-        const split = splitGroupChatData(jsonData);
-        const storedHeader = await readChatHeader(pathToFile);
-        const header = isGroupChatHeader(storedHeader) ? storedHeader : split.header;
-        return response.send(header ? [header, ...split.messages] : split.messages);
-    } else {
-        return response.send([]);
+            // Iterate through the array of strings and parse each line as JSON
+            const jsonData = lines.map(line => tryParse(line)).filter(x => x);
+            const split = splitGroupChatData(jsonData);
+            const storedHeader = await readChatHeader(pathToFile);
+            const header = isGroupChatHeader(storedHeader) ? storedHeader : split.header;
+            return response.send(header ? [header, ...split.messages] : split.messages);
+        } else {
+            return response.send([]);
+        }
+    } catch (error) {
+        console.error(error);
+        return response.status(500).send({ error: 'chat_load_failed' });
     }
 });
 

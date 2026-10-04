@@ -192,7 +192,7 @@ test('group paging frontend helpers reject malformed pages and preserve compatib
     });
     assert.deepEqual(tail, {
         url: '/api/chats/group/save-tail',
-        body: { id: 'chat-a', header, messages, before: 42, expectedRevision: 'revision-a', force: false },
+        body: { id: 'chat-a', header, messages, before: 42, expectedRevision: 'revision-a', force: false, allow_shrink: false },
         tail: true,
     });
     const full = createGroupChatSaveRequest({
@@ -201,10 +201,11 @@ test('group paging frontend helpers reject malformed pages and preserve compatib
         messages,
         pagingState: { active: true, isGroup: true, chatId: 'another-chat', cursor: 42 },
         force: true,
+        allowShrink: true,
     });
     assert.deepEqual(full, {
         url: '/api/chats/group/save',
-        body: { id: 'chat-b', chat: [header, ...messages], force: true },
+        body: { id: 'chat-b', chat: [header, ...messages], force: true, allow_shrink: true },
         tail: false,
     });
 

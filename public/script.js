@@ -650,6 +650,83 @@ export function resetChatPagingState({ isGroup = false, chatId = null } = {}) {
 }
 
 /**
+ * Whether the open chat's history was read from the server. Until it was, `chat`
+ * does not hold that history: a chat that failed to load is never saved (that
+ * would overwrite the stored history with an empty chat or the greeting), and
+ * only a loaded chat may shrink the stored one to a single message.
+ * @type {{status: 'loading'|'loaded'|'failed', identity: string|null}}
+ */
+const chatLoadState = { status: 'loading', identity: null };
+
+export function markChatLoading() {
+    chatLoadState.status = 'loading';
+    chatLoadState.identity = null;
+}
+
+export function markChatLoaded() {
+    chatLoadState.status = 'loaded';
+    chatLoadState.identity = getCurrentChatIdentity();
+}
+
+/**
+ * Marks the open chat as not loaded and tells the user, without touching the stored chat.
+ * @param {unknown} error Load error
+ */
+export function markChatLoadFailed(error) {
+    console.error('Chat could not be loaded', error);
+    chatLoadState.status = 'failed';
+    chatLoadState.identity = getCurrentChatIdentity();
+    toastr.error('聊天记录没有加载成功（网络或服务器问题），原有记录不受影响。为防止覆盖，这段聊天暂不保存。点击这里重新加载。', '聊天加载失败', {
+        timeOut: 0,
+        extendedTimeOut: 0,
+        closeButton: true,
+        preventDuplicates: true,
+        onclick: () => void reloadCurrentChat(),
+    });
+}
+
+/** @returns {boolean} Whether the open chat failed to load (and must not be saved) */
+export function isChatLoadFailed() {
+    return chatLoadState.status === 'failed' && chatLoadState.identity === getCurrentChatIdentity();
+}
+
+/**
+ * Refuses to save a chat that failed to load, telling the user why.
+ * @returns {boolean} Whether saving is blocked
+ */
+export function isChatSaveBlocked() {
+    if (!isChatLoadFailed()) {
+        return false;
+    }
+    console.warn('Not saving a chat that failed to load.');
+    toastr.warning('这段聊天没有加载成功，为防止覆盖原有记录，暂不保存。请重新加载聊天或刷新页面。', '聊天未保存', { preventDuplicates: true });
+    return true;
+}
+
+/** @returns {boolean} Whether a save may shrink the stored chat to a single message (the server refuses otherwise) */
+export function canShrinkSavedChat() {
+    return chatLoadState.status === 'loaded' && chatLoadState.identity === getCurrentChatIdentity();
+}
+
+/**
+ * A chat whose stored header counts messages but that came back without any was
+ * not read completely; it is treated as a failed load rather than an empty chat.
+ * @param {object|null|undefined} header Chat header from the server
+ * @param {unknown[]} messages Messages from the server
+ */
+export function assertChatHistoryPresent(header, messages) {
+    const expected = Number(header?.chat_metadata?.message_count);
+    if (messages.length === 0 && Number.isFinite(expected) && expected > 0) {
+        throw new Error(`The chat came back empty although its header counts ${expected} messages.`);
+    }
+}
+
+/** Shown when the server refuses a save that would wipe a chat. */
+export function reportChatWipeRejected() {
+    toastr.error('为防止聊天记录被意外清空，这次保存已被拦截，服务器上的原有记录没有改动。请刷新页面后重试。', '聊天未保存', { preventDuplicates: true });
+}
+
+/**
  * Hydration of the open paged chat: older messages are loaded into `chat` as
  * light, tracked messages so the whole history is readable (see chat-hydration.js).
  * @type {ChatHydrationSession|null}
@@ -2454,6 +2531,7 @@ export async function reloadCurrentChat({ expectedIdentity = getCurrentChatIdent
     if (!isCurrent()) {
         return false;
     }
+    markChatLoading();
     chat.length = 0;
 
     if (selected_group) {
@@ -2487,6 +2565,7 @@ export async function reloadCurrentChat({ expectedIdentity = getCurrentChatIdent
 export async function sendTextareaMessage() {
     if (is_send_press) return;
     if (isExecutingCommandsFromChatInput) return;
+    if (isChatSaveBlocked()) return;
 
     let generateType = 'normal';
     // "Continue on send" is activated when the user hits "send" (or presses enter) on an empty chat box, and the last
@@ -8173,6 +8252,7 @@ async function saveChatTail(options = {}) {
             before,
             expectedRevision: typeof expectedRevision === 'string' ? expectedRevision : null,
             force: force,
+            allow_shrink: canShrinkSavedChat(),
         }),
     });
 
@@ -8208,6 +8288,10 @@ async function saveChatTail(options = {}) {
         clearCachedChatPage({ isGroup: false });
         toastr.error(t`Chat changed in another tab. Reloading to prevent data loss.`, t`Chat changed`);
         window.location.reload();
+        return;
+    }
+    if (errorData?.error === 'chat_wipe_rejected') {
+        reportChatWipeRejected();
         return;
     }
     if (errorData?.error === 'storage_limit') {
@@ -8404,6 +8488,8 @@ async function saveChatCopyFromPagedChat({ fileName, metadata, mesId }) {
             file_name: fileName,
             chat: [header, ...fullMessages.slice(0, lastIndex + 1)],
             avatar_url: character.avatar,
+            // A copy of the stored chat, so it may replace a longer checkpoint.
+            allow_shrink: true,
         }),
     });
     if (result.ok) {
@@ -8432,6 +8518,10 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false } 
     if (arguments.length > 0 && typeof arguments[0] !== 'object') {
         console.trace('saveChat called with positional arguments. Please use an object instead.');
         [chatName, withMetadata, mesId, force] = arguments;
+    }
+
+    if (isChatSaveBlocked()) {
+        return;
     }
 
     const metadata = { ...chat_metadata, ...(withMetadata || {}) };
@@ -8506,6 +8596,7 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false } 
                 chat: chatToSave,
                 avatar_url: characters[this_chid].avatar,
                 force: force,
+                allow_shrink: canShrinkSavedChat(),
             }),
         });
 
@@ -8514,6 +8605,10 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false } 
         }
 
         const errorData = await result.json();
+        if (errorData?.error === 'chat_wipe_rejected') {
+            reportChatWipeRejected();
+            return;
+        }
         if (errorData?.error === 'storage_limit') {
             toastr.error(errorData.message || '存储空间不足，无法保存聊天记录。请删除内容或使用激活码扩容。', '存储空间不足');
             return;
@@ -8736,6 +8831,8 @@ export async function getChat({ signal: parentSignal, isCurrent: parentIsCurrent
         }, 200);
     };
 
+    markChatLoading();
+    let historyLoaded = false;
     try {
         await unshallowCharacter(characterId);
         if (controller.signal.aborted || loadGeneration !== characterChatLoadGeneration || this_chid !== characterId || !parentIsCurrent()) {
@@ -8761,6 +8858,8 @@ export async function getChat({ signal: parentSignal, isCurrent: parentIsCurrent
                 chatPagingState.revision = typeof cached.revision === 'string' ? cached.revision : null;
                 chatPagingState.active = true;
                 chat.forEach(ensureMessageMediaIsArray);
+                markChatLoaded();
+                historyLoaded = true;
                 if (!chat_metadata['integrity']) {
                     chat_metadata['integrity'] = uuidv4();
                 }
@@ -8781,6 +8880,7 @@ export async function getChat({ signal: parentSignal, isCurrent: parentIsCurrent
             });
             if (isStale()) return false;
             if (paged && Array.isArray(paged.messages)) {
+                assertChatHistoryPresent(paged.header, paged.messages);
                 chat.splice(0, chat.length, ...paged.messages);
                 chat_create_date = paged.header?.create_date ?? humanizedDateTime();
                 chat_metadata = paged.header?.chat_metadata ?? {};
@@ -8830,6 +8930,7 @@ export async function getChat({ signal: parentSignal, isCurrent: parentIsCurrent
             }
             if (isStale()) return false;
             if (response[0] !== undefined) {
+                assertChatHistoryPresent(response[0], response.slice(1));
                 chat.splice(0, chat.length, ...response);
                 chat_create_date = chat[0]['create_date'];
                 chat_metadata = chat[0]['chat_metadata'] ?? {};
@@ -8842,6 +8943,8 @@ export async function getChat({ signal: parentSignal, isCurrent: parentIsCurrent
             chatPagingState.active = false;
         }
         if (isStale()) return false;
+        markChatLoaded();
+        historyLoaded = true;
         if (!chat_metadata['integrity']) {
             chat_metadata['integrity'] = uuidv4();
         }
@@ -8853,6 +8956,13 @@ export async function getChat({ signal: parentSignal, isCurrent: parentIsCurrent
         return true;
     } catch (error) {
         if (isStale() || error?.name === 'AbortError' || error?.statusText === 'abort') {
+            return false;
+        }
+        if (!historyLoaded) {
+            // Not an empty chat: no greeting, nothing saved over the stored history.
+            name2 = characters[characterId].name;
+            select_selected_character(characterId);
+            markChatLoadFailed(error);
             return false;
         }
         await getChatResult({ characterId, isCurrent: () => !isStale() });

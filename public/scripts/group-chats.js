@@ -92,6 +92,13 @@ import {
     getChatHydration,
     hydrateLoadedChat,
     startChatHydration,
+    markChatLoading,
+    markChatLoaded,
+    markChatLoadFailed,
+    isChatSaveBlocked,
+    canShrinkSavedChat,
+    assertChatHistoryPresent,
+    reportChatWipeRejected,
 } from '../script.js';
 import { printTagList, createTagMapFromList, applyTagsOnCharacterSelect, tag_map, applyTagsOnGroupSelect } from './tags.js';
 import { FILTER_TYPES, FilterHelper } from './filters.js';
@@ -299,6 +306,8 @@ export async function getGroupChat(groupId, reload = false, { signal: parentSign
         || group.chat_id !== chatId
         || !parentIsCurrent();
     resetChatPagingState({ isGroup: true, chatId });
+    markChatLoading();
+    let historyLoaded = false;
 
     try {
         // Run validation before any loading
@@ -330,6 +339,9 @@ export async function getGroupChat(groupId, reload = false, { signal: parentSign
             }
 
             if (isStale()) return;
+            if (page && !cached) {
+                assertChatHistoryPresent(page.header, page.messages);
+            }
             if (page) {
                 header = page.header;
                 data = page.messages;
@@ -363,12 +375,18 @@ export async function getGroupChat(groupId, reload = false, { signal: parentSign
 
         if (!usedPaging) {
             const fullChat = await loadGroupChat(chatId, { signal: controller.signal });
-            if (isStale() || !fullChat) return;
+            if (isStale()) return;
+            if (!fullChat) {
+                throw new Error('The group chat request failed.');
+            }
             const full = splitGroupChatFile(fullChat);
+            assertChatHistoryPresent(full.header, full.messages);
             header = full.header;
             data = full.messages;
             resetChatPagingState({ isGroup: true, chatId });
         }
+        markChatLoaded();
+        historyLoaded = true;
 
         const metadata = header?.chat_metadata ?? {};
         const freshChat = !metadata.tainted && !header && data.length === 0;
@@ -424,9 +442,15 @@ export async function getGroupChat(groupId, reload = false, { signal: parentSign
         await eventSource.emit(event_types.CHAT_CHANGED, chatId);
         if (freshChat) await eventSource.emit(event_types.GROUP_CHAT_CREATED);
     } catch (error) {
-        if (error?.name !== 'AbortError') {
-            console.error('Could not load group chat', error);
+        if (error?.name === 'AbortError' || isStale()) {
+            return;
         }
+        if (!historyLoaded) {
+            // Not an empty chat: no greetings, nothing saved over the stored history.
+            markChatLoadFailed(error);
+            return;
+        }
+        console.error('Could not load group chat', error);
     } finally {
         parentSignal?.removeEventListener('abort', abortFromParent);
         if (groupChatLoadController === controller) {
@@ -748,6 +772,9 @@ async function saveGroupChat(groupId, shouldSaveGroup, force = false) {
         console.warn('Group not found', groupId);
         return false;
     }
+    if (isChatSaveBlocked()) {
+        return false;
+    }
     const chatId = group.chat_id;
     group['date_last_chat'] = Date.now();
     /** @type {ChatHeader} */
@@ -776,6 +803,7 @@ async function saveGroupChat(groupId, shouldSaveGroup, force = false) {
                 messages,
                 pagingState: useSession ? { ...pagingState, revision: session.revision } : pagingState,
                 force,
+                allowShrink: canShrinkSavedChat(),
             });
             saveRequest = { ...request, body: JSON.stringify(request.body) };
         }
@@ -840,6 +868,10 @@ async function saveGroupChat(groupId, shouldSaveGroup, force = false) {
             clearCachedChatPage({ isGroup: true, chatId });
             toastr.error(t`Chat changed in another tab. Reloading to prevent data loss.`, t`Chat changed`);
             window.location.reload();
+            return false;
+        }
+        if (errorData?.error === 'chat_wipe_rejected') {
+            reportChatWipeRejected();
             return false;
         }
         const isIntegrityError = errorData?.error === 'integrity' && !force;
