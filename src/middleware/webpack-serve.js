@@ -1,6 +1,7 @@
 import path from 'node:path';
 import webpack from 'webpack';
 import getPublicLibConfig from '../../webpack.config.js';
+import { getVersionedAssetCacheControl } from '../asset-version.js';
 
 export default function getWebpackServeMiddleware() {
     /**
@@ -18,8 +19,9 @@ export default function getWebpackServeMiddleware() {
 
         if (req.method === 'GET' && parsedPath.dir === '/' && parsedPath.base === outputFile) {
             // lib.js is generated under DATA_ROOT and bypasses express.static.
-            // Give it the same short freshness window as other scripts.
-            res.setHeader('Cache-Control', 'public, max-age=300, must-revalidate');
+            // Give it the same short freshness window as other scripts, or the
+            // long-lived one under /v/<version>/.
+            res.setHeader('Cache-Control', getVersionedAssetCacheControl(res) ?? 'public, max-age=300, must-revalidate');
             // Same as express.static in server-main.js: no per-Origin CDN copies.
             res.removeHeader('Vary');
             return res.sendFile(outputFile, { root: outputPath });
@@ -27,6 +29,16 @@ export default function getWebpackServeMiddleware() {
 
         next();
     }
+
+    /**
+     * @returns {string|null} Path of the compiled lib.js
+     */
+    devMiddleware.getOutputFile = () => {
+        const publicLibConfig = getPublicLibConfig();
+        const outputPath = publicLibConfig.output?.path;
+        const outputFile = publicLibConfig.output?.filename;
+        return outputPath && typeof outputFile === 'string' ? path.join(outputPath, outputFile) : null;
+    };
 
     /**
      * Wait until Webpack is done compiling.

@@ -1,3 +1,5 @@
+import { getExtensionModuleUrl } from './module-url.js';
+
 const DEFAULT_MAX_PRELOADS = 64;
 const DEFAULT_MAX_MODULE_PRELOADS = 400;
 export const EXTENSION_RESOURCE_PRELOAD_MIGRATION_VERSION = 1;
@@ -124,7 +126,10 @@ export function preloadExtensionResources(manifests, {
                 if (resource.as) {
                     link.as = resource.as;
                 }
-                const href = `/scripts/extensions/${name}/${resource.file}`;
+                // Module hints must use the URL activation will load (versioned or not).
+                const href = resource.rel === 'modulepreload'
+                    ? getExtensionModuleUrl(name, resource.file)
+                    : `/scripts/extensions/${name}/${resource.file}`;
                 link.href = href;
                 documentRef.head.appendChild(link);
                 links.push(link);
@@ -162,7 +167,7 @@ export function preloadExtensionResources(manifests, {
                     if (typeof file !== 'string' || !file || file.startsWith('/') || file.split('/').includes('..')) {
                         continue;
                     }
-                    const href = `/scripts/extensions/${name}/${file}`;
+                    const href = getExtensionModuleUrl(name, file);
                     if (preloaded.has(href)) {
                         continue;
                     }

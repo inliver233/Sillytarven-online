@@ -1,4 +1,5 @@
 // native node modules
+import fs from 'node:fs';
 import path from 'node:path';
 import util from 'node:util';
 import net from 'node:net';
@@ -39,6 +40,12 @@ import {
 } from './users.js';
 
 import getWebpackServeMiddleware from './middleware/webpack-serve.js';
+import {
+    computeAssetVersion,
+    createVersionedAssetsMiddleware,
+    getVersionedAssetCacheControl,
+    transformAppHtml,
+} from './asset-version.js';
 import basicAuthMiddleware from './middleware/basicAuth.js';
 import getWhitelistMiddleware from './middleware/whitelist.js';
 import accessLoggerMiddleware, { getAccessLogPath, migrateAccessLog } from './middleware/accessLogWriter.js';
@@ -279,7 +286,7 @@ if (!cliArgs.disableCsrf) {
 app.get('/', cacheBuster.middleware, (request, response) => {
     setPrivateNoStoreHeaders(response);
     if (request.session && (request.session.userId || request.session.handle)) {
-        return response.sendFile('index.html', { root: path.join(serverDirectory, 'public') });
+        return sendAppPage(response);
     }
     return response.sendFile('welcome.html', { root: path.join(serverDirectory, 'public') });
 });
@@ -296,7 +303,7 @@ app.get('/app', cacheBuster.middleware, (request, response) => {
     if (shouldRedirectToLogin(request)) {
         return response.redirect(302, '/login');
     }
-    return response.sendFile('index.html', { root: path.join(serverDirectory, 'public') });
+    return sendAppPage(response);
 });
 
 // Callback endpoint for OAuth PKCE flows (e.g. OpenRouter)
@@ -358,8 +365,53 @@ if (discordApplicationEnabled) {
 
 // Host frontend assets
 const webpackMiddleware = getWebpackServeMiddleware();
-app.use(webpackMiddleware);
 const publicDirectory = path.join(serverDirectory, 'public');
+
+// The app's modules under /v/<version>/ with a long-lived cache (see asset-version.js).
+const versionedAssetsEnabled = getConfigValue('performance.versionedAssets', true, 'boolean');
+const assetVersioning = { version: null, checkedAt: 0, pageKey: null, page: null };
+
+/** @returns {string} Version of the files served under /v/, rechecked every few seconds */
+function getAssetVersion() {
+    const now = Date.now();
+    if (!assetVersioning.version || now - assetVersioning.checkedAt > 10_000) {
+        assetVersioning.version = computeAssetVersion(publicDirectory, webpackMiddleware.getOutputFile());
+        assetVersioning.checkedAt = now;
+    }
+    return assetVersioning.version;
+}
+
+/**
+ * Sends index.html, with the import map when versioned assets are enabled.
+ * Anything unexpected falls back to the page as it is on disk.
+ * @param {import('express').Response} response Response
+ */
+function sendAppPage(response) {
+    if (versionedAssetsEnabled) {
+        try {
+            const indexFile = path.join(publicDirectory, 'index.html');
+            const version = getAssetVersion();
+            const stats = fs.statSync(indexFile);
+            const key = `${version}:${stats.size}:${stats.mtimeMs}`;
+            if (assetVersioning.pageKey !== key) {
+                assetVersioning.page = transformAppHtml(fs.readFileSync(indexFile, 'utf8'), { version });
+                assetVersioning.pageKey = key;
+                if (!assetVersioning.page) {
+                    console.warn('index.html does not have the expected shape; serving it without versioned assets.');
+                }
+            }
+            if (assetVersioning.page) {
+                return response.type('html').send(assetVersioning.page);
+            }
+        } catch (error) {
+            console.warn('Could not version the app assets; serving the page as is.', error);
+        }
+    }
+    return response.sendFile('index.html', { root: publicDirectory });
+}
+
+app.use(createVersionedAssetsMiddleware(getAssetVersion));
+app.use(webpackMiddleware);
 const templatesDirectory = path.join(publicDirectory, 'scripts', 'templates');
 app.use(express.static(publicDirectory, {
     maxAge: 0,
@@ -367,6 +419,11 @@ app.use(express.static(publicDirectory, {
     lastModified: true,
     setHeaders: (res, filePath) => {
         dropVaryOrigin(res);
+        const versionedCacheControl = getVersionedAssetCacheControl(res);
+        if (versionedCacheControl) {
+            res.setHeader('Cache-Control', versionedCacheControl);
+            return;
+        }
         const extension = path.extname(filePath).toLowerCase();
         const isTemplate = extension === '.html' && isPathUnderParent(templatesDirectory, filePath);
 

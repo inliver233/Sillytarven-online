@@ -12,6 +12,7 @@ import { addLocaleData, getCurrentLocale, t } from './i18n.js';
 import { debounce_timeout } from './constants.js';
 import { accountStorage } from './util/AccountStorage.js';
 import { preloadExtensionResources } from './util/extension-resource-preload.js';
+import { getExtensionModuleUrl } from './util/module-url.js';
 import { getExtensionActivationPlan } from './util/extension-eligibility.js';
 import { SimpleMutex } from './util/SimpleMutex.js';
 import { power_user } from './power-user.js';
@@ -622,7 +623,7 @@ function addExtensionScript(name, manifest) {
     }
 
     return new Promise((resolve, reject) => {
-        const url = `/scripts/extensions/${name}/${manifest.js}`;
+        const url = getExtensionModuleUrl(name, manifest.js);
         const id = sanitizeSelector(`${name}-js`);
         let ready = false;
 

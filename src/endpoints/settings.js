@@ -164,22 +164,39 @@ router.post('/save', createSettingsSaveHandler({
     },
 }));
 
+function loadSettingsPayload(request) {
+    return settingsCache.get({
+        userKey: request.user.profile.handle,
+        directories: request.user.directories,
+        runtimeConfig: {
+            enable_extensions: ENABLE_EXTENSIONS,
+            enable_extensions_auto_update: ENABLE_EXTENSIONS_AUTO_UPDATE,
+            enable_accounts: ENABLE_ACCOUNTS,
+            chat_paging_enabled: ENABLE_CHAT_PAGING,
+            long_chat_dom_render_optimization_enabled: ENABLE_LONG_CHAT_DOM_RENDER_OPTIMIZATION,
+            telemetry_enabled: ENABLE_TELEMETRY,
+        },
+    });
+}
+
 // Wintermute's code
 router.post('/get', async (request, response) => {
+    // Callers that need one list (world names, Quick Reply sets) name it and get
+    // just that, instead of every preset of the user once more.
+    const fields = Array.isArray(request.body?.fields) ? request.body.fields.filter(field => typeof field === 'string') : null;
+    if (fields?.length) {
+        try {
+            const { payload } = await loadSettingsPayload(request);
+            return response.send(Object.fromEntries(fields.filter(field => Object.hasOwn(payload, field)).map(field => [field, payload[field]])));
+        } catch (error) {
+            console.error('Failed to build settings payload:', error);
+            return response.sendStatus(500);
+        }
+    }
+
     const performanceTimer = beginEndpointPerformance(request, 'settings-get');
     try {
-        const result = await performanceTimer.measureAsync('load', () => settingsCache.get({
-            userKey: request.user.profile.handle,
-            directories: request.user.directories,
-            runtimeConfig: {
-                enable_extensions: ENABLE_EXTENSIONS,
-                enable_extensions_auto_update: ENABLE_EXTENSIONS_AUTO_UPDATE,
-                enable_accounts: ENABLE_ACCOUNTS,
-                chat_paging_enabled: ENABLE_CHAT_PAGING,
-                long_chat_dom_render_optimization_enabled: ENABLE_LONG_CHAT_DOM_RENDER_OPTIMIZATION,
-                telemetry_enabled: ENABLE_TELEMETRY,
-            },
-        }));
+        const result = await performanceTimer.measureAsync('load', () => loadSettingsPayload(request));
         performanceTimer.increment(`settings-cache-${result.state}`);
         performanceTimer.setCacheState(result.state === 'miss' ? 'miss' : 'hit');
         if (result.state === 'miss') {
