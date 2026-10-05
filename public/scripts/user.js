@@ -2380,6 +2380,14 @@ jQuery(() => {
     $('#backup_hub_button').on('click', () => {
         openBackupHub();
     });
+    // Links to "#backups" (for example a small button in an announcement) open the same hub.
+    $(document).on('click', 'a[href="#backups"]', function (event) {
+        event.preventDefault();
+        if ($(this).closest('#announcementsPopup').length) {
+            $('#closeAnnouncementsPopup').trigger('click');
+        }
+        void openBackupHub();
+    });
     initPasskeys({ getHandle: () => currentUser?.handle ?? null });
     setInterval(async () => {
         if (currentUser) {
