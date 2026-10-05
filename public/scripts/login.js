@@ -1,4 +1,5 @@
 import { initAccessibility } from './a11y.js';
+import { describePasskeyError, forgetPasskey, getPasskey, isHostCoveredBy, isPasskeySupported } from './util/webauthn.js';
 
 /**
  * CRSF token for requests.
@@ -350,6 +351,9 @@ function configureDiscreetLogin() {
     // 加载OAuth配置并显示按钮
     await loadOAuthConfig();
 
+    // 通行密钥登录按钮
+    await loadPasskeyLogin();
+
     // 检查是否需要输入OAuth邀请码
     await checkOAuthPendingInvitation();
 
@@ -608,6 +612,91 @@ async function loadOAuthConfig() {
         }
     } catch (error) {
         console.error('Error loading OAuth config:', error);
+    }
+}
+
+/**
+ * Shows the passkey sign-in button when passkeys are on and this browser can use them.
+ */
+async function loadPasskeyLogin() {
+    if (!isPasskeySupported()) {
+        return;
+    }
+    try {
+        const response = await fetch('/api/passkeys/config');
+        const config = response.ok ? await response.json() : null;
+        if (!config?.enabled || !isHostCoveredBy(config.rpId)) {
+            return;
+        }
+        $('#passkeyLoginButton').show().on('click', () => performPasskeyLogin(config.rpId));
+        $('#passkeyLoginHint').show();
+        $('#oauthDivider span').text('或使用其他方式登录');
+        $('#oauthDivider').show();
+        $('#oauthButtons').show();
+    } catch (error) {
+        console.error('Error loading passkey config:', error);
+    }
+}
+
+/**
+ * Signs in with a passkey the user picks in the browser's passkey dialog.
+ * @param {string} rpId Domain the passkeys belong to
+ */
+async function performPasskeyLogin(rpId) {
+    if (isLoggingIn) {
+        return;
+    }
+    isLoggingIn = true;
+    const button = $('#passkeyLoginButton');
+    const label = button.find('span');
+    button.addClass('is-busy');
+    label.text('请在弹出的窗口中验证…');
+    displayError('');
+    let signedIn = false;
+    try {
+        const optionsResponse = await fetch('/api/passkeys/login/options', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: '{}',
+        });
+        const options = await optionsResponse.json().catch(() => ({}));
+        if (!optionsResponse.ok) {
+            return displayError(options.error || '通行密钥暂时不可用，请稍后再试');
+        }
+
+        let credential;
+        try {
+            credential = await getPasskey(options);
+        } catch (error) {
+            const message = describePasskeyError(error, 'get');
+            return displayError(message || '');
+        }
+
+        label.text('正在登录…');
+        const verifyResponse = await fetch('/api/passkeys/login/verify', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-CSRF-Token': csrfToken },
+            body: JSON.stringify({ response: credential }),
+        });
+        const result = await verifyResponse.json().catch(() => ({}));
+        if (!verifyResponse.ok || !result.handle) {
+            if (result.code === 'unknown_credential') {
+                forgetPasskey(rpId, credential.id);
+            }
+            return displayError(result.error || '通行密钥登录失败，请再试一次');
+        }
+        signedIn = true;
+        displayError('登录成功，正在进入…', true);
+        redirectToHome();
+    } catch (error) {
+        console.error('Passkey login failed:', error);
+        displayError('网络异常，请检查网络后再试');
+    } finally {
+        if (!signedIn) {
+            isLoggingIn = false;
+            button.removeClass('is-busy');
+            label.text('通行密钥登录');
+        }
     }
 }
 

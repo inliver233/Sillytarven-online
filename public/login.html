@@ -91,6 +91,11 @@
 
                                 <!-- OAuth第三方登录按钮 -->
                                 <div id="oauthButtons" class="oauth-buttons" style="display:none;">
+                                    <button id="passkeyLoginButton" type="button" class="oauth-button oauth-passkey" style="display:none;">
+                                        <i class="fa-solid fa-fingerprint"></i>
+                                        <span>通行密钥登录</span>
+                                    </button>
+                                    <small id="passkeyLoginHint" class="passkey-login-hint" style="display:none;">指纹 / 面容一键登录，需先在「用户设置 → 通行密钥」里添加</small>
                                     <button id="githubLoginButton" class="oauth-button oauth-github" style="display:none;">
                                         <i class="fa-brands fa-github"></i>
                                         <span>GitHub 登录</span>

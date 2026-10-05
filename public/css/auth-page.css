@@ -257,6 +257,20 @@ body.login #submitRenewal:hover,
     box-shadow: none;
 }
 
+.oauth-button.oauth-passkey {
+    border-color: rgba(52, 211, 153, 0.55);
+    background: rgba(16, 185, 129, 0.18);
+}
+
+.oauth-button.oauth-passkey:hover {
+    border-color: rgba(52, 211, 153, 0.85);
+    background: rgba(16, 185, 129, 0.28);
+}
+
+.oauth-button.oauth-passkey i {
+    color: #34d399;
+}
+
 .login-announcement-item {
     border-radius: 8px;
     background: rgba(255, 255, 255, 0.05);

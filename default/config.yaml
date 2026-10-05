@@ -82,6 +82,18 @@ requestProxy:
 enableUserAccounts: true
 # Enable discreet login mode: hides user list on the login screen
 enableDiscreetLogin: true
+# Passkeys: sign in with a fingerprint, face or device PIN. Users add them in
+# their account settings (up to 10). Not used when stcontrol handles sign-in.
+passkeys:
+  enabled: false
+  # Domain the passkeys belong to; defaults to the requested host. A parent
+  # domain (example.com) makes them work on all of its subdomains.
+  rpId: ''
+  # Name shown by the passkey manager
+  rpName: ''
+  # Page origins allowed to use them, e.g. ['https://chat.example.com'];
+  # defaults to the origin of the request
+  origins: []
 # If `basicAuthMode` and this are enabled then
 # the username and passwords for basic auth are the same as those
 # for the individual accounts

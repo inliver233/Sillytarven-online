@@ -3,6 +3,7 @@ import { POPUP_RESULT, POPUP_TYPE, Popup, callGenericPopup } from './popup.js';
 import { renderTemplateAsync } from './templates.js';
 import { ensureImageFormatSupported, getBase64Async, humanFileSize } from './utils.js';
 import './user-heartbeat.js';
+import { initPasskeys } from './passkeys.js';
 
 /**
  * @type {import('../../src/users.js').UserViewModel} Logged in user
@@ -2376,6 +2377,7 @@ jQuery(() => {
     $('#backup_hub_button').on('click', () => {
         openBackupHub();
     });
+    initPasskeys();
     setInterval(async () => {
         if (currentUser) {
             await extendUserSession();

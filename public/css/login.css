@@ -410,3 +410,28 @@ body.login #passwordRecoveryBlock .flexGap10 {
         font-size: 1.2em;
     }
 }
+
+/* 通行密钥登录按钮 */
+.oauth-passkey {
+    background: linear-gradient(135deg, rgba(16, 185, 129, 0.85) 0%, rgba(5, 150, 105, 0.75) 100%);
+    border-color: rgba(52, 211, 153, 0.55);
+}
+
+.oauth-passkey:hover {
+    background: linear-gradient(135deg, rgba(16, 185, 129, 1) 0%, rgba(5, 150, 105, 0.95) 100%);
+    border-color: rgba(52, 211, 153, 0.85);
+}
+
+.oauth-passkey.is-busy {
+    opacity: 0.75;
+    cursor: progress;
+    transform: none;
+}
+
+.passkey-login-hint {
+    margin: -4px 0 2px;
+    color: rgba(255, 255, 255, 0.55);
+    font-size: 0.8em;
+    text-align: center;
+    line-height: 1.4;
+}

@@ -73,6 +73,7 @@ import { ensureThumbnailCache } from './endpoints/thumbnails.js';
 
 // Routers
 import { router as usersPublicRouter } from './endpoints/users-public.js';
+import { publicRouter as passkeysPublicRouter } from './endpoints/passkeys.js';
 import { router as publicConfigRouter } from './endpoints/public-config.js';
 import { router as oauthRouter, linuxdoCallbackHandler } from './endpoints/oauth.js';
 import { init as statsInit, onExit as statsOnExit } from './endpoints/stats.js';
@@ -444,6 +445,7 @@ app.use(express.static(publicDirectory, {
 
 // Public API
 app.use('/api/users', usersPublicRouter);
+app.use('/api/passkeys', passkeysPublicRouter);
 app.use('/api/public-config', publicConfigRouter);
 
 // 无需认证的延迟探测端点(供总控注册页测节点延迟)

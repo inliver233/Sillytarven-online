@@ -32,6 +32,7 @@
         "@jsquash/webp": "^1.4.0",
         "@mozilla/readability": "^0.6.0",
         "@popperjs/core": "^2.11.8",
+        "@simplewebauthn/server": "^14.0.3",
         "@xenova/transformers": "2.17.2",
         "@zeldafan0225/ai_horde": "^5.2.0",
         "archiver": "^7.0.1",
