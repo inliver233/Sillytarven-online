@@ -615,6 +615,8 @@ async function loadOAuthConfig() {
     }
 }
 
+let passkeyButtonLabel = '通行密钥登录';
+
 /**
  * Shows the passkey sign-in button when passkeys are on and this browser can use them.
  */
@@ -625,11 +627,13 @@ async function loadPasskeyLogin() {
     try {
         const response = await fetch('/api/passkeys/config');
         const config = response.ok ? await response.json() : null;
-        if (!config?.enabled || !isHostCoveredBy(config.rpId)) {
+        if (!config?.enabled || config.showOnLoginPage === false || !isHostCoveredBy(config.rpId)) {
             return;
         }
+        passkeyButtonLabel = config.loginButtonText || passkeyButtonLabel;
+        $('#passkeyLoginButton span').text(passkeyButtonLabel);
         $('#passkeyLoginButton').show().on('click', () => performPasskeyLogin(config.rpId));
-        $('#passkeyLoginHint').show();
+        $('#passkeyLoginHint').text(config.loginHintText || '').toggle(Boolean(config.loginHintText));
         $('#oauthDivider span').text('或使用其他方式登录');
         $('#oauthDivider').show();
         $('#oauthButtons').show();
@@ -695,7 +699,7 @@ async function performPasskeyLogin(rpId) {
         if (!signedIn) {
             isLoggingIn = false;
             button.removeClass('is-busy');
-            label.text('通行密钥登录');
+            label.text(passkeyButtonLabel);
         }
     }
 }

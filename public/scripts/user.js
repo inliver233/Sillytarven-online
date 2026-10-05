@@ -2026,6 +2026,9 @@ async function openAdminPanel(initialTab = 'usersList') {
         if (target === 'backupLimitsAdminBlock') {
             void import('./backup-limits-admin.js').then(module => module.openBackupLimitsAdmin(template.find('.backupLimitsAdminBlock')[0]));
         }
+        if (target === 'passkeysAdminBlock') {
+            void import('./passkeys-admin.js').then(module => module.openPasskeysAdmin(template.find('.passkeysAdminBlock')[0]));
+        }
         // 初始化管理员扩展功能
         if (typeof window.initializeAdminExtensions === 'function') {
             setTimeout(() => {
@@ -2377,7 +2380,7 @@ jQuery(() => {
     $('#backup_hub_button').on('click', () => {
         openBackupHub();
     });
-    initPasskeys();
+    initPasskeys({ getHandle: () => currentUser?.handle ?? null });
     setInterval(async () => {
         if (currentUser) {
             await extendUserSession();

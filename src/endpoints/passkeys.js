@@ -4,31 +4,31 @@ import { RateLimiterMemory, RateLimiterRes } from 'rate-limiter-flexible';
 
 import { getIpFromRequest, getRealIpFromHeader } from '../express-common.js';
 import { getConfigValue } from '../util.js';
-import { ensureUserDirectoriesExist, makeUserAccountPermanent, normalizeHandle, toKey } from '../users.js';
+import { ensureUserDirectoriesExist, makeUserAccountPermanent, normalizeHandle, requireAdminMiddleware, toKey } from '../users.js';
 import { isStcontrolEnabled } from '../stcontrol.js';
 import systemMonitor from '../system-monitor.js';
+import { getPasskeySettings, getPasskeyStats, recordPasskeyEvent, savePasskeySettings } from '../passkey-settings.js';
 
 /**
  * Passkeys (WebAuthn): a second way into an existing account, so people who
  * signed up with Discord can sign in without it. They are added from the
- * account settings (up to MAX_PASSKEYS) and kept on the user record.
+ * account settings (up to the administrator's limit) and kept on the user record.
  *
  * Login is username-less: the passkey carries the account handle as its user
  * ID, and the assertion is checked against the public key stored on that
  * account for that credential, so a forged user ID only ever names an account
  * whose keys the forger does not have.
  *
- * Off unless `passkeys.enabled` is set, and always off on a node whose sign-in
- * is handled by the stcontrol Controller.
+ * Switched on and tuned from the admin panel (see passkey-settings.js); always
+ * off on a node whose sign-in is handled by the stcontrol Controller.
  */
 
-export const MAX_PASSKEYS = 10;
 const CHALLENGE_TTL_MS = 5 * 60 * 1000;
 const MAX_NAME_LENGTH = 40;
 const PREFER_REAL_IP_HEADER = getConfigValue('rateLimiting.preferRealIpHeader', false, 'boolean');
 
 // Known authenticators, to name a new passkey after where it lives.
-const AUTHENTICATOR_NAMES = {
+export const AUTHENTICATOR_NAMES = Object.freeze({
     'ea9b8d66-4d01-1d21-3ce4-b6b48cb575d4': 'Google 密码管理器',
     'fbfc3007-154e-4ecc-8c0b-6e020557d7bd': 'iCloud 钥匙串',
     'dd4ec289-e01d-41c9-bb89-70fa845d4bf2': 'iCloud 钥匙串',
@@ -45,7 +45,7 @@ const AUTHENTICATOR_NAMES = {
     'f3809540-7f14-49c1-a8b3-8f813b225541': 'Enpass',
     'b5397666-4885-aa6b-cebf-e52262a439a2': 'Chromium 浏览器',
     '771b48fd-d3d4-4f74-9232-fc157ab0507a': 'Edge（Mac）',
-};
+});
 
 const loginLimiter = new RateLimiterMemory({ points: 20, duration: 60 });
 
@@ -70,21 +70,22 @@ function loadWebAuthn() {
 
 /**
  * @param {import('express').Request} request Request
- * @returns {{enabled: boolean, rpId: string, rpName: string, origins: string[]}}
+ * @returns {{available: boolean, enabled: boolean, rpId: string, rpName: string, origins: string[], settings: ReturnType<typeof getPasskeySettings>}}
  */
 export function getPasskeyConfig(request) {
-    const enabled = getConfigValue('passkeys.enabled', false, 'boolean')
-        && getConfigValue('enableUserAccounts', false, 'boolean')
-        && !isStcontrolEnabled();
+    const settings = getPasskeySettings();
+    const available = getConfigValue('enableUserAccounts', false, 'boolean') && !isStcontrolEnabled();
     const configuredOrigins = getConfigValue('passkeys.origins', []);
     const origins = Array.isArray(configuredOrigins) && configuredOrigins.length
         ? configuredOrigins.map(String)
         : [`${request.protocol}://${request.get('host')}`];
     return {
-        enabled,
+        available,
+        enabled: available && settings.enabled,
         rpId: String(getConfigValue('passkeys.rpId', '') || request.hostname),
-        rpName: String(getConfigValue('passkeys.rpName', '') || 'SillyTavern'),
+        rpName: settings.rpName || 'SillyTavern',
         origins,
+        settings,
     };
 }
 
@@ -141,13 +142,50 @@ function sendDisabled(response) {
     return response.status(404).json({ error: '通行密钥未开启', code: 'passkeys_disabled' });
 }
 
+function limitMessage(max) {
+    return `最多只能添加 ${max} 个通行密钥，请先删除不用的`;
+}
+
+/**
+ * Applies a change to one user's passkeys under that user's lock.
+ * @param {string} handle User handle
+ * @param {(passkeys: object[]) => object[]|null} change New list, or null when nothing applies
+ * @returns {Promise<object[]|null>} The new list, or null when the user or passkey was not found
+ */
+async function changePasskeys(handle, change) {
+    return withUserLock(handle, async () => {
+        const user = await storage.getItem(toKey(handle));
+        if (!user) return null;
+        const next = change(getPasskeys(user));
+        if (!next) return null;
+        user.passkeys = next;
+        await storage.setItem(toKey(handle), user);
+        return next;
+    });
+}
+
 // ---------------------------------------------------------------- sign-in (public)
 
 export const publicRouter = express.Router();
 
 publicRouter.get('/config', (request, response) => {
     const config = getPasskeyConfig(request);
-    return response.json({ enabled: config.enabled, rpId: config.enabled ? config.rpId : null, max: MAX_PASSKEYS });
+    if (!config.enabled) {
+        return response.json({ enabled: false, rpId: null });
+    }
+    const { settings } = config;
+    return response.json({
+        enabled: true,
+        rpId: config.rpId,
+        max: settings.maxPerUser,
+        allowRegistration: settings.allowRegistration,
+        showOnLoginPage: settings.showOnLoginPage,
+        showInSettings: settings.showInSettings,
+        loginPrompt: settings.loginPrompt,
+        loginButtonText: settings.loginButtonText,
+        loginHintText: settings.loginHintText,
+        managerDescription: settings.managerDescription,
+    });
 });
 
 publicRouter.post('/login/options', async (request, response) => {
@@ -158,7 +196,7 @@ publicRouter.post('/login/options', async (request, response) => {
         const { generateAuthenticationOptions } = await loadWebAuthn();
         const options = await generateAuthenticationOptions({
             rpID: config.rpId,
-            userVerification: 'preferred',
+            userVerification: config.settings.userVerification,
             timeout: 120_000,
         });
         rememberChallenge(request, 'login', options.challenge);
@@ -191,6 +229,7 @@ publicRouter.post('/login/verify', async (request, response) => {
         const user = handle ? await storage.getItem(toKey(handle)) : null;
         const passkey = getPasskeys(user).find(item => item.id === credential.id);
         if (!user || !passkey) {
+            recordPasskeyEvent('failures');
             return response.status(404).json({
                 error: '这个通行密钥已不能使用（可能已在账号中删除）。请用其他方式登录后重新添加。',
                 code: 'unknown_credential',
@@ -216,24 +255,27 @@ publicRouter.post('/login/verify', async (request, response) => {
                     counter: Number(passkey.counter) || 0,
                     transports: Array.isArray(passkey.transports) ? passkey.transports : undefined,
                 },
-                requireUserVerification: false,
+                requireUserVerification: config.settings.userVerification === 'required',
             });
         } catch (error) {
             console.warn('Passkey login rejected for', handle, '-', error.message);
-            return response.status(403).json({ error: '通行密钥验证失败，请再试一次', code: 'verification_failed' });
+            verification = null;
         }
-        if (!verification.verified) {
-            return response.status(403).json({ error: '通行密钥验证失败，请再试一次', code: 'verification_failed' });
+        if (!verification?.verified) {
+            recordPasskeyEvent('failures');
+            const message = config.settings.userVerification === 'required'
+                ? '通行密钥验证失败：本站要求验证指纹、面容或锁屏密码，请再试一次'
+                : '通行密钥验证失败，请再试一次';
+            return response.status(403).json({ error: message, code: 'verification_failed' });
         }
 
-        await withUserLock(handle, async () => {
-            const fresh = await storage.getItem(toKey(handle));
-            const stored = getPasskeys(fresh).find(item => item.id === passkey.id);
-            if (!fresh || !stored) return;
+        await changePasskeys(handle, passkeys => {
+            const stored = passkeys.find(item => item.id === passkey.id);
+            if (!stored) return null;
             stored.counter = verification.authenticationInfo.newCounter;
             stored.lastUsedAt = Date.now();
             stored.backedUp = verification.authenticationInfo.credentialBackedUp;
-            await storage.setItem(toKey(handle), fresh);
+            return passkeys;
         });
 
         // The same steps as a password login once the user is known.
@@ -248,6 +290,7 @@ publicRouter.post('/login/verify', async (request, response) => {
         request.session.authenticated = true;
         systemMonitor.recordUserLogin(user.handle, { userName: user.name });
         systemMonitor.updateUserActivity(user.handle, { userName: user.name, isHeartbeat: false });
+        recordPasskeyEvent('logins');
         console.info('Passkey login successful:', user.handle, 'from', ip, 'at', new Date().toLocaleString());
         return response.json({ handle: user.handle });
     } catch (error) {
@@ -256,6 +299,115 @@ publicRouter.post('/login/verify', async (request, response) => {
         }
         console.error('Passkey login failed:', error);
         return response.status(500).json({ error: '登录失败，请稍后再试' });
+    }
+});
+
+// ---------------------------------------------------------------- administration
+
+export const adminRouter = express.Router();
+adminRouter.use(requireAdminMiddleware);
+
+/**
+ * Users who have passkeys, with theirs, newest activity first.
+ * @returns {Promise<object[]>}
+ */
+async function listPasskeyUsers() {
+    const values = await storage.values();
+    const users = [];
+    for (const user of values) {
+        if (!user || typeof user !== 'object' || typeof user.handle !== 'string') continue;
+        const passkeys = getPasskeys(user);
+        if (!passkeys.length) continue;
+        const described = passkeys.map(passkey => ({
+            ...describePasskey(passkey),
+            provider: AUTHENTICATOR_NAMES[passkey.aaguid] || null,
+        }));
+        users.push({
+            handle: user.handle,
+            name: user.name || user.handle,
+            enabled: user.enabled !== false,
+            admin: Boolean(user.admin),
+            passkeys: described,
+            lastUsedAt: Math.max(0, ...described.map(passkey => passkey.lastUsedAt || 0)) || null,
+            firstAddedAt: Math.min(...described.map(passkey => passkey.createdAt || Date.now())),
+        });
+    }
+    users.sort((a, b) => (b.lastUsedAt || b.firstAddedAt || 0) - (a.lastUsedAt || a.firstAddedAt || 0));
+    return users;
+}
+
+adminRouter.get('/overview', async (request, response) => {
+    try {
+        const config = getPasskeyConfig(request);
+        const users = await listPasskeyUsers();
+        const week = Date.now() - 7 * 24 * 60 * 60 * 1000;
+        const all = users.flatMap(user => user.passkeys);
+        const providers = {};
+        for (const passkey of all) {
+            const provider = passkey.provider || '其他 / 未识别';
+            providers[provider] = (providers[provider] || 0) + 1;
+        }
+        return response.json({
+            settings: config.settings,
+            status: {
+                available: config.available,
+                enabled: config.enabled,
+                stcontrol: isStcontrolEnabled(),
+                accounts: getConfigValue('enableUserAccounts', false, 'boolean'),
+                rpId: config.rpId,
+                origins: config.origins,
+                originsFromConfig: Array.isArray(getConfigValue('passkeys.origins', [])) && getConfigValue('passkeys.origins', []).length > 0,
+                rpIdFromConfig: Boolean(getConfigValue('passkeys.rpId', '')),
+            },
+            summary: {
+                users: users.length,
+                passkeys: all.length,
+                activeUsers7d: users.filter(user => (user.lastUsedAt || 0) >= week).length,
+                added7d: all.filter(passkey => (passkey.createdAt || 0) >= week).length,
+                synced: all.filter(passkey => passkey.synced).length,
+                providers: Object.entries(providers).sort((a, b) => b[1] - a[1]).map(([name, count]) => ({ name, count })),
+            },
+            stats: getPasskeyStats(7),
+            users,
+        });
+    } catch (error) {
+        console.error('Passkey overview failed:', error);
+        return response.status(500).json({ error: '读取失败，请稍后再试' });
+    }
+});
+
+adminRouter.post('/settings', (request, response) => {
+    try {
+        const settings = savePasskeySettings(request.body?.settings);
+        console.info('Passkey settings saved by', request.user?.profile?.handle, JSON.stringify(settings));
+        return response.json({ settings });
+    } catch (error) {
+        console.error('Saving passkey settings failed:', error);
+        return response.status(500).json({ error: '保存失败，请稍后再试' });
+    }
+});
+
+adminRouter.post('/delete', async (request, response) => {
+    const handle = normalizeHandle(String(request.body?.handle ?? ''));
+    const id = String(request.body?.id ?? '');
+    const all = request.body?.all === true;
+    if (!handle || (!all && !id)) {
+        return response.status(400).json({ error: '参数不完整', code: 'invalid_request' });
+    }
+    try {
+        const result = await changePasskeys(handle, passkeys => {
+            if (all) return passkeys.length ? [] : null;
+            const next = passkeys.filter(passkey => passkey.id !== id);
+            return next.length === passkeys.length ? null : next;
+        });
+        if (!result) {
+            return response.status(404).json({ error: '找不到这个通行密钥，请刷新后再试', code: 'not_found' });
+        }
+        console.info('Admin', request.user?.profile?.handle, all ? 'removed all passkeys of' : 'removed a passkey of', handle);
+        return response.json({ passkeys: result.map(describePasskey) });
+    } catch (error) {
+        console.error('Admin passkey delete failed:', error);
+        return response.status(500).json({ error: '删除失败，请稍后再试' });
     }
 });
 
@@ -270,19 +422,24 @@ router.use((request, response, next) => {
 });
 
 router.get('/list', async (request, response) => {
+    const { settings } = getPasskeyConfig(request);
     const user = await storage.getItem(toKey(request.user.profile.handle));
-    return response.json({ passkeys: getPasskeys(user).map(describePasskey), max: MAX_PASSKEYS });
+    return response.json({ passkeys: getPasskeys(user).map(describePasskey), max: settings.maxPerUser, allowRegistration: settings.allowRegistration });
 });
 
 router.post('/register/options', async (request, response) => {
     const config = getPasskeyConfig(request);
+    const { settings } = config;
     const handle = request.user.profile.handle;
+    if (!settings.allowRegistration) {
+        return response.status(403).json({ error: '管理员暂时关闭了添加通行密钥，已添加的仍可登录', code: 'registration_disabled' });
+    }
     try {
         const user = await storage.getItem(toKey(handle));
         if (!user) return response.sendStatus(404);
         const passkeys = getPasskeys(user);
-        if (passkeys.length >= MAX_PASSKEYS) {
-            return response.status(409).json({ error: `最多只能添加 ${MAX_PASSKEYS} 个通行密钥，请先删除不用的`, code: 'limit_reached' });
+        if (passkeys.length >= settings.maxPerUser) {
+            return response.status(409).json({ error: limitMessage(settings.maxPerUser), code: 'limit_reached' });
         }
         const userId = Buffer.from(handle, 'utf8');
         if (userId.length > 64) {
@@ -298,7 +455,7 @@ router.post('/register/options', async (request, response) => {
             userDisplayName: displayName,
             attestationType: 'none',
             excludeCredentials: passkeys.map(passkey => ({ id: passkey.id, transports: passkey.transports })),
-            authenticatorSelection: { residentKey: 'required', requireResidentKey: true, userVerification: 'preferred' },
+            authenticatorSelection: { residentKey: 'required', requireResidentKey: true, userVerification: settings.userVerification },
             timeout: 120_000,
         });
         rememberChallenge(request, 'register', options.challenge, handle);
@@ -311,11 +468,15 @@ router.post('/register/options', async (request, response) => {
 
 router.post('/register/verify', async (request, response) => {
     const config = getPasskeyConfig(request);
+    const { settings } = config;
     const handle = request.user.profile.handle;
     try {
         const expectedChallenge = takeChallenge(request, 'register', handle);
         if (!expectedChallenge) {
             return response.status(400).json({ error: '操作已过期，请重新添加', code: 'challenge_expired' });
+        }
+        if (!settings.allowRegistration) {
+            return response.status(403).json({ error: '管理员暂时关闭了添加通行密钥，已添加的仍可登录', code: 'registration_disabled' });
         }
         const credential = request.body?.response;
         if (!credential || typeof credential.id !== 'string') {
@@ -329,29 +490,33 @@ router.post('/register/verify', async (request, response) => {
                 expectedChallenge,
                 expectedOrigin: config.origins,
                 expectedRPID: config.rpId,
-                requireUserVerification: false,
+                requireUserVerification: settings.userVerification === 'required',
             });
         } catch (error) {
             console.warn('Passkey registration rejected for', handle, '-', error.message);
-            return response.status(400).json({ error: '通行密钥验证失败，请重新添加', code: 'verification_failed' });
+            verification = null;
         }
-        if (!verification.verified) {
-            return response.status(400).json({ error: '通行密钥验证失败，请重新添加', code: 'verification_failed' });
+        if (!verification?.verified) {
+            const message = settings.userVerification === 'required'
+                ? '添加失败：本站要求验证指纹、面容或锁屏密码，请重新添加'
+                : '通行密钥验证失败，请重新添加';
+            return response.status(400).json({ error: message, code: 'verification_failed' });
         }
 
         const info = verification.registrationInfo;
         const name = cleanName(AUTHENTICATOR_NAMES[info.aaguid] || request.body?.name) || '通行密钥';
-        const result = await withUserLock(handle, async () => {
-            const user = await storage.getItem(toKey(handle));
-            if (!user) return { status: 404 };
-            const passkeys = getPasskeys(user);
+        let refusal = null;
+        let added = null;
+        const result = await changePasskeys(handle, passkeys => {
             if (passkeys.some(passkey => passkey.id === info.credential.id)) {
-                return { status: 409, body: { error: '这个通行密钥已经添加过了', code: 'already_added' } };
+                refusal = { status: 409, body: { error: '这个通行密钥已经添加过了', code: 'already_added' } };
+                return null;
             }
-            if (passkeys.length >= MAX_PASSKEYS) {
-                return { status: 409, body: { error: `最多只能添加 ${MAX_PASSKEYS} 个通行密钥，请先删除不用的`, code: 'limit_reached' } };
+            if (passkeys.length >= settings.maxPerUser) {
+                refusal = { status: 409, body: { error: limitMessage(settings.maxPerUser), code: 'limit_reached' } };
+                return null;
             }
-            const passkey = {
+            added = {
                 id: info.credential.id,
                 publicKey: toBase64Url(info.credential.publicKey),
                 counter: info.credential.counter,
@@ -363,55 +528,40 @@ router.post('/register/verify', async (request, response) => {
                 createdAt: Date.now(),
                 lastUsedAt: null,
             };
-            user.passkeys = [...passkeys, passkey];
-            await storage.setItem(toKey(handle), user);
-            return { status: 200, body: { passkey: describePasskey(passkey), count: user.passkeys.length, max: MAX_PASSKEYS } };
+            return [...passkeys, added];
         });
-        if (result.status !== 200) {
-            return result.body ? response.status(result.status).json(result.body) : response.sendStatus(result.status);
+        if (refusal) {
+            return response.status(refusal.status).json(refusal.body);
         }
-        console.info('Passkey added for', handle, `(${result.body.count}/${MAX_PASSKEYS})`);
-        return response.json(result.body);
+        if (!result || !added) {
+            return response.sendStatus(404);
+        }
+        recordPasskeyEvent('registrations');
+        console.info('Passkey added for', handle, `(${result.length}/${settings.maxPerUser})`);
+        return response.json({ passkey: describePasskey(added), count: result.length, max: settings.maxPerUser });
     } catch (error) {
         console.error('Passkey registration failed:', error);
         return response.status(500).json({ error: '添加失败，请稍后再试' });
     }
 });
 
-/**
- * Applies a change to one of the user's passkeys.
- * @param {import('express').Request} request Request with body.id
- * @param {import('express').Response} response Response
- * @param {(passkeys: object[], index: number) => object[]} change Returns the new list
- */
-async function updatePasskey(request, response, change) {
-    const handle = request.user.profile.handle;
-    const id = String(request.body?.id ?? '');
-    const result = await withUserLock(handle, async () => {
-        const user = await storage.getItem(toKey(handle));
-        const passkeys = getPasskeys(user);
-        const index = passkeys.findIndex(passkey => passkey.id === id);
-        if (!user || index < 0) return null;
-        user.passkeys = change(passkeys, index);
-        await storage.setItem(toKey(handle), user);
-        return user.passkeys;
-    });
-    if (!result) {
-        return response.status(404).json({ error: '找不到这个通行密钥，请刷新后再试', code: 'not_found' });
-    }
-    return response.json({ passkeys: result.map(describePasskey), max: MAX_PASSKEYS });
-}
-
 router.post('/rename', async (request, response) => {
     const name = cleanName(request.body?.name);
+    const id = String(request.body?.id ?? '');
     if (!name) {
         return response.status(400).json({ error: '名称不能为空', code: 'invalid_name' });
     }
     try {
-        return await updatePasskey(request, response, (passkeys, index) => {
+        const result = await changePasskeys(request.user.profile.handle, passkeys => {
+            const index = passkeys.findIndex(passkey => passkey.id === id);
+            if (index < 0) return null;
             passkeys[index] = { ...passkeys[index], name };
             return passkeys;
         });
+        if (!result) {
+            return response.status(404).json({ error: '找不到这个通行密钥，请刷新后再试', code: 'not_found' });
+        }
+        return response.json({ passkeys: result.map(describePasskey), max: getPasskeySettings().maxPerUser });
     } catch (error) {
         console.error('Passkey rename failed:', error);
         return response.status(500).json({ error: '保存失败，请稍后再试' });
@@ -419,11 +569,18 @@ router.post('/rename', async (request, response) => {
 });
 
 router.post('/delete', async (request, response) => {
+    const id = String(request.body?.id ?? '');
     try {
-        return await updatePasskey(request, response, (passkeys, index) => passkeys.filter((_, i) => i !== index));
+        const result = await changePasskeys(request.user.profile.handle, passkeys => {
+            const next = passkeys.filter(passkey => passkey.id !== id);
+            return next.length === passkeys.length ? null : next;
+        });
+        if (!result) {
+            return response.status(404).json({ error: '找不到这个通行密钥，请刷新后再试', code: 'not_found' });
+        }
+        return response.json({ passkeys: result.map(describePasskey), max: getPasskeySettings().maxPerUser });
     } catch (error) {
         console.error('Passkey delete failed:', error);
         return response.status(500).json({ error: '删除失败，请稍后再试' });
     }
 });
-

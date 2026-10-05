@@ -82,6 +82,10 @@
     --pk-notice: #ef4444;
 }
 
+.passkeyManager-notice[data-kind="info"] {
+    --pk-notice: #3b82f6;
+}
+
 .passkeyManager-list {
     display: flex;
     flex-direction: column;
@@ -223,4 +227,309 @@
     border-color: rgba(52, 211, 153, 0.75) !important;
     background: linear-gradient(135deg, rgba(16, 185, 129, 0.9), rgba(5, 150, 105, 0.85)) !important;
     color: #fff !important;
+}
+
+/* 管理员面板：通行密钥 */
+.passkeyAdmin-status {
+    padding: 10px 12px;
+    border: 1px solid var(--bl-border);
+    border-radius: 10px;
+    font-size: 0.9em;
+}
+
+.passkeyAdmin-status::before {
+    content: '';
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    margin-right: 8px;
+    border-radius: 50%;
+    background: var(--bl-muted);
+    vertical-align: middle;
+}
+
+.passkeyAdmin-status[data-state="on"] {
+    border-color: color-mix(in srgb, #10b981 55%, transparent);
+    background: color-mix(in srgb, #10b981 12%, transparent);
+}
+
+.passkeyAdmin-status[data-state="on"]::before {
+    background: #10b981;
+}
+
+.passkeyAdmin-status[data-state="unavailable"] {
+    border-color: color-mix(in srgb, var(--bl-warning) 55%, transparent);
+    background: color-mix(in srgb, var(--bl-warning) 12%, transparent);
+}
+
+.passkeyAdmin-status[data-state="unavailable"]::before {
+    background: var(--bl-warning);
+}
+
+.passkeyAdmin-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr));
+    gap: 12px;
+}
+
+.passkeyAdmin-switches {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.passkeyAdmin-switch {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    cursor: pointer;
+}
+
+.passkeyAdmin-switch input {
+    flex: 0 0 auto;
+    margin-top: 3px;
+}
+
+.passkeyAdmin-switch.is-muted {
+    opacity: 0.55;
+}
+
+.passkeyAdmin-switchText {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.passkeyAdmin-label {
+    margin: 4px 0 -6px;
+    font-size: 0.9em;
+}
+
+.passkeyAdmin-texts {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.passkeyAdmin-field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.passkeyAdmin-fieldHead {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 0.88em;
+}
+
+.passkeyAdmin-field .text_pole {
+    width: 100%;
+    margin: 0;
+}
+
+.passkeyAdmin-preview {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+    padding: 12px;
+    border: 1px dashed var(--bl-border);
+    border-radius: 10px;
+    background: #0b1220;
+    font-size: 0.88em;
+}
+
+.passkeyAdmin-previewButton {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 10px;
+    border: 1px solid rgba(52, 211, 153, 0.55);
+    border-radius: 8px;
+    background: rgba(16, 185, 129, 0.18);
+    color: #fff;
+    font-weight: 600;
+}
+
+.passkeyAdmin-previewButton i {
+    color: #34d399;
+}
+
+.passkeyAdmin-previewHint {
+    color: rgba(255, 255, 255, 0.55);
+    text-align: center;
+}
+
+.passkeyAdmin-domain {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.passkeyAdmin-domainRow {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 4px 10px;
+}
+
+.passkeyAdmin-domainRow code {
+    overflow-wrap: anywhere;
+}
+
+.passkeyAdmin-tiles {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.passkeyAdmin-days .backupLimits-row {
+    grid-template-columns: minmax(0, 2fr) repeat(3, minmax(0, 1fr));
+}
+
+.passkeyAdmin-providers {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.passkeyAdmin-provider {
+    display: grid;
+    grid-template-columns: minmax(0, 10em) minmax(0, 1fr) 3em;
+    align-items: center;
+    gap: 10px;
+    font-size: 0.9em;
+}
+
+.passkeyAdmin-providerName {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.passkeyAdmin-providerCount {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+
+.passkeyAdmin-bar {
+    height: 8px;
+    border-radius: 4px;
+    background: var(--bl-surface);
+    overflow: hidden;
+}
+
+.passkeyAdmin-bar span {
+    display: block;
+    height: 100%;
+    border-radius: 4px;
+    background: #10b981;
+}
+
+.passkeyAdmin-usersHead {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px 12px;
+}
+
+.passkeyAdmin .text_pole.passkeyAdmin-search {
+    width: min(260px, 100%);
+    margin: 0;
+}
+
+.passkeyAdmin-userRow {
+    grid-template-columns: minmax(0, 3fr) minmax(0, 1fr) minmax(0, 1.3fr) 1.2em;
+    align-items: center;
+}
+
+button.passkeyAdmin-userRow {
+    width: 100%;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+button.passkeyAdmin-userRow:hover {
+    background: var(--bl-surface);
+}
+
+.passkeyAdmin-user + .passkeyAdmin-user,
+.backupLimits-rowHead + .passkeyAdmin-user {
+    border-top: 1px solid var(--bl-border);
+}
+
+.passkeyAdmin-chevron {
+    transition: transform 0.15s;
+}
+
+.passkeyAdmin-userRow[aria-expanded="true"] .passkeyAdmin-chevron {
+    transform: rotate(180deg);
+}
+
+.passkeyAdmin-details {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 4px 14px 12px;
+}
+
+.passkeyAdmin-key {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border: 1px solid var(--bl-border);
+    border-radius: 8px;
+}
+
+.passkeyAdmin-keyText {
+    flex: 1 1 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.passkeyAdmin .menu_button.passkeyAdmin-remove {
+    flex: 0 0 auto;
+    width: 32px;
+    height: 32px;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    place-items: center;
+}
+
+.passkeyAdmin .menu_button.passkeyAdmin-clear,
+.passkeyAdmin .menu_button.passkeyAdmin-more {
+    align-self: flex-start;
+    width: auto;
+    margin: 4px 0 0;
+    gap: 6px;
+    padding: 6px 12px;
+}
+
+.passkeyAdmin .menu_button.passkeyAdmin-more {
+    align-self: center;
+    margin: 8px;
+}
+
+@media (max-width: 600px) {
+    .passkeyAdmin-tiles {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .passkeyAdmin-userRow {
+        grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) 1.2em;
+    }
+
+    .passkeyAdmin-userRow > span:nth-child(3) {
+        display: none;
+    }
 }

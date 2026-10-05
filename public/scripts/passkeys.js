@@ -1,4 +1,4 @@
-import { getRequestHeaders } from '../script.js';
+import { eventSource, event_types, getRequestHeaders } from '../script.js';
 import { POPUP_RESULT, POPUP_TYPE, Popup, callGenericPopup } from './popup.js';
 import { createPasskey, describePasskeyError, guessDeviceName, isHostCoveredBy, isPasskeySupported } from './util/webauthn.js';
 
@@ -8,7 +8,7 @@ import { createPasskey, describePasskeyError, guessDeviceName, isHostCoveredBy, 
  * any link to "#passkeys" (for example a button in an announcement).
  */
 
-/** @type {Promise<{enabled: boolean, rpId: string|null, max: number}>|null} */
+/** @type {Promise<{enabled: boolean, rpId: string|null, max?: number, allowRegistration?: boolean, showInSettings?: boolean, loginPrompt?: string, managerDescription?: string}>|null} */
 let configRequest = null;
 
 function loadPasskeyConfig() {
@@ -72,7 +72,7 @@ export async function openPasskeyManager() {
                 <i class="passkeyManager-heroIcon fa-solid fa-fingerprint"></i>
                 <div class="passkeyManager-heroText">
                     <b>通行密钥</b>
-                    <span>用指纹、面容或设备锁屏密码一键登录，不用再打开 Discord。</span>
+                    <span>${escapeHtml(config.managerDescription || '')}</span>
                 </div>
             </div>
             <div class="passkeyManager-notice" hidden></div>
@@ -99,6 +99,7 @@ export async function openPasskeyManager() {
     const notice = root.find('.passkeyManager-notice');
     let passkeys = [];
     let max = config.max;
+    let allowRegistration = config.allowRegistration !== false;
     let busy = false;
 
     const showNotice = (text, kind = 'warning') => {
@@ -106,17 +107,20 @@ export async function openPasskeyManager() {
     };
 
     const canAdd = isPasskeySupported() && isHostCoveredBy(config.rpId);
-    if (!isPasskeySupported()) {
+    if (!allowRegistration) {
+        showNotice('管理员暂时关闭了添加通行密钥，已添加的仍可正常登录。', 'info');
+    } else if (!isPasskeySupported()) {
         showNotice('当前浏览器不支持通行密钥。微信 / QQ 里打开的页面请改用系统浏览器（Safari、Chrome、Edge 等）。');
     } else if (!isHostCoveredBy(config.rpId)) {
         showNotice(`请从 ${config.rpId} 的网址打开本站后再添加通行密钥。`);
     }
 
     const render = () => {
+        const blocked = busy || !canAdd || !allowRegistration || passkeys.length >= max;
         count.text(`已添加 ${passkeys.length} / ${max}`);
-        addButton.prop('disabled', busy || !canAdd || passkeys.length >= max)
-            .toggleClass('disabled', busy || !canAdd || passkeys.length >= max)
-            .find('span').text(passkeys.length >= max ? `已达上限 ${max} 个` : busy ? '请在弹出的窗口中验证…' : '添加通行密钥');
+        addButton.prop('disabled', blocked)
+            .toggleClass('disabled', blocked)
+            .find('span').text(!allowRegistration ? '暂停添加' : passkeys.length >= max ? `已达上限 ${max} 个` : busy ? '请在弹出的窗口中验证…' : '添加通行密钥');
         if (!passkeys.length) {
             list.html(`
                 <div class="passkeyManager-empty">
@@ -142,6 +146,7 @@ export async function openPasskeyManager() {
             const data = await callPasskeyApi('list');
             passkeys = data.passkeys || [];
             max = data.max || max;
+            allowRegistration = data.allowRegistration !== false;
         } catch (error) {
             showNotice(`读取通行密钥失败：${error.message}`);
         }
@@ -149,7 +154,7 @@ export async function openPasskeyManager() {
     };
 
     addButton.on('click', async () => {
-        if (busy || !canAdd || passkeys.length >= max) return;
+        if (busy || !canAdd || !allowRegistration || passkeys.length >= max) return;
         busy = true;
         render();
         try {
@@ -211,11 +216,58 @@ export async function openPasskeyManager() {
     await shown;
 }
 
+const PROMPT_INTERVALS = { once: Infinity, weekly: 7 * 24 * 60 * 60 * 1000 };
+
+/**
+ * Once the app is ready, suggests adding a passkey to a user who has none, as
+ * often as the administrator chose ("once" or "weekly" per user and browser).
+ * @param {object} config Passkey config
+ * @param {() => string|null} getHandle Current user's handle
+ */
+function schedulePasskeyPrompt(config, getHandle) {
+    const interval = PROMPT_INTERVALS[config.loginPrompt];
+    if (!interval || !config.allowRegistration || !isPasskeySupported() || !isHostCoveredBy(config.rpId)) {
+        return;
+    }
+    const handler = async () => {
+        eventSource.removeListener(event_types.APP_READY, handler);
+        const handle = getHandle();
+        if (!handle) return;
+        const key = `passkeyPromptAt:${handle}`;
+        let last = 0;
+        try {
+            last = Number(localStorage.getItem(key)) || 0;
+        } catch {
+            return;
+        }
+        if (last && (interval === Infinity || Date.now() - last < interval)) return;
+        try {
+            const data = await callPasskeyApi('list');
+            if ((data.passkeys || []).length > 0) return;
+        } catch {
+            return;
+        }
+        try {
+            localStorage.setItem(key, String(Date.now()));
+        } catch {
+            // Shown anyway; it may come back next time.
+        }
+        toastr.info('添加一个通行密钥，下次用指纹或面容一键登录。点这里设置', '通行密钥', {
+            timeOut: 15000,
+            extendedTimeOut: 5000,
+            closeButton: true,
+            onclick: () => void openPasskeyManager(),
+        });
+    };
+    eventSource.on(event_types.APP_READY, handler);
+}
+
 /**
  * Shows the passkey button in the user settings when passkeys are on, and lets
  * links to "#passkeys" open the passkey settings.
+ * @param {{getHandle?: () => string|null}} [options] Options
  */
-export function initPasskeys() {
+export function initPasskeys({ getHandle = () => null } = {}) {
     $(document).on('click', 'a[href="#passkeys"]', function (event) {
         event.preventDefault();
         // From the announcements: close them first, the settings take over from there.
@@ -226,6 +278,7 @@ export function initPasskeys() {
     });
     $('#passkeys_button').on('click', () => void openPasskeyManager());
     void loadPasskeyConfig().then(config => {
-        $('#passkeys_button').toggle(Boolean(config.enabled));
+        $('#passkeys_button').toggle(Boolean(config.enabled && config.showInSettings !== false));
+        if (config.enabled) schedulePasskeyPrompt(config, getHandle);
     });
 }

@@ -23,7 +23,8 @@ globalThis.DATA_ROOT = path.join(testRoot, 'data');
 fs.mkdirSync(globalThis.DATA_ROOT, { recursive: true });
 
 const { initUserStorage, toKey } = await import('../src/users.js');
-const { publicRouter, router, MAX_PASSKEYS } = await import('../src/endpoints/passkeys.js');
+const { adminRouter, publicRouter, router } = await import('../src/endpoints/passkeys.js');
+const MAX_PASSKEYS = 10;
 const { default: systemMonitor } = await import('../src/system-monitor.js');
 await initUserStorage(globalThis.DATA_ROOT);
 
@@ -32,10 +33,11 @@ app.use(express.json());
 app.use(cookieSession({ name: 'session', keys: ['test-secret'] }));
 app.use((request, _response, next) => {
     const handle = request.get('x-test-user');
-    if (handle) request.user = { profile: { handle } };
+    if (handle) request.user = { profile: { handle, admin: request.get('x-test-admin') === '1' } };
     next();
 });
 app.use('/api/passkeys', publicRouter);
+app.use('/api/passkeys/admin', adminRouter);
 app.use('/api/passkeys', router);
 const server = await new Promise(resolve => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); });
 const baseUrl = `http://127.0.0.1:${server.address().port}/api/passkeys`;
@@ -47,10 +49,10 @@ after(async () => {
     fs.rmSync(testRoot, { recursive: true, force: true });
 });
 
-async function call(route, { body, user, cookie } = {}) {
+async function call(route, { body, user, cookie, admin = false } = {}) {
     const response = await fetch(`${baseUrl}${route}`, {
         method: body === undefined ? 'GET' : 'POST',
-        headers: { 'content-type': 'application/json', ...(user ? { 'x-test-user': user } : {}), ...(cookie ? { cookie } : {}) },
+        headers: { 'content-type': 'application/json', ...(user ? { 'x-test-user': user } : {}), ...(admin ? { 'x-test-admin': '1' } : {}), ...(cookie ? { cookie } : {}) },
         body: body === undefined ? undefined : JSON.stringify(body),
     });
     const cookies = response.headers.getSetCookie().map(c => c.split(';')[0]).join('; ');
@@ -59,7 +61,10 @@ async function call(route, { body, user, cookie } = {}) {
 
 test('config and sign-in options are public; a sign-in needs the challenge it was given', async () => {
     const configResponse = await call('/config');
-    assert.deepEqual(configResponse.body, { enabled: true, rpId: 'example.test', max: MAX_PASSKEYS });
+    assert.equal(configResponse.body.enabled, true);
+    assert.equal(configResponse.body.rpId, 'example.test');
+    assert.equal(configResponse.body.max, MAX_PASSKEYS);
+    assert.equal(configResponse.body.loginButtonText, '通行密钥登录');
 
     const options = await call('/login/options', { body: {} });
     assert.equal(options.status, 200);
@@ -98,4 +103,37 @@ test('management needs a signed-in user and stops at the limit', async () => {
     assert.equal(removed.body.passkeys.length, MAX_PASSKEYS - 1);
     assert.equal((await call('/delete', { body: { id: 'missing' }, user: 'alice' })).status, 404);
     assert.equal((await call('/list', { user: 'alice' })).body.passkeys.length, MAX_PASSKEYS - 1);
+});
+
+test('administrators tune passkeys and manage what users added', async () => {
+    assert.equal((await call('/admin/overview', { user: 'alice' })).status, 403);
+
+    const overview = await call('/admin/overview', { user: 'root', admin: true });
+    assert.equal(overview.status, 200);
+    assert.equal(overview.body.status.enabled, true);
+    assert.equal(overview.body.summary.users, 1);
+    assert.equal(overview.body.users[0].handle, 'alice');
+
+    const saved = await call('/admin/settings', { user: 'root', admin: true, body: { settings: { ...overview.body.settings, maxPerUser: 3, allowRegistration: false, loginButtonText: '  指纹登录  ', loginPrompt: 'weekly', userVerification: 'bogus' } } });
+    assert.equal(saved.body.settings.maxPerUser, 3);
+    assert.equal(saved.body.settings.loginButtonText, '指纹登录');
+    assert.equal(saved.body.settings.userVerification, 'preferred');
+    const publicConfig = (await call('/config')).body;
+    assert.equal(publicConfig.max, 3);
+    assert.equal(publicConfig.allowRegistration, false);
+    assert.equal(publicConfig.loginPrompt, 'weekly');
+    assert.equal((await call('/register/options', { body: {}, user: 'alice' })).body.code, 'registration_disabled');
+
+    const removedOne = await call('/admin/delete', { user: 'root', admin: true, body: { handle: 'alice', id: 'id-5' } });
+    assert.equal(removedOne.body.passkeys.length, MAX_PASSKEYS - 2);
+    const cleared = await call('/admin/delete', { user: 'root', admin: true, body: { handle: 'alice', all: true } });
+    assert.equal(cleared.body.passkeys.length, 0);
+    assert.equal((await call('/admin/delete', { user: 'root', admin: true, body: { handle: 'alice', all: true } })).status, 404);
+
+    // Switched off: the public side goes quiet, the admin side keeps working.
+    await call('/admin/settings', { user: 'root', admin: true, body: { settings: { ...saved.body.settings, enabled: false } } });
+    assert.deepEqual((await call('/config')).body, { enabled: false, rpId: null });
+    assert.equal((await call('/login/options', { body: {} })).status, 404);
+    assert.equal((await call('/list', { user: 'alice' })).status, 404);
+    assert.equal((await call('/admin/overview', { user: 'root', admin: true })).body.status.enabled, false);
 });

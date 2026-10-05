@@ -8,7 +8,7 @@ import { registerKeeperServer, requestListenHandle } from './keeper-worker.js';
 // Express routers
 import { router as userDataRouter } from './users.js';
 import { router as usersPrivateRouter } from './endpoints/users-private.js';
-import { router as passkeysRouter } from './endpoints/passkeys.js';
+import { adminRouter as passkeysAdminRouter, router as passkeysRouter } from './endpoints/passkeys.js';
 import { router as usersAdminRouter } from './endpoints/users-admin.js';
 import { router as movingUIRouter } from './endpoints/moving-ui.js';
 import { router as imagesRouter } from './endpoints/images.js';
@@ -163,6 +163,7 @@ export function setupPrivateEndpoints(app) {
     app.use('/', userDataRouter);
     app.use('/api/users', usersPrivateRouter);
     app.use('/api/users', usersAdminRouter);
+    app.use('/api/passkeys/admin', passkeysAdminRouter);
     app.use('/api/passkeys', passkeysRouter);
     app.use('/api/moving-ui', movingUIRouter);
     app.use('/api/images', imagesRouter);
