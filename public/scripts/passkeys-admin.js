@@ -1,30 +1,35 @@
-// 管理员面板：通行密钥
+// 管理员面板：通行密钥（紧凑布局：设置一屏放下，用户列表在自己的框里滚动）
 import { getRequestHeaders } from '../script.js';
 import { POPUP_RESULT, POPUP_TYPE, callGenericPopup } from './popup.js';
 
 const SWITCHES = Object.freeze([
-    { key: 'enabled', title: '启用通行密钥', description: '关闭后登录页按钮和设置入口都会隐藏，也不能用通行密钥登录；用户已添加的通行密钥会保留，重新开启后可继续使用。' },
-    { key: 'allowRegistration', title: '允许用户添加新的通行密钥', description: '关闭后用户不能再添加，已添加的仍可登录。' },
-    { key: 'showOnLoginPage', title: '在登录页显示「通行密钥登录」按钮', description: '关闭后登录页不显示按钮（已有通行密钥也无法从登录页使用）。' },
-    { key: 'showInSettings', title: '在用户设置里显示「通行密钥」入口', description: '关闭后只能从公告里的 #passkeys 链接打开设置窗口。' },
+    { key: 'enabled', label: '启用通行密钥', title: '关闭后登录页按钮和设置入口都隐藏，也不能用通行密钥登录；已添加的保留，重新开启即可继续用。' },
+    { key: 'allowRegistration', label: '允许添加新的', title: '关闭后用户不能再添加，已添加的仍可登录。' },
+    { key: 'showOnLoginPage', label: '登录页显示按钮', title: '关闭后登录页不显示「通行密钥登录」。' },
+    { key: 'showInSettings', label: '用户设置显示入口', title: '关闭后只能从公告里的 #passkeys 链接打开。' },
 ]);
 
-const VERIFICATION = Object.freeze([
-    { value: 'preferred', label: '尽量验证', hint: '有指纹 / 面容 / 锁屏密码就验证，兼容不带验证的实体安全钥。' },
-    { value: 'required', label: '必须验证', hint: '每次都必须验证指纹、面容或锁屏密码，更安全；不支持验证的安全钥将无法使用。' },
-]);
-
-const PROMPTS = Object.freeze([
-    { value: 'off', label: '不提醒' },
-    { value: 'once', label: '提醒一次' },
-    { value: 'weekly', label: '每周提醒' },
+const SELECTS = Object.freeze([
+    {
+        key: 'loginPrompt', label: '进站提醒', title: '用户进站后，对还没添加通行密钥的人弹一条可关闭的小提示（按用户和浏览器计）。', options: [
+            ['off', '不提醒'],
+            ['once', '提醒一次'],
+            ['weekly', '每周提醒'],
+        ],
+    },
+    {
+        key: 'userVerification', label: '验证要求', title: '「必须验证」更安全，但不带指纹或 PIN 的实体安全钥将无法使用。', options: [
+            ['preferred', '尽量验证（兼容安全钥）'],
+            ['required', '必须验证指纹 / 面容 / 锁屏密码'],
+        ],
+    },
 ]);
 
 const TEXTS = Object.freeze([
-    { key: 'loginButtonText', label: '登录页按钮文字', max: 20, placeholder: '通行密钥登录' },
-    { key: 'loginHintText', label: '登录页按钮下方的说明（留空则不显示）', max: 80, placeholder: '' },
-    { key: 'managerDescription', label: '用户设置窗口顶部的说明', max: 120, placeholder: '', multiline: true },
-    { key: 'rpName', label: '站点名称（显示在系统密码管理器里，只影响之后新添加的）', max: 40, placeholder: 'SillyTavern' },
+    { key: 'loginButtonText', label: '按钮文字', title: '登录页「通行密钥登录」按钮上的文字（最多 20 字）', max: 20, placeholder: '通行密钥登录' },
+    { key: 'loginHintText', label: '按钮下方说明', title: '登录页按钮下方的小字说明，留空则不显示（最多 80 字）', max: 80, placeholder: '留空则不显示' },
+    { key: 'managerDescription', label: '设置窗口说明', title: '用户打开通行密钥设置时顶部的说明（最多 120 字）', max: 120, placeholder: '' },
+    { key: 'rpName', label: '站点名称', title: '显示在系统密码管理器里，只影响之后新添加的（最多 40 字）', max: 40, placeholder: 'SillyTavern' },
 ]);
 
 function element(tag, className, text) {
@@ -37,10 +42,10 @@ function element(tag, className, text) {
 function formatDate(timestamp) {
     if (!timestamp) return '—';
     const date = new Date(timestamp);
-    const today = new Date();
-    const time = `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
-    if (date.toDateString() === today.toDateString()) return `今天 ${time}`;
-    return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+    if (date.toDateString() === new Date().toDateString()) {
+        return `今天 ${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+    }
+    return `${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
 
 async function callAdminApi(path, body = undefined) {
@@ -54,138 +59,99 @@ async function callAdminApi(path, body = undefined) {
     return data;
 }
 
-function segmented(name, options) {
-    const group = element('div', 'backupLimits-segmented');
-    group.setAttribute('role', 'radiogroup');
-    for (const option of options) {
-        const label = element('label');
-        const input = element('input');
-        input.type = 'radio';
-        input.name = name;
-        input.value = option.value;
-        label.append(input, element('span', '', option.label));
-        group.append(label);
-    }
-    return group;
-}
-
-function card(icon, title, description) {
-    const node = element('section', 'backupLimits-card');
-    const head = element('div', 'backupLimits-cardHead');
-    const titles = element('div', 'backupLimits-cardTitles');
-    titles.append(element('h4', '', title));
-    if (description) titles.append(element('p', 'backupLimits-muted', description));
-    head.append(element('i', `fa-solid ${icon}`), titles);
-    node.append(head);
-    return node;
+function field(label, control, className = 'passkeyAdmin-field', title = '') {
+    const wrap = element('label', className);
+    if (title) wrap.title = title;
+    wrap.append(element('span', 'passkeyAdmin-fieldLabel', label), control);
+    return wrap;
 }
 
 function buildView(block) {
     const root = element('div', 'backupLimits passkeyAdmin');
 
-    const header = element('header', 'backupLimits-header');
-    const status = element('div', 'passkeyAdmin-status');
-    header.append(
-        element('h3', '', '通行密钥'),
-        element('p', 'backupLimits-muted', '让用户用指纹、面容或设备锁屏密码登录，不必每次走 Discord。通行密钥保存在各自账号里；这里的设置保存后立即生效，无需重启。'),
-        status,
-    );
+    // Title, state and save on one line.
+    const top = element('div', 'passkeyAdmin-top');
+    const status = element('span', 'passkeyAdmin-pill');
+    const saveStatus = element('span', 'backupLimits-status passkeyAdmin-saveStatus');
+    saveStatus.setAttribute('role', 'status');
+    const save = element('button', 'menu_button menu_button_icon passkeyAdmin-save');
+    save.type = 'button';
+    save.append(element('i', 'fa-fw fa-solid fa-floppy-disk'), element('span', '', '保存'));
+    const title = element('div', 'passkeyAdmin-title');
+    title.append(element('h3', '', '通行密钥'), status);
+    top.append(title, saveStatus, save);
 
-    const switchesCard = card('fa-toggle-on', '开关');
+    const settings = element('section', 'passkeyAdmin-panel');
     const switches = element('div', 'passkeyAdmin-switches');
     for (const item of SWITCHES) {
         const label = element('label', 'passkeyAdmin-switch');
+        label.title = item.title;
         const input = element('input');
         input.type = 'checkbox';
         input.dataset.setting = item.key;
-        const text = element('span', 'passkeyAdmin-switchText');
-        text.append(element('b', '', item.title), element('small', 'backupLimits-muted', item.description));
-        label.append(input, text);
+        label.append(input, element('span', '', item.label));
         switches.append(label);
     }
-    switchesCard.append(switches);
 
-    const rulesCard = card('fa-sliders', '规则');
-    const maxRow = element('label', 'backupLimits-perDay');
-    const maxInput = element('input', 'text_pole');
-    maxInput.type = 'number';
-    maxInput.min = '1';
-    maxInput.max = '50';
-    maxInput.step = '1';
-    maxInput.inputMode = 'numeric';
-    maxInput.dataset.setting = 'maxPerUser';
-    maxRow.append(element('span', '', '每人最多'), maxInput, element('span', '', '个（1–50）'));
-    const verification = segmented('passkeyVerification', VERIFICATION);
-    const verificationHint = element('p', 'backupLimits-note');
-    const prompts = segmented('passkeyPrompt', PROMPTS);
-    rulesCard.append(
-        maxRow,
-        element('h5', 'passkeyAdmin-label', '验证要求'), verification, verificationHint,
-        element('h5', 'passkeyAdmin-label', '登录后提醒还没添加的用户'), prompts,
-        element('p', 'backupLimits-note', '在用户进入酒馆后弹一条可关闭的小提示，点一下即可添加；同一用户在同一浏览器里按所选频率提醒。'),
-    );
+    const rules = element('div', 'passkeyAdmin-rules');
+    const max = element('input', 'text_pole');
+    max.type = 'number';
+    max.min = '1';
+    max.max = '50';
+    max.step = '1';
+    max.inputMode = 'numeric';
+    max.dataset.setting = 'maxPerUser';
+    rules.append(field('每人上限', max, 'passkeyAdmin-field passkeyAdmin-max', '每个用户最多能添加几个（1–50）'));
+    for (const item of SELECTS) {
+        const select = element('select', 'text_pole');
+        select.dataset.setting = item.key;
+        for (const [value, text] of item.options) {
+            const option = element('option', '', text);
+            option.value = value;
+            select.append(option);
+        }
+        rules.append(field(item.label, select, `passkeyAdmin-field passkeyAdmin-${item.key}`, item.title));
+    }
 
-    const textsCard = card('fa-pen-to-square', '文案');
-    const textFields = element('div', 'passkeyAdmin-texts');
+    const texts = element('div', 'passkeyAdmin-texts');
     for (const item of TEXTS) {
-        const label = element('label', 'passkeyAdmin-field');
-        const input = element(item.multiline ? 'textarea' : 'input', 'text_pole');
-        if (!item.multiline) input.type = 'text';
-        else input.rows = 2;
+        const input = element('input', 'text_pole');
+        input.type = 'text';
         input.maxLength = item.max;
         input.placeholder = item.placeholder;
         input.dataset.setting = item.key;
-        const head = element('span', 'passkeyAdmin-fieldHead');
-        const counter = element('small', 'backupLimits-muted passkeyAdmin-counter');
-        head.append(element('span', '', item.label), counter);
-        label.append(head, input);
-        textFields.append(label);
+        texts.append(field(item.label, input, 'passkeyAdmin-field', item.title));
     }
-    const preview = element('div', 'passkeyAdmin-preview');
-    const previewButton = element('div', 'passkeyAdmin-previewButton');
-    previewButton.append(element('i', 'fa-solid fa-fingerprint'), element('span'));
-    const previewHint = element('small', 'passkeyAdmin-previewHint');
-    preview.append(element('span', 'backupLimits-muted', '登录页预览'), previewButton, previewHint);
-    textsCard.append(textFields, preview);
 
-    const domainCard = card('fa-globe', '域名（只读）', '通行密钥绑定在这个域名上。如需修改，请改 config.yaml 里的 passkeys.rpId / passkeys.origins 后重载；改动后已添加的通行密钥将全部失效。');
-    const domainInfo = element('div', 'passkeyAdmin-domain');
-    domainCard.append(domainInfo);
+    const foot = element('div', 'passkeyAdmin-foot');
+    const preview = element('span', 'passkeyAdmin-preview');
+    preview.title = '登录页按钮预览';
+    preview.append(element('i', 'fa-solid fa-fingerprint'), element('span'));
+    const domain = element('small', 'backupLimits-muted passkeyAdmin-domain');
+    foot.append(preview, domain);
 
-    const actions = element('div', 'backupLimits-actions');
-    const saveStatus = element('span', 'backupLimits-status');
-    saveStatus.setAttribute('role', 'status');
-    const save = element('button', 'menu_button menu_button_icon backupLimits-save');
-    save.type = 'button';
-    save.append(element('i', 'fa-fw fa-solid fa-floppy-disk'), element('span', '', '保存'));
-    actions.append(saveStatus, save);
+    settings.append(switches, rules, texts, foot);
 
-    const cards = element('div', 'passkeyAdmin-cards');
-    cards.append(switchesCard, rulesCard, textsCard, domainCard);
-
-    const usage = element('section', 'backupLimits-usage');
-    const usageHead = element('div', 'backupLimits-usageHead');
-    const refresh = element('button', 'menu_button menu_button_icon backupLimits-refresh');
+    // Usage.
+    const usage = element('section', 'passkeyAdmin-panel');
+    const usageHead = element('div', 'passkeyAdmin-usageHead');
+    const refresh = element('button', 'menu_button passkeyAdmin-iconButton');
     refresh.type = 'button';
-    refresh.append(element('i', 'fa-fw fa-solid fa-rotate'), element('span', '', '刷新'));
-    usageHead.append(element('h4', '', '使用情况'), refresh);
-    const tiles = element('div', 'backupLimits-tiles passkeyAdmin-tiles');
-    const days = element('div', 'backupLimits-table passkeyAdmin-days');
-    const providers = element('div', 'passkeyAdmin-providers');
-    const usersHead = element('div', 'passkeyAdmin-usersHead');
+    refresh.title = '刷新';
+    refresh.append(element('i', 'fa-fw fa-solid fa-rotate'));
     const search = element('input', 'text_pole passkeyAdmin-search');
     search.type = 'search';
-    search.placeholder = '搜索用户名 / 昵称';
-    usersHead.append(element('h5', 'backupLimits-subhead', '已添加通行密钥的用户'), search);
-    const users = element('div', 'backupLimits-table passkeyAdmin-users');
-    usage.append(usageHead, tiles,
-        element('h5', 'backupLimits-subhead', '最近 7 天'), days,
-        element('h5', 'backupLimits-subhead', '保存在哪里'), providers,
-        usersHead, users);
+    search.placeholder = '搜索用户';
+    usageHead.append(element('h4', '', '使用情况'), search, refresh);
+    const tiles = element('div', 'passkeyAdmin-tiles');
+    const days = element('div', 'passkeyAdmin-days');
+    const providers = element('div', 'passkeyAdmin-providers');
+    const users = element('div', 'passkeyAdmin-users');
+    usage.append(usageHead, tiles, days, providers, users);
 
-    root.append(header, cards, actions, usage);
+    root.append(top, settings, usage);
     block.replaceChildren(root);
-    return { root, status, maxInput, verification, verificationHint, prompts, previewButton, previewHint, domainInfo, saveStatus, save, refresh, tiles, days, providers, search, users };
+    return { root, status, saveStatus, save, preview, domain, refresh, search, tiles, days, providers, users };
 }
 
 function renderSettings(view, settings) {
@@ -194,113 +160,96 @@ function renderSettings(view, settings) {
         if (input.type === 'checkbox') input.checked = Boolean(settings[key]);
         else input.value = String(settings[key] ?? '');
     }
-    const check = (group, value) => {
-        const radio = group.querySelector(`input[value="${value}"]`);
-        if (radio) radio.checked = true;
-    };
-    check(view.verification, settings.userVerification);
-    check(view.prompts, settings.loginPrompt);
     syncDerived(view);
 }
 
 function readSettings(view) {
     const settings = {};
     for (const input of view.root.querySelectorAll('[data-setting]')) {
-        const key = input.dataset.setting;
-        settings[key] = input.type === 'checkbox' ? input.checked : input.value;
+        settings[input.dataset.setting] = input.type === 'checkbox' ? input.checked : input.value;
     }
     const max = Number(settings.maxPerUser);
     if (!Number.isInteger(max) || max < 1 || max > 50) {
         throw new Error('每人上限需要是 1 到 50 之间的整数');
     }
     settings.maxPerUser = max;
-    settings.userVerification = view.verification.querySelector('input:checked')?.value ?? 'preferred';
-    settings.loginPrompt = view.prompts.querySelector('input:checked')?.value ?? 'off';
     return settings;
 }
 
-/** Keeps the preview, counters and dependent switches in step with the form. */
 function syncDerived(view) {
     const value = key => view.root.querySelector(`[data-setting="${key}"]`);
-    view.previewButton.querySelector('span').textContent = value('loginButtonText').value.trim() || '通行密钥登录';
-    view.previewHint.textContent = value('loginHintText').value.trim();
-    view.previewHint.hidden = !view.previewHint.textContent;
-    for (const input of view.root.querySelectorAll('.passkeyAdmin-field [data-setting]')) {
-        input.closest('.passkeyAdmin-field').querySelector('.passkeyAdmin-counter').textContent = `${input.value.length} / ${input.maxLength}`;
-    }
+    view.preview.querySelector('span').textContent = value('loginButtonText').value.trim() || '通行密钥登录';
+    const hint = value('loginHintText').value.trim();
+    view.preview.title = hint ? `登录页按钮预览\n说明：${hint}` : '登录页按钮预览（不显示说明）';
     const enabled = value('enabled').checked;
     for (const key of ['allowRegistration', 'showOnLoginPage', 'showInSettings']) {
         value(key).closest('.passkeyAdmin-switch').classList.toggle('is-muted', !enabled);
     }
-    const verification = view.verification.querySelector('input:checked')?.value;
-    view.verificationHint.textContent = VERIFICATION.find(item => item.value === verification)?.hint ?? '';
 }
 
 function renderStatus(view, status, settings) {
     let state = 'on';
-    let text = '已开启：用户可以在登录页和用户设置里使用通行密钥。';
+    let text = '已开启';
+    let title = '用户可以在登录页和用户设置里使用通行密钥。';
     if (!status.accounts) {
         state = 'unavailable';
-        text = '不可用：本节点没有开启账号登录（enableUserAccounts）。';
+        text = '不可用';
+        title = '本节点没有开启账号登录（enableUserAccounts）。';
     } else if (status.stcontrol) {
         state = 'unavailable';
-        text = '不可用：本节点的登录由主控负责，通行密钥不会生效。';
+        text = '不可用：登录由主控负责';
+        title = '本节点的用户在主控登录，酒馆登录页的通行密钥不会生效。';
     } else if (!settings.enabled) {
         state = 'off';
-        text = '已关闭：登录页和用户设置里都不显示，已添加的通行密钥保留。';
+        text = '已关闭';
+        title = '登录页和用户设置里都不显示，已添加的通行密钥保留。';
     }
     view.status.dataset.state = state;
     view.status.textContent = text;
-
-    view.domainInfo.replaceChildren();
-    const rows = [
-        ['绑定域名', status.rpId + (status.rpIdFromConfig ? '' : '（未在 config.yaml 设置，使用访问时的主机名）')],
-        ['允许来源', (status.origins || []).join('，') + (status.originsFromConfig ? '' : '（未在 config.yaml 设置，使用访问时的地址）')],
-    ];
-    for (const [label, value] of rows) {
-        const row = element('div', 'passkeyAdmin-domainRow');
-        row.append(element('span', 'backupLimits-muted', label), element('code', '', value));
-        view.domainInfo.append(row);
-    }
+    view.status.title = title;
+    const origins = status.origins || [];
+    view.domain.textContent = `域名 ${status.rpId} · 来源 ${origins.map(origin => origin.replace(/^https?:\/\//, '')).join('、')}`;
+    view.domain.title = '在 config.yaml 的 passkeys.rpId / passkeys.origins 修改并重载；改动后已添加的通行密钥全部失效。';
 }
 
-function tile(label, value, unit, detail = '') {
-    const node = element('div', 'backupLimits-tile');
-    const number = element('b', '', String(value));
-    if (unit) number.append(element('small', '', unit));
-    node.append(element('span', '', label), number);
-    if (detail) node.append(element('span', 'backupLimits-tileDetail', detail));
+function tile(label, value, detail) {
+    const node = element('div', 'passkeyAdmin-tile');
+    node.append(element('b', '', String(value)), element('span', '', label));
+    node.title = detail;
+    const small = element('small', '', detail);
+    node.append(small);
     return node;
 }
 
 function renderUsage(view, data, state) {
     const { summary, stats } = data;
     view.tiles.replaceChildren(
-        tile('开通的用户', summary.users, '人', `近 7 天用过 ${summary.activeUsers7d} 人`),
-        tile('通行密钥', summary.passkeys, '个', `可同步 ${summary.synced} 个 · 近 7 天新增 ${summary.added7d}`),
-        tile('通行密钥登录', stats.total.logins, '次', `今天 ${stats.today.logins} 次 · 近 7 天`),
-        tile('登录失败', stats.total.failures, '次', '近 7 天（已删除或验证失败）'),
+        tile('开通用户', summary.users, `近 7 天用过 ${summary.activeUsers7d} 人`),
+        tile('通行密钥', summary.passkeys, `近 7 天新增 ${summary.added7d} · 可同步 ${summary.synced}`),
+        tile('近 7 天登录', stats.total.logins, `今天 ${stats.today.logins} 次`),
+        tile('近 7 天失败', stats.total.failures, '已删除或验证没通过'),
     );
 
-    const head = element('div', 'backupLimits-row backupLimits-rowHead');
-    head.append(element('span', '', '日期'), element('span', '', '登录'), element('span', '', '新增'), element('span', '', '失败'));
-    view.days.replaceChildren(head, ...stats.days.slice().reverse().map(day => {
-        const row = element('div', 'backupLimits-row');
-        row.append(element('span', '', day.date === stats.today.date ? `今天（${day.date.slice(5)}）` : day.date.slice(5)),
-            element('span', '', String(day.logins)), element('span', '', String(day.registrations)), element('span', '', String(day.failures)));
-        return row;
-    }));
+    // Seven days across, three short rows down.
+    const grid = element('div', 'passkeyAdmin-dayGrid');
+    grid.append(element('span', 'passkeyAdmin-dayHead'));
+    for (const day of stats.days) {
+        grid.append(element('span', 'passkeyAdmin-dayHead', day.date === stats.today.date ? '今天' : day.date.slice(5)));
+    }
+    for (const [key, label] of [['logins', '登录'], ['registrations', '新增'], ['failures', '失败']]) {
+        grid.append(element('span', 'passkeyAdmin-dayLabel', label));
+        for (const day of stats.days) {
+            const cell = element('span', 'passkeyAdmin-dayCell', String(day[key]));
+            if (!day[key]) cell.classList.add('is-zero');
+            grid.append(cell);
+        }
+    }
+    view.days.replaceChildren(grid);
 
-    const total = summary.providers.reduce((sum, item) => sum + item.count, 0);
-    view.providers.replaceChildren(...(summary.providers.length ? summary.providers.map(item => {
-        const row = element('div', 'passkeyAdmin-provider');
-        const bar = element('span', 'passkeyAdmin-bar');
-        const fill = element('span');
-        fill.style.width = `${Math.max(4, Math.round(item.count / total * 100))}%`;
-        bar.append(fill);
-        row.append(element('span', 'passkeyAdmin-providerName', item.name), bar, element('span', 'passkeyAdmin-providerCount', String(item.count)));
-        return row;
-    }) : [element('p', 'backupLimits-empty', '还没有人添加通行密钥')]));
+    view.providers.replaceChildren(...(summary.providers.length
+        ? summary.providers.map(item => element('span', 'passkeyAdmin-chip', `${item.name} ${item.count}`))
+        : []));
+    view.providers.hidden = !summary.providers.length;
 
     renderUsers(view, data.users, state);
 }
@@ -309,56 +258,47 @@ function renderUsers(view, users, state) {
     const query = view.search.value.trim().toLowerCase();
     const shown = users.filter(user => !query || user.handle.toLowerCase().includes(query) || String(user.name).toLowerCase().includes(query));
     if (!shown.length) {
-        view.users.replaceChildren(element('p', 'backupLimits-empty', users.length ? '没有匹配的用户' : '还没有人添加通行密钥'));
+        view.users.replaceChildren(element('p', 'passkeyAdmin-empty', users.length ? '没有匹配的用户' : '还没有人添加通行密钥'));
         return;
     }
-    const head = element('div', 'backupLimits-row backupLimits-rowHead passkeyAdmin-userRow');
-    head.append(element('span', '', '用户'), element('span', '', '数量'), element('span', '', '最近使用'), element('span'));
-    view.users.replaceChildren(head, ...shown.slice(0, state.limit).map(user => {
-        const wrap = element('div', 'passkeyAdmin-user');
-        const row = element('button', 'backupLimits-row passkeyAdmin-userRow');
-        row.type = 'button';
-        row.setAttribute('aria-expanded', String(state.open.has(user.handle)));
-        const who = element('span', 'backupLimits-handle');
+    const rows = shown.slice(0, state.limit).map(user => {
+        const row = element('div', 'passkeyAdmin-user');
+        const head = element('div', 'passkeyAdmin-userHead');
+        const who = element('span', 'passkeyAdmin-who');
         who.append(element('b', '', user.name));
-        if (user.name !== user.handle) who.append(element('small', 'backupLimits-muted', ` ${user.handle}`));
+        if (user.name !== user.handle) who.append(element('small', '', user.handle));
         if (user.admin) who.append(element('span', 'backupLimits-adminTag', '管理员'));
         if (!user.enabled) who.append(element('span', 'backupLimits-badge is-muted', '已禁用'));
-        row.append(who, element('span', '', `${user.passkeys.length} 个`), element('span', '', formatDate(user.lastUsedAt)), element('i', 'fa-solid fa-chevron-down passkeyAdmin-chevron'));
-        const details = element('div', 'passkeyAdmin-details');
-        details.hidden = !state.open.has(user.handle);
+        const meta = element('small', 'passkeyAdmin-userMeta', `${user.passkeys.length} 个 · 最近 ${formatDate(user.lastUsedAt)}`);
+        const clear = element('button', 'menu_button passkeyAdmin-iconButton passkeyAdmin-clear');
+        clear.type = 'button';
+        clear.title = '删除该用户的全部通行密钥';
+        clear.dataset.handle = user.handle;
+        clear.dataset.name = user.name;
+        clear.append(element('i', 'fa-fw fa-solid fa-user-slash'));
+        head.append(who, meta, clear);
+
+        const keys = element('div', 'passkeyAdmin-keys');
         for (const passkey of user.passkeys) {
-            const item = element('div', 'passkeyAdmin-key');
-            const text = element('span', 'passkeyAdmin-keyText');
-            text.append(element('b', '', passkey.name),
-                element('small', 'backupLimits-muted', `${passkey.provider ? passkey.provider + ' · ' : ''}添加于 ${formatDate(passkey.createdAt)} · ${passkey.lastUsedAt ? `上次使用 ${formatDate(passkey.lastUsedAt)}` : '还没用过'}${passkey.synced ? ' · 可同步' : ''}`));
-            const remove = element('button', 'menu_button passkeyAdmin-remove');
+            const chip = element('span', 'passkeyAdmin-key');
+            chip.title = `${passkey.provider ? passkey.provider + '\n' : ''}添加于 ${formatDate(passkey.createdAt)}\n${passkey.lastUsedAt ? `上次使用 ${formatDate(passkey.lastUsedAt)}` : '还没用过'}${passkey.synced ? '\n可同步' : ''}`;
+            chip.append(element('span', '', passkey.name), element('small', '', formatDate(passkey.lastUsedAt || passkey.createdAt)));
+            const remove = element('button', 'passkeyAdmin-remove');
             remove.type = 'button';
             remove.title = '删除这个通行密钥';
             remove.dataset.handle = user.handle;
             remove.dataset.id = passkey.id;
             remove.dataset.name = passkey.name;
-            remove.append(element('i', 'fa-solid fa-trash-can'));
-            item.append(text, remove);
-            details.append(item);
+            remove.append(element('i', 'fa-solid fa-xmark'));
+            chip.append(remove);
+            keys.append(chip);
         }
-        const clear = element('button', 'menu_button menu_button_icon passkeyAdmin-clear');
-        clear.type = 'button';
-        clear.dataset.handle = user.handle;
-        clear.dataset.name = user.name;
-        clear.append(element('i', 'fa-solid fa-user-slash'), element('span', '', '删除该用户的全部通行密钥'));
-        details.append(clear);
-        row.addEventListener('click', () => {
-            if (state.open.has(user.handle)) state.open.delete(user.handle);
-            else state.open.add(user.handle);
-            details.hidden = !state.open.has(user.handle);
-            row.setAttribute('aria-expanded', String(!details.hidden));
-        });
-        wrap.append(row, details);
-        return wrap;
-    }));
+        row.append(head, keys);
+        return row;
+    });
+    view.users.replaceChildren(...rows);
     if (shown.length > state.limit) {
-        const more = element('button', 'menu_button passkeyAdmin-more', `显示更多（还有 ${shown.length - state.limit} 人）`);
+        const more = element('button', 'menu_button passkeyAdmin-more', `再显示 50 人（共 ${shown.length} 人）`);
         more.type = 'button';
         more.addEventListener('click', () => {
             state.limit += 50;
@@ -380,7 +320,7 @@ export async function openPasskeysAdmin(block) {
         return;
     }
     const view = buildView(block);
-    const state = { open: new Set(), limit: 50, users: [] };
+    const state = { limit: 50, users: [] };
     let saved = null;
 
     const setStatus = (text, kind = '') => {
@@ -406,18 +346,17 @@ export async function openPasskeysAdmin(block) {
         }
     };
 
-    view.root.addEventListener('input', event => {
+    const onEdit = event => {
         if (event.target === view.search) {
             renderUsers(view, state.users, state);
             return;
         }
         syncDerived(view);
-        setStatus('有未保存的修改', 'dirty');
-    });
+        setStatus('未保存', 'dirty');
+    };
+    view.root.addEventListener('input', onEdit);
     view.root.addEventListener('change', event => {
-        if (event.target === view.search) return;
-        syncDerived(view);
-        setStatus('有未保存的修改', 'dirty');
+        if (event.target !== view.search) onEdit(event);
     });
 
     view.save.addEventListener('click', async () => {
@@ -438,7 +377,7 @@ export async function openPasskeysAdmin(block) {
             const data = await callAdminApi('settings', { settings });
             saved = data.settings;
             renderSettings(view, saved);
-            setStatus('已保存，立即生效', 'ok');
+            setStatus('已保存', 'ok');
             await load();
         } catch (error) {
             setStatus(`保存失败：${error.message}`, 'error');
@@ -451,19 +390,18 @@ export async function openPasskeysAdmin(block) {
     block.__passkeysAdminReload = load;
 
     view.users.addEventListener('click', async event => {
-        const remove = /** @type {HTMLElement} */ (event.target).closest('.passkeyAdmin-remove');
-        const clear = /** @type {HTMLElement} */ (event.target).closest('.passkeyAdmin-clear');
-        const target = remove || clear;
-        if (!target) return;
-        event.stopPropagation();
+        const target = /** @type {HTMLElement} */ (event.target).closest('.passkeyAdmin-remove, .passkeyAdmin-clear');
+        if (!(target instanceof HTMLElement)) return;
+        const all = target.classList.contains('passkeyAdmin-clear');
         const { handle, id, name } = target.dataset;
-        const message = remove
-            ? `<h3>删除「${$('<span>').text(name).html()}」？</h3><p>用户 ${$('<span>').text(handle).html()} 将不能再用这个通行密钥登录，其他登录方式不受影响。</p>`
-            : `<h3>删除 ${$('<span>').text(name).html()} 的全部通行密钥？</h3><p>适用于用户丢失设备等情况。删除后该用户只能用其他方式登录，之后可以重新添加。</p>`;
+        const escape = text => $('<span>').text(text).html();
+        const message = all
+            ? `<h3>删除 ${escape(name)} 的全部通行密钥？</h3><p>适用于用户丢失设备等情况。删除后该用户只能用其他方式登录，之后可以重新添加。</p>`
+            : `<h3>删除「${escape(name)}」？</h3><p>用户 ${escape(handle)} 将不能再用这个通行密钥登录，其他登录方式不受影响。</p>`;
         const confirmed = await callGenericPopup(message, POPUP_TYPE.CONFIRM, '', { okButton: '删除', cancelButton: '取消' });
         if (confirmed !== POPUP_RESULT.AFFIRMATIVE) return;
         try {
-            await callAdminApi('delete', remove ? { handle, id } : { handle, all: true });
+            await callAdminApi('delete', all ? { handle, all: true } : { handle, id });
             toastr.success('已删除', '通行密钥');
             await load();
         } catch (error) {
