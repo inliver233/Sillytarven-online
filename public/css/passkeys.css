@@ -491,6 +491,54 @@
     font-size: 0.76em;
 }
 
+.passkeyAdmin-recentHead {
+    font-size: 0.82em;
+    color: var(--bl-muted);
+    margin-bottom: 3px;
+}
+
+.passkeyAdmin-recentList {
+    max-height: min(30vh, 220px);
+    overflow-y: auto;
+    border: 1px solid var(--bl-border);
+    border-radius: 8px;
+    font-size: 0.82em;
+}
+
+.passkeyAdmin-recentRow {
+    display: grid;
+    grid-template-columns: 7.2em minmax(0, 1.2fr) minmax(0, 1fr);
+    gap: 8px;
+    padding: 4px 8px;
+    align-items: baseline;
+}
+
+.passkeyAdmin-recentRow + .passkeyAdmin-recentRow {
+    border-top: 1px solid var(--bl-border);
+}
+
+.passkeyAdmin-recentTime {
+    color: var(--bl-muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.passkeyAdmin-recentWho,
+.passkeyAdmin-recentWhat {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.passkeyAdmin-recentWhat {
+    color: var(--bl-muted);
+}
+
+.passkeyAdmin-recentRow.is-failed .passkeyAdmin-recentWhat {
+    color: #e5555f;
+}
+
 .passkeyAdmin-users {
     display: flex;
     flex-direction: column;
@@ -616,5 +664,13 @@
 
     .passkeyAdmin-tiles {
         grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .passkeyAdmin-recentRow {
+        grid-template-columns: 6.6em minmax(0, 1fr);
+    }
+
+    .passkeyAdmin-recentWhat {
+        grid-column: 2;
     }
 }

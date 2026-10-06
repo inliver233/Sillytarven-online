@@ -7,7 +7,7 @@ import { getConfigValue } from '../util.js';
 import { ensureUserDirectoriesExist, makeUserAccountPermanent, normalizeHandle, requireAdminMiddleware, toKey } from '../users.js';
 import { getStcontrolControllerUrl, isStcontrolEnabled } from '../stcontrol.js';
 import systemMonitor from '../system-monitor.js';
-import { getPasskeySettings, getPasskeyStats, recordPasskeyEvent, savePasskeySettings } from '../passkey-settings.js';
+import { getPasskeySettings, getPasskeyStats, getRecentPasskeyLogins, recordPasskeyEvent, recordPasskeyLogin, savePasskeySettings } from '../passkey-settings.js';
 
 /**
  * Passkeys (WebAuthn): a second way into an existing account, so people who
@@ -272,6 +272,8 @@ publicRouter.post('/login/verify', async (request, response) => {
         const passkey = getPasskeys(user).find(item => item.id === credential.id);
         if (!user || !passkey) {
             recordPasskeyEvent('failures');
+            // Only name an account that exists; the handle here is whatever the request claimed.
+            recordPasskeyLogin({ ok: false, reason: 'unknown_credential', handle: user?.handle, name: user?.name });
             return response.status(404).json({
                 error: '这个通行密钥已不能使用（可能已在账号中删除）。请用其他方式登录后重新添加。',
                 code: 'unknown_credential',
@@ -305,6 +307,7 @@ publicRouter.post('/login/verify', async (request, response) => {
         }
         if (!verification?.verified) {
             recordPasskeyEvent('failures');
+            recordPasskeyLogin({ ok: false, reason: 'verification_failed', handle: user.handle, name: user.name, passkeyName: passkey.name });
             const message = config.settings.userVerification === 'required'
                 ? '通行密钥验证失败：本站要求验证指纹、面容或锁屏密码，请再试一次'
                 : '通行密钥验证失败，请再试一次';
@@ -333,6 +336,7 @@ publicRouter.post('/login/verify', async (request, response) => {
         systemMonitor.recordUserLogin(user.handle, { userName: user.name });
         systemMonitor.updateUserActivity(user.handle, { userName: user.name, isHeartbeat: false });
         recordPasskeyEvent('logins');
+        recordPasskeyLogin({ ok: true, handle: user.handle, name: user.name, passkeyName: passkey.name });
         console.info('Passkey login successful:', user.handle, 'from', ip, 'at', new Date().toLocaleString());
         return response.json({ handle: user.handle });
     } catch (error) {
@@ -410,6 +414,7 @@ adminRouter.get('/overview', async (request, response) => {
                 providers: Object.entries(providers).sort((a, b) => b[1] - a[1]).map(([name, count]) => ({ name, count })),
             },
             stats: getPasskeyStats(7),
+            recentLogins: getRecentPasskeyLogins(),
             users,
         });
     } catch (error) {

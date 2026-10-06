@@ -9,8 +9,8 @@ import { canPersistSharedState, onActivate, onDrain } from './process-lifecycle.
 
 /**
  * Passkey rules and wording, set from the admin panel (`_global/passkey-settings.json`),
- * plus a small per-day count of passkey sign-ins and additions
- * (`_global/passkey-stats.json`, last STATS_DAYS days).
+ * plus a small per-day count of passkey sign-ins and additions and the last
+ * RECENT_LOGINS sign-in attempts (`_global/passkey-stats.json`, last STATS_DAYS days).
  *
  * Until an administrator saves the settings once, `passkeys.enabled` and
  * `passkeys.rpName` from config.yaml decide; the domain (`rpId`) and allowed
@@ -23,6 +23,7 @@ const SETTINGS_FILE = 'passkey-settings.json';
 const STATS_FILE = 'passkey-stats.json';
 const STATS_DAYS = 30;
 const STATS_WRITE_DELAY_MS = 5000;
+const RECENT_LOGINS = 100;
 
 export const MAX_PASSKEYS_LIMIT = 50;
 export const LOGIN_PROMPT_MODES = Object.freeze(['off', 'once', 'weekly']);
@@ -46,7 +47,16 @@ export const PASSKEY_SETTING_DEFAULTS = Object.freeze({
 
 /** @type {object|null} */
 let settingsCache = null;
-/** @type {{days: Record<string, {logins: number, registrations: number, failures: number}>}|null} */
+/**
+ * @typedef {object} PasskeyLoginEntry
+ * @property {number} at Time (ms)
+ * @property {boolean} ok Whether the sign-in succeeded
+ * @property {string} [handle] Account, when it exists
+ * @property {string} [name] Account display name
+ * @property {string} [passkeyName] Passkey used
+ * @property {string} [reason] Why it failed
+ */
+/** @type {{days: Record<string, {logins: number, registrations: number, failures: number}>, recent: PasskeyLoginEntry[]}|null} */
 let statsCache = null;
 let statsTimer = null;
 
@@ -143,7 +153,10 @@ export function savePasskeySettings(raw) {
 function loadStats() {
     if (!statsCache) {
         const stored = readJson(STATS_FILE);
-        statsCache = { days: stored?.days && typeof stored.days === 'object' ? stored.days : {} };
+        statsCache = {
+            days: stored?.days && typeof stored.days === 'object' ? stored.days : {},
+            recent: Array.isArray(stored?.recent) ? stored.recent.slice(-RECENT_LOGINS) : [],
+        };
     }
     return statsCache;
 }
@@ -176,6 +189,33 @@ export function recordPasskeyEvent(kind) {
     }
     statsTimer ??= setTimeout(flushStats, STATS_WRITE_DELAY_MS);
     statsTimer.unref?.();
+}
+
+/**
+ * Remembers one sign-in attempt for the admin panel (newest RECENT_LOGINS kept).
+ * @param {{ok: boolean, handle?: string, name?: string, passkeyName?: string, reason?: string}} entry Attempt
+ */
+export function recordPasskeyLogin(entry) {
+    const stats = loadStats();
+    const clean = (value, max) => typeof value === 'string' && value ? value.slice(0, max) : undefined;
+    stats.recent.push({
+        at: Date.now(),
+        ok: Boolean(entry.ok),
+        handle: clean(entry.handle, 64),
+        name: clean(entry.name, 64),
+        passkeyName: clean(entry.passkeyName, 64),
+        reason: clean(entry.reason, 32),
+    });
+    if (stats.recent.length > RECENT_LOGINS) stats.recent.splice(0, stats.recent.length - RECENT_LOGINS);
+    statsTimer ??= setTimeout(flushStats, STATS_WRITE_DELAY_MS);
+    statsTimer.unref?.();
+}
+
+/**
+ * @returns {PasskeyLoginEntry[]} Recent sign-in attempts, newest first
+ */
+export function getRecentPasskeyLogins() {
+    return [...loadStats().recent].reverse();
 }
 
 /**

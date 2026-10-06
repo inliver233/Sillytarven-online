@@ -146,12 +146,13 @@ function buildView(block) {
     const tiles = element('div', 'passkeyAdmin-tiles');
     const days = element('div', 'passkeyAdmin-days');
     const providers = element('div', 'passkeyAdmin-providers');
+    const recent = element('div', 'passkeyAdmin-recent');
     const users = element('div', 'passkeyAdmin-users');
-    usage.append(usageHead, tiles, days, providers, users);
+    usage.append(usageHead, tiles, days, providers, recent, users);
 
     root.append(top, settings, usage);
     block.replaceChildren(root);
-    return { root, status, saveStatus, save, preview, domain, refresh, search, tiles, days, providers, users };
+    return { root, status, saveStatus, save, preview, domain, refresh, search, tiles, days, providers, recent, users };
 }
 
 function renderSettings(view, settings) {
@@ -212,6 +213,44 @@ function renderStatus(view, status, settings) {
     view.domain.title = '在 config.yaml 的 passkeys.rpId / passkeys.origins 修改并重载；改动后已添加的通行密钥全部失效。';
 }
 
+const LOGIN_FAILURES = Object.freeze({
+    unknown_credential: '密钥已删除或不属于本站',
+    verification_failed: '验证没通过',
+});
+
+function formatTime(timestamp) {
+    const date = new Date(timestamp);
+    const time = `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+    if (date.toDateString() === new Date().toDateString()) return `今天 ${time}`;
+    return `${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')} ${time}`;
+}
+
+/** Who signed in with a passkey and when (the search box filters it too). */
+function renderRecent(view, entries) {
+    const query = view.search.value.trim().toLowerCase();
+    const shown = entries.filter(entry => !query || String(entry.handle || '').toLowerCase().includes(query) || String(entry.name || '').toLowerCase().includes(query));
+    view.recent.hidden = !entries.length;
+    if (!entries.length) {
+        view.recent.replaceChildren();
+        return;
+    }
+    const list = element('div', 'passkeyAdmin-recentList');
+    for (const entry of shown) {
+        const who = entry.handle
+            ? (entry.name && entry.name !== entry.handle ? `${entry.name}（${entry.handle}）` : entry.handle)
+            : '未知账号';
+        const what = entry.ok
+            ? (entry.passkeyName || '通行密钥')
+            : `失败：${LOGIN_FAILURES[entry.reason] || '验证没通过'}${entry.passkeyName ? ` · ${entry.passkeyName}` : ''}`;
+        const row = element('div', `passkeyAdmin-recentRow${entry.ok ? '' : ' is-failed'}`);
+        row.append(element('span', 'passkeyAdmin-recentTime', formatTime(entry.at)), element('span', 'passkeyAdmin-recentWho', who), element('span', 'passkeyAdmin-recentWhat', what));
+        row.title = `${new Date(entry.at).toLocaleString()} · ${who} · ${what}`;
+        list.append(row);
+    }
+    if (!shown.length) list.append(element('div', 'passkeyAdmin-empty', '没有匹配的登录记录'));
+    view.recent.replaceChildren(element('div', 'passkeyAdmin-recentHead', `最近登录（最近 ${entries.length} 次）`), list);
+}
+
 function tile(label, value, detail) {
     const node = element('div', 'passkeyAdmin-tile');
     node.append(element('b', '', String(value)), element('span', '', label));
@@ -251,6 +290,8 @@ function renderUsage(view, data, state) {
         : []));
     view.providers.hidden = !summary.providers.length;
 
+    state.recent = data.recentLogins || [];
+    renderRecent(view, state.recent);
     renderUsers(view, data.users, state);
 }
 
@@ -348,6 +389,7 @@ export async function openPasskeysAdmin(block) {
 
     const onEdit = event => {
         if (event.target === view.search) {
+            renderRecent(view, state.recent || []);
             renderUsers(view, state.users, state);
             return;
         }

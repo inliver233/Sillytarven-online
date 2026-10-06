@@ -114,6 +114,12 @@ test('administrators tune passkeys and manage what users added', async () => {
     assert.equal(overview.body.status.enabled, true);
     assert.equal(overview.body.summary.users, 1);
     assert.equal(overview.body.users[0].handle, 'alice');
+    // The failed sign-in from the first test is listed, without the account it merely claimed.
+    const [attempt] = overview.body.recentLogins;
+    assert.equal(attempt.ok, false);
+    assert.equal(attempt.reason, 'unknown_credential');
+    assert.equal(attempt.handle, undefined);
+    assert.ok(Math.abs(attempt.at - Date.now()) < 60_000);
 
     const saved = await call('/admin/settings', { user: 'root', admin: true, body: { settings: { ...overview.body.settings, maxPerUser: 3, allowRegistration: false, loginButtonText: '  指纹登录  ', loginPrompt: 'weekly', userVerification: 'bogus' } } });
     assert.equal(saved.body.settings.maxPerUser, 3);
