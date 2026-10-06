@@ -237,6 +237,9 @@ performance:
     signatureTtlMs: 5000
     maxEntries: 100
     maxBytes: 104857600
+    # Browsers keep the cards they downloaded and fetch only cards whose file changed since.
+    # Set to false to always send the full list.
+    browserCopies: true
   # Asynchronously build and retain complete per-user /api/settings/get payloads.
   settingsCache:
     enabled: true

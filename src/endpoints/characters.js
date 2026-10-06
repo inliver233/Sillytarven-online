@@ -29,6 +29,7 @@ import { canConsumeStorage } from '../storage-quota.js';
 import { beginEndpointPerformance } from '../performance-monitor.js';
 import { detectImageFormat } from '../media-validation.js';
 import { CharacterListCache, invalidateCharacterListCache, registerCharacterListCache } from '../character-list-cache.js';
+import { buildCharacterListDelta, CHARACTER_LIST_DELTA_TYPE, readKnownVersions, VOLATILE_CHARACTER } from '../character-list-delta.js';
 import { ArchiveReadError } from '../bounded-zip.js';
 import { FileTransaction } from '../file-transaction.js';
 import { KeyedMutex } from '../keyed-mutex.js';
@@ -50,6 +51,7 @@ const characterListCache = new CharacterListCache({
     maxBytes: getConfigValue('performance.characterListCache.maxBytes', 100 * 1024 * 1024, 'number'),
 });
 registerCharacterListCache(characterListCache);
+const sendCharacterListDeltas = getConfigValue('performance.characterListCache.browserCopies', true, 'boolean');
 const chatDirStatsCache = new Map();
 const characterImportMutex = new KeyedMutex();
 const CHARACTER_SIZE_OVERHEAD = 2048;
@@ -690,9 +692,15 @@ const processCharacter = async (item, directories, { shallow, cacheObserver = nu
         const imgData = await readCharacterData(imgFile, 'png', cacheObserver);
         if (imgData === undefined) throw new Error('Failed to read character file');
 
-        let jsonObject = getCharaCardV2(JSON.parse(imgData), directories, false);
+        const parsedCard = JSON.parse(imgData);
+        // A card with no saved chat name gets a fresh one on every read (convertToV2 / readFromV2).
+        const isVolatile = parsedCard?.chat === undefined || parsedCard?.chat === null;
+        let jsonObject = getCharaCardV2(parsedCard, directories, false);
         jsonObject.avatar = item;
         const character = jsonObject;
+        if (isVolatile) {
+            character[VOLATILE_CHARACTER] = true;
+        }
         character['json_data'] = imgData;
         const charStat = fs.statSync(path.join(directories.characters, item));
         character['date_added'] = charStat.ctimeMs;
@@ -1718,6 +1726,16 @@ router.post('/all', async function (request, response) {
         performanceTimer.setCounter('returned', result.characters.length);
         performanceTimer.setCacheState(result.state === 'miss' ? 'miss' : 'hit');
         performanceTimer.startPhase('serialize');
+        // The browser holds earlier copies: send only the cards that changed (see character-list-delta.js).
+        const known = useShallowCharacters || !sendCharacterListDeltas ? null : readKnownVersions(request.body);
+        if (known) {
+            const delta = buildCharacterListDelta(result.characters, result.fileStats, request.user.profile.handle, known);
+            performanceTimer.setCounter('delta-sent', delta.sent);
+            performanceTimer.setCounter('delta-reused', delta.reused);
+            response.setHeader('Content-Type', CHARACTER_LIST_DELTA_TYPE);
+            response.setHeader('Cache-Control', 'no-store');
+            return response.send(delta.body);
+        }
         return response.send(result.characters);
     } catch (err) {
         console.error(err);

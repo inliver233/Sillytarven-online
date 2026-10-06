@@ -7,6 +7,14 @@ import { BoundedCache } from './bounded-cache.js';
 import { mapWithConcurrency } from './concurrency.js';
 
 /**
+ * @typedef {object} CharacterFileStats
+ * @property {number} size File size
+ * @property {number} mtimeMs Last content change
+ * @property {number} ctimeMs Last inode change (also moves on restore, rename and replace)
+ * @property {number} ino Inode number
+ */
+
+/**
  * Builds and caches complete per-user character lists without returning placeholder data.
  */
 export class CharacterListCache {
@@ -47,7 +55,7 @@ export class CharacterListCache {
      * @param {string} options.directory Character PNG directory
      * @param {boolean} options.shallow Current response mode
      * @param {(fileName: string) => Promise<object>} options.loadCharacter Existing compatible card loader
-     * @returns {Promise<{characters: object[], state: 'hit'|'miss'|'shared', fileCount: number, failures: number, maxCharacterMs: number, concurrency: number}>}
+     * @returns {Promise<{characters: object[], state: 'hit'|'miss'|'shared', fileCount: number, failures: number, maxCharacterMs: number, concurrency: number, fileStats: Map<string, CharacterFileStats>}>}
      */
     async get({ userKey, directory, shallow, loadCharacter }) {
         const trustedKey = String(userKey);
@@ -88,6 +96,7 @@ export class CharacterListCache {
             state: result.state,
             fileCount: signature.files.length,
             concurrency: Math.min(this.concurrency, Math.max(0, signature.files.length)),
+            fileStats: signature.fileStats,
         };
     }
 
@@ -163,7 +172,7 @@ export class CharacterListCache {
         const records = await mapWithConcurrency(pngFiles, this.concurrency, async fileName => {
             try {
                 const stats = await fs.promises.stat(path.join(directory, fileName));
-                return { fileName, size: stats.size, mtimeMs: stats.mtimeMs };
+                return { fileName, size: stats.size, mtimeMs: stats.mtimeMs, ctimeMs: stats.ctimeMs, ino: stats.ino };
             } catch {
                 return null;
             }
@@ -178,6 +187,7 @@ export class CharacterListCache {
         const result = {
             value,
             files: validRecords.map(record => record.fileName),
+            fileStats: new Map(validRecords.map(({ fileName, ...stats }) => [fileName, Object.freeze(stats)])),
             directoryMtimeMs: directoryStats.mtimeMs,
             checkedAt: this.now(),
         };

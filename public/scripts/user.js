@@ -4,6 +4,7 @@ import { renderTemplateAsync } from './templates.js';
 import { ensureImageFormatSupported, getBase64Async, humanFileSize } from './utils.js';
 import './user-heartbeat.js';
 import { initPasskeys } from './passkeys.js';
+import { clearCharacterListStore } from './util/character-list-store.js';
 
 /**
  * @type {import('../../src/users.js').UserViewModel} Logged in user
@@ -2305,6 +2306,7 @@ async function logout() {
         if (typeof window.userHeartbeat !== 'undefined' && window.userHeartbeat.stop) {
             window.userHeartbeat.stop();
         }
+        await clearCharacterListStore(getCurrentUserHandle());
 
         // 发送登出请求
     await fetch('/api/users/logout', {
