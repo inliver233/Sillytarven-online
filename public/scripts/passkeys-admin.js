@@ -197,8 +197,8 @@ function renderStatus(view, status, settings) {
         title = '本节点没有开启账号登录（enableUserAccounts）。';
     } else if (status.stcontrol) {
         state = 'unavailable';
-        text = '不可用：登录由主控负责';
-        title = '本节点的用户在主控登录，酒馆登录页的通行密钥不会生效。';
+        text = '由主控负责';
+        title = '本节点的用户在主控登录：通行密钥在主控后台「通行密钥」里开关和管理，主控开启后，用户设置里的通行密钥按钮会打开主控账号页。';
     } else if (!settings.enabled) {
         state = 'off';
         text = '已关闭';

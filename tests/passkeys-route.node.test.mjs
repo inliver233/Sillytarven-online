@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import http from 'node:http';
 import test, { after } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
@@ -10,7 +11,7 @@ import cookieSession from 'cookie-session';
 import storage from 'node-persist';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 
-import { setConfigFilePath } from '../src/util.js';
+import { keyToEnv, setConfigFilePath } from '../src/util.js';
 
 const testRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'st-passkeys-'));
 const configPath = path.join(testRoot, 'config.yaml');
@@ -23,7 +24,7 @@ globalThis.DATA_ROOT = path.join(testRoot, 'data');
 fs.mkdirSync(globalThis.DATA_ROOT, { recursive: true });
 
 const { initUserStorage, toKey } = await import('../src/users.js');
-const { adminRouter, publicRouter, router } = await import('../src/endpoints/passkeys.js');
+const { adminRouter, clearControllerPasskeysCache, publicRouter, router } = await import('../src/endpoints/passkeys.js');
 const MAX_PASSKEYS = 10;
 const { default: systemMonitor } = await import('../src/system-monitor.js');
 await initUserStorage(globalThis.DATA_ROOT);
@@ -136,4 +137,43 @@ test('administrators tune passkeys and manage what users added', async () => {
     assert.equal((await call('/login/options', { body: {} })).status, 404);
     assert.equal((await call('/list', { user: 'alice' })).status, 404);
     assert.equal((await call('/admin/overview', { user: 'root', admin: true })).body.status.enabled, false);
+});
+
+test('a node managed by the Controller sends passkey buttons to the Controller account page', async () => {
+    const state = { enabled: true, fail: false, hits: 0 };
+    const controller = http.createServer((request, response) => {
+        state.hits++;
+        if (state.fail || request.url !== '/api/auth/passkey/config') {
+            response.writeHead(500).end();
+            return;
+        }
+        response.setHeader('content-type', 'application/json');
+        response.end(JSON.stringify({ enabled: state.enabled, login_enabled: state.enabled }));
+    });
+    await new Promise(resolve => controller.listen(0, '127.0.0.1', resolve));
+    const controllerUrl = `http://127.0.0.1:${controller.address().port}`;
+    process.env[keyToEnv('stcontrol.enabled')] = 'true';
+    process.env[keyToEnv('stcontrol.controllerUrl')] = `${controllerUrl}/`;
+    clearControllerPasskeysCache();
+    try {
+        const managed = await call('/config');
+        assert.deepEqual(managed.body, { enabled: false, rpId: null, managedBy: { enabled: true, url: `${controllerUrl}/account#passkeys` } });
+        await call('/config');
+        assert.equal(state.hits, 1, 'the Controller answer is cached');
+        // The tavern's own passkey sign-in stays off on a managed node.
+        assert.equal((await call('/login/options', { body: {} })).status, 404);
+
+        state.enabled = false;
+        clearControllerPasskeysCache();
+        assert.deepEqual((await call('/config')).body, { enabled: false, rpId: null });
+
+        state.fail = true;
+        clearControllerPasskeysCache();
+        assert.deepEqual((await call('/config')).body, { enabled: false, rpId: null }, 'an unreachable Controller hides the buttons');
+    } finally {
+        delete process.env[keyToEnv('stcontrol.enabled')];
+        delete process.env[keyToEnv('stcontrol.controllerUrl')];
+        clearControllerPasskeysCache();
+        await new Promise(resolve => controller.close(resolve));
+    }
 });

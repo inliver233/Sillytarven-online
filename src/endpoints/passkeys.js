@@ -5,7 +5,7 @@ import { RateLimiterMemory, RateLimiterRes } from 'rate-limiter-flexible';
 import { getIpFromRequest, getRealIpFromHeader } from '../express-common.js';
 import { getConfigValue } from '../util.js';
 import { ensureUserDirectoriesExist, makeUserAccountPermanent, normalizeHandle, requireAdminMiddleware, toKey } from '../users.js';
-import { isStcontrolEnabled } from '../stcontrol.js';
+import { getStcontrolControllerUrl, isStcontrolEnabled } from '../stcontrol.js';
 import systemMonitor from '../system-monitor.js';
 import { getPasskeySettings, getPasskeyStats, recordPasskeyEvent, savePasskeySettings } from '../passkey-settings.js';
 
@@ -164,14 +164,56 @@ async function changePasskeys(handle, change) {
     });
 }
 
+// ---------------------------------------------------------------- Controller-managed nodes
+
+const CONTROLLER_PASSKEYS_TTL_MS = 60_000;
+const CONTROLLER_PASSKEYS_RETRY_MS = 15_000;
+/** @type {{until: number, value: {enabled: boolean, url: string}|null, pending: Promise<{enabled: boolean, url: string}|null>|null}} */
+let controllerPasskeys = { until: 0, value: null, pending: null };
+
+/**
+ * On a node managed by the stcontrol Controller, sign-in and therefore passkeys
+ * belong to the Controller. Reports whether it has them switched on and where
+ * users manage them; cached briefly so pages never wait on the Controller.
+ * @returns {Promise<{enabled: boolean, url: string}|null>}
+ */
+export async function getControllerPasskeys() {
+    const base = getStcontrolControllerUrl();
+    if (!base) return null;
+    if (Date.now() < controllerPasskeys.until) return controllerPasskeys.value;
+    controllerPasskeys.pending ??= (async () => {
+        const url = `${base}/account#passkeys`;
+        try {
+            const response = await fetch(`${base}/api/auth/passkey/config`, { signal: AbortSignal.timeout(3000) });
+            const data = response.ok ? await response.json() : null;
+            const value = { enabled: Boolean(data?.enabled), url };
+            controllerPasskeys = { until: Date.now() + CONTROLLER_PASSKEYS_TTL_MS, value, pending: null };
+            return value;
+        } catch {
+            const value = { enabled: false, url };
+            controllerPasskeys = { until: Date.now() + CONTROLLER_PASSKEYS_RETRY_MS, value, pending: null };
+            return value;
+        }
+    })();
+    return controllerPasskeys.pending;
+}
+
+/** Forgets the Controller's passkey state (tests, configuration reloads). */
+export function clearControllerPasskeysCache() {
+    controllerPasskeys = { until: 0, value: null, pending: null };
+}
+
 // ---------------------------------------------------------------- sign-in (public)
 
 export const publicRouter = express.Router();
 
-publicRouter.get('/config', (request, response) => {
+publicRouter.get('/config', async (request, response) => {
     const config = getPasskeyConfig(request);
     if (!config.enabled) {
-        return response.json({ enabled: false, rpId: null });
+        const managedBy = isStcontrolEnabled() ? await getControllerPasskeys() : null;
+        return response.json(managedBy?.enabled
+            ? { enabled: false, rpId: null, managedBy }
+            : { enabled: false, rpId: null });
     }
     const { settings } = config;
     return response.json({

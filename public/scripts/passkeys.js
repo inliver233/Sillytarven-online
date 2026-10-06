@@ -8,8 +8,10 @@ import { createPasskey, describePasskeyError, guessDeviceName, isHostCoveredBy, 
  * any link to "#passkeys" (for example a button in an announcement).
  */
 
-/** @type {Promise<{enabled: boolean, rpId: string|null, max?: number, allowRegistration?: boolean, showInSettings?: boolean, loginPrompt?: string, managerDescription?: string}>|null} */
+/** @type {Promise<{enabled: boolean, rpId: string|null, max?: number, allowRegistration?: boolean, showInSettings?: boolean, loginPrompt?: string, managerDescription?: string, managedBy?: {enabled: boolean, url: string}}>|null} */
 let configRequest = null;
+/** The loaded config, so clicks can open the Controller page without waiting (popup blockers). */
+let loadedConfig = null;
 
 function loadPasskeyConfig() {
     configRequest ??= fetch('/api/passkeys/config')
@@ -17,8 +19,24 @@ function loadPasskeyConfig() {
         .catch(() => {
             configRequest = null;
             return { enabled: false };
+        })
+        .then(config => {
+            loadedConfig = config;
+            return config;
         });
     return configRequest;
+}
+
+/**
+ * On a node managed by the stcontrol Controller, passkeys live in the Controller
+ * account page; opens it in a new tab.
+ * @returns {boolean} Whether the Controller page was opened
+ */
+function openControllerPasskeys() {
+    const url = loadedConfig?.managedBy?.enabled ? loadedConfig.managedBy.url : '';
+    if (!url) return false;
+    window.open(url, '_blank', 'noopener');
+    return true;
 }
 
 async function callPasskeyApi(path, body = undefined) {
@@ -274,11 +292,13 @@ export function initPasskeys({ getHandle = () => null } = {}) {
         if ($(this).closest('#announcementsPopup').length) {
             $('#closeAnnouncementsPopup').trigger('click');
         }
-        void openPasskeyManager();
+        if (!openControllerPasskeys()) void openPasskeyManager();
     });
-    $('#passkeys_button').on('click', () => void openPasskeyManager());
+    $('#passkeys_button').on('click', () => {
+        if (!openControllerPasskeys()) void openPasskeyManager();
+    });
     void loadPasskeyConfig().then(config => {
-        $('#passkeys_button').toggle(Boolean(config.enabled && config.showInSettings !== false));
+        $('#passkeys_button').toggle(Boolean((config.enabled && config.showInSettings !== false) || config.managedBy?.enabled));
         if (config.enabled) schedulePasskeyPrompt(config, getHandle);
     });
 }
