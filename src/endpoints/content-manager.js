@@ -150,6 +150,52 @@ export function upgradeRetiredContent(contentItem, targetPath, retired = RETIRED
 }
 
 /**
+ * Built-in backgrounds are hard-linked into user folders instead of copied, so every
+ * user shares one copy on disk. Background files are never edited in place: uploads
+ * and renames refuse to overwrite (COPYFILE_EXCL), deletes unlink, and imports write a
+ * new file and rename it, so a shared file never changes under another user. The
+ * shared copies live in the data root, keyed by content, so replacing a file in
+ * default/content cannot reach users who already have the earlier version.
+ */
+const SHARED_BACKGROUNDS_FOLDER = path.join('_shared-content', 'backgrounds');
+
+/** @type {Map<string, string>} Built-in file path -> name of its shared copy */
+const sharedBackgroundNames = new Map();
+
+/**
+ * Hard-links a built-in background into a user's backgrounds folder.
+ * @param {string} contentPath Built-in file
+ * @param {string} targetPath Path in the user's folder
+ * @param {string} dataRoot Folder that holds the user folders
+ * @returns {boolean} Whether the user has the file now; false means it should be copied instead
+ */
+function linkSharedBackground(contentPath, targetPath, dataRoot) {
+    try {
+        let name = sharedBackgroundNames.get(contentPath);
+        if (!name) {
+            const hash = crypto.createHash('sha256').update(fs.readFileSync(contentPath)).digest('hex');
+            name = `${hash.slice(0, 16)}-${path.basename(contentPath)}`;
+            sharedBackgroundNames.set(contentPath, name);
+        }
+        const sharedPath = path.join(dataRoot, SHARED_BACKGROUNDS_FOLDER, name);
+        if (!fs.existsSync(sharedPath)) {
+            fs.mkdirSync(path.dirname(sharedPath), { recursive: true });
+            writeFileAtomicSync(sharedPath, fs.readFileSync(contentPath));
+        }
+        fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+        fs.linkSync(sharedPath, targetPath);
+        return true;
+    } catch (error) {
+        // The file appeared meanwhile. Never copy over it: it may be a link to the shared copy.
+        if (error?.code === 'EEXIST') {
+            return true;
+        }
+        // Another filesystem, no hard link support or too many links: copy as before.
+        return false;
+    }
+}
+
+/**
  * Seeds content for a user.
  * @param {ContentItem[]} contentIndex Content index
  * @param {import('../users.js').UserDirectoryList} directories User directories
@@ -208,10 +254,14 @@ async function seedContentForUser(contentIndex, directories, forceCategories) {
             continue;
         }
 
-        // fs.cpSync({recursive:true}) hard-crashes with non-ASCII paths on some Windows setups
-        safeCopySync(contentPath, targetPath);
+        if (contentItem.type === CONTENT_TYPES.BACKGROUND && linkSharedBackground(contentPath, targetPath, path.dirname(directories.root))) {
+            console.info(`Content file ${contentItem.filename} linked to ${contentTarget}`);
+        } else {
+            // fs.cpSync({recursive:true}) hard-crashes with non-ASCII paths on some Windows setups
+            safeCopySync(contentPath, targetPath);
+            console.info(`Content file ${contentItem.filename} copied to ${contentTarget}`);
+        }
         setPermissionsSync(targetPath);
-        console.info(`Content file ${contentItem.filename} copied to ${contentTarget}`);
         anyContentAdded = true;
     }
 
