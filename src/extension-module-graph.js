@@ -34,7 +34,9 @@ const resultCache = new Map();
 export function findRelativeImports(source) {
     const specifiers = new Set();
     for (const match of String(source).matchAll(RELATIVE_IMPORT_PATTERN)) {
-        specifiers.add(match[2]);
+        // A match is a slice that keeps the whole module source alive; the
+        // specifiers are cached, so store a copy instead.
+        specifiers.add(Buffer.from(match[2]).toString());
     }
     return [...specifiers];
 }
