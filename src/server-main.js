@@ -71,6 +71,7 @@ import {
 import { UPLOADS_DIRECTORY } from './constants.js';
 import { ensureThumbnailCache } from './endpoints/thumbnails.js';
 import systemMonitor from './system-monitor.js';
+import scheduledTasksManager from './scheduled-tasks.js';
 
 // Routers
 import { router as usersPublicRouter } from './endpoints/users-public.js';
@@ -528,6 +529,38 @@ let exitProcessRef = async (exitCode = 0) => process.exit(exitCode);
 async function preSetupTasks() {
     // Only the server samples load and keeps the monitor files; scripts importing the same modules do not.
     systemMonitor.start();
+
+    // Shutdown is set up before the slow startup work below, so a stop request at
+    // any point saves what is in memory before the process ends. This is the only
+    // place that ends the process on a signal; other modules just save or stop.
+    const consoleTitle = process.title;
+    /** @type {(() => Promise<void>)|null} */
+    let cleanupPlugins = null;
+    let isExiting = false;
+    const exitProcess = exitProcessRef = async (exitCode = 0) => {
+        if (isExiting) return;
+        isExiting = true;
+        scheduledTasksManager.stopAllTasks();
+        await statsOnExit();
+        if (typeof cleanupPlugins === 'function') {
+            await cleanupPlugins();
+        }
+        diskCache.dispose();
+        setWindowTitle(consoleTitle);
+        process.exit(exitCode);
+    };
+
+    // Set up event listeners for a graceful shutdown
+    // Signal listeners receive the signal name; never pass it on as an exit code.
+    // A second signal while shutting down ends the process at once.
+    const onStopSignal = () => (isExiting ? process.exit(0) : exitProcess(0));
+    process.on('SIGINT', onStopSignal);
+    process.on('SIGTERM', onStopSignal);
+    process.on('uncaughtException', (err) => {
+        console.error('Uncaught exception:', err);
+        exitProcess(1);
+    });
+
     const version = await getVersion();
 
     // Print formatted header
@@ -564,30 +597,7 @@ async function preSetupTasks() {
     }
 
     const pluginsDirectory = path.join(serverDirectory, 'plugins');
-    const cleanupPlugins = await loadPlugins(app, pluginsDirectory);
-    const consoleTitle = process.title;
-
-    let isExiting = false;
-    const exitProcess = exitProcessRef = async (exitCode = 0) => {
-        if (isExiting) return;
-        isExiting = true;
-        await statsOnExit();
-        if (typeof cleanupPlugins === 'function') {
-            await cleanupPlugins();
-        }
-        diskCache.dispose();
-        setWindowTitle(consoleTitle);
-        process.exit(exitCode);
-    };
-
-    // Set up event listeners for a graceful shutdown
-    // Signal listeners receive the signal name; never pass it on as an exit code.
-    process.on('SIGINT', () => exitProcess(0));
-    process.on('SIGTERM', () => exitProcess(0));
-    process.on('uncaughtException', (err) => {
-        console.error('Uncaught exception:', err);
-        exitProcess(1);
-    });
+    cleanupPlugins = await loadPlugins(app, pluginsDirectory);
 
     // Add request proxy.
     initRequestProxy({ enabled: cliArgs.requestProxyEnabled, url: cliArgs.requestProxyUrl, bypass: cliArgs.requestProxyBypass });

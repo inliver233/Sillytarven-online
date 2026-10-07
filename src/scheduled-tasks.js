@@ -270,19 +270,8 @@ const scheduledTasksManager = new ScheduledTasksManager();
 
 // Hot reload: the new server runs the tasks from now on.
 onDrain(() => scheduledTasksManager.stopAllTasks());
-
-// 进程退出时停止所有任务
-process.on('SIGINT', () => {
-    console.log('\n正在停止所有定时任务...');
-    scheduledTasksManager.stopAllTasks();
-    process.exit(0);
-});
-
-process.on('SIGTERM', () => {
-    console.log('\n正在停止所有定时任务...');
-    scheduledTasksManager.stopAllTasks();
-    process.exit(0);
-});
+// On shutdown the server stops the tasks before it exits (server-main.js). Exiting
+// here would cut short its saving of in-memory state.
 
 export default scheduledTasksManager;
 export { ScheduledTasksManager };
