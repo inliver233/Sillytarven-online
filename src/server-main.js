@@ -70,6 +70,7 @@ import {
 } from './util.js';
 import { UPLOADS_DIRECTORY } from './constants.js';
 import { ensureThumbnailCache } from './endpoints/thumbnails.js';
+import systemMonitor from './system-monitor.js';
 
 // Routers
 import { router as usersPublicRouter } from './endpoints/users-public.js';
@@ -525,6 +526,8 @@ let exitProcessRef = async (exitCode = 0) => process.exit(exitCode);
  * @returns {Promise<void>}
  */
 async function preSetupTasks() {
+    // Only the server samples load and keeps the monitor files; scripts importing the same modules do not.
+    systemMonitor.start();
     const version = await getVersion();
 
     // Print formatted header

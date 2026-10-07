@@ -1,6 +1,8 @@
 import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
+import { sync as writeFileAtomicSync } from 'write-file-atomic';
+
 import { canPersistSharedState, onActivate, onDrain } from './process-lifecycle.js';
 
 /**
@@ -24,6 +26,22 @@ class SystemMonitor {
         this.cpuUsageHistory = []; // CPU使用率历史，用于平滑处理
         this.maxCpuHistoryLength = 6; // 保存最近6次测量（30秒）
 
+        this.started = false;
+    }
+
+    /**
+     * Loads the saved numbers and starts sampling and saving. Only the server calls
+     * this. A script that merely imports this module (directly or through users.js)
+     * must not be kept alive by these timers, nor write the files it shares with the
+     * running server: a forgotten admin script once overwrote them with empty
+     * numbers every five minutes for weeks.
+     */
+    start() {
+        if (this.started) {
+            return;
+        }
+        this.started = true;
+
         // 数据持久化相关
         // Respect --dataRoot so secondary/test instances never read or write the
         // production monitor files merely because they share the same cwd.
@@ -37,6 +55,21 @@ class SystemMonitor {
 
         // 加载历史数据
         this.loadPersistedData();
+
+        // 进程退出时保存数据. Prepended: other modules' signal handlers end the
+        // process, so saving must come first. Exiting is left to them.
+        const saveOnSignal = () => {
+            console.log('\n正在保存系统监控数据...');
+            this.saveDataToDisk();
+        };
+        this.exitHandlers = {
+            SIGINT: saveOnSignal,
+            SIGTERM: saveOnSignal,
+            beforeExit: () => this.saveDataToDisk(),
+        };
+        for (const [event, handler] of Object.entries(this.exitHandlers)) {
+            process.prependListener(event, handler);
+        }
 
         // 定期更新系统负载
         this.updateInterval = setInterval(() => {
@@ -919,6 +952,9 @@ class SystemMonitor {
      * 加载持久化数据
      */
     loadPersistedData() {
+        if (!this.started) {
+            return;
+        }
         try {
             // 加载用户统计数据
             if (fs.existsSync(this.userStatsFile)) {
@@ -993,25 +1029,27 @@ class SystemMonitor {
      * 保存数据到磁盘
      */
     saveDataToDisk() {
-        // A server starting next to (or replaced by) another must not overwrite its numbers.
-        if (!canPersistSharedState()) {
+        // Only a started monitor owns the files, and a server starting next to (or
+        // replaced by) another must not overwrite its numbers.
+        if (!this.started || !canPersistSharedState()) {
             return;
         }
         try {
+            // Atomic writes: a server taking over reads these files and must never see half of one.
             // 保存用户统计数据
             const userStatsObj = Object.fromEntries(this.userLoadStats);
-            fs.writeFileSync(this.userStatsFile, JSON.stringify(userStatsObj));
+            writeFileAtomicSync(this.userStatsFile, JSON.stringify(userStatsObj));
 
             // 保存系统负载历史（只保存最近的记录）
             const recentHistory = this.systemLoadHistory.slice(-this.maxHistoryLength);
-            fs.writeFileSync(this.loadHistoryFile, JSON.stringify(recentHistory));
+            writeFileAtomicSync(this.loadHistoryFile, JSON.stringify(recentHistory));
 
             // 保存系统统计信息
             const systemStats = {
                 startTime: this.startTime,
                 lastSave: Date.now(),
             };
-            fs.writeFileSync(this.systemStatsFile, JSON.stringify(systemStats));
+            writeFileAtomicSync(this.systemStatsFile, JSON.stringify(systemStats));
 
             if (process.env.NODE_ENV === 'development') {
                 console.log(`数据已保存: 用户=${this.userLoadStats.size}, 历史=${recentHistory.length}`);
@@ -1038,6 +1076,9 @@ class SystemMonitor {
     clearAllStats() {
         this.userLoadStats.clear();
         this.systemLoadHistory = [];
+        if (!this.started) {
+            return;
+        }
 
         // 删除持久化文件
         try {
@@ -1071,6 +1112,10 @@ class SystemMonitor {
         if (this.userUpdateInterval) {
             clearInterval(this.userUpdateInterval);
         }
+
+        for (const [event, handler] of Object.entries(this.exitHandlers || {})) {
+            process.off(event, handler);
+        }
     }
 }
 
@@ -1083,23 +1128,6 @@ onDrain(() => {
     systemMonitor.saveDataToDisk();
     clearInterval(systemMonitor.saveInterval);
     clearInterval(systemMonitor.userUpdateInterval);
-});
-
-// 进程退出时保存数据
-process.on('SIGINT', () => {
-    console.log('\n正在保存系统监控数据...');
-    systemMonitor.saveDataToDisk();
-    process.exit(0);
-});
-
-process.on('SIGTERM', () => {
-    console.log('\n正在保存系统监控数据...');
-    systemMonitor.saveDataToDisk();
-    process.exit(0);
-});
-
-process.on('beforeExit', () => {
-    systemMonitor.saveDataToDisk();
 });
 
 export default systemMonitor;
