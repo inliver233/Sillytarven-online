@@ -7,6 +7,13 @@ import { DOMPurify, showdown } from '../lib.js';
  */
 const BUTTON_TITLE_PATTERN = /^\s*button\s*$/i;
 
+/**
+ * 链接里的 {{user}} 在点开时换成当前用户名，例如反馈问卷：
+ *   [反馈问题](https://example.com/f/report?user={{user}} "button")
+ * 渲染时先留空（登录页没有用户），花括号可能已被编码。
+ */
+const USER_PLACEHOLDER = /\{\{user\}\}|%7B%7Buser%7D%7D/gi;
+
 let converter = null;
 
 function getConverter() {
@@ -127,6 +134,12 @@ function decorateFragment(fragment) {
             link.setAttribute('rel', 'noopener noreferrer');
         }
 
+        const withoutUser = href.replace(USER_PLACEHOLDER, '');
+        if (withoutUser !== href) {
+            link.dataset.userHref = href;
+            link.setAttribute('href', withoutUser);
+        }
+
         const title = link.getAttribute('title');
         if (title && BUTTON_TITLE_PATTERN.test(title)) {
             link.removeAttribute('title');
@@ -180,6 +193,18 @@ export function renderAnnouncementMarkdown(markdown) {
     });
     decorateFragment(fragment);
     return fragment;
+}
+
+/**
+ * 把带 {{user}} 的公告链接填上当前用户名，在链接打开前调用。
+ * @param {HTMLAnchorElement} link
+ * @param {string} handle
+ */
+export function fillAnnouncementLinkUser(link, handle) {
+    const template = link.dataset.userHref;
+    if (template) {
+        link.setAttribute('href', template.replace(USER_PLACEHOLDER, encodeURIComponent(handle || '')));
+    }
 }
 
 /**

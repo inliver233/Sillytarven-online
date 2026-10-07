@@ -4,6 +4,7 @@ import { renderTemplateAsync } from './templates.js';
 import { ensureImageFormatSupported, getBase64Async, humanFileSize } from './utils.js';
 import './user-heartbeat.js';
 import { initPasskeys } from './passkeys.js';
+import { fillAnnouncementLinkUser } from './announcement-markdown.js';
 import { clearCharacterListStore } from './util/character-list-store.js';
 
 /**
@@ -2389,6 +2390,11 @@ jQuery(() => {
             $('#closeAnnouncementsPopup').trigger('click');
         }
         void openBackupHub();
+    });
+    // Announcement links with "{{user}}" (e.g. the feedback form's ?user={{user}}) get the
+    // signed-in handle just before they open, so the form arrives with the name filled in.
+    $(document).on('pointerdown click auxclick contextmenu', 'a[data-user-href]', function () {
+        fillAnnouncementLinkUser(this, currentUser?.handle);
     });
     initPasskeys({ getHandle: () => currentUser?.handle ?? null });
     setInterval(async () => {
