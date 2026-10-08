@@ -521,6 +521,8 @@ setupPrivateEndpoints(app);
 
 /** @type {(exitCode?: number) => Promise<void>} */
 let exitProcessRef = async (exitCode = 0) => process.exit(exitCode);
+/** How long a shutdown may spend saving before the process ends regardless. */
+const SHUTDOWN_TIMEOUT_MS = 10 * 1000;
 
 /**
  * Tasks that need to be run before the server starts listening.
@@ -540,6 +542,8 @@ async function preSetupTasks() {
     const exitProcess = exitProcessRef = async (exitCode = 0) => {
         if (isExiting) return;
         isExiting = true;
+        // If saving hangs, end anyway, well before the keeper (15 s) or pm2 (kill_timeout) kill the process.
+        setTimeout(() => process.exit(exitCode), SHUTDOWN_TIMEOUT_MS).unref();
         scheduledTasksManager.stopAllTasks();
         await statsOnExit();
         if (typeof cleanupPlugins === 'function') {
@@ -552,10 +556,10 @@ async function preSetupTasks() {
 
     // Set up event listeners for a graceful shutdown
     // Signal listeners receive the signal name; never pass it on as an exit code.
-    // A second signal while shutting down ends the process at once.
-    const onStopSignal = () => (isExiting ? process.exit(0) : exitProcess(0));
-    process.on('SIGINT', onStopSignal);
-    process.on('SIGTERM', onStopSignal);
+    // Repeated signals are expected and must not cut the saving short: pm2 signals
+    // the whole process tree and the keeper then forwards its own signal.
+    process.on('SIGINT', () => exitProcess(0));
+    process.on('SIGTERM', () => exitProcess(0));
     process.on('uncaughtException', (err) => {
         console.error('Uncaught exception:', err);
         exitProcess(1);
