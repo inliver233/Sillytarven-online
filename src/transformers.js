@@ -1,6 +1,8 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import process from 'node:process';
+import v8 from 'node:v8';
+import vm from 'node:vm';
 import { Buffer } from 'node:buffer';
 
 import { pipeline, env, RawImage } from '@xenova/transformers';
@@ -132,6 +134,7 @@ export async function getPipeline(task, forceModel = '') {
 
     if (tasks[task].pipeline) {
         if (forceModel === '' || tasks[task].currentModel === forceModel) {
+            touchPipeline(task);
             return tasks[task].pipeline;
         }
         console.log('Disposing transformers.js pipeline for for task', task, 'with model', tasks[task].currentModel);
@@ -145,8 +148,92 @@ export async function getPipeline(task, forceModel = '') {
     const instance = await pipeline(task, model, { cache_dir: cacheDir, quantized: tasks[task].quantized ?? true, local_files_only: localOnly });
     tasks[task].pipeline = instance;
     tasks[task].currentModel = model;
+    touchPipeline(task);
     // @ts-ignore
     return instance;
+}
+
+/** A model nobody has used for this long is released, and loaded again on next use. */
+const PIPELINE_IDLE_RELEASE_MS = 10 * 60 * 1000;
+
+/** @type {Record<string, {touch: () => void}>} */
+const idleReleases = {};
+
+/**
+ * Calls `release` once `touch` has not been called for `delayMs`.
+ * @param {number} delayMs Idle time before releasing
+ * @param {() => unknown} release Release callback
+ * @returns {{touch: () => void}} Call `touch` on every use
+ */
+export function createIdleRelease(delayMs, release) {
+    /** @type {NodeJS.Timeout|null} */
+    let timer = null;
+    return {
+        touch() {
+            if (timer) {
+                clearTimeout(timer);
+            }
+            timer = setTimeout(() => {
+                timer = null;
+                release();
+            }, delayMs);
+            // An idle model must not keep a process (or a script) alive.
+            timer.unref();
+        },
+    };
+}
+
+function touchPipeline(task) {
+    idleReleases[task] ??= createIdleRelease(PIPELINE_IDLE_RELEASE_MS, () => releasePipeline(task));
+    idleReleases[task].touch();
+}
+
+/** @type {(() => void)|null} */
+let collectGarbageNow = null;
+
+/**
+ * Runs a few full garbage collections, letting native finalizers run in between.
+ * onnxruntime-node 1.14 cannot release a session itself (dispose() does nothing): the
+ * native session and its memory arena, which grows with the longest input seen (GBs
+ * for long texts), are freed only when V8 collects the session's JS wrapper. V8 cannot
+ * see that native memory, so on its own it may never collect it.
+ */
+async function collectGarbage() {
+    if (!collectGarbageNow) {
+        if (typeof globalThis.gc === 'function') {
+            collectGarbageNow = globalThis.gc;
+        } else {
+            v8.setFlagsFromString('--expose-gc');
+            collectGarbageNow = vm.runInNewContext('gc');
+            v8.setFlagsFromString('--no-expose-gc');
+        }
+    }
+    for (let i = 0; i < 4; i++) {
+        collectGarbageNow();
+        await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+}
+
+/**
+ * Releases a task's pipeline and the native memory of its model.
+ * @param {string} task Pipeline task
+ * @returns {Promise<void>}
+ */
+export async function releasePipeline(task) {
+    let instance = tasks[task]?.pipeline;
+    if (!instance) {
+        return;
+    }
+    tasks[task].pipeline = null;
+    console.log('Releasing idle transformers.js pipeline for task', task, 'with model', tasks[task].currentModel);
+    try {
+        await instance.dispose();
+        // This suspended function would otherwise keep the model reachable during the collections.
+        instance = null;
+        await collectGarbage();
+    } catch (error) {
+        console.warn('Failed to release transformers.js pipeline', error);
+    }
 }
 
 export default {
