@@ -27,6 +27,7 @@ import {
     getCookieSecret,
     getCookieSessionName,
     ensurePublicDirectoriesExist,
+    getAllUserHandles,
     getUserDirectoriesList,
     migrateSystemPrompts,
     migrateUserData,
@@ -582,6 +583,11 @@ async function preSetupTasks() {
     console.log();
 
     const directories = await getUserDirectoriesList();
+    // Monitor numbers of deleted accounts would otherwise be loaded (and counted) forever.
+    // A server taking over reloads them from disk first, so prune again after that.
+    const pruneMonitorStats = async () => systemMonitor.retainUsers(await getAllUserHandles());
+    await pruneMonitorStats();
+    onActivate(pruneMonitorStats);
     await migrateGroupChatsMetadataFormat(directories);
     await checkForNewContent(directories);
     await ensureThumbnailCache(directories);

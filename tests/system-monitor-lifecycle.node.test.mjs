@@ -44,6 +44,22 @@ test('stopping such a script does not overwrite the files with its empty numbers
     assert.equal(fs.readFileSync(statsFile, 'utf8'), before);
 });
 
+test('records of accounts that no longer exist are dropped', async () => {
+    const { default: systemMonitor } = await import(monitorUrl);
+    const saved = new Map(systemMonitor.userLoadStats);
+    systemMonitor.userLoadStats.clear();
+    try {
+        for (const handle of ['alice', 'bob', 'carol']) {
+            systemMonitor.userLoadStats.set(handle, { userHandle: handle });
+        }
+        assert.equal(systemMonitor.retainUsers(['alice', 'carol', 'dave']), 1);
+        assert.deepEqual([...systemMonitor.userLoadStats.keys()].sort(), ['alice', 'carol']);
+        assert.equal(systemMonitor.retainUsers(['alice', 'carol']), 0);
+    } finally {
+        systemMonitor.userLoadStats = saved;
+    }
+});
+
 test('the started monitor loads the saved numbers and saves atomically', async () => {
     const { root, statsFile } = dataRootWithStats();
     globalThis.DATA_ROOT = root;

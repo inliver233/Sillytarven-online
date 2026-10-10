@@ -498,6 +498,7 @@ router.post('/delete', requireAdminMiddleware, async (request, response) => {
         }
 
         await storage.removeItem(toKey(normalizedHandle));
+        systemMonitor.resetUserStats(normalizedHandle);
 
         if (request.body.purge) {
             const directories = getUserDirectories(normalizedHandle);

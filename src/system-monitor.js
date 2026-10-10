@@ -1071,6 +1071,28 @@ class SystemMonitor {
     }
 
     /**
+     * Drops the numbers of accounts that no longer exist, which otherwise stay counted
+     * (and in the admin panel's total) forever: accounts deleted while the server was
+     * down, by scripts, or by older versions that did not reset them.
+     * @param {Iterable<string>} handles Handles of all existing accounts
+     * @returns {number} How many records were dropped
+     */
+    retainUsers(handles) {
+        const existing = new Set(handles);
+        let dropped = 0;
+        for (const handle of this.userLoadStats.keys()) {
+            if (!existing.has(handle)) {
+                this.userLoadStats.delete(handle);
+                dropped++;
+            }
+        }
+        if (dropped > 0) {
+            console.log(`系统监控：移除 ${dropped} 个已不存在账号的统计记录`);
+        }
+        return dropped;
+    }
+
+    /**
      * 清除所有统计数据
      */
     clearAllStats() {
