@@ -49,7 +49,7 @@ function handleRequest({ apiBase, readKey }, timeoutMs, action) {
                     // Fixed messages never expose upstream HTML, credentials, or request text.
                     const messages = {
                         401: 'Fish Audio rejected the API key.',
-                        402: 'Fish Audio credits are exhausted.',
+                        402: 'Fish Audio API credit is insufficient. API credit is separate from fish.audio membership; try the S2.1 Pro (free) model.',
                         403: 'Fish Audio denied access to this resource.',
                         404: 'Fish Audio voice or resource was not found.',
                         422: 'Fish Audio rejected the synthesis parameters.',

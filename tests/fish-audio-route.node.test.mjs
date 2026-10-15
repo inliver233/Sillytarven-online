@@ -123,7 +123,7 @@ test('responses that are not MP3 audio are rejected without leaking their conten
 test('upstream errors map to safe statuses and messages', async () => {
     const cases = [
         [401, 400, 'Fish Audio rejected the API key.'],
-        [402, 402, 'Fish Audio credits are exhausted.'],
+        [402, 402, 'Fish Audio API credit is insufficient. API credit is separate from fish.audio membership; try the S2.1 Pro (free) model.'],
         [422, 422, 'Fish Audio rejected the synthesis parameters.'],
         [500, 502, 'Fish Audio request failed (HTTP 500).'],
     ];

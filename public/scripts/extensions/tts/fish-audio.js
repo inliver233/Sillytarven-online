@@ -10,7 +10,8 @@ const MODELS = [
     { value: 's1', label: 'S1' },
     { value: 'drama-3', label: 'Drama 3' },
 ];
-const DEFAULT_MODEL = 's2.1-pro';
+// The free model works without API credit, which most users do not buy separately.
+const DEFAULT_MODEL = 's2.1-pro-free';
 const LATENCY_VALUES = ['normal', 'balanced', 'low'];
 const GENERATION_CONTROLS = {
     speed: { label: 'Speed', min: 0.5, max: 2, defaultValue: 1 },
