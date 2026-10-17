@@ -3,6 +3,7 @@ import { extension_settings, writeExtensionField } from '../../extensions.js';
 import { getPresetManager } from '../../preset-manager.js';
 import { regexFromString } from '../../utils.js';
 import { lodash } from '../../../lib.js';
+import { anchorLeadingWildcard } from './anchor-leading-wildcard.js';
 
 /**
  * @readonly
@@ -54,7 +55,7 @@ export class RegexProvider {
         const isCached = this.#cache.has(regexString);
         const regex = isCached
             ? this.#cache.get(regexString)
-            : regexFromString(regexString);
+            : anchorLeadingWildcard(regexFromString(regexString));
 
         if (!regex) {
             return null;
@@ -358,15 +359,14 @@ export function getRegexedString(rawString, placement, { characterOverride, isMa
                 return;
             }
 
-            // Check if the depth is within the min/max depth
+            // Check if the depth is within the min/max depth.
+            // No logging here: prompt templates can run every script on every message thousands of times per prompt.
             if (typeof depth === 'number') {
                 if (!isNaN(script.minDepth) && script.minDepth !== null && script.minDepth >= -1 && depth < script.minDepth) {
-                    console.debug(`getRegexedString: Skipping script ${script.scriptName} because depth ${depth} is less than minDepth ${script.minDepth}`);
                     return;
                 }
 
                 if (!isNaN(script.maxDepth) && script.maxDepth !== null && script.maxDepth >= 0 && depth > script.maxDepth) {
-                    console.debug(`getRegexedString: Skipping script ${script.scriptName} because depth ${depth} is greater than maxDepth ${script.maxDepth}`);
                     return;
                 }
             }
