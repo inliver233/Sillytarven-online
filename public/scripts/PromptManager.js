@@ -16,6 +16,9 @@ import { LatestTaskScheduler } from './util/latest-task-scheduler.js';
 import { commitPromptManagerResult } from './util/prompt-manager-result.js';
 import { recordPerformanceSample } from './performance-telemetry.js';
 import { createPromptManagerContextIdentity } from './util/prompt-manager-context.js';
+import { installBatchedSortableHandles } from './util/sortable-batch-handles.js';
+
+installBatchedSortableHandles($);
 
 function debouncePromise(func, delay) {
     let timeoutId;
@@ -2053,6 +2056,22 @@ class PromptManager {
      * @returns {void}
      */
     makeDraggable() {
+        // jQuery UI measures every item when a sortable is created and again when a drag starts.
+        // With hundreds of prompts, many hidden by grouping extensions, the creation pass forces a
+        // style recalculation per item on every re-render. Skip it; dragging measures fresh positions.
+        const sortable = $.ui.sortable.prototype;
+        const refreshPositions = sortable.refreshPositions;
+        sortable.refreshPositions = function () {
+            return this;
+        };
+        try {
+            this.#createSortable();
+        } finally {
+            sortable.refreshPositions = refreshPositions;
+        }
+    }
+
+    #createSortable() {
         $(`#${this.configuration.prefix}prompt_manager_list`).sortable({
             delay: this.configuration.sortableDelay,
             handle: isMobile() ? '.drag-handle' : null,
