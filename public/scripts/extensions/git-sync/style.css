@@ -1600,6 +1600,17 @@
     color: #f05133 !important;
 }
 
+.git-sync-destroy {
+    color: #fff !important;
+    background: #c62828 !important;
+    border-color: #8e1c1c !important;
+    font-weight: 600;
+}
+
+.git-sync-danger-title {
+    color: #e5534b;
+}
+
 @media (max-width: 760px) {
     .git-sync-qs-foot {
         justify-content: stretch;

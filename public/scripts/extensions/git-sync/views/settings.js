@@ -84,8 +84,8 @@ export default {
                 </section>` : ''}
                 <section class="danger-zone">
                     <h4><i class="fa-solid fa-triangle-exclamation"></i> 危险操作</h4>
-                    <p>删除这个账号的酒馆 Git（全部历史、分支、存档点、安全存档和远程设置）。你酒馆里的数据不受影响${cloudOn ? `，${esc(app.state.hosted.label)}里的备份也还在` : ''}。</p>
-                    <button type="button" class="menu_button danger" data-action="destroy"><i class="fa-solid fa-trash"></i> 删除仓库</button>
+                    <p>永久删除这个账号的酒馆 Git：全部存档历史${cloudOn ? `和${esc(app.state.hosted.label)}里的备份` : ''}。<b>不可恢复。</b>你酒馆里现在的数据不受影响。</p>
+                    <button type="button" class="menu_button git-sync-destroy" data-action="destroy"><i class="fa-solid fa-trash"></i> 永久删除酒馆 Git</button>
                 </section>
             </details>`;
         const scope = renderScopeForm(body.querySelector('[data-scope]'), app.state, settings.rules);
@@ -143,12 +143,16 @@ export default {
             }
         });
         body.querySelector('[data-action="destroy"]').addEventListener('click', async () => {
-            if (!await confirmAction('确定删除酒馆 Git 仓库吗？这会删除所有本地历史、分支和安全存档。', { okButton: '继续', danger: true })) return;
-            const typed = await promptText('请输入你的用户名以确认删除');
+            const cloudNote = cloudOn ? `<li>${esc(app.state.hosted.label)}里的备份</li>` : '';
+            if (!await confirmAction(`<h3 class="git-sync-danger-title"><i class="fa-solid fa-triangle-exclamation"></i> 删除后无法恢复</h3>
+                <p>会立刻永久删除：</p>
+                <ul><li>全部存档历史、分支、存档点、安全存档</li>${cloudNote}<li>远程设置和保存的令牌</li></ul>
+                <p>你酒馆里现在的聊天、角色卡等<b>不会</b>被删。${Object.values(settings.remotes).some(remote => remote.provider !== 'hosted') ? '你自己的 GitHub 等仓库也不会被删。' : ''}</p>`, { okButton: '我明白，继续', danger: true })) return;
+            const typed = await promptText(`<p>输入你的用户名 <b>${esc(app.state.handle ?? '')}</b> 确认删除</p>`);
             if (!typed) return;
             try {
-                await gitApi('/destroy', { confirm: typed });
-                toastr.success('仓库已删除');
+                const result = await app.busy('正在删除…', () => gitApi('/destroy', { confirm: typed }));
+                toastr.success(result.cloudDeleted ? `本地和${esc(app.state.hosted?.label ?? '酒馆云')}里的备份都已删除` : '已删除', '酒馆 Git 已删除', { escapeHtml: false });
                 await app.refresh('overview');
             } catch (error) {
                 showError(error, '删除失败');

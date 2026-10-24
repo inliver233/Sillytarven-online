@@ -4,7 +4,7 @@ import { CATEGORIES, HARD_EXCLUDES, sanitizeTrackingRules } from '../tracking.js
 import { commitAll, commitByCategory, commitFiles, currentBranch, ensureRepo, getChangeDigest, getStatus, headOid, readSettings, repoExists, sanitizeSmartCommit, writeSettings } from '../repo.js';
 import { PROVIDERS } from '../remotes.js';
 import { getEnabledModuleIds, readCredentials } from '../router.js';
-import { ensureCloud, hostedConfig, MIRROR_DELAY_MS, MIRROR_SOON_MS, readCloudStatus, scheduleMirror } from './hosted.js';
+import { deleteCloudRepo, ensureCloud, hostedConfig, MIRROR_DELAY_MS, MIRROR_SOON_MS, readCloudStatus, scheduleMirror } from './hosted.js';
 
 /**
  * Repository creation, overview, tracking scope, status and commits.
@@ -30,6 +30,7 @@ export default {
                 head: exists ? await headOid(ctx) : null,
                 settings: { ...settings, remotes },
                 defaultAuthor: api.author(request, { ...settings, author: { name: '', email: '' } }),
+                handle: ctx.handle,
                 categories: CATEGORIES.map(({ id, label, hint, defaultEnabled }) => ({ id, label, hint, defaultEnabled })),
                 hardExcludes: HARD_EXCLUDES,
                 providers: PROVIDERS,
@@ -102,9 +103,16 @@ export default {
 
         /** Removes the repository and its settings; the user's data is untouched. */
         router.post('/destroy', api.handle(async (ctx, request) => {
-            if (request.body?.confirm !== ctx.handle) throw api.userError(400, '请输入用户名确认删除');
+            if (request.body?.confirm !== ctx.handle) throw api.userError(400, '用户名不对，没有删除');
+            // The online copy first: if that fails nothing is gone yet and the user can try again.
+            let cloudDeleted = false;
+            try {
+                cloudDeleted = await deleteCloudRepo(ctx.handle);
+            } catch (error) {
+                throw api.userError(502, `${error.message}，什么都还没删，请稍后再试`);
+            }
             fs.rmSync(ctx.root, { recursive: true, force: true });
-            return { ok: true };
+            return { ok: true, cloudDeleted };
         }, { needsRepo: false }));
 
         /** Repository size, for the overview. */

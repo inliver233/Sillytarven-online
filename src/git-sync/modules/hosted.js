@@ -239,6 +239,24 @@ export async function cloudIsBehind(ctx) {
     return remote !== head;
 }
 
+/**
+ * Deletes this site's 酒馆云 copy of a user's repository (the user deleted their 酒馆 Git) and
+ * drops any upload still waiting. Other sites' copies belong to those sites and stay.
+ * @param {string} handle
+ * @returns {Promise<boolean>} Whether a copy existed and was deleted
+ */
+export async function deleteCloudRepo(handle) {
+    const pending = pendingMirrors.get(handle);
+    if (pending) clearTimeout(pending.timer);
+    pendingMirrors.delete(handle);
+    const cfg = hostedConfig();
+    if (!cfg) return false;
+    const { status } = await forgejo(cfg, 'DELETE', `/repos/${cfg.org}/${repoName(cfg.site, handle)}`);
+    if (status === 204) return true;
+    if (status === 404) return false;
+    throw new Error(`酒馆云删除失败（${status}）`);
+}
+
 /** Replaces the 酒馆云 address in text that goes to the page. */
 export function hideHostedAddress(text) {
     const cfg = hostedConfig();
