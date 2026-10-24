@@ -5,7 +5,7 @@ import { getUserDirectories, toKey } from '../../users.js';
 import { canConsumeStorage } from '../../storage-quota.js';
 import { authorOf, commitAll, currentBranch, getRepoContext, readSettings, repoExists, withRepoLock, writeSettings } from '../repo.js';
 import { explainNetworkError, pushRemote } from '../remotes.js';
-import { readCredentials } from '../router.js';
+import { remoteAccessFor } from '../router.js';
 
 const CHECK_INTERVAL_MS = 10 * 60 * 1000;
 
@@ -36,7 +36,7 @@ async function runBackup(handle, api, force = false) {
             const remote = settings.remotes[schedule.remote];
             const branch = schedule.branch || await currentBranch(ctx);
             if (schedule.push && remote && branch) {
-                const access = { ...remote, token: readCredentials(ctx)[schedule.remote] ?? '' };
+                const access = await remoteAccessFor(ctx, schedule.remote);
                 await pushRemote(ctx, schedule.remote, access, api.policy(), { ref: branch });
                 result.pushed = true;
             }

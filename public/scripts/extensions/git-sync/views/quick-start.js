@@ -1,4 +1,4 @@
-import { esc, finishWorkTreeChange, flushPendingSaves, gitApi } from '../shared.js';
+import { esc, finishWorkTreeChange, flushPendingSaves, gitApi, timeAgo } from '../shared.js';
 import { reloadSmartCommit } from '../smart-commit.js';
 
 /**
@@ -123,7 +123,13 @@ export function renderQuickStart(container, app, { onlineOnly = false, onExit } 
         token: '',
         branch: '',
         branches: [],
+        /** 酒馆云 (the site's own git server) instead of an account on a git host */
+        cloud: false,
+        remote: 'origin',
+        force: false,
+        cloudChoices: [],
     };
+    const cloudLabel = app.state.hosted?.label ?? '';
     const trail = [];
 
     const show = (screen, remember = true) => {
@@ -144,8 +150,9 @@ export function renderQuickStart(container, app, { onlineOnly = false, onExit } 
 
     /** Screen order for the progress dots. */
     const route = () => {
-        if (answers.mode === 'restore') return ['start', 'platform', 'url', 'token', 'confirm'];
+        if (answers.mode === 'restore') return answers.cloud ? ['start', 'platform', 'confirm'] : ['start', 'platform', 'url', 'token', 'confirm'];
         if (!answers.online) return ['start', 'where', 'run'];
+        if (answers.cloud) return onlineOnly ? ['platform', 'run'] : ['start', 'where', 'run'];
         return [...(onlineOnly ? [] : ['start', 'where']), 'platform', 'repo', 'url', 'token', 'run'];
     };
 
@@ -213,21 +220,32 @@ export function renderQuickStart(container, app, { onlineOnly = false, onExit } 
             });
         },
         where() {
-            frame(head('fa-box-archive', '存在哪？') + choices([
+            frame(head('fa-box-archive', '存在哪？') + choices(cloudLabel ? [
+                { id: 'cloud', icon: 'fa-cloud', title: `存到${esc(cloudLabel)}`, text: '最安全 · 点一下就好', primary: true },
+                { id: 'local', icon: 'fa-house', title: '只存这里', text: '最快' },
+                { id: 'online', icon: 'fa-brands fa-github', title: '存到 GitHub 等', text: '要自己注册账号' },
+            ] : [
                 { id: 'online', icon: 'fa-cloud', title: '存网上', text: '最安全 · 推荐', primary: true },
                 { id: 'local', icon: 'fa-house', title: '只存这里', text: '最快 · 点一下就好' },
             ]));
             onChoice((id) => {
+                if (id === 'cloud') return useCloud();
+                answers.cloud = false;
+                answers.remote = 'origin';
                 answers.online = id === 'online';
                 show(answers.online ? 'platform' : 'run');
             });
         },
         platform() {
             const restoring = answers.mode === 'restore';
-            frame(head('fa-globe', restoring ? '备份在哪个网站？' : '选一个网站', restoring ? '' : '都免费') + choices(Object.entries(PLATFORMS).map(([id, entry]) => ({
-                id, icon: entry.icon, title: entry.label, text: entry.hint, primary: id === 'github' && !restoring,
-            }))));
+            frame(head('fa-globe', restoring ? '备份在哪？' : '选一个网站', restoring ? '' : '都免费') + choices([
+                ...(cloudLabel ? [{ id: 'cloud', icon: 'fa-cloud', title: esc(cloudLabel), text: restoring ? '' : '点一下就好 · 推荐', primary: true }] : []),
+                ...Object.entries(PLATFORMS).map(([id, entry]) => ({ id, icon: entry.icon, title: entry.label, text: entry.hint, primary: id === 'github' && !restoring && !cloudLabel })),
+            ]));
             onChoice((id) => {
+                if (id === 'cloud') return useCloud();
+                answers.cloud = false;
+                answers.remote = 'origin';
                 answers.platform = id;
                 show(restoring || id === 'custom' ? 'url' : 'repo');
             });
@@ -330,6 +348,29 @@ export function renderQuickStart(container, app, { onlineOnly = false, onExit } 
             container.querySelector('[data-qs="next"]').addEventListener('click', () => connect(true));
             container.querySelector('[data-qs="skip"]')?.addEventListener('click', () => connect(false));
         },
+        /** Several sites have a backup of this (Discord) account. */
+        cloudPick() {
+            frame(head('fa-clock-rotate-left', '找回哪一份？') + choices(answers.cloudChoices.map(entry => ({
+                id: entry.site, icon: 'fa-cloud', title: esc(entry.label), text: entry.updatedAt ? `上次存：${timeAgo(Date.parse(entry.updatedAt) / 1000)}` : '',
+            }))));
+            onChoice(site => connectCloud(site));
+        },
+        /** Starting fresh, but this site's cloud repository already holds a backup. */
+        cloudExists() {
+            frame(head('fa-cloud', `${esc(cloudLabel)}里已经有你的备份`) + choices([
+                { id: 'restore', icon: 'fa-cloud-arrow-down', title: '找回它', text: '换成云上那份', primary: true },
+                { id: 'overwrite', icon: 'fa-arrow-up-from-bracket', title: '用现在的覆盖它', text: '云上那份会被替换' },
+            ]));
+            onChoice((id) => {
+                if (id === 'restore') {
+                    answers.mode = 'restore';
+                    void connectCloud(app.state.hosted?.site ?? '');
+                    return;
+                }
+                answers.force = true;
+                show('run');
+            });
+        },
         confirm() {
             frame(head('fa-cloud-arrow-down', '换成网上的备份？')
                 + `<ul class="git-sync-qs-facts">
@@ -344,7 +385,7 @@ export function renderQuickStart(container, app, { onlineOnly = false, onExit } 
                 try {
                     await flushPendingSaves();
                     await saveAutoSave();
-                    const result = await app.busy('恢复中，别关页面…', () => gitApi('/import', { remote: 'origin', branch: answers.branch }));
+                    const result = await app.busy('恢复中，别关页面…', () => gitApi('/import', { remote: answers.remote, branch: answers.branch }));
                     container.innerHTML = doneHtml('恢复好了！', '马上自动刷新');
                     finishWorkTreeChange(result, '恢复完成');
                 } catch (error) {
@@ -363,7 +404,8 @@ export function renderQuickStart(container, app, { onlineOnly = false, onExit } 
                         });
                     },
                 }]),
-                ...(answers.online ? [{ label: '传到网上', work: () => gitApi('/push', { remote: 'origin' }) }] : []),
+                ...(answers.cloud ? [{ label: `连上${esc(cloudLabel)}`, work: () => gitApi('/hosted/connect') }] : []),
+                ...(answers.online ? [{ label: '传到网上', work: () => gitApi('/push', { remote: answers.remote, force: answers.force }) }] : []),
                 { label: '打开自动存', work: saveAutoSave },
             ];
             frame(head('fa-gears', '稍等…', '别关页面')
@@ -385,10 +427,49 @@ export function renderQuickStart(container, app, { onlineOnly = false, onExit } 
                     return;
                 }
             }
-            container.innerHTML = doneHtml('搞定！', `${answers.online ? '已存好，网上也有一份' : '已存好'}<br>以后会自动存`,
+            container.innerHTML = doneHtml('搞定！', `${answers.cloud ? `已存好，${esc(cloudLabel)}里也有一份` : answers.online ? '已存好，网上也有一份' : '已存好'}<br>以后会自动存`,
                 '<div class="git-sync-qs-foot"><button type="button" class="menu_button git-sync-qs-next" data-qs="finish">好 <i class="fa-solid fa-check"></i></button></div>');
             container.querySelector('[data-qs="finish"]').addEventListener('click', () => app.refresh('overview'));
         },
+    };
+
+    /** 酒馆云 chosen: see what this account already has there. */
+    const useCloud = async () => {
+        answers.cloud = true;
+        answers.online = true;
+        answers.remote = 'cloud';
+        answers.force = false;
+        let info;
+        try {
+            info = await app.busy('连接中…', () => gitApi('/hosted/info'));
+        } catch (error) {
+            return fail(friendlyError(error));
+        }
+        if (!info.available) return fail(`${esc(cloudLabel)}暂时不能用`);
+        if (answers.mode === 'restore') {
+            answers.cloudChoices = info.repositories.filter(entry => entry.exists && !entry.empty);
+            if (!answers.cloudChoices.length) return fail(`${esc(cloudLabel)}里还没有你的备份`);
+            if (answers.cloudChoices.length === 1) return connectCloud(answers.cloudChoices[0].site);
+            return show('cloudPick');
+        }
+        const own = info.repositories.find(entry => entry.site === info.site);
+        show(own?.exists && !own.empty ? 'cloudExists' : 'run');
+    };
+
+    /** Restoring from 酒馆云: connect that site's repository and read its branches. */
+    const connectCloud = async (site) => {
+        try {
+            const info = await app.busy('连接中…', async () => {
+                await gitApi('/hosted/connect', site ? { site } : {});
+                return gitApi('/remote/test', { name: 'cloud' });
+            });
+            if (!info.branches.length) return fail('这份备份是空的');
+            answers.branches = info.branches.map(branch => branch.name);
+            answers.branch = info.defaultBranch || answers.branches[0];
+            show('confirm');
+        } catch (error) {
+            fail(friendlyError(error));
+        }
     };
 
     const doneHtml = (title, text, foot = '') => `
@@ -409,7 +490,7 @@ export function renderQuickStart(container, app, { onlineOnly = false, onExit } 
                 onChatSwitch: true,
                 everyMessages: 20,
                 push: answers.online,
-                remote: 'origin',
+                remote: answers.remote,
             },
         });
         await reloadSmartCommit();

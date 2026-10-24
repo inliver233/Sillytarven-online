@@ -38,9 +38,9 @@ export default {
             ${remotes.length ? '' : '<div class="git-sync-empty"><i class="fa-solid fa-cloud"></i><p>连接一个 GitHub / GitLab / Gitee / Gitea 仓库，就能把存档推送上去，或在别的酒馆拉取下来。</p></div>'}
             ${remotes.map(([name, remote]) => `
                 <section class="git-sync-panel-card" data-remote="${esc(name)}">
-                    <h3><i class="fa-solid fa-cloud"></i> ${esc(name)} <small class="git-sync-muted">${esc(app.state.providers[remote.provider]?.label ?? remote.provider)}</small></h3>
+                    <h3><i class="fa-solid fa-cloud"></i> ${esc(name)} <small class="git-sync-muted">${esc(remote.provider === 'hosted' ? (app.state.hosted?.label ?? '酒馆云') : (app.state.providers[remote.provider]?.label ?? remote.provider))}</small></h3>
                     <div class="git-sync-path">${esc(remote.url)}</div>
-                    <div class="git-sync-muted">${remote.username ? `用户名 ${esc(remote.username)} · ` : ''}${remote.hasToken ? '<span class="git-sync-ok">token 已设置</span>' : '未设置 token（只能读取公开仓库）'}</div>
+                    <div class="git-sync-muted">${remote.provider === 'hosted' ? '<span class="git-sync-ok">本站提供，不用设置 token</span>' : `${remote.username ? `用户名 ${esc(remote.username)} · ` : ''}${remote.hasToken ? '<span class="git-sync-ok">token 已设置</span>' : '未设置 token（只能读取公开仓库）'}`}</div>
                     <div class="git-sync-actions">
                         <button type="button" class="menu_button git-sync-small" data-op="test"><i class="fa-solid fa-plug"></i> 测试连接</button>
                         <button type="button" class="menu_button git-sync-small" data-op="fetch"><i class="fa-solid fa-arrows-rotate"></i> 获取更新</button>
@@ -48,7 +48,7 @@ export default {
                         <button type="button" class="menu_button git-sync-small" data-op="push"><i class="fa-solid fa-cloud-arrow-up"></i> 推送${branch ? ` ${esc(branch)}` : ''}</button>
                         <button type="button" class="menu_button git-sync-small" data-op="push-advanced"><i class="fa-solid fa-sliders"></i> 高级推送…</button>
                         <button type="button" class="menu_button git-sync-small" data-op="import"><i class="fa-solid fa-download"></i> 导入分支…</button>
-                        <button type="button" class="menu_button git-sync-small" data-op="edit"><i class="fa-solid fa-pen"></i> 编辑</button>
+                        ${remote.provider === 'hosted' ? '' : '<button type="button" class="menu_button git-sync-small" data-op="edit"><i class="fa-solid fa-pen"></i> 编辑</button>'}
                         <button type="button" class="menu_button git-sync-small danger" data-op="delete"><i class="fa-solid fa-trash"></i></button>
                     </div>
                     <div class="git-sync-remote-result"></div>

@@ -15,6 +15,7 @@ import remotesModule from './modules/remotes.js';
 import tagsModule from './modules/tags.js';
 import safetyModule from './modules/safety.js';
 import autoBackupModule from './modules/auto-backup.js';
+import hostedModule, { hostedAccess, hostedConfig } from './modules/hosted.js';
 
 /**
  * Built-in git ("酒馆 Git"): per-user repositories of the user's tavern data.
@@ -26,7 +27,7 @@ import autoBackupModule from './modules/auto-backup.js';
 /** @typedef {{ id: string, label: string, register: (router: express.Router, api: ModuleApi) => void, start?: (api: ModuleApi) => void }} GitModule */
 
 /** @type {GitModule[]} */
-export const MODULES = [coreModule, historyModule, branchesModule, remotesModule, tagsModule, safetyModule, autoBackupModule];
+export const MODULES = [coreModule, historyModule, branchesModule, remotesModule, tagsModule, safetyModule, autoBackupModule, hostedModule];
 
 export function getPolicy() {
     return {
@@ -38,7 +39,9 @@ export function getPolicy() {
 export function getEnabledModuleIds() {
     const configured = getConfigValue('gitSync.modules', null);
     const ids = Array.isArray(configured) ? configured.map(String) : MODULES.map(module => module.id);
-    return MODULES.filter(module => module.id === 'core' || ids.includes(module.id)).map(module => module.id);
+    // 酒馆云 is on whenever it is configured (gitSync.hosted), together with remotes.
+    const hosted = Boolean(hostedConfig()) && ids.includes('remotes');
+    return MODULES.filter(module => module.id === 'core' || ids.includes(module.id) || (module.id === 'hosted' && hosted)).map(module => module.id);
 }
 
 /**
@@ -76,9 +79,23 @@ export function writeCredentials(ctx, credentials) {
 }
 
 /**
+ * Address and login for a remote. 酒馆云 remotes are rebuilt from the config and the handle,
+ * never taken from the stored record.
+ * @param {import('./repo.js').RepoContext} ctx
+ * @param {string} remoteName
+ * @returns {Promise<import('./remotes.js').RemoteAccess>}
+ */
+export async function remoteAccessFor(ctx, remoteName) {
+    const remote = readSettings(ctx).remotes[remoteName];
+    if (!remote) throw userError(404, `没有名为 ${remoteName} 的远程仓库`);
+    if (remote.provider === 'hosted') return hostedAccess(ctx, remote, userError);
+    return { url: remote.url, provider: remote.provider, username: remote.username, token: readCredentials(ctx)[remoteName] ?? '' };
+}
+
+/**
  * @typedef {object} ModuleApi
  * @property {(work: (ctx: import('./repo.js').RepoContext, request: express.Request, response: express.Response) => Promise<any>, options?: { needsRepo?: boolean }) => express.RequestHandler} handle
- * @property {(ctx: import('./repo.js').RepoContext, remoteName: string) => import('./remotes.js').RemoteAccess} remoteAccess
+ * @property {typeof remoteAccessFor} remoteAccess
  * @property {typeof getPolicy} policy
  * @property {(request: express.Request, settings: import('./repo.js').RepoSettings) => { name: string, email: string }} author
  * @property {(request: express.Request) => Promise<void>} afterWorkTreeChange
@@ -141,12 +158,7 @@ const api = {
             }
         };
     },
-    remoteAccess(ctx, remoteName) {
-        const settings = readSettings(ctx);
-        const remote = settings.remotes[remoteName];
-        if (!remote) throw userError(404, `没有名为 ${remoteName} 的远程仓库`);
-        return { url: remote.url, provider: remote.provider, username: remote.username, token: readCredentials(ctx)[remoteName] ?? '' };
-    },
+    remoteAccess: remoteAccessFor,
     policy: getPolicy,
     author(request, settings) {
         return authorOf(settings, request.user.profile.name || request.user.profile.handle);

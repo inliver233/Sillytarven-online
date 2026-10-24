@@ -493,3 +493,16 @@ gitSync:
   allowPrivateNetworks: false
   # Allow plain http:// remotes on public addresses.
   allowHttp: false
+  # 酒馆云: a Forgejo/Gitea server run by the site, so users can back up online without an
+  # account of their own. Each user gets a private repository <org>/<site>--<handle>, read and
+  # written with this token (scopes write:organization, write:repository), which never leaves
+  # the server. Leave url empty to turn it off.
+  hosted:
+    url: ''
+    token: ''
+    org: tavern
+    # This site's id (lowercase letters, digits, -); part of repository names.
+    site: ''
+    # Sites sharing the server, id: label. Discord accounts may restore from any of them.
+    sites: {}
+    label: 酒馆云

@@ -4,6 +4,7 @@ import { CATEGORIES, HARD_EXCLUDES, sanitizeTrackingRules } from '../tracking.js
 import { commitAll, currentBranch, ensureRepo, getChangeDigest, getStatus, headOid, readSettings, repoExists, sanitizeSmartCommit, writeSettings } from '../repo.js';
 import { PROVIDERS } from '../remotes.js';
 import { getEnabledModuleIds, readCredentials } from '../router.js';
+import { hostedConfig } from './hosted.js';
 
 /**
  * Repository creation, overview, tracking scope, status and commits.
@@ -29,6 +30,7 @@ export default {
                 hardExcludes: HARD_EXCLUDES,
                 providers: PROVIDERS,
                 modules: getEnabledModuleIds(),
+                hosted: hostedConfig() ? { label: hostedConfig().label, site: hostedConfig().site } : null,
                 policy: api.policy(),
             };
         }, { needsRepo: false }));

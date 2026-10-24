@@ -82,7 +82,7 @@ export default {
 
         /** Checks the address and token, and lists the remote's branches. */
         router.post('/remote/test', api.handle(async (ctx, request) => {
-            const access = api.remoteAccess(ctx, String(request.body?.name || 'origin'));
+            const access = await api.remoteAccess(ctx, String(request.body?.name || 'origin'));
             const read = await network(api, () => listRemoteBranches(access, api.policy(), false));
             const write = await listRemoteBranches(access, api.policy(), true).then(() => true).catch(() => false);
             return { ...read, canPush: write };
@@ -91,7 +91,7 @@ export default {
         router.post('/fetch', api.handle(async (ctx, request) => {
             await api.ensureQuota(request.user.profile, request.user.directories);
             const name = String(request.body?.remote || 'origin');
-            const access = api.remoteAccess(ctx, name);
+            const access = await api.remoteAccess(ctx, name);
             const result = await network(api, () => fetchRemote(ctx, name, access, api.policy()));
             return { remote: name, defaultBranch: result.defaultBranch, fetchHead: result.fetchHead };
         }));
@@ -103,7 +103,7 @@ export default {
         router.post('/pull', api.handle(async (ctx, request) => {
             await api.ensureQuota(request.user.profile, request.user.directories);
             const name = String(request.body?.remote || 'origin');
-            const access = api.remoteAccess(ctx, name);
+            const access = await api.remoteAccess(ctx, name);
             const branch = String(request.body?.branch || await currentBranch(ctx) || 'main');
             if (!request.body?.apply) {
                 await network(api, () => fetchRemote(ctx, name, access, api.policy()));
@@ -117,7 +117,7 @@ export default {
         /** Pushes the current branch (or a named one) and optionally all tags. */
         router.post('/push', api.handle(async (ctx, request) => {
             const name = String(request.body?.remote || 'origin');
-            const access = api.remoteAccess(ctx, name);
+            const access = await api.remoteAccess(ctx, name);
             const branch = String(request.body?.branch || await currentBranch(ctx) || '');
             if (!branch || !(await headOid(ctx))) throw api.userError(409, '还没有可以推送的提交');
             const remoteBranch = String(request.body?.remoteBranch || branch);
@@ -139,7 +139,7 @@ export default {
             const name = String(request.body?.remote || 'origin');
             const branch = String(request.body?.branch ?? '');
             if (!branch) throw api.userError(400, '没有指定分支');
-            const access = api.remoteAccess(ctx, name);
+            const access = await api.remoteAccess(ctx, name);
             await network(api, () => pushRemote(ctx, name, access, api.policy(), { ref: branch, delete: true }));
             await git.deleteRef({ fs, gitdir: ctx.gitdir, ref: `refs/remotes/${name}/${branch}` }).catch(() => {});
             return { deleted: `${name}/${branch}` };
@@ -152,7 +152,7 @@ export default {
         router.post('/import', api.handle(async (ctx, request) => {
             await api.ensureQuota(request.user.profile, request.user.directories);
             const name = String(request.body?.remote || 'origin');
-            const access = api.remoteAccess(ctx, name);
+            const access = await api.remoteAccess(ctx, name);
             await ensureRepo(ctx);
             const result = await network(api, () => fetchRemote(ctx, name, access, api.policy()));
             if (result.empty) throw api.userError(404, '远程仓库是空的，还没有可以导入的内容');

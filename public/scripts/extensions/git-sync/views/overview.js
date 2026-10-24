@@ -50,7 +50,7 @@ export default {
                     <h3><i class="fa-solid fa-cloud"></i> 远程仓库</h3>
                     ${remotes.length ? remotes.map(([name, remote]) => `
                         <div class="git-sync-remote-line">
-                            <b>${esc(name)}</b> <span class="git-sync-muted">${esc(state.providers[remote.provider]?.label ?? remote.provider)}</span>
+                            <b>${esc(name)}</b> <span class="git-sync-muted">${esc(remote.provider === 'hosted' ? (state.hosted?.label ?? '酒馆云') : (state.providers[remote.provider]?.label ?? remote.provider))}</span>
                             <div class="git-sync-path">${esc(remote.url)}</div>
                             <div class="git-sync-actions">
                                 <button type="button" class="menu_button git-sync-small" data-pull="${esc(name)}"><i class="fa-solid fa-cloud-arrow-down"></i> 拉取</button>
