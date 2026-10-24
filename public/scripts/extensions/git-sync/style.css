@@ -620,3 +620,14 @@
     width: auto;
     white-space: nowrap;
 }
+
+.git-sync-beta {
+    padding: 1px 6px;
+    margin-left: 4px;
+    font-size: 0.65em;
+    font-weight: normal;
+    vertical-align: middle;
+    color: #e8a33d;
+    border: 1px solid #e8a33d;
+    border-radius: 999px;
+}

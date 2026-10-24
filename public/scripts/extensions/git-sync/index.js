@@ -108,7 +108,7 @@ function openPanel(tab) {
         panel.innerHTML = `
             <div class="git-sync-window" role="dialog" aria-label="酒馆 Git">
                 <header class="git-sync-header">
-                    <div class="git-sync-title"><i class="fa-brands fa-git-alt"></i> 酒馆 Git</div>
+                    <div class="git-sync-title"><i class="fa-brands fa-git-alt"></i> 酒馆 Git <span class="git-sync-beta">测试版</span></div>
                     <div class="git-sync-header-status"></div>
                     <button type="button" class="git-sync-close menu_button" title="关闭"><i class="fa-solid fa-xmark"></i></button>
                 </header>
@@ -169,9 +169,47 @@ function addSettingsBlock() {
     block.querySelector('#git_sync_open').addEventListener('click', () => openPanel());
 }
 
+/** "酒馆 Git" next to "备份与导出" in the user settings panel. */
+function addUserSettingsButton() {
+    const backup = document.getElementById('backup_hub_button');
+    if (!backup || document.getElementById('git_sync_user_button')) return;
+    const button = document.createElement('div');
+    button.id = 'git_sync_user_button';
+    button.className = 'margin0 menu_button_icon menu_button';
+    button.title = '用 Git 给聊天、角色卡、世界书、预设做版本备份（测试版）';
+    button.innerHTML = '<i class="fa-fw fa-brands fa-git-alt"></i><span>酒馆 Git</span>';
+    button.addEventListener('click', () => openPanel());
+    backup.after(button);
+}
+
+/**
+ * Any link to "#tavern-git" opens the panel, e.g. a button in an announcement:
+ *   [打开酒馆 Git](#tavern-git "button")
+ */
+function handleEntryLinks() {
+    document.addEventListener('click', (event) => {
+        const link = /** @type {HTMLElement} */ (event.target)?.closest?.('a[href="#tavern-git"]');
+        if (!link) return;
+        event.preventDefault();
+        // The announcement popup sits above the panel; close it first.
+        document.getElementById('closeAnnouncementsPopup')?.click();
+        openPanel();
+    }, true);
+    const openFromHash = () => {
+        if (location.hash === '#tavern-git') {
+            history.replaceState(null, '', location.pathname + location.search);
+            openPanel();
+        }
+    };
+    window.addEventListener('hashchange', openFromHash);
+    openFromHash();
+}
+
 jQuery(() => {
     addMenuButton();
     addSettingsBlock();
+    addUserSettingsButton();
+    handleEntryLinks();
 });
 
 export { openPanel };
