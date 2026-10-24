@@ -280,6 +280,31 @@ export function renderQuickStart(container, app, { onlineOnly = false, onExit } 
             const sceneEls = [...demo.querySelectorAll('.git-sync-demo-scene')];
             const dots = [...demo.querySelectorAll('.git-sync-demo-dots span')];
             let index = 0;
+            // The first time, "开始" waits until every scene has been shown (tapping through counts).
+            const seen = new Set([0]);
+            const nextButton = /** @type {HTMLButtonElement} */ (container.querySelector('[data-qs="next"]'));
+            const nextLabel = nextButton.innerHTML;
+            let watched = false;
+            try {
+                watched = localStorage.getItem('git_sync_intro_seen') === '1';
+            } catch {
+                // No storage: show it every time.
+            }
+            const updateGate = () => {
+                if (watched || seen.size >= sceneEls.length) {
+                    watched = true;
+                    nextButton.disabled = false;
+                    nextButton.innerHTML = nextLabel;
+                    try {
+                        localStorage.setItem('git_sync_intro_seen', '1');
+                    } catch {
+                        // Ignore
+                    }
+                    return;
+                }
+                nextButton.disabled = true;
+                nextButton.innerHTML = `先看完介绍 ${seen.size}/${sceneEls.length} <i class="fa-solid fa-eye"></i>`;
+            };
             const showScene = (next) => {
                 sceneEls[index].classList.remove('on');
                 sceneEls[index].setAttribute('aria-hidden', 'true');
@@ -290,7 +315,10 @@ export function renderQuickStart(container, app, { onlineOnly = false, onExit } 
                 sceneEls[index].classList.add('on');
                 sceneEls[index].setAttribute('aria-hidden', 'false');
                 dots[index].classList.add('on');
+                seen.add(index);
+                if (!watched) updateGate();
             };
+            updateGate();
             const timer = setInterval(() => {
                 if (!demo.isConnected) return clearInterval(timer);
                 showScene(index + 1);

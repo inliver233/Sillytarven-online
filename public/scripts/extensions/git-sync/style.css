@@ -1611,6 +1611,11 @@
     color: #e5534b;
 }
 
+.git-sync-qs-next:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
 @media (max-width: 760px) {
     .git-sync-qs-foot {
         justify-content: stretch;
