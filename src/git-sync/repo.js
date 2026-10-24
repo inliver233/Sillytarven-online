@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import git from 'isomorphic-git';
 import { KeyedMutex } from '../keyed-mutex.js';
-import { createTrackFilter, describePath, isHardExcluded, sanitizeTrackingRules } from './tracking.js';
+import { CATEGORIES, createTrackFilter, describePath, isHardExcluded, sanitizeTrackingRules } from './tracking.js';
 
 /**
  * Repository storage and the operations every module builds on.
@@ -201,13 +201,14 @@ export async function currentBranch(ctx) {
  * Lists what a commit would record now.
  * @param {RepoContext} ctx
  * @param {RepoSettings} settings
+ * @param {{ filepaths?: string[] }} [options] Only look at these files (no full scan, no "stopped tracking" list)
  * @returns {Promise<{ changes: Change[], skipped: Change[] }>}
  */
-export async function getStatus(ctx, settings) {
+export async function getStatus(ctx, settings, { filepaths } = {}) {
     const tracked = createTrackFilter(settings.rules);
     const maxBytes = settings.rules.maxFileSizeMiB * 1024 * 1024;
     const head = await headOid(ctx);
-    const matrix = await git.statusMatrix({ fs, dir: ctx.dir, gitdir: ctx.gitdir, filter: tracked, cache: ctx.cache });
+    const matrix = await git.statusMatrix({ fs, dir: ctx.dir, gitdir: ctx.gitdir, filter: tracked, cache: ctx.cache, ...(filepaths ? { filepaths } : {}) });
 
     // isomorphic-git trusts size + mtime in whole seconds. A file rewritten with the same size in
     // the same second the index was written looks unchanged ("racy git"); hash those to be sure.
@@ -256,7 +257,7 @@ export async function getStatus(ctx, settings) {
     }
 
     // Files committed earlier that the current scope no longer includes are dropped from the next commit.
-    if (head) {
+    if (head && !filepaths) {
         const inHead = await git.listFiles({ fs, gitdir: ctx.gitdir, ref: head, cache: ctx.cache });
         for (const filepath of inHead) {
             if (!tracked(filepath)) {
@@ -304,14 +305,68 @@ export async function commitAll(ctx, settings, { message, author, paths }) {
     const { changes } = await getStatus(ctx, settings);
     const selected = paths ? changes.filter(change => paths.includes(change.path)) : changes;
     if (!selected.length) return null;
+    // Start from HEAD so a previous, interrupted operation cannot leak staged files into this commit.
+    await resetIndexToHead(ctx);
+    return recordChanges(ctx, selected, { message, author });
+}
 
+/**
+ * Records a few known files (the open chat) without scanning the rest of the user's data, so it
+ * is cheap enough to run every few messages. Returns null when they have not changed.
+ * @param {RepoContext} ctx
+ * @param {RepoSettings} settings
+ * @param {{ message?: string, author: { name: string, email: string }, paths: string[] }} options
+ */
+export async function commitFiles(ctx, settings, { message, author, paths }) {
+    const { changes } = await getStatus(ctx, settings, { filepaths: paths });
+    if (!changes.length) return null;
+    const head = await headOid(ctx);
+    for (const change of changes) {
+        await git.resetIndex({ fs, dir: ctx.dir, gitdir: ctx.gitdir, filepath: change.path, ...(head ? { ref: head } : {}), cache: ctx.cache });
+    }
+    return recordChanges(ctx, changes, { message, author });
+}
+
+/**
+ * Records all changes as one commit per kind of data (chats, characters, lorebooks, ...), so the
+ * history can be read and restored by kind.
+ * @param {RepoContext} ctx
+ * @param {RepoSettings} settings
+ * @param {{ message?: string, author: { name: string, email: string } }} options The message goes on the chats commit (or the first one)
+ * @returns {Promise<{ oid: string, summary: string, count: number, commits: { oid: string, summary: string }[] } | null>}
+ */
+export async function commitByCategory(ctx, settings, { message, author }) {
+    const { changes } = await getStatus(ctx, settings);
+    if (!changes.length) return null;
+    await resetIndexToHead(ctx);
+    const order = CATEGORIES.map(category => category.id);
+    const groups = new Map();
+    for (const change of changes) {
+        if (!groups.has(change.category)) groups.set(change.category, []);
+        groups.get(change.category).push(change);
+    }
+    const sorted = [...groups.entries()].sort(([a], [b]) => (order.indexOf(a) + 1 || 99) - (order.indexOf(b) + 1 || 99));
+    const messageOn = groups.has('chats') ? 'chats' : sorted[0][0];
+    const commits = [];
+    for (const [category, group] of sorted) {
+        const result = await recordChanges(ctx, group, { message: category === messageOn ? message : '', author });
+        commits.push({ oid: result.oid, summary: result.summary });
+    }
+    return { oid: commits.at(-1).oid, summary: commits.map(commit => commit.summary).join('；'), count: changes.length, commits };
+}
+
+/**
+ * Stages the given changes on top of the current index and commits.
+ * @param {RepoContext} ctx
+ * @param {Change[]} selected
+ * @param {{ message?: string, author: { name: string, email: string } }} options
+ */
+async function recordChanges(ctx, selected, { message, author }) {
     const toAdd = selected.filter(change => change.kind === 'added' || change.kind === 'modified').map(change => change.path);
     const toRemove = selected.filter(change => change.kind === 'deleted' || change.kind === 'untracked').map(change => change.path);
     if (toAdd.some(isHardExcluded)) {
         throw new Error('Refusing to record an excluded file');
     }
-    // Start from HEAD so a previous, interrupted operation cannot leak staged files into this commit.
-    await resetIndexToHead(ctx);
     for (let i = 0; i < toAdd.length; i += 200) {
         await git.add({ fs, dir: ctx.dir, gitdir: ctx.gitdir, filepath: toAdd.slice(i, i + 200), cache: ctx.cache });
     }

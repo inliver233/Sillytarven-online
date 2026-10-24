@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import git from 'isomorphic-git';
 import { getConfigValue } from '../../util.js';
-import { currentBranch, ensureRepo, headOid, readSettings, writeSettings } from '../repo.js';
+import path from 'node:path';
+import { currentBranch, ensureRepo, getRepoContext, headOid, readSettings, repoExists, withRepoLock, writeSettings } from '../repo.js';
 import { explainNetworkError, pushRemote } from '../remotes.js';
 
 /**
@@ -179,6 +180,63 @@ export async function mirrorToCloud(ctx, userError, policy) {
         console.warn('[git-sync] 酒馆云 push failed', error?.message);
         return { pushed: false, error: hideHostedAddress(error?.userMessage || explainNetworkError(error)) };
     }
+}
+
+/** Saves of the open chat (every few messages) are gathered and uploaded at most this often. */
+export const MIRROR_DELAY_MS = 5 * 60 * 1000;
+/** Bigger saves (leaving a chat, saving by hand) go up shortly after. */
+export const MIRROR_SOON_MS = 15 * 1000;
+
+/** @type {Map<string, { timer: NodeJS.Timeout, due: number }>} handle → pending upload */
+const pendingMirrors = new Map();
+
+/** Last upload result, shown in the panel. */
+export function readCloudStatus(ctx) {
+    try {
+        return JSON.parse(fs.readFileSync(path.join(ctx.root, 'cloud-status.json'), 'utf8'));
+    } catch {
+        return { lastPushAt: 0, lastError: '' };
+    }
+}
+
+/**
+ * Uploads to 酒馆云 in the background after `delayMs`; a pending upload that is due sooner wins,
+ * so many small saves become one upload.
+ * @param {import('../repo.js').RepoContext} ctx
+ * @param {number} delayMs
+ */
+export function scheduleMirror(ctx, userError, policy, delayMs) {
+    if (!hostedConfig()) return false;
+    const due = Date.now() + delayMs;
+    const pending = pendingMirrors.get(ctx.handle);
+    if (pending && pending.due <= due) return true;
+    if (pending) clearTimeout(pending.timer);
+    const { handle, dir } = ctx;
+    const timer = setTimeout(async () => {
+        pendingMirrors.delete(handle);
+        const fresh = getRepoContext(handle, dir);
+        if (!repoExists(fresh)) return;
+        const result = await withRepoLock(fresh, () => mirrorToCloud(fresh, userError, policy));
+        const status = { ...readCloudStatus(fresh), ...(result.pushed ? { lastPushAt: Date.now(), lastError: '' } : {}), ...(result.error ? { lastError: result.error, lastErrorAt: Date.now() } : {}) };
+        fs.writeFileSync(path.join(fresh.root, 'cloud-status.json'), JSON.stringify(status));
+    }, delayMs);
+    timer.unref?.();
+    pendingMirrors.set(handle, { timer, due });
+    return true;
+}
+
+/**
+ * Whether this site's 酒馆云 copy is behind the tavern's repository (e.g. an upload was lost to
+ * a restart), checked by the periodic task.
+ * @param {import('../repo.js').RepoContext} ctx
+ */
+export async function cloudIsBehind(ctx) {
+    if (!hostedConfig() || readSettings(ctx).remotes[HOSTED_REMOTE]?.provider !== 'hosted') return false;
+    const branch = await currentBranch(ctx);
+    const head = await headOid(ctx);
+    if (!branch || !head) return false;
+    const remote = await git.resolveRef({ fs, gitdir: ctx.gitdir, ref: `refs/remotes/${HOSTED_REMOTE}/${branch}` }).catch(() => null);
+    return remote !== head;
 }
 
 /** Replaces the 酒馆云 address in text that goes to the page. */

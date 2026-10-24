@@ -1,4 +1,4 @@
-import { esc, finishWorkTreeChange, flushPendingSaves, gitApi, timeAgo } from '../shared.js';
+import { CATEGORY_ICONS, esc, finishWorkTreeChange, flushPendingSaves, gitApi, timeAgo } from '../shared.js';
 import { reloadSmartCommit } from '../smart-commit.js';
 
 /**
@@ -128,6 +128,10 @@ export function renderQuickStart(container, app, { onlineOnly = false, onExit } 
         remote: 'origin',
         force: false,
         cloudChoices: [],
+        /** Auto-save every this many messages (0: only by hand) */
+        every: 5,
+        /** Tracking rules when the user picked "只存一部分" */
+        rules: null,
     };
     const cloudLabel = app.state.hosted?.label ?? '';
     const trail = [];
@@ -150,10 +154,11 @@ export function renderQuickStart(container, app, { onlineOnly = false, onExit } 
 
     /** Screen order for the progress dots. */
     const route = () => {
-        if (answers.mode === 'restore') return answers.cloud ? ['start', 'platform', 'confirm'] : ['start', 'platform', 'url', 'token', 'confirm'];
-        if (!answers.online) return ['start', 'where', 'run'];
-        if (answers.cloud) return onlineOnly ? ['platform', 'run'] : ['start', 'where', 'run'];
-        return [...(onlineOnly ? [] : ['start', 'where']), 'platform', 'repo', 'url', 'token', 'run'];
+        const first = onlineOnly ? [] : ['intro', 'start'];
+        if (answers.mode === 'restore') return answers.cloud ? [...first, 'platform', 'freq', 'confirm'] : [...first, 'platform', 'url', 'token', 'freq', 'confirm'];
+        if (!answers.online) return [...first, 'where', 'freq', 'run'];
+        if (answers.cloud) return onlineOnly ? ['platform', 'freq', 'run'] : [...first, 'where', 'freq', 'run'];
+        return [...first, ...(onlineOnly ? [] : ['where']), 'platform', 'repo', 'url', 'token', 'freq', 'run'];
     };
 
     const frame = (inner) => {
@@ -168,15 +173,26 @@ export function renderQuickStart(container, app, { onlineOnly = false, onExit } 
                 ${inner}
                 <div class="git-sync-qs-error" hidden></div>
             </div>`;
-        container.querySelector('[data-qs="back"]').addEventListener('click', back);
+        const backButton = container.querySelector('[data-qs="back"]');
+        backButton.addEventListener('click', back);
+        if (!trail.length && !onExit) backButton.hidden = true;
         // Not scrollIntoView: on phones the tavern transforms <html>, and that scrolls the whole page.
         const scroller = container.closest('.git-sync-body');
         if (scroller) scroller.scrollTop = 0;
     };
-    const fail = (text) => {
+    /**
+     * Shows an error under the current screen, with a big "重试" button when `retry` is given.
+     * @param {string} text HTML
+     * @param {() => any} [retry]
+     */
+    const fail = (text, retry) => {
         const box = container.querySelector('.git-sync-qs-error');
-        box.innerHTML = `<i class="fa-solid fa-circle-xmark"></i> ${text}`;
+        box.innerHTML = `<i class="fa-solid fa-circle-xmark"></i> ${text}${retry ? '<button type="button" class="menu_button git-sync-qs-retry"><i class="fa-solid fa-rotate-right"></i> 重试</button>' : ''}`;
         box.hidden = false;
+        box.querySelector('.git-sync-qs-retry')?.addEventListener('click', () => {
+            box.hidden = true;
+            retry();
+        });
         const scroller = container.closest('.git-sync-body');
         if (scroller) scroller.scrollTo({ top: scroller.scrollHeight, behavior: 'smooth' });
     };
@@ -208,6 +224,66 @@ export function renderQuickStart(container, app, { onlineOnly = false, onExit } 
     };
 
     const screens = {
+        /** What it does, as a small looping animation, then one button. */
+        intro() {
+            frame(`
+                <div class="git-sync-demo" aria-hidden="true">
+                    <div class="git-sync-demo-stage">
+                        <span class="git-sync-demo-node n1"><i class="fa-solid fa-comments"></i></span>
+                        <span class="git-sync-demo-line l1"><i></i></span>
+                        <span class="git-sync-demo-node n2"><i class="fa-solid fa-floppy-disk"></i></span>
+                        <span class="git-sync-demo-line l2"><i></i></span>
+                        <span class="git-sync-demo-node n3"><i class="fa-solid fa-cloud"></i></span>
+                    </div>
+                    <div class="git-sync-demo-timeline">
+                        <span class="git-sync-demo-track"></span>
+                        ${[1, 2, 3, 4, 5].map(i => `<span class="git-sync-demo-tick k${i}"></span>`).join('')}
+                        <span class="git-sync-demo-cursor"><i class="fa-solid fa-backward"></i></span>
+                    </div>
+                    <div class="git-sync-demo-captions">
+                        <span class="c1">你在聊天</span>
+                        <span class="c2">自动存一份</span>
+                        <span class="c3">放到${esc(cloudLabel || '网上')}</span>
+                        <span class="c4">随时回到过去</span>
+                    </div>
+                </div>`
+                + head('fa-code-branch', '酒馆 Git', '自动帮你存聊天、角色卡<br>存错了、删错了都能找回来')
+                + `<div class="git-sync-qs-foot center">${next('开始', 'fa-arrow-right')}</div>
+                <p class="git-sync-qs-beta"><i class="fa-solid fa-flask"></i> 测试版：重要数据请再用“备份与导出”存一份</p>`);
+            container.querySelector('[data-qs="next"]').addEventListener('click', () => show('start'));
+        },
+        /** "只存一部分": big toggles per kind of data. */
+        scope() {
+            const rules = answers.rules ?? structuredClone(app.state.settings.rules);
+            frame(head('fa-list-check', '要存哪些？', '点一下切换，亮的会存')
+                + `<div class="git-sync-qs-tiles">${app.state.categories.map(category => `
+                    <button type="button" class="git-sync-qs-tile${rules.categories[category.id] ? ' on' : ''}" data-category="${esc(category.id)}">
+                        <i class="fa-solid ${CATEGORY_ICONS[category.id] ?? 'fa-file'}"></i><span>${esc(category.label)}</span>
+                    </button>`).join('')}</div>`
+                + `<div class="git-sync-qs-foot">${next('好了', 'fa-check')}</div>`);
+            container.querySelectorAll('[data-category]').forEach(tile => tile.addEventListener('click', () => {
+                tile.classList.toggle('on');
+                rules.categories[tile.dataset.category] = tile.classList.contains('on');
+            }));
+            container.querySelector('[data-qs="next"]').addEventListener('click', () => {
+                if (!Object.values(rules.categories).some(Boolean)) return fail('至少选一样');
+                answers.rules = rules;
+                back();
+            });
+        },
+        /** How often to save automatically. */
+        freq() {
+            frame(head('fa-stopwatch', '多久自动存一次？', '存得越勤，丢得越少') + choices([
+                { id: '5', icon: 'fa-gauge', title: '每 5 条消息', text: '推荐', primary: true },
+                { id: '2', icon: 'fa-gauge-high', title: '每次 AI 回复后', text: '一条都不丢' },
+                { id: '10', icon: 'fa-gauge-simple', title: '每 10 条消息', text: '历史记录少一点' },
+                { id: '0', icon: 'fa-hand-pointer', title: '不自动存', text: '我自己点' },
+            ]));
+            onChoice((id) => {
+                answers.every = Number(id);
+                show(answers.mode === 'restore' ? 'confirm' : 'run');
+            });
+        },
         start() {
             frame(head('fa-hand-sparkles', '第一次用吗？') + choices([
                 { id: 'new', icon: 'fa-seedling', title: '是', text: '帮我存起来', primary: true },
@@ -227,12 +303,14 @@ export function renderQuickStart(container, app, { onlineOnly = false, onExit } 
                 { id: 'online', icon: 'fa-cloud', title: '存网上', text: '最安全 · 推荐', primary: true },
                 { id: 'local', icon: 'fa-house', title: '只存这里', text: '最快 · 点一下就好' },
             ]));
+            container.querySelector('.git-sync-qs-choices').insertAdjacentHTML('afterend', `<button type="button" class="git-sync-qs-skip" data-qs="scope">${answers.rules ? '<i class="fa-solid fa-check"></i> 已选好要存的内容，改一下？' : '只存一部分？'}</button>`);
+            container.querySelector('[data-qs="scope"]').addEventListener('click', () => show('scope'));
             onChoice((id) => {
                 if (id === 'cloud') return useCloud();
                 answers.cloud = false;
                 answers.remote = 'origin';
                 answers.online = id === 'online';
-                show(answers.online ? 'platform' : 'run');
+                show(answers.online ? 'platform' : 'freq');
             });
         },
         platform() {
@@ -334,12 +412,12 @@ export function renderQuickStart(container, app, { onlineOnly = false, onExit } 
                         if (!info.branches.length) return fail('这个仓库是空的，没有备份');
                         answers.branches = info.branches.map(branch => branch.name);
                         answers.branch = info.defaultBranch || answers.branches[0];
-                        show('confirm');
+                        show('freq');
                         return;
                     }
                     if (!info.canPush) return fail('钥匙权限不够，按上面步骤重新拿一把');
                     if (info.branches.length) return fail('这个仓库里已经有东西了，换一个新的空仓库');
-                    show('run');
+                    show('freq');
                 } catch (error) {
                     fail(friendlyError(error));
                 }
@@ -367,7 +445,7 @@ export function renderQuickStart(container, app, { onlineOnly = false, onExit } 
                     return;
                 }
                 answers.force = true;
-                show('run');
+                show('freq');
             });
         },
         confirm() {
@@ -379,7 +457,7 @@ export function renderQuickStart(container, app, { onlineOnly = false, onExit } 
                 + (answers.branches.length > 1 ? `<label class="git-sync-qs-label">恢复哪一份？<small>不懂就别改</small>
                     <select class="text_pole" data-field="branch">${answers.branches.map(name => `<option${name === answers.branch ? ' selected' : ''}>${esc(name)}</option>`).join('')}</select></label>` : '')
                 + '<div class="git-sync-qs-foot"><button type="button" class="menu_button git-sync-qs-next" data-qs="next"><i class="fa-solid fa-cloud-arrow-down"></i> 开始恢复</button></div>');
-            container.querySelector('[data-qs="next"]').addEventListener('click', async () => {
+            const restore = async () => {
                 answers.branch = container.querySelector('[data-field="branch"]')?.value || answers.branch;
                 try {
                     await flushPendingSaves();
@@ -388,47 +466,61 @@ export function renderQuickStart(container, app, { onlineOnly = false, onExit } 
                     container.innerHTML = doneHtml('恢复好了！', '马上自动刷新');
                     finishWorkTreeChange(result, '恢复完成');
                 } catch (error) {
-                    fail(friendlyError(error));
+                    fail(friendlyError(error), restore);
                 }
-            });
+            };
+            container.querySelector('[data-qs="next"]').addEventListener('click', restore);
         },
         async run() {
             const tasks = [
-                ...(onlineOnly ? [] : [{ label: '建仓库', work: () => gitApi('/init', { branch: 'main' }) }]),
+                ...(onlineOnly ? [] : [{ label: '建仓库', work: () => gitApi('/init', { branch: 'main', ...(answers.rules ? { rules: answers.rules } : {}) }) }]),
                 ...(onlineOnly ? [] : [{
                     label: '存第一份', work: async () => {
                         await flushPendingSaves();
-                        await gitApi('/commit', { message: '第一份存档' }).catch(error => {
+                        await gitApi('/commit', { message: '第一份存档', split: true }).catch(error => {
                             if (error.status !== 409) throw error;
                         });
                     },
                 }]),
                 ...(answers.cloud && onlineOnly ? [{ label: `连上${esc(cloudLabel)}`, work: () => gitApi('/hosted/connect') }] : []),
                 ...(answers.online ? [{ label: answers.cloud ? `传到${esc(cloudLabel)}` : '传到网上', work: () => gitApi('/push', { remote: answers.remote, force: answers.force || answers.cloud }) }] : []),
-                { label: '打开自动存', work: saveAutoSave },
+                { label: answers.every ? '打开自动存' : '记下设置', work: saveAutoSave },
             ];
             frame(head('fa-gears', '稍等…', '别关页面')
                 + `<ul class="git-sync-qs-progress">${tasks.map(task => `<li><i class="fa-regular fa-circle"></i> ${task.label}</li>`).join('')}</ul>`);
             container.querySelector('[data-qs="back"]').hidden = true;
             const rows = container.querySelectorAll('.git-sync-qs-progress li');
-            for (const [index, task] of tasks.entries()) {
-                const icon = rows[index].querySelector('i');
-                icon.className = 'fa-solid fa-spinner fa-spin';
-                try {
-                    await task.work();
-                    icon.className = 'fa-solid fa-circle-check';
-                    rows[index].classList.add('done');
-                } catch (error) {
-                    icon.className = 'fa-solid fa-circle-xmark';
-                    rows[index].classList.add('failed');
-                    container.querySelector('[data-qs="back"]').hidden = false;
-                    fail(friendlyError(error));
-                    return;
+            /** Runs the steps from `start`; "重试" continues from the step that failed. */
+            const runFrom = async (start) => {
+                for (let index = start; index < tasks.length; index++) {
+                    const row = rows[index];
+                    const icon = row.querySelector('i');
+                    row.classList.remove('failed');
+                    row.classList.add('active');
+                    icon.className = 'fa-solid fa-spinner fa-spin';
+                    try {
+                        await tasks[index].work();
+                        icon.className = 'fa-solid fa-circle-check';
+                        row.classList.replace('active', 'done');
+                    } catch (error) {
+                        icon.className = 'fa-solid fa-circle-xmark';
+                        row.classList.replace('active', 'failed');
+                        container.querySelector('[data-qs="back"]').hidden = false;
+                        fail(friendlyError(error), () => runFrom(index));
+                        return;
+                    }
                 }
-            }
-            container.innerHTML = doneHtml('搞定！', `${answers.cloud ? `已存好，${esc(cloudLabel)}里也有一份` : answers.online ? '已存好，网上也有一份' : '已存好'}<br>以后会自动存`,
-                '<div class="git-sync-qs-foot"><button type="button" class="menu_button git-sync-qs-next" data-qs="finish">好 <i class="fa-solid fa-check"></i></button></div>');
-            container.querySelector('[data-qs="finish"]').addEventListener('click', () => app.refresh('overview'));
+                const where = answers.cloud ? `${esc(cloudLabel)}里也有一份` : answers.online ? '网上也有一份' : '';
+                container.innerHTML = doneHtml('搞定！', `已存好${where ? `，${where}` : ''}<br>${answers.every ? '以后会自动存' : '想存的时候点“全部提交”'}`,
+                    `${howToRestore()}
+                    <div class="git-sync-qs-foot">
+                        <button type="button" class="menu_button git-sync-qs-link" data-qs="history"><i class="fa-solid fa-clock-rotate-left"></i> 去看看</button>
+                        <button type="button" class="menu_button git-sync-qs-next" data-qs="finish">好 <i class="fa-solid fa-check"></i></button>
+                    </div>`);
+                container.querySelector('[data-qs="finish"]').addEventListener('click', () => app.refresh('overview'));
+                container.querySelector('[data-qs="history"]').addEventListener('click', () => app.refresh('history'));
+            };
+            await runFrom(0);
         },
     };
 
@@ -442,7 +534,7 @@ export function renderQuickStart(container, app, { onlineOnly = false, onExit } 
         try {
             info = await app.busy('连接中…', () => gitApi('/hosted/info'));
         } catch (error) {
-            return fail(friendlyError(error));
+            return fail(friendlyError(error), useCloud);
         }
         if (!info.available) return fail(`${esc(cloudLabel)}暂时不能用`);
         if (answers.mode === 'restore') {
@@ -452,7 +544,7 @@ export function renderQuickStart(container, app, { onlineOnly = false, onExit } 
             return show('cloudPick');
         }
         const own = info.repositories.find(entry => entry.site === info.site);
-        show(own?.exists && !own.empty ? 'cloudExists' : 'run');
+        show(own?.exists && !own.empty ? 'cloudExists' : 'freq');
     };
 
     /** Restoring from 酒馆云: connect that site's repository and read its branches. */
@@ -466,11 +558,22 @@ export function renderQuickStart(container, app, { onlineOnly = false, onExit } 
             if (!info.branches.length) return fail('这份备份是空的');
             answers.branches = info.branches.map(branch => branch.name);
             answers.branch = info.defaultBranch || answers.branches[0];
-            show('confirm');
+            show('freq');
         } catch (error) {
-            fail(friendlyError(error));
+            fail(friendlyError(error), () => connectCloud(site));
         }
     };
+
+    /** "How do I get it back": three steps that light up one after another. */
+    const howToRestore = () => `
+        <div class="git-sync-qs-howto">
+            <b>想找回以前的？</b>
+            <ol>
+                <li><i class="fa-solid fa-clock-rotate-left"></i><span>点<b>历史</b></span></li>
+                <li><i class="fa-solid fa-hand-pointer"></i><span>选一条</span></li>
+                <li><i class="fa-solid fa-backward"></i><span>点<b>回到这个版本</b></span></li>
+            </ol>
+        </div>`;
 
     const doneHtml = (title, text, foot = '') => `
         <div class="git-sync-qs">
@@ -482,13 +585,13 @@ export function renderQuickStart(container, app, { onlineOnly = false, onExit } 
             ${foot}
         </div>`;
 
-    /** Leave a chat or every 20 messages → save (and upload when online). */
+    /** Every few messages → save the open chat; leaving a chat → save everything. */
     const saveAutoSave = async () => {
         await gitApi('/settings', {
             smartCommit: {
                 ...(app.state.settings.smartCommit ?? {}),
-                onChatSwitch: true,
-                everyMessages: 20,
+                onChatSwitch: answers.every > 0,
+                everyMessages: answers.every,
                 // 酒馆云 copies are made by the server after every save.
                 push: answers.online && !answers.cloud,
                 remote: answers.remote,
@@ -500,7 +603,7 @@ export function renderQuickStart(container, app, { onlineOnly = false, onExit } 
     const draw = () => {
         void screens[current]();
     };
-    show(onlineOnly ? 'platform' : 'start', false);
+    show(onlineOnly ? 'platform' : 'intro', false);
 }
 
 /** Server errors in a few words (the server's own message stays in small print). */

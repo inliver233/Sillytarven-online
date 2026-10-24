@@ -4,8 +4,10 @@ import { writeCommitMessage, isGenerating } from './ai-commit.js';
 import { esc, flushPendingSaves, gitApi } from './shared.js';
 
 /**
- * Smart auto-save: commits while the user plays, on leaving a chat or every N new messages.
- * Runs in the page, so it can wait for a reply to finish and use the user's model for messages.
+ * Smart auto-save: commits while the user plays. Every N new messages only the open chat is saved
+ * (no scan of the rest of the data, silent); leaving a chat saves everything, one commit per kind
+ * of data. Runs in the page, so it can wait for a reply to finish and use the user's model for
+ * messages. 酒馆云 uploads are made by the server; other remotes are pushed from here.
  */
 
 const ERROR_COOLDOWN_MS = 10 * 60 * 1000;
@@ -14,6 +16,8 @@ const DEBOUNCE_MS = 4000;
 /** @type {{ onChatSwitch: boolean, everyMessages: number, push: boolean, remote: string, aiMessages: boolean }|null} */
 let config = null;
 let hasRemote = false;
+/** 'light' (open chat only) or 'full' */
+let pendingKind = 'full';
 let messagesSinceCommit = 0;
 let running = false;
 let pending = null;
@@ -25,15 +29,42 @@ export async function reloadSmartCommit() {
     try {
         const state = await gitApi('/state');
         config = state.exists ? state.settings.smartCommit : null;
-        hasRemote = Boolean(config && state.settings.remotes[config.remote]);
+        // 酒馆云 is uploaded by the server after every save.
+        const remote = config ? state.settings.remotes[config.remote] : null;
+        hasRemote = Boolean(remote && remote.provider !== 'hosted');
     } catch {
         config = null;
     }
 }
 
-function schedule(reason) {
+/**
+ * Files of the open chat (the chat and its companions), relative to the user's folder.
+ * @returns {string[]|null}
+ */
+function openChatPaths() {
+    const context = getContext();
+    const chatId = context.getCurrentChatId?.();
+    if (!chatId) return null;
+    let base;
+    if (context.groupId) {
+        base = `group chats/${chatId}.jsonl`;
+    } else {
+        const avatar = context.characters?.[context.characterId]?.avatar;
+        if (!avatar) return null;
+        base = `chats/${avatar.replace(/\.[^.]+$/, '')}/${chatId}.jsonl`;
+    }
+    return ['', '.chunks', '.index.json', '.metadata.json', '.revision.json'].map(suffix => base + suffix);
+}
+
+/**
+ * @param {string} reason
+ * @param {'light'|'full'} [kind]
+ */
+function schedule(reason, kind = 'full') {
     if (!config) return;
-    console.debug('[git-sync] auto-save scheduled:', reason);
+    console.debug('[git-sync] auto-save scheduled:', reason, kind);
+    // A full save already pending covers a light one.
+    if (!(pending && pendingKind === 'full')) pendingKind = kind;
     pending = reason;
     clearTimeout(timer);
     timer = setTimeout(run, DEBOUNCE_MS);
@@ -48,17 +79,22 @@ async function run() {
         return;
     }
     const reason = pending;
+    const paths = pendingKind === 'light' ? openChatPaths() : null;
+    const light = Boolean(paths);
     pending = null;
+    pendingKind = 'full';
     running = true;
     try {
         await flushPendingSaves();
         let message = '';
-        if (config.aiMessages) {
+        // Light saves happen every few messages; an AI-written message each time would cost too much.
+        if (config.aiMessages && !light) {
             message = await writeCommitMessage().catch(() => '');
         }
         let result;
         try {
-            result = await gitApi('/commit', { message: message || `自动存档：${reason}` });
+            console.debug('[git-sync] auto-save:', reason, light ? 'open chat' : 'everything');
+            result = await gitApi('/commit', light ? { light: true, paths } : { split: true, message });
         } catch (error) {
             if (error.status === 409) {
                 console.debug('[git-sync] auto-save skipped: nothing changed');
@@ -70,8 +106,10 @@ async function run() {
         if (config.push && hasRemote) {
             await gitApi('/push', { remote: config.remote });
         }
-        const title = (message || result.summary).split('\n')[0];
-        toastr.info(esc(title), `已自动存档${config.push && hasRemote ? '并推送' : ''}`, { timeOut: 2500, escapeHtml: false });
+        if (!light) {
+            const title = (message || result.summary).split('\n')[0];
+            toastr.info(esc(title), `已自动存档${config.push && hasRemote ? '并推送' : ''}`, { timeOut: 2500, escapeHtml: false });
+        }
     } catch (error) {
         if (Date.now() - lastErrorAt > ERROR_COOLDOWN_MS) {
             lastErrorAt = Date.now();
@@ -109,7 +147,7 @@ export function startSmartCommit() {
     const counted = () => {
         if (!config?.everyMessages) return;
         messagesSinceCommit++;
-        if (messagesSinceCommit >= config.everyMessages) schedule(`${messagesSinceCommit} 条新消息`);
+        if (messagesSinceCommit >= config.everyMessages) schedule(`${messagesSinceCommit} 条新消息`, 'light');
     };
     eventSource.on(event_types.MESSAGE_RECEIVED, counted);
     eventSource.on(event_types.MESSAGE_SENT, counted);

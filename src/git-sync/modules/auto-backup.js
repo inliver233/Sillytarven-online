@@ -6,7 +6,7 @@ import { canConsumeStorage } from '../../storage-quota.js';
 import { authorOf, commitAll, currentBranch, getRepoContext, readSettings, repoExists, withRepoLock, writeSettings } from '../repo.js';
 import { explainNetworkError, pushRemote } from '../remotes.js';
 import { remoteAccessFor, userError } from '../router.js';
-import { hideHostedAddress, mirrorToCloud } from './hosted.js';
+import { cloudIsBehind, hideHostedAddress, MIRROR_SOON_MS, scheduleMirror } from './hosted.js';
 
 const CHECK_INTERVAL_MS = 10 * 60 * 1000;
 
@@ -34,10 +34,7 @@ async function runBackup(handle, api, force = false) {
                 throw new Error('存储空间已满，自动备份已跳过');
             }
             result.committed = await commitAll(ctx, settings, { message: '自动备份', author: authorOf(settings, handle) });
-            if (result.committed) {
-                const cloud = await mirrorToCloud(ctx, userError, api.policy());
-                if (cloud.error) result.error = cloud.error;
-            }
+            if (result.committed) scheduleMirror(ctx, userError, api.policy(), MIRROR_SOON_MS);
             const remote = settings.remotes[schedule.remote];
             const branch = schedule.branch || await currentBranch(ctx);
             if (schedule.push && remote && branch) {
@@ -102,6 +99,12 @@ export default {
             for (const handle of handles) {
                 try {
                     await runBackup(handle, api);
+                    // 酒馆云 safety net: an upload lost to a restart or a network error is retried here.
+                    const directories = getUserDirectories(handle);
+                    const ctx = getRepoContext(handle, directories.root);
+                    if (fs.existsSync(directories.root) && repoExists(ctx) && await cloudIsBehind(ctx)) {
+                        scheduleMirror(ctx, userError, api.policy(), MIRROR_SOON_MS);
+                    }
                 } catch (error) {
                     console.warn(`[git-sync] auto backup for ${handle} failed`, error);
                 }

@@ -75,7 +75,7 @@ export default {
                 if (state.settings.smartCommit?.aiMessages && !isGenerating()) {
                     message = await app.busy('AI 正在写说明…', () => writeCommitMessage()).catch(() => '');
                 }
-                await app.busy('正在提交…', () => gitApi('/commit', { message }));
+                await app.busy('正在提交…', () => gitApi('/commit', { message, split: true }));
                 if (push) {
                     const [name] = remotes[0];
                     await app.busy('正在推送…', () => gitApi('/push', { remote: name }));

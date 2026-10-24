@@ -910,6 +910,387 @@
     color: #e5534b;
 }
 
+/* 快速开始: screen transition */
+.git-sync-qs {
+    animation: git-sync-qs-in 0.28s ease-out;
+}
+
+@keyframes git-sync-qs-in {
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+}
+
+.git-sync-qs-choice {
+    transition: transform 0.12s ease, background-color 0.12s ease;
+}
+
+.git-sync-qs-choice:active,
+.git-sync-qs-tile:active {
+    transform: scale(0.97);
+}
+
+.git-sync-qs-foot.center {
+    justify-content: center;
+}
+
+.git-sync-qs-beta {
+    margin: 0;
+    text-align: center;
+    font-size: 0.85em;
+    opacity: 0.65;
+}
+
+.git-sync-qs-retry {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    width: 100%;
+    margin: 10px 0 0;
+    padding: 10px;
+    font-size: 1.05em;
+    font-weight: 600;
+}
+
+/* 快速开始: "只存一部分" toggles */
+.git-sync-qs-tiles {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+    gap: 8px;
+}
+
+.git-sync-qs-tile {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 12px 6px;
+    color: inherit;
+    background: rgba(127, 127, 127, 0.06);
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 12px;
+    cursor: pointer;
+    opacity: 0.45;
+    transition: opacity 0.15s ease, transform 0.12s ease, background-color 0.15s ease;
+}
+
+.git-sync-qs-tile i {
+    font-size: 1.5em;
+}
+
+.git-sync-qs-tile.on {
+    opacity: 1;
+    border: 2px solid var(--SmartThemeQuoteColor);
+    background: color-mix(in srgb, var(--SmartThemeQuoteColor) 14%, transparent);
+}
+
+/* 快速开始: done page, how to get a version back */
+.git-sync-qs-howto {
+    display: grid;
+    gap: 10px;
+    padding: 12px;
+    text-align: center;
+    border-radius: 12px;
+    background: rgba(127, 127, 127, 0.08);
+}
+
+.git-sync-qs-howto ol {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.git-sync-qs-howto li {
+    position: relative;
+    display: grid;
+    justify-items: center;
+    gap: 6px;
+    font-size: 0.92em;
+    animation: git-sync-howto 4.5s ease-in-out infinite;
+}
+
+.git-sync-qs-howto li:nth-child(2) {
+    animation-delay: 1.5s;
+}
+
+.git-sync-qs-howto li:nth-child(3) {
+    animation-delay: 3s;
+}
+
+.git-sync-qs-howto li i {
+    display: grid;
+    place-items: center;
+    width: 2.4em;
+    height: 2.4em;
+    font-size: 1.2em;
+    border-radius: 50%;
+    color: var(--SmartThemeBlurTintColor);
+    background: var(--SmartThemeQuoteColor);
+}
+
+.git-sync-qs-howto li:not(:last-child)::after {
+    content: '';
+    position: absolute;
+    top: 1.45em;
+    left: calc(50% + 1.7em);
+    width: calc(100% - 3.4em);
+    border-top: 2px dashed var(--SmartThemeBorderColor);
+}
+
+@keyframes git-sync-howto {
+    0%, 40%, 100% {
+        opacity: 0.45;
+        transform: none;
+    }
+
+    10%, 28% {
+        opacity: 1;
+        transform: translateY(-3px) scale(1.06);
+    }
+}
+
+/* 快速开始: intro animation — chat → save → cloud, then back in time (8 s loop) */
+.git-sync-demo {
+    --demo-accent: var(--SmartThemeQuoteColor);
+    display: grid;
+    gap: 14px;
+    padding: 18px 12px 12px;
+    border-radius: 16px;
+    background: color-mix(in srgb, var(--SmartThemeQuoteColor) 8%, transparent);
+    border: 1px solid var(--SmartThemeBorderColor);
+}
+
+.git-sync-demo-stage {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+}
+
+.git-sync-demo-node {
+    display: grid;
+    place-items: center;
+    flex: none;
+    width: 3.2em;
+    height: 3.2em;
+    font-size: 1.15em;
+    border-radius: 50%;
+    border: 2px solid var(--SmartThemeBorderColor);
+    background: var(--SmartThemeBlurTintColor);
+    animation: git-sync-demo-node 8s ease-in-out infinite;
+}
+
+.git-sync-demo-node.n2 {
+    animation-delay: 2s;
+}
+
+.git-sync-demo-node.n3 {
+    animation-delay: 4s;
+}
+
+@keyframes git-sync-demo-node {
+    0%, 30%, 100% {
+        color: inherit;
+        border-color: var(--SmartThemeBorderColor);
+        transform: none;
+        box-shadow: none;
+    }
+
+    6%, 20% {
+        color: var(--demo-accent);
+        border-color: var(--demo-accent);
+        transform: scale(1.12);
+        box-shadow: 0 0 0 6px color-mix(in srgb, var(--demo-accent) 20%, transparent);
+    }
+}
+
+.git-sync-demo-line {
+    position: relative;
+    flex: 1;
+    max-width: 90px;
+    height: 2px;
+    background: var(--SmartThemeBorderColor);
+}
+
+.git-sync-demo-line i {
+    position: absolute;
+    top: -4px;
+    left: 0;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--demo-accent);
+    opacity: 0;
+    animation: git-sync-demo-travel 8s linear infinite;
+}
+
+.git-sync-demo-line.l1 i {
+    animation-delay: 1.2s;
+}
+
+.git-sync-demo-line.l2 i {
+    animation-delay: 3.2s;
+}
+
+@keyframes git-sync-demo-travel {
+    0% {
+        left: 0;
+        opacity: 1;
+    }
+
+    10% {
+        left: calc(100% - 10px);
+        opacity: 1;
+    }
+
+    11%, 100% {
+        left: calc(100% - 10px);
+        opacity: 0;
+    }
+}
+
+.git-sync-demo-timeline {
+    position: relative;
+    height: 26px;
+    margin: 0 8%;
+}
+
+.git-sync-demo-track {
+    position: absolute;
+    top: 12px;
+    left: 0;
+    right: 0;
+    height: 2px;
+    background: var(--SmartThemeBorderColor);
+}
+
+.git-sync-demo-tick {
+    position: absolute;
+    top: 7px;
+    width: 12px;
+    height: 12px;
+    margin-left: -6px;
+    border-radius: 50%;
+    background: var(--demo-accent);
+    animation: git-sync-demo-tick 8s ease-out infinite;
+}
+
+.git-sync-demo-tick.k1 { left: 4%; animation-delay: 2.2s; }
+.git-sync-demo-tick.k2 { left: 27%; animation-delay: 2.7s; }
+.git-sync-demo-tick.k3 { left: 50%; animation-delay: 3.2s; }
+.git-sync-demo-tick.k4 { left: 73%; animation-delay: 3.7s; }
+.git-sync-demo-tick.k5 { left: 96%; animation-delay: 4.2s; }
+
+@keyframes git-sync-demo-tick {
+    0% {
+        opacity: 0;
+        transform: scale(0);
+    }
+
+    5%, 60% {
+        opacity: 1;
+        transform: scale(1);
+    }
+
+    68%, 100% {
+        opacity: 0;
+        transform: scale(0);
+    }
+}
+
+.git-sync-demo-cursor {
+    position: absolute;
+    top: -2px;
+    left: 96%;
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    margin-left: -15px;
+    font-size: 0.8em;
+    border-radius: 50%;
+    color: var(--SmartThemeBlurTintColor);
+    background: var(--demo-accent);
+    opacity: 0;
+    animation: git-sync-demo-cursor 8s ease-in-out infinite;
+}
+
+@keyframes git-sync-demo-cursor {
+    0%, 74% {
+        left: 96%;
+        opacity: 0;
+    }
+
+    77% {
+        left: 96%;
+        opacity: 1;
+    }
+
+    90%, 97% {
+        left: 27%;
+        opacity: 1;
+    }
+
+    100% {
+        left: 27%;
+        opacity: 0;
+    }
+}
+
+.git-sync-demo-captions {
+    position: relative;
+    height: 1.6em;
+    text-align: center;
+    font-weight: 700;
+    font-size: 1.1em;
+}
+
+.git-sync-demo-captions span {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    animation: git-sync-demo-caption 8s ease-in-out infinite;
+}
+
+.git-sync-demo-captions .c2 { animation-delay: 2s; }
+.git-sync-demo-captions .c3 { animation-delay: 4s; }
+.git-sync-demo-captions .c4 { animation-delay: 6s; }
+
+@keyframes git-sync-demo-caption {
+    0%, 25%, 100% {
+        opacity: 0;
+        transform: translateY(6px);
+    }
+
+    3%, 22% {
+        opacity: 1;
+        transform: none;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .git-sync-qs,
+    .git-sync-qs-howto li,
+    .git-sync-demo *,
+    .git-sync-demo-captions span {
+        animation: none !important;
+    }
+
+    .git-sync-demo-tick,
+    .git-sync-qs-howto li {
+        opacity: 1;
+    }
+
+    .git-sync-demo-captions .c4 {
+        opacity: 1;
+    }
+}
+
 @media (max-width: 760px) {
     .git-sync-qs-foot {
         justify-content: stretch;

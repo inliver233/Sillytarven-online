@@ -1,10 +1,10 @@
 import fs from 'node:fs';
 import git from 'isomorphic-git';
 import { CATEGORIES, HARD_EXCLUDES, sanitizeTrackingRules } from '../tracking.js';
-import { commitAll, currentBranch, ensureRepo, getChangeDigest, getStatus, headOid, readSettings, repoExists, sanitizeSmartCommit, writeSettings } from '../repo.js';
+import { commitAll, commitByCategory, commitFiles, currentBranch, ensureRepo, getChangeDigest, getStatus, headOid, readSettings, repoExists, sanitizeSmartCommit, writeSettings } from '../repo.js';
 import { PROVIDERS } from '../remotes.js';
 import { getEnabledModuleIds, readCredentials } from '../router.js';
-import { ensureCloud, hostedConfig, mirrorToCloud } from './hosted.js';
+import { ensureCloud, hostedConfig, MIRROR_DELAY_MS, MIRROR_SOON_MS, readCloudStatus, scheduleMirror } from './hosted.js';
 
 /**
  * Repository creation, overview, tracking scope, status and commits.
@@ -34,7 +34,7 @@ export default {
                 hardExcludes: HARD_EXCLUDES,
                 providers: PROVIDERS,
                 modules: getEnabledModuleIds(),
-                hosted: hostedConfig() ? { label: hostedConfig().label, site: hostedConfig().site } : null,
+                hosted: hostedConfig() ? { label: hostedConfig().label, site: hostedConfig().site, status: exists ? readCloudStatus(ctx) : null } : null,
                 policy: api.policy(),
             };
         }, { needsRepo: false }));
@@ -80,14 +80,24 @@ export default {
             return { count: selected.length, items: await getChangeDigest(ctx, selected) };
         }));
 
+        /**
+         * Records changes. `light` + `paths`: only those files, no full scan (the open chat, every few
+         * messages). `split`: one commit per kind of data. Otherwise one commit (of `paths` if given).
+         * 酒馆云 gets the result in the background: light saves are gathered for a few minutes.
+         */
         router.post('/commit', api.handle(async (ctx, request) => {
             await api.ensureQuota(request.user.profile, request.user.directories);
             const settings = readSettings(ctx);
             const paths = Array.isArray(request.body?.paths) ? request.body.paths.map(String) : undefined;
             const message = String(request.body?.message ?? '').slice(0, 5000);
-            const result = await commitAll(ctx, settings, { message, author: api.author(request, settings), paths });
+            const author = api.author(request, settings);
+            const light = Boolean(request.body?.light && paths?.length);
+            const result = light ? await commitFiles(ctx, settings, { message, author, paths })
+                : request.body?.split && !paths ? await commitByCategory(ctx, settings, { message, author })
+                    : await commitAll(ctx, settings, { message, author, paths });
             if (!result) throw api.userError(409, '没有需要提交的改动');
-            return { ...result, cloud: await mirrorToCloud(ctx, api.userError, api.policy()) };
+            const scheduled = scheduleMirror(ctx, api.userError, api.policy(), light ? MIRROR_DELAY_MS : MIRROR_SOON_MS);
+            return { ...result, cloud: { scheduled } };
         }));
 
         /** Removes the repository and its settings; the user's data is untouched. */
