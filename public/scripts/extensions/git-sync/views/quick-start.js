@@ -158,13 +158,16 @@ export function renderQuickStart(container, app, { onlineOnly = false, onExit } 
                 <div class="git-sync-qs-error" hidden></div>
             </div>`;
         container.querySelector('[data-qs="back"]').addEventListener('click', back);
-        container.querySelector('.git-sync-qs').scrollIntoView?.({ block: 'start' });
+        // Not scrollIntoView: on phones the tavern transforms <html>, and that scrolls the whole page.
+        const scroller = container.closest('.git-sync-body');
+        if (scroller) scroller.scrollTop = 0;
     };
     const fail = (text) => {
         const box = container.querySelector('.git-sync-qs-error');
         box.innerHTML = `<i class="fa-solid fa-circle-xmark"></i> ${text}`;
         box.hidden = false;
-        box.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' });
+        const scroller = container.closest('.git-sync-body');
+        if (scroller) scroller.scrollTo({ top: scroller.scrollHeight, behavior: 'smooth' });
     };
     const choices = (items) => `<div class="git-sync-qs-choices">${items.map(item => `
         <button type="button" class="git-sync-qs-choice${item.primary ? ' primary' : ''}" data-choice="${esc(item.id)}">

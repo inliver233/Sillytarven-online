@@ -591,7 +591,10 @@ function addExtensionStyle(name, manifest) {
     }
 
     return new Promise((resolve, reject) => {
-        const url = `/scripts/extensions/${name}/${manifest.css}`;
+        // Built-in extension styles carry the page's asset version, like the page's own
+        // stylesheets, so a deploy is not hidden behind the CDN/browser cache next to new scripts.
+        const version = name.startsWith('third-party') ? null : import.meta.url.match(/\/v\/([0-9a-f]{6,64})\//)?.[1];
+        const url = `/scripts/extensions/${name}/${manifest.css}${version ? `?v=${version}` : ''}`;
         const id = sanitizeSelector(`${name}-css`);
 
         if ($(`link[id="${id}"]`).length === 0) {
