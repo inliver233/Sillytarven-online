@@ -12,11 +12,11 @@ export function renderSetupWizard(body, app) {
     body.innerHTML = `
         <div class="git-sync-setup">
             <h2>欢迎使用酒馆 Git</h2>
+            <button type="button" class="git-sync-card git-sync-quick-card" data-mode="quick">
+                <i class="fa-solid fa-hand-holding-heart"></i><b>快速开始</b><span>跟着点就行</span>
+            </button>
             <p>给你的聊天、角色卡、世界书和预设做版本管理：每次提交都是一份可以随时回去的存档，还能同步到 GitHub、GitLab、Gitee、Gitea 等任意 Git 仓库，在多个酒馆之间搬家或备份。</p>
             <div class="git-sync-warning"><i class="fa-solid fa-flask"></i> <b>测试版</b>：功能还在测试中，请<b>不要把它当作唯一的备份</b>，重要数据请继续用“备份与导出”另存一份。遇到问题欢迎反馈。</div>
-            <button type="button" class="git-sync-card git-sync-quick-card" data-mode="quick">
-                <i class="fa-solid fa-hand-holding-heart"></i><b>快速开始（推荐）</b><span>看不懂上面这些也没关系，一步一步带你弄好</span>
-            </button>
             <div class="git-sync-choice-label">自己设置：</div>
             <div class="git-sync-choice">
                 <button type="button" class="git-sync-card" data-mode="new">

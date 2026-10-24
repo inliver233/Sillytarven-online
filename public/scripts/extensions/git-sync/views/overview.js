@@ -56,7 +56,7 @@ export default {
                                 <button type="button" class="menu_button git-sync-small" data-pull="${esc(name)}"><i class="fa-solid fa-cloud-arrow-down"></i> 拉取</button>
                                 <button type="button" class="menu_button git-sync-small" data-push="${esc(name)}"><i class="fa-solid fa-cloud-arrow-up"></i> 推送</button>
                             </div>
-                        </div>`).join('') : '<div class="git-sync-muted">还没有连接远程仓库。</div><div class="git-sync-actions"><button type="button" class="menu_button" data-action="quick-online"><i class="fa-solid fa-hand-holding-heart"></i> 一步一步带我放到网上</button><button type="button" class="menu_button" data-action="add-remote"><i class="fa-solid fa-plus"></i> 自己填写…</button></div>'}
+                        </div>`).join('') : '<div class="git-sync-muted">还没有连接远程仓库。</div><div class="git-sync-actions"><button type="button" class="menu_button" data-action="quick-online"><i class="fa-solid fa-hand-holding-heart"></i> 存到网上（跟着点）</button><button type="button" class="menu_button" data-action="add-remote"><i class="fa-solid fa-plus"></i> 自己填写…</button></div>'}
                 </section>` : ''}
                 ${state.modules.includes('autoBackup') ? `
                 <section class="git-sync-panel-card">
