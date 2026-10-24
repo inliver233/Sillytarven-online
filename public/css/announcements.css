@@ -482,4 +482,23 @@
         padding: 0.3em 0.75em;
         font-size: 0.78em;
     }
+
+    /* 展开的公告很长时，按钮贴在列表底部一直可见；读到末尾时回到原位 */
+    .announcement-item:not(.collapsed) .announcement-actions {
+        position: sticky;
+        /* 贴到列表可视区域最底边（列表底部有 15px 内边距） */
+        bottom: -15px;
+        z-index: 1;
+        margin: 0 -15px -12px;
+        padding: 10px 15px 12px;
+        /* The theme tint is translucent; stacking it makes the bar nearly opaque over the text. */
+        background-color: var(--SmartThemeBlurTintColor);
+        background-image:
+            linear-gradient(var(--SmartThemeBlurTintColor), var(--SmartThemeBlurTintColor)),
+            linear-gradient(var(--SmartThemeBlurTintColor), var(--SmartThemeBlurTintColor));
+        -webkit-backdrop-filter: blur(16px);
+        backdrop-filter: blur(16px);
+        border-top: 1px solid var(--SmartThemeBorderColor);
+        border-radius: 0 0 8px 8px;
+    }
 }
