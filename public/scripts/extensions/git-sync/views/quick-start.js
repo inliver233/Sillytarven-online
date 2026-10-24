@@ -222,7 +222,6 @@ export function renderQuickStart(container, app, { onlineOnly = false, onExit } 
         where() {
             frame(head('fa-box-archive', '存在哪？') + choices(cloudLabel ? [
                 { id: 'cloud', icon: 'fa-cloud', title: `存到${esc(cloudLabel)}`, text: '最安全 · 点一下就好', primary: true },
-                { id: 'local', icon: 'fa-house', title: '只存这里', text: '最快' },
                 { id: 'online', icon: 'fa-brands fa-github', title: '存到 GitHub 等', text: '要自己注册账号' },
             ] : [
                 { id: 'online', icon: 'fa-cloud', title: '存网上', text: '最安全 · 推荐', primary: true },
