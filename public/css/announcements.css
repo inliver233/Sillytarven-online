@@ -428,7 +428,12 @@
     white-space: nowrap;
 }
 
-/* 展开的公告至少露出一段正文，放不下时整个列表滚动，而不是把正文压成一行 */
+/* 展开的公告至少露出一段正文，放不下时整个列表滚动，而不是把正文压成一行。
+   公告本身也不能比“标题 + 这段正文 + 按钮”更矮，否则按钮折行后会溢出压到下一条 */
+.announcement-item:not(.collapsed) {
+    min-height: auto;
+}
+
 .announcement-item:not(.collapsed) .announcement-content {
     min-height: min(14em, 32vh);
 }
