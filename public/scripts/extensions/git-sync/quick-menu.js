@@ -2,7 +2,7 @@ import { esc, flushPendingSaves, gitApi, promptText, showError, timeAgo } from '
 import { isGenerating, writeCommitMessage } from './ai-commit.js';
 
 /**
- * 酒馆 Git quick menu, opened from the chat bar's extensions menu: save now, mark a save point,
+ * 酒馆 Git quick menu, opened from the chat bar's ☰ menu: save now, mark a save point,
  * start a parallel storyline, history, and the full panel, with a status line on top.
  */
 
@@ -18,7 +18,7 @@ function stamp() {
 /** Above the chat bar, lined up with the button that opened it. */
 function place(anchor) {
     const bar = document.getElementById('send_form')?.getBoundingClientRect();
-    const button = document.getElementById('extensionsMenuButton')?.getBoundingClientRect() ?? anchor?.getBoundingClientRect();
+    const button = document.getElementById('options_button')?.getBoundingClientRect() ?? anchor?.getBoundingClientRect();
     menu.style.left = `${Math.max(8, Math.min(button?.left ?? 8, window.innerWidth - menu.offsetWidth - 8))}px`;
     // top, not bottom: on phones the tavern transforms <html>, which then anchors fixed elements
     // to a zero-height box (the same reason the panel sets its size explicitly).

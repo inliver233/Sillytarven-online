@@ -199,19 +199,25 @@ function closePanel() {
     panel?.classList.remove('open');
 }
 
+/** "酒馆 Git" in the chat bar's leftmost menu (☰), opening the quick menu. */
 function addMenuButton(attempt = 0) {
-    const menu = document.getElementById('extensionsMenu');
-    if (!menu) {
+    const options = document.querySelector('#options .options-content');
+    if (!options) {
         if (attempt < 40) setTimeout(() => addMenuButton(attempt + 1), 500);
         return;
     }
-    if (document.getElementById('git_sync_menu_button')) return;
-    const button = document.createElement('div');
-    button.id = 'git_sync_menu_button';
-    button.className = 'list-group-item flex-container flexGap5';
-    button.innerHTML = '<div class="fa-brands fa-git-alt extensionsMenuExtensionButton"></div>酒馆 Git';
-    button.addEventListener('click', () => void openQuickMenu(button, openPanel));
-    menu.appendChild(button);
+    if (document.getElementById('option_git_sync')) return;
+    const item = document.createElement('a');
+    item.id = 'option_git_sync';
+    item.innerHTML = '<i class="fa-lg fa-brands fa-git-alt"></i><span>酒馆 Git</span>';
+    item.addEventListener('click', () => {
+        // The ☰ menu toggles on its button; close it the same way its own items do.
+        if (getComputedStyle(document.getElementById('options')).display !== 'none') document.getElementById('options_button')?.click();
+        void openQuickMenu(item, openPanel);
+    });
+    const anchor = document.getElementById('option_toggle_AN');
+    if (anchor) anchor.before(item);
+    else options.prepend(item);
 }
 
 function addSettingsBlock() {
