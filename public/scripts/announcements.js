@@ -106,6 +106,10 @@ function showAnnouncementsPopup(announcements) {
     const popup = document.getElementById('announcementsPopup');
     if (popup) {
         popup.style.display = 'flex';
+        // 只展开最上面一条（最新的），其余默认收起，点标题可以展开
+        popup.querySelectorAll('.announcement-item').forEach((item, index) => {
+            if (index > 0) setAnnouncementExpanded(item, false);
+        });
         fitAnnouncementsToPopup(popup);
         refreshScrollFades(popup);
         // 添加动画效果

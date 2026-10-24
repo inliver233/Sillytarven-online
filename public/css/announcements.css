@@ -483,6 +483,13 @@
         font-size: 0.78em;
     }
 
+    /* 手机上展开的公告由外层列表整体滚动；正文自己不再是滚动框，
+       否则手指按在正文上滑动会被它拦下（overscroll-behavior: contain）而滑不动 */
+    .announcement-item:not(.collapsed) .announcement-content {
+        overflow-y: visible;
+        overscroll-behavior: auto;
+    }
+
     /* 展开的公告很长时，按钮贴在列表底部一直可见；读到末尾时回到原位 */
     .announcement-item:not(.collapsed) .announcement-actions {
         position: sticky;
