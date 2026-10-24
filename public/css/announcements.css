@@ -412,9 +412,25 @@
     margin: 0;
 }
 
-/* 收起的公告也保留按钮（反馈、通行密钥等入口），只收起正文 */
+/* 收起的公告也保留按钮（反馈、通行密钥等入口），只收起正文；
+   按钮缩成一行小按钮，放不下时左右滑动，不挤占展开公告的正文 */
 .announcement-item.collapsed .announcement-actions {
     padding-top: 8px;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+}
+
+.announcement-item.collapsed .announcement-actions a.announcement-button {
+    flex: 0 0 auto;
+    padding: 4px 10px;
+    font-size: 0.82em;
+    white-space: nowrap;
+}
+
+/* 展开的公告至少露出一段正文，放不下时整个列表滚动，而不是把正文压成一行 */
+.announcement-item:not(.collapsed) .announcement-content {
+    min-height: min(14em, 32vh);
 }
 
 /* 正文还能往下滚：底部渐隐提示 */
