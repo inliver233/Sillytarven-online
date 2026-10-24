@@ -9,6 +9,7 @@ import safetyView from './views/safety.js';
 import settingsView from './views/settings.js';
 import { renderSetupWizard } from './views/setup.js';
 import { startSmartCommit } from './smart-commit.js';
+import { openQuickMenu } from './quick-menu.js';
 
 /**
  * 酒馆 Git: the panel shell. Each tab is a view module `{ id, label, icon, module, render(container, app) }`;
@@ -209,7 +210,7 @@ function addMenuButton(attempt = 0) {
     button.id = 'git_sync_menu_button';
     button.className = 'list-group-item flex-container flexGap5';
     button.innerHTML = '<div class="fa-brands fa-git-alt extensionsMenuExtensionButton"></div>酒馆 Git';
-    button.addEventListener('click', () => openPanel());
+    button.addEventListener('click', () => void openQuickMenu(button, openPanel));
     menu.appendChild(button);
 }
 
