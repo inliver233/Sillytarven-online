@@ -61,7 +61,8 @@ export function computeAssetVersion(publicDirectory, libFile) {
     const skip = relative => relative === 'scripts/extensions/third-party';
     collectStamps(path.join(publicDirectory, 'scripts'), skip, stamps, publicDirectory);
     collectStamps(path.join(publicDirectory, 'lib'), skip, stamps, publicDirectory);
-    for (const file of [path.join(publicDirectory, 'script.js'), libFile]) {
+    collectStamps(path.join(publicDirectory, 'css'), skip, stamps, publicDirectory);
+    for (const file of [path.join(publicDirectory, 'script.js'), path.join(publicDirectory, 'style.css'), libFile]) {
         try {
             if (file) {
                 const stats = fs.statSync(file);
@@ -107,12 +108,22 @@ export function transformAppHtml(html, { version }) {
         return null;
     }
     const prefix = `/v/${version}`;
+    // Stylesheets get the version as a query: a path prefix would break the relative font and
+    // image URLs inside them, while a query only changes the cache key, so a deploy reaches
+    // browsers and the CDN at once instead of after their max-age.
+    const styled = page.replace(/<link\b[^>]*>/gi, (tag) => {
+        if (!/\brel\s*=\s*["']?stylesheet\b/i.test(tag)) return tag;
+        return tag.replace(/\bhref\s*=\s*(["'])([^"']+)\1/i, (attribute, quote, href) => {
+            if (/^(?:[a-z][a-z0-9+.-]*:|\/\/|\/v\/|#)/i.test(href)) return attribute;
+            return `href=${quote}${href}${href.includes('?') ? '&' : '?'}v=${version}${quote}`;
+        });
+    });
     const imports = Object.fromEntries([
         ...VERSIONED_FILES.map(file => [file, `${prefix}${file}`]),
         ...VERSIONED_FOLDERS.map(folder => [folder, `${prefix}${folder}`]),
         [UNVERSIONED_FOLDER, UNVERSIONED_FOLDER],
     ]);
-    return page.replace('</head>', `    <script type="importmap">${JSON.stringify({ imports })}</script>\n</head>`);
+    return styled.replace('</head>', `    <script type="importmap">${JSON.stringify({ imports })}</script>\n</head>`);
 }
 
 /**

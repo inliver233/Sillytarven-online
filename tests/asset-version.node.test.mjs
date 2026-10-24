@@ -38,6 +38,20 @@ test('index.html loads its modules through the import map', () => {
     assert.equal(transformAppHtml(html, { version: 'not-a-version' }), null);
 });
 
+test('local stylesheets carry the version so a deploy reaches cached browsers', () => {
+    const html = `<html><head>
+    <link rel="stylesheet" type="text/css" href="css/announcements.css">
+    <link rel="stylesheet" href="style.css?x=1">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto">
+    <link rel="icon" href="favicon.ico">
+</head><body><script type="module" src="script.js"></script></body></html>`;
+    const page = transformAppHtml(html, { version: 'abc123def456' });
+    assert.match(page, /href="css\/announcements\.css\?v=abc123def456"/);
+    assert.match(page, /href="style\.css\?x=1&v=abc123def456"/);
+    assert.match(page, /href="https:\/\/fonts\.googleapis\.com\/css2\?family=Noto"/);
+    assert.match(page, /href="favicon\.ico"/);
+});
+
 test('versioned URLs are rewritten, cached by version, and limited to the app modules', () => {
     const middleware = createVersionedAssetsMiddleware(() => 'abc123def456');
     const run = (url, method = 'GET') => {
