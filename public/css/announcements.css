@@ -412,8 +412,9 @@
     margin: 0;
 }
 
+/* 收起的公告也保留按钮（反馈、通行密钥等入口），只收起正文 */
 .announcement-item.collapsed .announcement-actions {
-    display: none;
+    padding-top: 8px;
 }
 
 /* 正文还能往下滚：底部渐隐提示 */
