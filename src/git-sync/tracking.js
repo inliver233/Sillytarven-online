@@ -50,6 +50,9 @@ export const HARD_EXCLUDES = Object.freeze([
     'content.log',
     'stats.json',
     '**/*.tmp',
+    // A chat's save token: a new random id on every save, no content. Without it the server
+    // derives one from the chat itself.
+    '**/*.jsonl.revision.json',
     '**/.DS_Store',
 ]);
 

@@ -262,15 +262,19 @@ export async function getStatus(ctx, settings, { filepaths } = {}) {
     }
 
     // Files committed earlier that the current scope no longer includes are dropped from the next commit.
+    // Files that should never have been stored (a later hard exclude) go quietly, not as a change.
+    const cleanup = [];
     if (head && !filepaths) {
         const inHead = await git.listFiles({ fs, gitdir: ctx.gitdir, ref: head, cache: ctx.cache });
         for (const filepath of inHead) {
-            if (!tracked(filepath)) {
+            if (isHardExcluded(filepath)) {
+                cleanup.push(filepath);
+            } else if (!tracked(filepath)) {
                 changes.push({ path: filepath, kind: 'untracked', ...describePath(filepath) });
             }
         }
     }
-    return { changes, skipped };
+    return { changes, skipped, cleanup };
 }
 
 // ---------------------------------------------------------------------------
@@ -320,12 +324,12 @@ export function describeChanges(changes) {
  * @param {{ message?: string, author: { name: string, email: string }, paths?: string[] }} options
  */
 export async function commitAll(ctx, settings, { message, author, paths }) {
-    const { changes } = await getStatus(ctx, settings);
+    const { changes, cleanup } = await getStatus(ctx, settings);
     const selected = paths ? changes.filter(change => paths.includes(change.path)) : changes;
     if (!selected.length) return null;
     // Start from HEAD so a previous, interrupted operation cannot leak staged files into this commit.
     await resetIndexToHead(ctx);
-    return recordChanges(ctx, selected, { message, author });
+    return recordChanges(ctx, selected, { message, author, cleanup });
 }
 
 /**
@@ -354,7 +358,7 @@ export async function commitFiles(ctx, settings, { message, author, paths }) {
  * @returns {Promise<{ oid: string, summary: string, count: number, commits: { oid: string, summary: string }[] } | null>}
  */
 export async function commitByCategory(ctx, settings, { message, author }) {
-    const { changes } = await getStatus(ctx, settings);
+    const { changes, cleanup } = await getStatus(ctx, settings);
     if (!changes.length) return null;
     await resetIndexToHead(ctx);
     const order = CATEGORIES.map(category => category.id);
@@ -367,7 +371,7 @@ export async function commitByCategory(ctx, settings, { message, author }) {
     const messageOn = groups.has('chats') ? 'chats' : sorted[0][0];
     const commits = [];
     for (const [category, group] of sorted) {
-        const result = await recordChanges(ctx, group, { message: category === messageOn ? message : '', author });
+        const result = await recordChanges(ctx, group, { message: category === messageOn ? message : '', author, cleanup: commits.length ? [] : cleanup });
         commits.push({ oid: result.oid, summary: result.summary });
     }
     return { oid: commits.at(-1).oid, summary: commits.map(commit => commit.summary).join('；'), count: changes.length, commits };
@@ -377,9 +381,9 @@ export async function commitByCategory(ctx, settings, { message, author }) {
  * Stages the given changes on top of the current index and commits.
  * @param {RepoContext} ctx
  * @param {Change[]} selected
- * @param {{ message?: string, author: { name: string, email: string } }} options
+ * @param {{ message?: string, author: { name: string, email: string }, cleanup?: string[] }} options cleanup: stored files to drop without listing them
  */
-async function recordChanges(ctx, selected, { message, author }) {
+async function recordChanges(ctx, selected, { message, author, cleanup = [] }) {
     const toAdd = selected.filter(change => change.kind === 'added' || change.kind === 'modified').map(change => change.path);
     const toRemove = selected.filter(change => change.kind === 'deleted' || change.kind === 'untracked').map(change => change.path);
     if (toAdd.some(isHardExcluded)) {
@@ -388,7 +392,7 @@ async function recordChanges(ctx, selected, { message, author }) {
     for (let i = 0; i < toAdd.length; i += 200) {
         await git.add({ fs, dir: ctx.dir, gitdir: ctx.gitdir, filepath: toAdd.slice(i, i + 200), cache: ctx.cache });
     }
-    for (const filepath of toRemove) {
+    for (const filepath of [...toRemove, ...cleanup]) {
         await git.remove({ fs, dir: ctx.dir, gitdir: ctx.gitdir, filepath, cache: ctx.cache });
     }
     const summary = describeChanges(selected);
@@ -560,6 +564,7 @@ export async function applyCommitToWorkTree(ctx, oid, { paths, moveBranch } = {}
         for (const filepath of paths) {
             await git.resetIndex({ fs, dir: ctx.dir, gitdir: ctx.gitdir, filepath, cache: ctx.cache }).catch(() => {});
         }
+        dropChatRevisions(ctx, paths);
         return;
     }
     if (moveBranch) {
@@ -568,6 +573,46 @@ export async function applyCommitToWorkTree(ctx, oid, { paths, moveBranch } = {}
     } else {
         await git.checkout({ fs, dir: ctx.dir, gitdir: ctx.gitdir, ref: oid, force: true, cache: ctx.cache });
     }
+    dropChatRevisions(ctx, null);
+}
+
+const CHAT_FOLDERS = ['chats', 'group chats'];
+const REVISION_SUFFIX = '.jsonl.revision.json';
+
+/**
+ * Chats whose files were just replaced keep their save token (.jsonl.revision.json) otherwise,
+ * old ones written back by a checkout included. Removing it makes the server derive a new token
+ * from the restored content, so a page still holding the old chat cannot save over it.
+ * @param {RepoContext} ctx
+ * @param {string[]|null} paths Restored files, or null for all chats
+ */
+function dropChatRevisions(ctx, paths) {
+    const remove = (file) => {
+        try {
+            fs.rmSync(path.join(ctx.dir, file), { force: true });
+        } catch (error) {
+            console.warn('[git-sync] could not remove chat revision', file, error?.message);
+        }
+    };
+    if (paths) {
+        const bases = new Set(paths.filter(file => CHAT_FOLDERS.some(folder => file.startsWith(`${folder}/`))).map(file => file.replace(/\.jsonl(\..*)?$/, '')));
+        for (const base of bases) remove(`${base}${REVISION_SUFFIX}`);
+        return;
+    }
+    const walk = (relative) => {
+        let entries;
+        try {
+            entries = fs.readdirSync(path.join(ctx.dir, relative), { withFileTypes: true });
+        } catch {
+            return;
+        }
+        for (const entry of entries) {
+            const child = `${relative}/${entry.name}`;
+            if (entry.isDirectory() && !entry.name.endsWith('.chunks')) walk(child);
+            else if (entry.isFile() && entry.name.endsWith(REVISION_SUFFIX)) remove(child);
+        }
+    };
+    CHAT_FOLDERS.forEach(walk);
 }
 
 /**

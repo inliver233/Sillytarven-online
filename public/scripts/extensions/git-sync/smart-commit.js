@@ -53,7 +53,7 @@ function openChatPaths() {
         if (!avatar) return null;
         base = `chats/${avatar.replace(/\.[^.]+$/, '')}/${chatId}.jsonl`;
     }
-    return ['', '.chunks', '.index.json', '.metadata.json', '.revision.json'].map(suffix => base + suffix);
+    return ['', '.chunks', '.index.json', '.metadata.json'].map(suffix => base + suffix);
 }
 
 /**
