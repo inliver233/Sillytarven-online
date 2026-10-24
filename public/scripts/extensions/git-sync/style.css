@@ -1,0 +1,622 @@
+/* 酒馆 Git — uses the tavern theme's variables so it follows the user's colours. */
+.git-sync-panel {
+    position: fixed;
+    /* Explicit size: on mobile the tavern transforms <html>, which then becomes the containing
+       block of fixed elements with a height of 0, so top/bottom insets would collapse. */
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100dvh;
+    z-index: 9000;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.45);
+    backdrop-filter: blur(2px);
+}
+
+.git-sync-panel.open {
+    display: flex;
+}
+
+.git-sync-window {
+    position: relative;
+    display: grid;
+    grid-template-rows: auto auto 1fr;
+    width: min(1200px, calc(100vw - 24px));
+    height: min(860px, calc(100dvh - 24px));
+    overflow: hidden;
+    color: var(--SmartThemeBodyColor);
+    background: var(--SmartThemeBlurTintColor);
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 12px;
+    box-shadow: 0 12px 40px var(--SmartThemeShadowColor, rgba(0, 0, 0, 0.5));
+    backdrop-filter: blur(var(--SmartThemeBlurStrength, 10px));
+}
+
+.git-sync-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--SmartThemeBorderColor);
+}
+
+.git-sync-title {
+    font-size: 1.15em;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.git-sync-title .fa-git-alt {
+    color: #f05133;
+}
+
+.git-sync-header-status {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    opacity: 0.85;
+}
+
+.git-sync-close {
+    margin: 0;
+}
+
+.git-sync-nav {
+    display: flex;
+    gap: 4px;
+    padding: 6px 10px;
+    overflow-x: auto;
+    border-bottom: 1px solid var(--SmartThemeBorderColor);
+}
+
+.git-sync-tab {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    color: inherit;
+    white-space: nowrap;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    cursor: pointer;
+    opacity: 0.75;
+}
+
+.git-sync-tab:hover {
+    opacity: 1;
+    background: rgba(127, 127, 127, 0.12);
+}
+
+.git-sync-tab.active {
+    opacity: 1;
+    border-color: var(--SmartThemeBorderColor);
+    background: rgba(127, 127, 127, 0.18);
+}
+
+.git-sync-body {
+    min-height: 0;
+    padding: 14px;
+    overflow: auto;
+}
+
+.git-sync-busy {
+    position: absolute;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.1em;
+    background: rgba(0, 0, 0, 0.35);
+}
+
+.git-sync-busy.active {
+    display: flex;
+}
+
+.git-sync-busy > div {
+    padding: 14px 20px;
+    background: var(--SmartThemeBlurTintColor);
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 10px;
+}
+
+.git-sync-loading,
+.git-sync-empty {
+    padding: 40px 10px;
+    text-align: center;
+    opacity: 0.8;
+}
+
+.git-sync-empty i {
+    font-size: 2.4em;
+    opacity: 0.6;
+}
+
+.git-sync-error-box,
+.git-sync-warning {
+    padding: 8px 10px;
+    margin: 8px 0;
+    border-radius: 8px;
+    background: rgba(230, 150, 40, 0.14);
+    border: 1px solid rgba(230, 150, 40, 0.45);
+}
+
+.git-sync-error-box {
+    background: rgba(220, 60, 60, 0.14);
+    border-color: rgba(220, 60, 60, 0.5);
+}
+
+.git-sync-hint {
+    margin: 6px 0;
+    font-size: 0.9em;
+    opacity: 0.8;
+}
+
+.git-sync-muted {
+    font-size: 0.88em;
+    opacity: 0.7;
+}
+
+.git-sync-ok {
+    color: #5cb85c;
+}
+
+.git-sync-path {
+    font-family: var(--monoFontFamily, monospace);
+    font-size: 0.82em;
+    opacity: 0.7;
+    word-break: break-all;
+}
+
+.git-sync-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin: 8px 0;
+}
+
+.git-sync-actions .menu_button {
+    margin: 0;
+}
+
+.git-sync-small {
+    padding: 3px 8px !important;
+    font-size: 0.88em;
+}
+
+.menu_button.danger {
+    color: #e05555;
+}
+
+/* Overview cards */
+.git-sync-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 12px;
+}
+
+.git-sync-panel-card {
+    padding: 10px 14px;
+    margin-bottom: 12px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 10px;
+    background: rgba(127, 127, 127, 0.06);
+}
+
+.git-sync-grid .git-sync-panel-card {
+    margin: 0;
+}
+
+.git-sync-panel-card h3 {
+    margin: 0 0 8px;
+    font-size: 1.02em;
+}
+
+.git-sync-panel-card.danger-zone {
+    border-color: rgba(220, 60, 60, 0.5);
+}
+
+.git-sync-big {
+    font-size: 2em;
+    font-weight: 600;
+}
+
+.git-sync-big small {
+    font-size: 0.45em;
+    font-weight: normal;
+    opacity: 0.75;
+}
+
+.git-sync-big.ok {
+    color: #5cb85c;
+}
+
+.git-sync-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 6px 0;
+}
+
+.git-sync-chip {
+    display: inline-flex;
+    gap: 5px;
+    align-items: center;
+    padding: 2px 8px;
+    font-size: 0.85em;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 999px;
+}
+
+.git-sync-remote-line + .git-sync-remote-line {
+    padding-top: 8px;
+    margin-top: 8px;
+    border-top: 1px dashed var(--SmartThemeBorderColor);
+}
+
+/* Setup */
+.git-sync-setup {
+    max-width: 760px;
+    margin: 0 auto;
+}
+
+.git-sync-choice {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+    margin: 16px 0;
+}
+
+.git-sync-card {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    align-items: center;
+    padding: 18px;
+    color: inherit;
+    background: rgba(127, 127, 127, 0.08);
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 12px;
+    cursor: pointer;
+}
+
+.git-sync-card i {
+    font-size: 2em;
+}
+
+.git-sync-card span {
+    font-size: 0.88em;
+    opacity: 0.75;
+}
+
+.git-sync-card.selected {
+    outline: 2px solid var(--SmartThemeQuoteColor);
+}
+
+/* Forms */
+.git-sync-form {
+    display: grid;
+    gap: 8px;
+}
+
+.git-sync-form label {
+    display: grid;
+    gap: 3px;
+}
+
+.git-sync-form label.checkbox_label {
+    display: flex;
+}
+
+.git-sync-inline {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 8px 0;
+}
+
+.git-sync-scope {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+    gap: 6px;
+}
+
+.git-sync-scope-item {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    padding: 6px 8px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 8px;
+    cursor: pointer;
+}
+
+.git-sync-scope-item small {
+    display: block;
+    font-size: 0.78em;
+    opacity: 0.7;
+}
+
+.git-sync-advanced {
+    margin-top: 10px;
+}
+
+.git-sync-advanced label {
+    display: grid;
+    gap: 4px;
+    margin: 6px 0;
+}
+
+/* Change lists */
+.git-sync-commit-box {
+    position: sticky;
+    top: -14px;
+    z-index: 1;
+    padding: 8px 0;
+    background: var(--SmartThemeBlurTintColor);
+}
+
+.git-sync-group h4 {
+    margin: 12px 0 4px;
+}
+
+.git-sync-change {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    padding: 3px 6px;
+    border-radius: 6px;
+}
+
+.git-sync-change:hover {
+    background: rgba(127, 127, 127, 0.1);
+}
+
+.git-sync-change-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.git-sync-kind {
+    flex: none;
+    min-width: 3.5em;
+    padding: 0 6px;
+    font-size: 0.8em;
+    text-align: center;
+    border-radius: 4px;
+}
+
+.git-sync-kind.added { background: rgba(92, 184, 92, 0.25); }
+.git-sync-kind.modified { background: rgba(74, 163, 223, 0.25); }
+.git-sync-kind.deleted { background: rgba(224, 85, 85, 0.25); }
+.git-sync-kind.untracked { background: rgba(160, 160, 160, 0.25); }
+
+/* Lists */
+.git-sync-list-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 10px;
+    margin-bottom: 6px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 8px;
+}
+
+.git-sync-list-row.current {
+    border-color: var(--SmartThemeQuoteColor);
+}
+
+.git-sync-list-main {
+    min-width: 0;
+    flex: 1 1 260px;
+}
+
+/* History */
+.git-sync-history {
+    display: grid;
+    grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
+    gap: 14px;
+    height: 100%;
+    min-height: 0;
+}
+
+.git-sync-history-list,
+.git-sync-history-detail {
+    min-height: 0;
+    overflow: auto;
+}
+
+.git-sync-history-detail {
+    padding: 0 6px;
+    border-left: 1px solid var(--SmartThemeBorderColor);
+}
+
+.git-sync-graph-wrap {
+    position: relative;
+    display: grid;
+    grid-template-columns: var(--git-sync-graph-width) minmax(0, 1fr);
+}
+
+.git-sync-graph {
+    display: block;
+}
+
+.git-sync-commits {
+    min-width: 0;
+}
+
+.git-sync-commit-row {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    width: 100%;
+    min-width: 0;
+    padding: 0 8px;
+    color: inherit;
+    text-align: left;
+    background: transparent;
+    border: 0;
+    border-radius: 6px;
+    cursor: pointer;
+}
+
+.git-sync-commit-row:hover {
+    background: rgba(127, 127, 127, 0.1);
+}
+
+.git-sync-commit-row.selected {
+    background: rgba(127, 127, 127, 0.2);
+}
+
+.git-sync-commit-row .git-sync-commit-title {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.git-sync-commit-title {
+    font-weight: 500;
+}
+
+.git-sync-commit-body {
+    margin: 4px 0;
+    white-space: pre-wrap;
+    opacity: 0.85;
+}
+
+.git-sync-ref {
+    display: inline-flex;
+    gap: 3px;
+    align-items: center;
+    padding: 0 6px;
+    margin-right: 4px;
+    font-size: 0.78em;
+    font-weight: normal;
+    border-radius: 4px;
+    background: rgba(74, 163, 223, 0.25);
+}
+
+.git-sync-ref.head { background: rgba(232, 163, 61, 0.35); }
+.git-sync-ref.tag { background: rgba(156, 124, 224, 0.3); }
+.git-sync-ref.remote { background: rgba(63, 191, 173, 0.25); }
+
+/* Diffs */
+.git-sync-diff {
+    max-height: 60vh;
+    margin: 6px 0;
+    overflow: auto;
+    font-size: 0.85em;
+    line-height: 1.45;
+    text-align: left;
+    white-space: pre-wrap;
+    word-break: break-word;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 6px;
+}
+
+.git-sync-line {
+    padding: 0 6px;
+}
+
+.git-sync-line.add { background: rgba(92, 184, 92, 0.18); }
+.git-sync-line.del { background: rgba(224, 85, 85, 0.18); }
+.git-sync-line.fold { opacity: 0.55; font-style: italic; }
+
+.git-sync-diff-popup {
+    text-align: left;
+}
+
+.git-sync-chat-diff {
+    max-height: 60vh;
+    overflow: auto;
+    text-align: left;
+}
+
+.git-sync-chat-row {
+    display: grid;
+    gap: 2px;
+    padding: 6px 8px;
+    margin: 4px 0;
+    border-radius: 6px;
+}
+
+.git-sync-chat-row.add { background: rgba(92, 184, 92, 0.15); }
+.git-sync-chat-row.del { background: rgba(224, 85, 85, 0.15); }
+
+.git-sync-compare-meta {
+    display: grid;
+    gap: 4px;
+    margin: 6px 0;
+}
+
+/* Conflicts */
+.git-sync-conflicts {
+    text-align: left;
+}
+
+.git-sync-conflict {
+    padding: 8px;
+    margin: 6px 0;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 8px;
+}
+
+.git-sync-conflict label {
+    display: inline-flex;
+    gap: 4px;
+    align-items: center;
+    margin-right: 14px;
+}
+
+.git-sync-confirm.danger {
+    color: inherit;
+}
+
+@media (max-width: 760px) {
+    .git-sync-window {
+        width: 100vw;
+        height: 100dvh;
+        border-radius: 0;
+    }
+
+    .git-sync-tab span {
+        display: none;
+    }
+
+    .git-sync-history {
+        grid-template-columns: 1fr;
+        height: auto;
+    }
+
+    .git-sync-history-detail {
+        border-left: 0;
+        border-top: 1px solid var(--SmartThemeBorderColor);
+        padding-top: 8px;
+    }
+}
+
+/* Each tab renders into its own container. */
+.git-sync-view {
+    height: 100%;
+}
+
+/* The tavern's menu buttons stack icon and text vertically in narrow places; keep them on one line. */
+.git-sync-window .menu_button {
+    display: inline-flex;
+    flex-direction: row;
+    gap: 6px;
+    align-items: center;
+    width: auto;
+    white-space: nowrap;
+}

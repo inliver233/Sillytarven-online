@@ -51,6 +51,7 @@ import { router as azureRouter } from './endpoints/azure.js';
 import { router as minimaxRouter } from './endpoints/minimax.js';
 import { router as dataMaidRouter } from './endpoints/data-maid.js';
 import { router as backupsRouter } from './endpoints/backups.js';
+import { router as gitSyncRouter } from './git-sync/router.js';
 import { router as forumRouter } from './endpoints/forum.js';
 import { router as invitationCodesRouter } from './endpoints/invitation-codes.js';
 import { router as userInvitationsRouter } from './endpoints/user-invitations.js';
@@ -207,6 +208,7 @@ export function setupPrivateEndpoints(app) {
     app.use('/api/minimax', minimaxRouter);
     app.use('/api/data-maid', dataMaidRouter);
     app.use('/api/backups', backupsRouter);
+    app.use('/api/git-sync', gitSyncRouter);
     // 根据配置控制论坛API路由
     const enableForum = getConfigValue('enableForum', true, 'boolean');
     if (enableForum) {

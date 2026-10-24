@@ -1,0 +1,499 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import git from 'isomorphic-git';
+import { KeyedMutex } from '../keyed-mutex.js';
+import { createTrackFilter, describePath, isHardExcluded, sanitizeTrackingRules } from './tracking.js';
+
+/**
+ * Repository storage and the operations every module builds on.
+ *
+ * A user's repository lives in `<data root>/_git/<handle>/repo.git` with the user's data
+ * directory as its work tree. Keeping it outside the user directory means node snapshots and
+ * replicas never copy git history. Every operation on one user's repository runs under that
+ * user's lock.
+ */
+
+const locks = new KeyedMutex();
+const SAFETY_PREFIX = 'refs/tavern/safety/';
+const MAX_SAFETY_POINTS = 30;
+
+/**
+ * @typedef {object} RepoContext
+ * @property {string} handle
+ * @property {string} dir The user's data directory (work tree)
+ * @property {string} gitdir
+ * @property {string} root Directory holding the repository and its settings
+ * @property {object} cache Shared isomorphic-git cache for one request
+ */
+
+/**
+ * @param {string} handle
+ * @param {string} dir
+ * @returns {RepoContext}
+ */
+export function getRepoContext(handle, dir) {
+    if (!/^[a-z0-9][a-z0-9-]*$/i.test(handle)) {
+        throw new Error('Invalid user handle');
+    }
+    const root = path.join(globalThis.DATA_ROOT, '_git', handle);
+    return { handle, dir, gitdir: path.join(root, 'repo.git'), root, cache: {} };
+}
+
+/**
+ * Runs work on one user's repository while holding that user's lock.
+ * @template T
+ * @param {RepoContext} ctx
+ * @param {() => Promise<T>} work
+ * @returns {Promise<T>}
+ */
+export function withRepoLock(ctx, work) {
+    return locks.runExclusive(ctx.handle, work);
+}
+
+/** @param {RepoContext} ctx */
+export function repoExists(ctx) {
+    return fs.existsSync(path.join(ctx.gitdir, 'HEAD'));
+}
+
+// ---------------------------------------------------------------------------
+// Settings stored next to the repository
+// ---------------------------------------------------------------------------
+
+/**
+ * @typedef {object} RemoteSettings
+ * @property {string} url
+ * @property {string} provider github | gitlab | gitee | gitea | custom
+ * @property {string} username
+ */
+
+/**
+ * @typedef {object} RepoSettings
+ * @property {import('./tracking.js').TrackingRules} rules
+ * @property {Record<string, RemoteSettings>} remotes
+ * @property {{ name: string, email: string }} author
+ * @property {{ enabled: boolean, intervalHours: number, push: boolean, remote: string, branch: string, lastRunAt: number, lastError: string }} autoBackup
+ */
+
+/** @returns {RepoSettings} */
+function defaultSettings() {
+    return {
+        rules: sanitizeTrackingRules(null),
+        remotes: {},
+        author: { name: '', email: '' },
+        autoBackup: { enabled: false, intervalHours: 24, push: true, remote: 'origin', branch: '', lastRunAt: 0, lastError: '' },
+    };
+}
+
+/**
+ * @param {RepoContext} ctx
+ * @returns {RepoSettings}
+ */
+export function readSettings(ctx) {
+    const settings = defaultSettings();
+    try {
+        const stored = JSON.parse(fs.readFileSync(path.join(ctx.root, 'settings.json'), 'utf8'));
+        settings.rules = sanitizeTrackingRules(stored.rules);
+        if (stored.remotes && typeof stored.remotes === 'object') settings.remotes = stored.remotes;
+        if (stored.author && typeof stored.author === 'object') {
+            settings.author = { name: String(stored.author.name ?? '').slice(0, 100), email: String(stored.author.email ?? '').slice(0, 200) };
+        }
+        if (stored.autoBackup && typeof stored.autoBackup === 'object') settings.autoBackup = { ...settings.autoBackup, ...stored.autoBackup };
+    } catch {
+        // No settings yet
+    }
+    return settings;
+}
+
+/**
+ * @param {RepoContext} ctx
+ * @param {RepoSettings} settings
+ */
+export function writeSettings(ctx, settings) {
+    fs.mkdirSync(ctx.root, { recursive: true });
+    const file = path.join(ctx.root, 'settings.json');
+    const temp = `${file}.${process.pid}.tmp`;
+    fs.writeFileSync(temp, JSON.stringify(settings, null, 2));
+    fs.renameSync(temp, file);
+}
+
+/**
+ * @param {RepoContext} ctx
+ * @param {RepoSettings} settings
+ * @param {string} fallbackName
+ */
+export function authorOf(settings, fallbackName) {
+    const name = settings.author.name || fallbackName || 'Tavern';
+    const email = settings.author.email || `${name.replace(/[^\w.-]/g, '') || 'tavern'}@tavern.local`;
+    return { name, email };
+}
+
+// ---------------------------------------------------------------------------
+// Repository basics
+// ---------------------------------------------------------------------------
+
+/**
+ * Creates the repository if it does not exist yet.
+ * @param {RepoContext} ctx
+ * @param {string} [defaultBranch]
+ */
+export async function ensureRepo(ctx, defaultBranch = 'main') {
+    if (repoExists(ctx)) return false;
+    fs.mkdirSync(ctx.root, { recursive: true });
+    await git.init({ fs, dir: ctx.dir, gitdir: ctx.gitdir, defaultBranch });
+    return true;
+}
+
+/** @param {RepoContext} ctx */
+export async function headOid(ctx) {
+    try {
+        return await git.resolveRef({ fs, gitdir: ctx.gitdir, ref: 'HEAD' });
+    } catch {
+        return null;
+    }
+}
+
+/** @param {RepoContext} ctx */
+export async function currentBranch(ctx) {
+    return (await git.currentBranch({ fs, gitdir: ctx.gitdir, fullname: false }).catch(() => null)) ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// Status
+// ---------------------------------------------------------------------------
+
+/**
+ * @typedef {object} Change
+ * @property {string} path
+ * @property {'added'|'modified'|'deleted'|'untracked'} kind 'untracked' = no longer in the tracking scope
+ * @property {string} category
+ * @property {string} categoryLabel
+ * @property {string} item
+ * @property {number} [size]
+ * @property {boolean} [tooLarge]
+ */
+
+/**
+ * Lists what a commit would record now.
+ * @param {RepoContext} ctx
+ * @param {RepoSettings} settings
+ * @returns {Promise<{ changes: Change[], skipped: Change[] }>}
+ */
+export async function getStatus(ctx, settings) {
+    const tracked = createTrackFilter(settings.rules);
+    const maxBytes = settings.rules.maxFileSizeMiB * 1024 * 1024;
+    const head = await headOid(ctx);
+    const matrix = await git.statusMatrix({ fs, dir: ctx.dir, gitdir: ctx.gitdir, filter: tracked, cache: ctx.cache });
+
+    // isomorphic-git trusts size + mtime in whole seconds. A file rewritten with the same size in
+    // the same second the index was written looks unchanged ("racy git"); hash those to be sure.
+    const indexSecond = (() => {
+        try {
+            return Math.floor(fs.statSync(path.join(ctx.gitdir, 'index')).mtimeMs / 1000);
+        } catch {
+            return Infinity;
+        }
+    })();
+    for (const row of matrix) {
+        const [filepath, headStatus, workdirStatus] = row;
+        if (!head || headStatus !== 1 || workdirStatus !== 1) continue;
+        let stat;
+        try {
+            stat = fs.statSync(path.join(ctx.dir, filepath));
+        } catch {
+            continue;
+        }
+        if (Math.floor(stat.mtimeMs / 1000) < indexSecond) continue;
+        const [{ oid: current }, committed] = await Promise.all([
+            git.hashBlob({ object: fs.readFileSync(path.join(ctx.dir, filepath)) }),
+            git.readBlob({ fs, gitdir: ctx.gitdir, oid: head, filepath, cache: ctx.cache }).then(blob => blob.oid).catch(() => null),
+        ]);
+        if (current !== committed) row[2] = 2;
+    }
+
+    const changes = [];
+    const skipped = [];
+    for (const [filepath, headStatus, workdirStatus] of matrix) {
+        if (headStatus === 1 && workdirStatus === 1) continue;
+        let kind;
+        if (headStatus === 0 && workdirStatus === 2) kind = 'added';
+        else if (headStatus === 1 && workdirStatus === 2) kind = 'modified';
+        else if (headStatus === 1 && workdirStatus === 0) kind = 'deleted';
+        else continue;
+        const change = { path: filepath, kind, ...describePath(filepath) };
+        if (kind !== 'deleted') {
+            change.size = fs.statSync(path.join(ctx.dir, filepath)).size;
+            if (change.size > maxBytes) {
+                skipped.push({ ...change, tooLarge: true });
+                continue;
+            }
+        }
+        changes.push(change);
+    }
+
+    // Files committed earlier that the current scope no longer includes are dropped from the next commit.
+    if (head) {
+        const inHead = await git.listFiles({ fs, gitdir: ctx.gitdir, ref: head, cache: ctx.cache });
+        for (const filepath of inHead) {
+            if (!tracked(filepath)) {
+                changes.push({ path: filepath, kind: 'untracked', ...describePath(filepath) });
+            }
+        }
+    }
+    return { changes, skipped };
+}
+
+// ---------------------------------------------------------------------------
+// Commit
+// ---------------------------------------------------------------------------
+
+const KIND_LABEL = { added: '新增', modified: '更新', deleted: '删除', untracked: '停止同步' };
+
+/**
+ * Builds a commit message in tavern terms, e.g. "更新聊天：Seraphina · 初遇 等 3 项；新增角色卡：艾琳".
+ * @param {Change[]} changes
+ */
+export function describeChanges(changes) {
+    /** @type {Map<string, { kind: string, label: string, items: Set<string> }>} */
+    const groups = new Map();
+    for (const change of changes) {
+        const key = `${change.kind}|${change.category}`;
+        const group = groups.get(key) ?? { kind: change.kind, label: change.categoryLabel, items: new Set() };
+        group.items.add(change.item);
+        groups.set(key, group);
+    }
+    const parts = [...groups.values()].map(({ kind, label, items }) => {
+        const names = [...items];
+        const shown = names.slice(0, 2).join('、');
+        return `${KIND_LABEL[kind]}${label}：${shown}${names.length > 2 ? ` 等 ${names.length} 项` : ''}`;
+    });
+    return parts.join('；') || '没有改动';
+}
+
+/**
+ * Records the current tracked state. Returns null when there is nothing to record.
+ * @param {RepoContext} ctx
+ * @param {RepoSettings} settings
+ * @param {{ message?: string, author: { name: string, email: string }, paths?: string[] }} options
+ */
+export async function commitAll(ctx, settings, { message, author, paths }) {
+    const { changes } = await getStatus(ctx, settings);
+    const selected = paths ? changes.filter(change => paths.includes(change.path)) : changes;
+    if (!selected.length) return null;
+
+    const toAdd = selected.filter(change => change.kind === 'added' || change.kind === 'modified').map(change => change.path);
+    const toRemove = selected.filter(change => change.kind === 'deleted' || change.kind === 'untracked').map(change => change.path);
+    if (toAdd.some(isHardExcluded)) {
+        throw new Error('Refusing to record an excluded file');
+    }
+    // Start from HEAD so a previous, interrupted operation cannot leak staged files into this commit.
+    await resetIndexToHead(ctx);
+    for (let i = 0; i < toAdd.length; i += 200) {
+        await git.add({ fs, dir: ctx.dir, gitdir: ctx.gitdir, filepath: toAdd.slice(i, i + 200), cache: ctx.cache });
+    }
+    for (const filepath of toRemove) {
+        await git.remove({ fs, dir: ctx.dir, gitdir: ctx.gitdir, filepath, cache: ctx.cache });
+    }
+    const summary = describeChanges(selected);
+    const oid = await git.commit({
+        fs, dir: ctx.dir, gitdir: ctx.gitdir, cache: ctx.cache, author,
+        message: message?.trim() ? `${message.trim()}\n\n${summary}` : summary,
+    });
+    return { oid, summary, count: selected.length };
+}
+
+/**
+ * Makes the index match HEAD, leaving the work tree alone.
+ * @param {RepoContext} ctx
+ */
+async function resetIndexToHead(ctx) {
+    const head = await headOid(ctx);
+    const indexFile = path.join(ctx.gitdir, 'index');
+    if (!head) {
+        fs.rmSync(indexFile, { force: true });
+        return;
+    }
+    const staged = await git.listFiles({ fs, gitdir: ctx.gitdir, cache: ctx.cache });
+    const inHead = new Set(await git.listFiles({ fs, gitdir: ctx.gitdir, ref: head, cache: ctx.cache }));
+    for (const filepath of new Set([...staged, ...inHead])) {
+        await git.resetIndex({ fs, dir: ctx.dir, gitdir: ctx.gitdir, filepath, ref: head, cache: ctx.cache });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Safety points: the state before anything overwrites the user's data
+// ---------------------------------------------------------------------------
+
+/**
+ * Records the current data (committed or not) under refs/tavern/safety/ without moving any branch.
+ * @param {RepoContext} ctx
+ * @param {RepoSettings} settings
+ * @param {string} reason Shown in the list of safety points
+ * @param {{ name: string, email: string }} author
+ * @returns {Promise<string|null>} The safety point's commit, or null if there is no data yet
+ */
+export async function createSafetyPoint(ctx, settings, reason, author) {
+    const head = await headOid(ctx);
+    const { changes } = await getStatus(ctx, settings);
+    let oid = head;
+    if (changes.length) {
+        await resetIndexToHead(ctx);
+        const toAdd = changes.filter(change => change.kind === 'added' || change.kind === 'modified').map(change => change.path);
+        for (let i = 0; i < toAdd.length; i += 200) {
+            await git.add({ fs, dir: ctx.dir, gitdir: ctx.gitdir, filepath: toAdd.slice(i, i + 200), cache: ctx.cache });
+        }
+        for (const change of changes.filter(change => change.kind === 'deleted' || change.kind === 'untracked')) {
+            await git.remove({ fs, dir: ctx.dir, gitdir: ctx.gitdir, filepath: change.path, cache: ctx.cache });
+        }
+        const tree = await git.writeTree({ fs, gitdir: ctx.gitdir, tree: await indexTree(ctx) });
+        oid = await git.commit({
+            fs, gitdir: ctx.gitdir, cache: ctx.cache, author, tree, parent: head ? [head] : [],
+            message: `安全存档：${reason}\n\n${describeChanges(changes)}`, noUpdateBranch: true,
+        });
+        await resetIndexToHead(ctx);
+    }
+    if (!oid) return null;
+    const ref = `${SAFETY_PREFIX}${Date.now()}`;
+    await git.writeRef({ fs, gitdir: ctx.gitdir, ref, value: oid, force: true });
+    fs.writeFileSync(path.join(ctx.root, 'safety-reasons.json'), JSON.stringify({ ...readSafetyReasons(ctx), [ref]: reason }));
+    await pruneSafetyPoints(ctx);
+    return oid;
+}
+
+/** Tree entries for the current index, as git.writeTree expects (nested trees written first). */
+async function indexTree(ctx) {
+    /** @type {Map<string, { mode: string, oid: string }>} */
+    const flat = new Map();
+    await git.walk({
+        fs, dir: ctx.dir, gitdir: ctx.gitdir, cache: ctx.cache, trees: [git.STAGE()],
+        map: async (filepath, [entry]) => {
+            if (!entry || filepath === '.') return true;
+            if ((await entry.type()) === 'blob') {
+                flat.set(filepath, { mode: (await entry.mode()).toString(8), oid: await entry.oid() });
+            }
+            return true;
+        },
+    });
+    return writeTreesFromFlat(ctx, flat);
+}
+
+/**
+ * Writes nested tree objects for a flat map of file paths and returns the root tree's entries.
+ * @param {RepoContext} ctx
+ * @param {Map<string, { mode: string, oid: string }>} flat
+ */
+export async function writeTreesFromFlat(ctx, flat) {
+    /** @type {Map<string, Map<string, { mode: string, oid: string, type: string }>>} */
+    const dirs = new Map([['', new Map()]]);
+    for (const [filepath, entry] of flat) {
+        const parts = filepath.split('/');
+        for (let i = 1; i < parts.length; i++) {
+            const parent = parts.slice(0, i - 1).join('/');
+            const child = parts.slice(0, i).join('/');
+            if (!dirs.has(child)) dirs.set(child, new Map());
+            if (!dirs.has(parent)) dirs.set(parent, new Map());
+            dirs.get(parent).set(parts[i - 1], { mode: '040000', oid: '', type: 'tree' });
+        }
+        dirs.get(parts.slice(0, -1).join('/')).set(parts[parts.length - 1], { ...entry, type: 'blob' });
+    }
+    const order = [...dirs.keys()].sort((a, b) => b.split('/').length - a.split('/').length || (b.length - a.length));
+    /** @type {Map<string, string>} */
+    const treeOids = new Map();
+    let rootEntries = [];
+    for (const dirPath of order) {
+        const entries = [...dirs.get(dirPath)].map(([name, entry]) => ({
+            mode: entry.mode, path: name, type: entry.type,
+            oid: entry.type === 'tree' ? treeOids.get(dirPath ? `${dirPath}/${name}` : name) : entry.oid,
+        }));
+        if (dirPath === '') {
+            rootEntries = entries;
+        } else {
+            treeOids.set(dirPath, await git.writeTree({ fs, gitdir: ctx.gitdir, tree: entries }));
+        }
+    }
+    return rootEntries;
+}
+
+function readSafetyReasons(ctx) {
+    try {
+        return JSON.parse(fs.readFileSync(path.join(ctx.root, 'safety-reasons.json'), 'utf8'));
+    } catch {
+        return {};
+    }
+}
+
+/** @param {RepoContext} ctx */
+export async function listSafetyPoints(ctx) {
+    const reasons = readSafetyReasons(ctx);
+    const refs = await git.listRefs({ fs, gitdir: ctx.gitdir, filepath: SAFETY_PREFIX.slice(0, -1) }).catch(() => []);
+    const points = [];
+    for (const name of refs) {
+        const ref = `${SAFETY_PREFIX}${name}`;
+        const oid = await git.resolveRef({ fs, gitdir: ctx.gitdir, ref });
+        points.push({ id: name, ref, oid, createdAt: Number(name), reason: reasons[ref] ?? '' });
+    }
+    return points.sort((a, b) => b.createdAt - a.createdAt);
+}
+
+async function pruneSafetyPoints(ctx) {
+    const points = await listSafetyPoints(ctx);
+    const reasons = readSafetyReasons(ctx);
+    for (const point of points.slice(MAX_SAFETY_POINTS)) {
+        await git.deleteRef({ fs, gitdir: ctx.gitdir, ref: point.ref });
+        delete reasons[point.ref];
+    }
+    fs.writeFileSync(path.join(ctx.root, 'safety-reasons.json'), JSON.stringify(reasons));
+}
+
+// ---------------------------------------------------------------------------
+// Changing the work tree
+// ---------------------------------------------------------------------------
+
+/**
+ * Replaces the tracked data with a commit's content (after a safety point), optionally only some paths.
+ * Untracked and excluded files (secrets, extensions when not tracked, ...) are left alone.
+ * @param {RepoContext} ctx
+ * @param {string} oid Commit to apply
+ * @param {{ paths?: string[], moveBranch?: string|null }} [options] moveBranch: point this branch at oid and check it out
+ */
+export async function applyCommitToWorkTree(ctx, oid, { paths, moveBranch } = {}) {
+    if (paths?.length) {
+        await git.checkout({ fs, dir: ctx.dir, gitdir: ctx.gitdir, ref: oid, filepaths: paths, force: true, noUpdateHead: true, cache: ctx.cache });
+        // The index keeps HEAD's view so restored files show up as changes to record.
+        for (const filepath of paths) {
+            await git.resetIndex({ fs, dir: ctx.dir, gitdir: ctx.gitdir, filepath, cache: ctx.cache }).catch(() => {});
+        }
+        return;
+    }
+    if (moveBranch) {
+        await git.writeRef({ fs, gitdir: ctx.gitdir, ref: `refs/heads/${moveBranch}`, value: oid, force: true });
+        await git.checkout({ fs, dir: ctx.dir, gitdir: ctx.gitdir, ref: moveBranch, force: true, cache: ctx.cache });
+    } else {
+        await git.checkout({ fs, dir: ctx.dir, gitdir: ctx.gitdir, ref: oid, force: true, cache: ctx.cache });
+    }
+}
+
+/**
+ * Lists files that differ between two commits (either may be null for "empty").
+ * @param {RepoContext} ctx
+ * @param {string|null} fromOid
+ * @param {string|null} toOid
+ */
+export async function diffCommits(ctx, fromOid, toOid) {
+    // A missing side is compared against an empty tree, written once so the walker can read it.
+    const empty = (!fromOid || !toOid) ? await git.writeTree({ fs, gitdir: ctx.gitdir, tree: [] }) : null;
+    const results = [];
+    await git.walk({
+        fs, gitdir: ctx.gitdir, cache: ctx.cache, trees: [git.TREE({ ref: fromOid ?? empty }), git.TREE({ ref: toOid ?? empty })],
+        map: async (filepath, [a, b]) => {
+            if (filepath === '.') return true;
+            const [aType, bType] = await Promise.all([a?.type(), b?.type()]);
+            if (aType === 'tree' || bType === 'tree') return true;
+            const [aOid, bOid] = await Promise.all([a?.oid(), b?.oid()]);
+            if (aOid === bOid) return undefined;
+            const kind = !aOid ? 'added' : !bOid ? 'deleted' : 'modified';
+            results.push({ path: filepath, kind, ...describePath(filepath) });
+            return undefined;
+        },
+    });
+    return results;
+}

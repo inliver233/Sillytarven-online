@@ -73,6 +73,7 @@ import { UPLOADS_DIRECTORY } from './constants.js';
 import { ensureThumbnailCache } from './endpoints/thumbnails.js';
 import systemMonitor from './system-monitor.js';
 import scheduledTasksManager from './scheduled-tasks.js';
+import { startGitSync } from './git-sync/router.js';
 
 // Routers
 import { router as usersPublicRouter } from './endpoints/users-public.js';
@@ -532,6 +533,8 @@ const SHUTDOWN_TIMEOUT_MS = 10 * 1000;
 async function preSetupTasks() {
     // Only the server samples load and keeps the monitor files; scripts importing the same modules do not.
     systemMonitor.start();
+    // Scheduled git backups of users who turned them on.
+    startGitSync();
 
     // Shutdown is set up before the slow startup work below, so a stop request at
     // any point saves what is in memory before the process ends. This is the only

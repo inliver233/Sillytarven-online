@@ -1,0 +1,11 @@
+{
+    "display_name": "酒馆 Git",
+    "loading_order": 90,
+    "requires": [],
+    "optional": [],
+    "js": "index.js",
+    "css": "style.css",
+    "author": "inliver",
+    "version": "1.0.0",
+    "homePage": ""
+}

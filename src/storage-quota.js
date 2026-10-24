@@ -82,6 +82,17 @@ export async function calculateDirectorySize(dirPath) {
     return totalSize;
 }
 
+/**
+ * Storage a user occupies: their data directory plus their built-in git repository, which lives
+ * outside it (`<data root>/_git/<handle>`) so node replicas never copy git history.
+ * @param {{ root: string }} directories
+ */
+export async function calculateUserStorageBytes(directories) {
+    const gitRoot = path.join(path.dirname(directories.root), '_git', path.basename(directories.root));
+    const [data, git] = await Promise.all([calculateDirectorySize(directories.root), calculateDirectorySize(gitRoot)]);
+    return data + git;
+}
+
 export function buildStorageStatus({ usedBytes, limitMiB, rewardMiB, lastCheckInDate }) {
     const limitBytes = toBytesFromMiB(limitMiB);
     const remainingBytes = Math.max(0, limitBytes - usedBytes);
@@ -111,7 +122,7 @@ export async function canConsumeStorage(user, directories, additionalBytes) {
 
     const limitMiB = getUserLimitMiB(user, config) ?? 0;
     const limitBytes = toBytesFromMiB(limitMiB);
-    const usedBytes = await calculateDirectorySize(directories.root);
+    const usedBytes = await calculateUserStorageBytes(directories);
     const remainingBytes = Math.max(0, limitBytes - usedBytes);
 
     if (additionalBytes <= 0) {

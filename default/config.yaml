@@ -481,3 +481,15 @@ scheduledTasks:
   clearAllBackups:
     enabled: true
     cronExpression: 0 */1 * * *
+# 酒馆 Git: per-user version history of tavern data, synced to any git host over HTTPS.
+# Repositories live in <dataRoot>/_git/<user> and count toward the user's storage quota.
+gitSync:
+  enabled: true
+  # Feature modules to serve; "core" is always on.
+  # Available: core, history, branches, remotes, tags, safety, autoBackup
+  modules: [core, history, branches, remotes, tags, safety, autoBackup]
+  # Allow remotes on private/loopback addresses (self-hosted Gitea on the same network).
+  # Leave off on public servers: users could otherwise reach internal services.
+  allowPrivateNetworks: false
+  # Allow plain http:// remotes on public addresses.
+  allowHttp: false

@@ -5,7 +5,7 @@ import express from 'express';
 import storage from 'node-persist';
 
 import { requireAdminMiddleware, requireLoginMiddleware, toKey } from '../users.js';
-import { getStorageConfig, getUserLimitMiB, calculateDirectorySize, buildStorageStatus, getLocalDateKey } from '../storage-quota.js';
+import { getStorageConfig, getUserLimitMiB, calculateUserStorageBytes, buildStorageStatus, getLocalDateKey } from '../storage-quota.js';
 import { createStorageCodes, useStorageCode } from '../storage-codes.js';
 
 export const router = express.Router();
@@ -103,7 +103,7 @@ router.get('/status', requireLoginMiddleware, async (request, response) => {
             await storage.setItem(toKey(user.handle), user);
         }
 
-        const usedBytes = await calculateDirectorySize(request.user.directories.root);
+        const usedBytes = await calculateUserStorageBytes(request.user.directories);
         const status = buildStorageStatus({
             usedBytes,
             limitMiB: limitMiB ?? 0,
