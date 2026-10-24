@@ -583,6 +583,317 @@
     color: inherit;
 }
 
+/* 快速开始: one big question per screen */
+.git-sync-quick-card {
+    width: 100%;
+    margin: 16px 0 6px;
+    border: 2px solid var(--SmartThemeQuoteColor);
+    background: color-mix(in srgb, var(--SmartThemeQuoteColor) 14%, transparent);
+}
+
+.git-sync-quick-card b {
+    font-size: 1.15em;
+}
+
+.git-sync-choice-label {
+    margin-top: 14px;
+    font-size: 0.9em;
+    opacity: 0.7;
+}
+
+.git-sync-choice-label + .git-sync-choice {
+    margin-top: 6px;
+}
+
+.git-sync-qs {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    max-width: 620px;
+    margin: 0 auto;
+    font-size: 1.05em;
+}
+
+.git-sync-qs-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+}
+
+.git-sync-qs-back,
+.git-sync-qs-skip {
+    padding: 6px 4px;
+    color: inherit;
+    background: none;
+    border: none;
+    cursor: pointer;
+    opacity: 0.75;
+}
+
+.git-sync-qs-back[hidden] {
+    visibility: hidden;
+    display: block !important;
+}
+
+.git-sync-qs-skip {
+    text-decoration: underline;
+    font-size: 0.9em;
+}
+
+.git-sync-qs-dots {
+    display: flex;
+    gap: 5px;
+}
+
+.git-sync-qs-dots span {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--SmartThemeBorderColor);
+}
+
+.git-sync-qs-dots span.done {
+    background: var(--SmartThemeQuoteColor);
+    opacity: 0.55;
+}
+
+.git-sync-qs-dots span.now {
+    width: 22px;
+    border-radius: 4px;
+    background: var(--SmartThemeQuoteColor);
+}
+
+.git-sync-qs-head {
+    text-align: center;
+}
+
+.git-sync-qs-head > i {
+    font-size: 2.6em;
+    color: var(--SmartThemeQuoteColor);
+}
+
+.git-sync-qs-head.done > i {
+    font-size: 3.4em;
+    color: #3fb950;
+}
+
+.git-sync-qs-head h2 {
+    margin: 10px 0 6px;
+    font-size: 1.35em;
+    text-wrap: balance;
+}
+
+.git-sync-qs-head p {
+    margin: 4px 0;
+    opacity: 0.85;
+    line-height: 1.6;
+}
+
+.git-sync-qs-choices {
+    display: grid;
+    gap: 10px;
+}
+
+.git-sync-qs-choice {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    width: 100%;
+    padding: 14px 16px;
+    color: inherit;
+    text-align: left;
+    background: rgba(127, 127, 127, 0.08);
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 12px;
+    cursor: pointer;
+}
+
+.git-sync-qs-choice:hover {
+    background: rgba(127, 127, 127, 0.16);
+}
+
+.git-sync-qs-choice.primary {
+    border: 2px solid var(--SmartThemeQuoteColor);
+}
+
+.git-sync-qs-choice > i:first-child {
+    flex: none;
+    width: 1.6em;
+    font-size: 1.6em;
+    text-align: center;
+}
+
+.git-sync-qs-choice span {
+    flex: 1;
+    min-width: 0;
+    display: grid;
+    gap: 3px;
+}
+
+.git-sync-qs-choice b {
+    font-size: 1.08em;
+}
+
+.git-sync-qs-choice small {
+    font-size: 0.86em;
+    line-height: 1.45;
+    opacity: 0.75;
+}
+
+.git-sync-qs-arrow {
+    flex: none;
+    opacity: 0.5;
+}
+
+.git-sync-qs-steps {
+    display: grid;
+    gap: 8px;
+    margin: 0;
+    padding: 12px 12px 12px 34px;
+    line-height: 1.55;
+    background: rgba(127, 127, 127, 0.08);
+    border-radius: 10px;
+}
+
+.git-sync-qs-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 10px;
+}
+
+.git-sync-qs-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0;
+    padding: 10px 16px;
+    color: inherit;
+    text-decoration: none;
+}
+
+.git-sync-qs-field {
+    display: flex;
+    gap: 8px;
+}
+
+.git-sync-qs-field input {
+    flex: 1;
+    min-width: 0;
+    margin: 0;
+    padding: 10px;
+    font-size: 1em;
+}
+
+.git-sync-qs-field .menu_button {
+    flex: none;
+    margin: 0;
+    white-space: nowrap;
+}
+
+.git-sync-qs-label {
+    display: grid;
+    gap: 6px;
+    font-weight: 600;
+}
+
+.git-sync-qs-label small {
+    font-weight: normal;
+    opacity: 0.7;
+}
+
+.git-sync-qs-check:empty {
+    display: none;
+}
+
+.git-sync-qs-check.good {
+    color: #3fb950;
+}
+
+.git-sync-qs-check.bad {
+    color: #e3a33a;
+}
+
+.git-sync-qs-example {
+    font-size: 0.86em;
+    opacity: 0.7;
+    overflow-wrap: anywhere;
+}
+
+.git-sync-qs-error {
+    padding: 10px 12px;
+    line-height: 1.55;
+    border-radius: 10px;
+    background: rgba(220, 60, 60, 0.14);
+    border: 1px solid rgba(220, 60, 60, 0.5);
+    overflow-wrap: anywhere;
+}
+
+.git-sync-qs-error small {
+    display: block;
+    margin-top: 4px;
+    opacity: 0.7;
+}
+
+.git-sync-qs-warn {
+    padding: 4px 14px;
+    line-height: 1.6;
+    border-radius: 10px;
+    background: rgba(230, 150, 40, 0.14);
+    border: 1px solid rgba(230, 150, 40, 0.45);
+}
+
+.git-sync-qs-foot {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 12px;
+}
+
+.git-sync-qs-next {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0;
+    padding: 10px 22px;
+    font-size: 1.05em;
+    font-weight: 600;
+}
+
+.git-sync-qs-progress {
+    display: grid;
+    gap: 10px;
+    margin: 0 auto;
+    padding: 0;
+    list-style: none;
+}
+
+.git-sync-qs-progress li.done i {
+    color: #3fb950;
+}
+
+.git-sync-qs-progress li.failed i {
+    color: #e5534b;
+}
+
+.git-sync-qs-tip {
+    margin-top: 14px !important;
+    font-size: 0.92em;
+}
+
+@media (max-width: 760px) {
+    .git-sync-qs-foot {
+        justify-content: stretch;
+    }
+
+    .git-sync-qs-next {
+        flex: 1;
+        justify-content: center;
+    }
+}
+
 @media (max-width: 760px) {
     .git-sync-window {
         width: 100vw;
