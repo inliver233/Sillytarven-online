@@ -83,6 +83,8 @@ export function repoExists(ctx) {
  * @property {boolean} push Push after an automatic commit
  * @property {string} remote
  * @property {boolean} aiMessages Let the model write commit messages (manual and automatic)
+ * @property {boolean} beforeReroll Save the open chat before a reply is regenerated or swiped
+ * @property {boolean} beforeDelete Save before a message, chat, character, lorebook, ... is deleted
  */
 
 /** @param {any} value @returns {SmartCommitSettings} */
@@ -93,7 +95,10 @@ export function sanitizeSmartCommit(value) {
         everyMessages: Number.isFinite(every) && every > 0 ? Math.min(Math.round(every), 500) : 0,
         push: Boolean(value?.push),
         remote: typeof value?.remote === 'string' && /^[\w.-]{1,50}$/.test(value.remote) ? value.remote : 'origin',
-        aiMessages: Boolean(value?.aiMessages),
+        // On unless turned off: AI-written messages, and the saves that protect against mistakes.
+        aiMessages: value?.aiMessages === undefined ? true : Boolean(value.aiMessages),
+        beforeReroll: value?.beforeReroll === undefined ? true : Boolean(value.beforeReroll),
+        beforeDelete: value?.beforeDelete === undefined ? true : Boolean(value.beforeDelete),
     };
 }
 
@@ -286,6 +291,19 @@ export function describeChanges(changes) {
         const group = groups.get(key) ?? { kind: change.kind, label: change.categoryLabel, items: new Set() };
         group.items.add(change.item);
         groups.set(key, group);
+    }
+    if (groups.size > 3) {
+        // Many kinds at once (a first save, an import): counts per kind instead of names.
+        const byKind = new Map();
+        for (const { kind, label, items } of groups.values()) {
+            if (!byKind.has(kind)) byKind.set(kind, []);
+            byKind.get(kind).push({ label, count: items.size });
+        }
+        return [...byKind].map(([kind, list]) => {
+            const total = list.reduce((sum, entry) => sum + entry.count, 0);
+            const top = list.sort((a, b) => b.count - a.count).slice(0, 3).map(entry => `${entry.label} ${entry.count}`).join('、');
+            return `${KIND_LABEL[kind]} ${total} 项：${top}${list.length > 3 ? ` 等 ${list.length} 类` : ''}`;
+        }).join('；');
     }
     const parts = [...groups.values()].map(({ kind, label, items }) => {
         const names = [...items];

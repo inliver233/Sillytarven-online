@@ -1,5 +1,6 @@
-import { CATEGORY_ICONS, KIND_LABELS, confirmAction, esc, finishWorkTreeChange, flushPendingSaves, fullTime, gitApi, promptText, showError, timeAgo } from '../shared.js';
+import { confirmAction, esc, finishWorkTreeChange, flushPendingSaves, fullTime, gitApi, promptText, showError, timeAgo } from '../shared.js';
 import { showFileDiff } from './diff.js';
+import { changeGroupsHtml, wireChangeGroups } from './change-list.js';
 import { runMergeFlow } from './merge.js';
 
 const ROW = 48;
@@ -146,7 +147,7 @@ async function renderDetail(detail, app, oid, data) {
     const modules = app.state.modules;
     detail.innerHTML = `
         <h3>${esc(title)}</h3>
-        ${rest.join('\n').trim() ? `<div class="git-sync-commit-body">${esc(rest.join('\n').trim())}</div>` : ''}
+        ${rest.join('\n').trim() ? `<div class="git-sync-commit-body${rest.join('\n').trim().length > 120 ? ' clamp' : ''}" title="点一下展开/收起">${esc(rest.join('\n').trim())}</div>` : ''}
         <div class="git-sync-muted">${esc(info.author.name)} · ${esc(fullTime(info.author.timestamp))} · <code>${esc(info.oid.slice(0, 10))}</code>${info.parents.length > 1 ? ' · 合并提交' : ''}</div>
         <div class="git-sync-actions">
             <button type="button" class="menu_button git-sync-small" data-action="reset"><i class="fa-solid fa-backward"></i> 回到这个版本</button>
@@ -154,19 +155,12 @@ async function renderDetail(detail, app, oid, data) {
             ${modules.includes('tags') ? '<button type="button" class="menu_button git-sync-small" data-action="tag"><i class="fa-solid fa-bookmark"></i> 设为存档点</button>' : ''}
             ${modules.includes('branches') && oid !== data.head ? '<button type="button" class="menu_button git-sync-small" data-action="merge"><i class="fa-solid fa-code-merge"></i> 合并到当前</button>' : ''}
         </div>
-        <h4>改动了 ${entries.length} 项</h4>
-        <div class="git-sync-detail-changes">
-            ${entries.map((entry, index) => `
-                <div class="git-sync-change ${entry.kind}">
-                    <input type="checkbox" data-entry="${index}">
-                    <span class="git-sync-kind ${entry.kind}">${KIND_LABELS[entry.kind]}</span>
-                    <i class="fa-solid ${CATEGORY_ICONS[entry.category] ?? 'fa-file'}"></i>
-                    <span class="git-sync-change-name" title="${esc(entry.changes.map(change => change.path).join('\n'))}">${esc(entry.categoryLabel)} · ${esc(entry.item)}</span>
-                    <button type="button" class="menu_button git-sync-small" data-diff="${index}" title="查看差异"><i class="fa-solid fa-code-compare"></i></button>
-                </div>`).join('')}
-        </div>
+        <h4>改动了 ${entries.length} 项 <small class="git-sync-muted">勾选后可以只恢复这几项</small></h4>
+        <div class="git-sync-detail-changes">${changeGroupsHtml(entries)}</div>
         ${entries.length ? '<div class="git-sync-actions"><button type="button" class="menu_button git-sync-small" data-action="restore"><i class="fa-solid fa-rotate-left"></i> 把勾选的恢复成这个版本</button></div>' : ''}`;
 
+    wireChangeGroups(detail);
+    detail.querySelector('.git-sync-commit-body.clamp')?.addEventListener('click', event => event.currentTarget.classList.toggle('expanded'));
     detail.querySelectorAll('[data-diff]').forEach(button => button.addEventListener('click', () => {
         void showFileDiff(primary(entries[Number(button.dataset.diff)]), { oid });
     }));

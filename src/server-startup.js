@@ -52,6 +52,7 @@ import { router as minimaxRouter } from './endpoints/minimax.js';
 import { router as dataMaidRouter } from './endpoints/data-maid.js';
 import { router as backupsRouter } from './endpoints/backups.js';
 import { router as gitSyncRouter } from './git-sync/router.js';
+import { snapshotBeforeDelete } from './git-sync/snapshot.js';
 import { router as forumRouter } from './endpoints/forum.js';
 import { router as invitationCodesRouter } from './endpoints/invitation-codes.js';
 import { router as userInvitationsRouter } from './endpoints/user-invitations.js';
@@ -161,6 +162,8 @@ export function setupPrivateEndpoints(app) {
     app.use(stcontrolRequestTracker);
     app.use(settingsCacheInvalidationMiddleware);
     app.use(recentChatsCacheInvalidationMiddleware);
+    // 酒馆 Git: save before characters, chats, lorebooks, ... are deleted
+    app.use(snapshotBeforeDelete);
     app.use('/', userDataRouter);
     app.use('/api/users', usersPrivateRouter);
     app.use('/api/users', usersAdminRouter);

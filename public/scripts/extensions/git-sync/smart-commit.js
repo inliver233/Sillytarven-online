@@ -13,7 +13,7 @@ import { esc, flushPendingSaves, gitApi } from './shared.js';
 const ERROR_COOLDOWN_MS = 10 * 60 * 1000;
 const DEBOUNCE_MS = 4000;
 
-/** @type {{ onChatSwitch: boolean, everyMessages: number, push: boolean, remote: string, aiMessages: boolean }|null} */
+/** @type {{ onChatSwitch: boolean, everyMessages: number, push: boolean, remote: string, aiMessages: boolean, beforeReroll?: boolean, beforeDelete?: boolean }|null} */
 let config = null;
 let hasRemote = false;
 /** 'light' (open chat only) or 'full' */
@@ -108,7 +108,8 @@ async function run() {
         }
         if (!light) {
             const title = (message || result.summary).split('\n')[0];
-            toastr.info(esc(title), `已自动存档${config.push && hasRemote ? '并推送' : ''}`, { timeOut: 2500, escapeHtml: false });
+            const where = result.cloud?.scheduled ? '，稍后传到酒馆云' : config.push && hasRemote ? '并推送' : '（只在本地）';
+            toastr.info(esc(title), `已自动存档${where}`, { timeOut: 2500, escapeHtml: false });
         }
     } catch (error) {
         if (Date.now() - lastErrorAt > ERROR_COOLDOWN_MS) {
@@ -122,7 +123,35 @@ async function run() {
     }
 }
 
+/** Longest a reroll waits for its protective save before it goes ahead anyway. */
+const SNAPSHOT_WAIT_MS = 1500;
+
+/**
+ * Saves the open chat as it is on disk right now, before it changes (a reroll, a deleted
+ * message). The page is not saved first: its copy may already hold the change. Silent.
+ * @param {string} message
+ */
+function snapshotOpenChat(message) {
+    const paths = openChatPaths();
+    if (!config || !paths) return Promise.resolve();
+    return gitApi('/commit', { light: true, paths, message }).then(() => {
+        console.debug('[git-sync] protective save:', message);
+    }, error => {
+        if (error.status !== 409) console.warn('[git-sync] protective save failed', error);
+    });
+}
+
 export function startSmartCommit() {
+    // Before a reply is regenerated or a new swipe is generated, keep the chat as it was.
+    eventSource.on(event_types.GENERATION_STARTED, async (type, _options, dryRun) => {
+        if (dryRun || !config?.beforeReroll || !['regenerate', 'swipe', 'continue'].includes(type)) return;
+        const label = type === 'continue' ? '继续生成' : '重新生成';
+        await Promise.race([snapshotOpenChat(`${label}前自动存档`), new Promise(resolve => setTimeout(resolve, SNAPSHOT_WAIT_MS))]);
+    });
+    // A deleted message is still in the file on disk until the page saves (debounced).
+    eventSource.on(event_types.MESSAGE_DELETED, () => {
+        if (config?.beforeDelete && !isGenerating()) void snapshotOpenChat('删除消息前自动存档');
+    });
     // GENERATION_STARTED also fires for dry runs (token counting) that never end, so the page's
     // own "generating" marker decides; these events only resume a waiting save promptly.
     const ended = () => {

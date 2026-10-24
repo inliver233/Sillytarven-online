@@ -46,8 +46,8 @@ export default {
                 </div>
             </div>
             ${[...groups].map(([category, entries]) => `
-                <section class="git-sync-group">
-                    <h4><label class="checkbox_label"><input type="checkbox" data-group="${esc(category)}" checked><i class="fa-solid ${CATEGORY_ICONS[category] ?? 'fa-file'}"></i> ${esc(entries[0].categoryLabel)} <span class="git-sync-muted">${entries.length}</span></label></h4>
+                <details class="git-sync-fold"${groups.size === 1 || entries.length <= 5 ? ' open' : ''}>
+                    <summary><input type="checkbox" data-group="${esc(category)}" checked><i class="fa-solid ${CATEGORY_ICONS[category] ?? 'fa-file'}"></i> <b>${esc(entries[0].categoryLabel)}</b> <span class="git-sync-muted">${entries.length} 项</span><i class="fa-solid fa-chevron-down git-sync-fold-arrow"></i></summary>
                     ${entries.map(entry => {
         const index = rows.indexOf(entry);
         return `
@@ -59,7 +59,7 @@ export default {
                             ${entry.kind !== 'untracked' ? `<button type="button" class="menu_button git-sync-small" data-diff="${index}" title="查看差异"><i class="fa-solid fa-code-compare"></i></button>` : ''}
                         </div>`;
     }).join('')}
-                </section>`).join('')}
+                </details>`).join('')}
             ${status.skipped.length ? `
                 <section class="git-sync-group skipped">
                     <h4><i class="fa-solid fa-triangle-exclamation"></i> 超过大小限制，不会同步</h4>
@@ -76,6 +76,7 @@ export default {
             body.querySelectorAll('[data-group]').forEach(box => { box.checked = event.target.checked; });
             updateCount();
         });
+        body.querySelectorAll('[data-group]').forEach(group => group.addEventListener('click', event => event.stopPropagation()));
         body.querySelectorAll('[data-group]').forEach(group => group.addEventListener('change', () => {
             boxes().filter(box => box.dataset.category === group.dataset.group).forEach(box => { box.checked = group.checked; });
             updateCount();

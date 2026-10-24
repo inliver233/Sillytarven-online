@@ -278,7 +278,10 @@ export function renderQuickStart(container, app, { onlineOnly = false, onExit } 
                 { id: '2', icon: 'fa-gauge-high', title: '每次 AI 回复后', text: '一条都不丢' },
                 { id: '10', icon: 'fa-gauge-simple', title: '每 10 条消息', text: '历史记录少一点' },
                 { id: '0', icon: 'fa-hand-pointer', title: '不自动存', text: '我自己点' },
-            ]));
+            ]) + `<ul class="git-sync-qs-notes">
+                <li><i class="fa-solid fa-shield-heart"></i> 重 roll、删除之前也会先存一份</li>
+                <li><i class="fa-solid fa-wand-magic-sparkles"></i> 存档说明由你的 AI 写一句，花一点点 token，可在设置里关</li>
+            </ul>`);
             onChoice((id) => {
                 answers.every = Number(id);
                 show(answers.mode === 'restore' ? 'confirm' : 'run');
@@ -592,6 +595,9 @@ export function renderQuickStart(container, app, { onlineOnly = false, onExit } 
                 ...(app.state.settings.smartCommit ?? {}),
                 onChatSwitch: answers.every > 0,
                 everyMessages: answers.every,
+                aiMessages: true,
+                beforeReroll: true,
+                beforeDelete: true,
                 // 酒馆云 copies are made by the server after every save.
                 push: answers.online && !answers.cloud,
                 remote: answers.remote,

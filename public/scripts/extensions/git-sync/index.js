@@ -1,4 +1,4 @@
-import { esc, gitApi, showError } from './shared.js';
+import { esc, gitApi, showError, timeAgo } from './shared.js';
 import overviewView from './views/overview.js';
 import changesView from './views/changes.js';
 import historyView from './views/history.js';
@@ -16,6 +16,57 @@ import { startSmartCommit } from './smart-commit.js';
  */
 
 const VIEWS = [overviewView, changesView, historyView, branchesView, remotesView, tagsView, safetyView, settingsView];
+
+/** One-line explanation at the top of each tab, until the user taps "知道了". */
+const TAB_GUIDES = {
+    overview: ['fa-house', '这里看总体情况：有没有没存的改动、最近一次存档、备份放在哪。'],
+    changes: ['fa-pen-to-square', '这里是<b>还没存</b>的改动。平时会自动存，不用管；想马上存就点“提交”。'],
+    history: ['fa-clock-rotate-left', '每一条是一次存档。点一条看改了什么；想回到那时候，点<b>回到这个版本</b>。'],
+    branches: ['fa-code-branch', '分支 = 平行世界。想试一条新剧情又怕弄乱，就建个分支，随时切回来。'],
+    remotes: ['fa-cloud', '这里是网上的备份位置。酒馆云会自动同步，一般不用动。'],
+    tags: ['fa-bookmark', '存档点 = 给重要的存档起个名字（比如“第一章结束”），以后好找。'],
+    safety: ['fa-life-ring', '每次恢复、切换之前，都会自动先存一份“安全存档”。后悔了就从这里找回。'],
+    settings: ['fa-gear', '一般不用改。想换自动存的频率、关掉 AI 写说明、选存哪些，来这里。'],
+};
+
+function guideDismissed(tab) {
+    try {
+        return localStorage.getItem(`git_sync_guide_${tab}`) === '1';
+    } catch {
+        return false;
+    }
+}
+
+function dismissGuide(tab) {
+    try {
+        localStorage.setItem(`git_sync_guide_${tab}`, '1');
+    } catch {
+        // Private mode: the guide just shows again next time.
+    }
+}
+
+/**
+ * Where saves end up: 酒馆云, the user's own git host, or only this tavern.
+ * @param {any} state /state response
+ */
+function destinationBadge(state) {
+    const remotes = Object.entries(state.settings?.remotes ?? {});
+    const cloud = remotes.find(([name, remote]) => name === 'cloud' && remote.provider === 'hosted');
+    if (cloud) {
+        const status = state.hosted?.status ?? {};
+        const when = status.lastPushAt ? `${timeAgo(status.lastPushAt / 1000)}同步` : '等待第一次同步';
+        if (status.lastError && (status.lastErrorAt ?? 0) > (status.lastPushAt ?? 0)) {
+            return `<span class="git-sync-dest warn" title="${esc(status.lastError)}"><i class="fa-solid fa-triangle-exclamation"></i> ${esc(state.hosted.label)}：同步出错，稍后自动重试</span>`;
+        }
+        return `<span class="git-sync-dest cloud" title="每次存档后自动传到${esc(state.hosted.label)}"><i class="fa-solid fa-cloud"></i> ${esc(state.hosted.label)} · ${esc(when)}</span>`;
+    }
+    const other = remotes.find(([, remote]) => remote.provider !== 'hosted');
+    if (other) {
+        const label = state.providers?.[other[1].provider]?.label ?? other[0];
+        return `<span class="git-sync-dest remote" title="备份会推送到你自己的 ${esc(label)} 仓库"><i class="fa-solid fa-cloud-arrow-up"></i> ${esc(label)}</span>`;
+    }
+    return '<span class="git-sync-dest local" title="只存在这个酒馆里，没有网上的备份"><i class="fa-solid fa-house"></i> 只在本地</span>';
+}
 
 /**
  * @typedef {object} PanelApp
@@ -80,7 +131,7 @@ function render() {
         return;
     }
 
-    status.innerHTML = `<i class="fa-solid fa-code-branch"></i> ${esc(state.branch ?? '（游离版本）')}${state.head ? ` · <code>${esc(state.head.slice(0, 7))}</code>` : ' · 还没有提交'}`;
+    status.innerHTML = `${destinationBadge(state)} <span class="git-sync-branch"><i class="fa-solid fa-code-branch"></i> ${esc(state.branch ?? '（游离版本）')}${state.head ? ` · <code>${esc(state.head.slice(0, 7))}</code>` : ' · 还没有提交'}</span>`;
     const views = availableViews();
     if (!views.some(view => view.id === app.tab)) app.tab = 'overview';
     nav.innerHTML = views.map(view => `
@@ -95,7 +146,19 @@ function render() {
     const container = document.createElement('div');
     container.className = 'git-sync-view';
     container.innerHTML = '<div class="git-sync-loading"><i class="fa-solid fa-spinner fa-spin"></i> 加载中…</div>';
-    body.replaceChildren(container);
+    const guide = TAB_GUIDES[view.id];
+    if (guide && !guideDismissed(view.id)) {
+        const tip = document.createElement('div');
+        tip.className = 'git-sync-guide';
+        tip.innerHTML = `<i class="fa-solid ${guide[0]}"></i><span>${guide[1]}</span><button type="button" class="menu_button git-sync-small">知道了</button>`;
+        tip.querySelector('button').addEventListener('click', () => {
+            dismissGuide(view.id);
+            tip.remove();
+        });
+        body.replaceChildren(tip, container);
+    } else {
+        body.replaceChildren(container);
+    }
     Promise.resolve(view.render(container, app)).catch(error => {
         container.innerHTML = `<div class="git-sync-error-box">${esc(error?.message || String(error))}</div>`;
     });
