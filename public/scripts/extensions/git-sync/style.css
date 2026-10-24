@@ -612,7 +612,10 @@
 }
 
 /* The tavern's menu buttons stack icon and text vertically in narrow places; keep them on one line. */
-.git-sync-window .menu_button {
+.git-sync-window .menu_button,
+.git-sync-conflicts .menu_button,
+.git-sync-diff-popup .menu_button,
+.git-sync-bulk .menu_button {
     display: inline-flex;
     flex-direction: row;
     gap: 6px;
@@ -630,4 +633,11 @@
     color: #e8a33d;
     border: 1px solid #e8a33d;
     border-radius: 999px;
+}
+
+.git-sync-bulk {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 8px 0;
 }
