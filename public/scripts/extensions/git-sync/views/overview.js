@@ -1,5 +1,6 @@
 import { CATEGORY_ICONS, esc, flushPendingSaves, formatSize, gitApi, showError, timeAgo } from '../shared.js';
 import { runMergeFlow } from './merge.js';
+import { isGenerating, writeCommitMessage } from '../ai-commit.js';
 
 /** @type {{ id: string, label: string, icon: string, module: string, render: Function }} */
 export default {
@@ -69,7 +70,11 @@ export default {
 
         const commit = async (push) => {
             try {
-                await app.busy('正在提交…', () => gitApi('/commit'));
+                let message = '';
+                if (state.settings.smartCommit?.aiMessages && !isGenerating()) {
+                    message = await app.busy('AI 正在写说明…', () => writeCommitMessage()).catch(() => '');
+                }
+                await app.busy('正在提交…', () => gitApi('/commit', { message }));
                 if (push) {
                     const [name] = remotes[0];
                     await app.busy('正在推送…', () => gitApi('/push', { remote: name }));

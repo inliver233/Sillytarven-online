@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import git from 'isomorphic-git';
 import { CATEGORIES, HARD_EXCLUDES, sanitizeTrackingRules } from '../tracking.js';
-import { commitAll, currentBranch, ensureRepo, getStatus, headOid, readSettings, repoExists, writeSettings } from '../repo.js';
+import { commitAll, currentBranch, ensureRepo, getChangeDigest, getStatus, headOid, readSettings, repoExists, sanitizeSmartCommit, writeSettings } from '../repo.js';
 import { PROVIDERS } from '../remotes.js';
 import { getEnabledModuleIds, readCredentials } from '../router.js';
 
@@ -49,6 +49,7 @@ export default {
             const settings = readSettings(ctx);
             const body = request.body ?? {};
             if (body.rules) settings.rules = sanitizeTrackingRules(body.rules);
+            if (body.smartCommit && typeof body.smartCommit === 'object') settings.smartCommit = sanitizeSmartCommit(body.smartCommit);
             if (body.author && typeof body.author === 'object') {
                 settings.author = { name: String(body.author.name ?? '').trim().slice(0, 100), email: String(body.author.email ?? '').trim().slice(0, 200) };
             }
@@ -60,6 +61,15 @@ export default {
             const settings = readSettings(ctx);
             const { changes, skipped } = await getStatus(ctx, settings);
             return { branch: await currentBranch(ctx), head: await headOid(ctx), changes, skipped };
+        }));
+
+        /** What changed inside the files (new chat messages, changed fields), for AI-written messages. */
+        router.post('/digest', api.handle(async (ctx, request) => {
+            const settings = readSettings(ctx);
+            const { changes } = await getStatus(ctx, settings);
+            const paths = Array.isArray(request.body?.paths) ? new Set(request.body.paths.map(String)) : null;
+            const selected = paths ? changes.filter(change => paths.has(change.path)) : changes;
+            return { count: selected.length, items: await getChangeDigest(ctx, selected) };
         }));
 
         router.post('/commit', api.handle(async (ctx, request) => {

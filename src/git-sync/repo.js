@@ -72,7 +72,30 @@ export function repoExists(ctx) {
  * @property {Record<string, RemoteSettings>} remotes
  * @property {{ name: string, email: string }} author
  * @property {{ enabled: boolean, intervalHours: number, push: boolean, remote: string, branch: string, lastRunAt: number, lastError: string }} autoBackup
+ * @property {SmartCommitSettings} smartCommit
  */
+
+/**
+ * Commits made by the browser while the user plays, plus AI-written messages.
+ * @typedef {object} SmartCommitSettings
+ * @property {boolean} onChatSwitch Commit when the user leaves a chat
+ * @property {number} everyMessages Commit after this many new messages (0 = off)
+ * @property {boolean} push Push after an automatic commit
+ * @property {string} remote
+ * @property {boolean} aiMessages Let the model write commit messages (manual and automatic)
+ */
+
+/** @param {any} value @returns {SmartCommitSettings} */
+export function sanitizeSmartCommit(value) {
+    const every = Number(value?.everyMessages);
+    return {
+        onChatSwitch: Boolean(value?.onChatSwitch),
+        everyMessages: Number.isFinite(every) && every > 0 ? Math.min(Math.round(every), 500) : 0,
+        push: Boolean(value?.push),
+        remote: typeof value?.remote === 'string' && /^[\w.-]{1,50}$/.test(value.remote) ? value.remote : 'origin',
+        aiMessages: Boolean(value?.aiMessages),
+    };
+}
 
 /** @returns {RepoSettings} */
 function defaultSettings() {
@@ -81,6 +104,7 @@ function defaultSettings() {
         remotes: {},
         author: { name: '', email: '' },
         autoBackup: { enabled: false, intervalHours: 24, push: true, remote: 'origin', branch: '', lastRunAt: 0, lastError: '' },
+        smartCommit: sanitizeSmartCommit(null),
     };
 }
 
@@ -98,6 +122,7 @@ export function readSettings(ctx) {
             settings.author = { name: String(stored.author.name ?? '').slice(0, 100), email: String(stored.author.email ?? '').slice(0, 200) };
         }
         if (stored.autoBackup && typeof stored.autoBackup === 'object') settings.autoBackup = { ...settings.autoBackup, ...stored.autoBackup };
+        if (stored.smartCommit) settings.smartCommit = sanitizeSmartCommit(stored.smartCommit);
     } catch {
         // No settings yet
     }
@@ -496,4 +521,116 @@ export async function diffCommits(ctx, fromOid, toOid) {
         },
     });
     return results;
+}
+
+// ---------------------------------------------------------------------------
+// Change digest: what changed inside the files, for AI-written commit messages
+// ---------------------------------------------------------------------------
+
+const DIGEST_MAX_FILE_BYTES = 2 * 1024 * 1024;
+
+/** @param {Buffer|null} buffer */
+function jsonOf(buffer) {
+    try {
+        return buffer ? JSON.parse(buffer.toString('utf8')) : null;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * Keys that differ between two JSON values, as dotted paths two levels deep.
+ * @param {any} before
+ * @param {any} after
+ */
+function changedKeys(before, after, prefix = '', depth = 0) {
+    const out = [];
+    const isObject = value => value && typeof value === 'object' && !Array.isArray(value);
+    if (!isObject(before) || !isObject(after) || depth >= 2) {
+        return JSON.stringify(before) === JSON.stringify(after) ? [] : [prefix || '(内容)'];
+    }
+    for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
+        if (JSON.stringify(before[key]) === JSON.stringify(after[key])) continue;
+        const path = prefix ? `${prefix}.${key}` : key;
+        if (isObject(before[key]) && isObject(after[key]) && depth < 1) out.push(...changedKeys(before[key], after[key], path, depth + 1));
+        else out.push(path);
+    }
+    return out;
+}
+
+/** Messages present now but not before, from JSONL chat text. */
+function addedMessages(beforeText, afterText) {
+    const seen = new Set((beforeText ?? '').split('\n'));
+    const messages = [];
+    for (const line of (afterText ?? '').split('\n')) {
+        if (!line || seen.has(line)) continue;
+        try {
+            const entry = JSON.parse(line);
+            if (typeof entry?.mes === 'string' && entry.mes.trim()) {
+                messages.push({ name: String(entry.name ?? '').slice(0, 40), text: entry.mes.replace(/\s+/g, ' ').trim().slice(0, 120) });
+            }
+        } catch {
+            // Not a message line
+        }
+    }
+    return messages;
+}
+
+/**
+ * Describes what changed inside the changed files, grouped by tavern item.
+ * @param {RepoContext} ctx
+ * @param {Change[]} changes
+ * @param {{ maxItems?: number, maxMessages?: number }} [limits]
+ */
+export async function getChangeDigest(ctx, changes, { maxItems = 30, maxMessages = 6 } = {}) {
+    const head = await headOid(ctx);
+    const readHead = async (filepath) => {
+        if (!head) return null;
+        const blob = await git.readBlob({ fs, gitdir: ctx.gitdir, oid: head, filepath, cache: ctx.cache }).catch(() => null);
+        return blob && blob.blob.length <= DIGEST_MAX_FILE_BYTES ? Buffer.from(blob.blob) : null;
+    };
+    const readNow = (filepath) => {
+        try {
+            const full = path.join(ctx.dir, filepath);
+            return fs.statSync(full).size <= DIGEST_MAX_FILE_BYTES ? fs.readFileSync(full) : null;
+        } catch {
+            return null;
+        }
+    };
+
+    /** @type {Map<string, any>} */
+    const items = new Map();
+    for (const change of changes) {
+        const key = `${change.category}|${change.item}`;
+        const item = items.get(key) ?? { category: change.category, categoryLabel: change.categoryLabel, item: change.item, kind: change.kind, messages: [], keys: [] };
+        if (item.kind !== change.kind) item.kind = 'modified';
+        items.set(key, item);
+        if (items.size > maxItems || change.kind === 'deleted' || change.kind === 'untracked') continue;
+
+        if ((change.category === 'chats' || change.category === 'groupChats') && /\.jsonl$/.test(change.path)) {
+            const [before, after] = await Promise.all([readHead(change.path), readNow(change.path)]);
+            item.messages.push(...addedMessages(before?.toString('utf8'), after?.toString('utf8')));
+        } else if (/\.json$/i.test(change.path) && change.kind === 'modified') {
+            const [before, after] = await Promise.all([readHead(change.path), readNow(change.path)]);
+            const a = jsonOf(before);
+            const b = jsonOf(after);
+            if (change.category === 'worlds' && a?.entries && b?.entries) {
+                // Lorebooks: name the entries that changed.
+                for (const uid of new Set([...Object.keys(a.entries), ...Object.keys(b.entries)])) {
+                    if (JSON.stringify(a.entries[uid]) === JSON.stringify(b.entries[uid])) continue;
+                    const entry = b.entries[uid] ?? a.entries[uid];
+                    const label = entry?.comment || (Array.isArray(entry?.key) ? entry.key.join('/') : '') || `条目 ${uid}`;
+                    item.keys.push(`${!a.entries[uid] ? '新增' : !b.entries[uid] ? '删除' : '修改'}条目「${String(label).slice(0, 30)}」`);
+                }
+            } else if (a && b) {
+                item.keys.push(...changedKeys(a, b));
+            }
+        }
+    }
+    return [...items.values()].slice(0, maxItems).map(item => ({
+        ...item,
+        messageCount: item.messages.length,
+        messages: item.messages.slice(-maxMessages),
+        keys: [...new Set(item.keys)].slice(0, 12),
+    }));
 }

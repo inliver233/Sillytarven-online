@@ -8,6 +8,7 @@ import tagsView from './views/tags.js';
 import safetyView from './views/safety.js';
 import settingsView from './views/settings.js';
 import { renderSetupWizard } from './views/setup.js';
+import { startSmartCommit } from './smart-commit.js';
 
 /**
  * 酒馆 Git: the panel shell. Each tab is a view module `{ id, label, icon, module, render(container, app) }`;
@@ -210,6 +211,7 @@ jQuery(() => {
     addSettingsBlock();
     addUserSettingsButton();
     handleEntryLinks();
+    startSmartCommit();
 });
 
 export { openPanel };

@@ -1,5 +1,6 @@
 import { CATEGORY_ICONS, KIND_LABELS, esc, flushPendingSaves, formatSize, gitApi, showError } from '../shared.js';
 import { showFileDiff } from './diff.js';
+import { isGenerating, writeCommitMessage } from '../ai-commit.js';
 
 /** @type {{ id: string, label: string, icon: string, module: string, render: Function }} */
 export default {
@@ -39,6 +40,7 @@ export default {
             <div class="git-sync-commit-box">
                 <textarea class="text_pole" rows="2" data-field="message" placeholder="提交说明（可不填，会自动写成“更新聊天：… 新增角色卡：…”）"></textarea>
                 <div class="git-sync-actions">
+                    <button type="button" class="menu_button" data-action="ai" title="用你当前连接的模型，根据改动内容写一句说明（会消耗少量 token）"><i class="fa-solid fa-wand-magic-sparkles"></i> AI 写说明</button>
                     <label class="checkbox_label"><input type="checkbox" data-field="all" checked> 全选</label>
                     <button type="button" class="menu_button" data-action="commit"><i class="fa-solid fa-floppy-disk"></i> 提交选中的 <span data-count>${rows.length}</span> 项</button>
                 </div>
@@ -82,8 +84,31 @@ export default {
         body.querySelectorAll('[data-diff]').forEach(button => button.addEventListener('click', () => {
             void showFileDiff(primary(rows[Number(button.dataset.diff)]), { against: 'workdir' });
         }));
+        const selectedPaths = () => boxes().filter(box => box.checked).flatMap(box => rows[Number(box.dataset.row)].changes.map(change => change.path));
+        const messageBox = body.querySelector('[data-field="message"]');
+        const aiWrite = async () => {
+            if (isGenerating()) throw new Error('AI 正在回复聊天，请等它说完再试');
+            const message = await app.busy('AI 正在看改动、写说明…', () => writeCommitMessage({ paths: selectedPaths() }));
+            if (!message) throw new Error('模型没有返回内容，请检查 API 连接');
+            messageBox.value = message;
+            return message;
+        };
+        body.querySelector('[data-action="ai"]').addEventListener('click', async () => {
+            try {
+                await aiWrite();
+            } catch (error) {
+                showError(error, 'AI 写说明失败');
+            }
+        });
         body.querySelector('[data-action="commit"]').addEventListener('click', async () => {
-            const paths = boxes().filter(box => box.checked).flatMap(box => rows[Number(box.dataset.row)].changes.map(change => change.path));
+            if (!messageBox.value.trim() && app.state.settings.smartCommit?.aiMessages) {
+                try {
+                    await aiWrite();
+                } catch (error) {
+                    toastr.info(esc(error.message), '改用自动生成的说明', { escapeHtml: false });
+                }
+            }
+            const paths = selectedPaths();
             if (!paths.length) {
                 toastr.warning('没有选择要提交的改动');
                 return;

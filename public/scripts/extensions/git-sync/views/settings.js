@@ -1,5 +1,6 @@
 import { confirmAction, esc, gitApi, promptText, showError } from '../shared.js';
 import { renderScopeForm } from './scope-form.js';
+import { reloadSmartCommit } from '../smart-commit.js';
 
 /** @type {{ id: string, label: string, icon: string, module: string, render: Function }} */
 export default {
@@ -10,6 +11,7 @@ export default {
     async render(body, app) {
         const { settings, defaultAuthor, modules } = app.state;
         const auto = settings.autoBackup;
+        const smart = settings.smartCommit ?? { onChatSwitch: false, everyMessages: 0, push: false, remote: 'origin', aiMessages: false };
         const remotes = Object.keys(settings.remotes);
         body.innerHTML = `
             <section class="git-sync-panel-card">
@@ -25,6 +27,20 @@ export default {
                 </div>
             </section>
             <div class="git-sync-actions"><button type="button" class="menu_button" data-action="save"><i class="fa-solid fa-floppy-disk"></i> 保存设置</button></div>
+            <section class="git-sync-panel-card">
+                <h3><i class="fa-solid fa-wand-magic-sparkles"></i> 智能自动存档</h3>
+                <div class="git-sync-hint">玩的时候自动提交，不用记得点。AI 正在回复时会等它说完再存；没有改动就不提交。</div>
+                <div class="git-sync-form">
+                    <label class="checkbox_label"><input type="checkbox" id="git_sync_smart_switch" data-field="smartSwitch"${smart.onChatSwitch ? ' checked' : ''}> 离开一个聊天（切换聊天或角色）时自动存档</label>
+                    <label>每多少条新消息自动存档一次（0 为关闭）
+                        <input class="text_pole" type="number" min="0" max="500" id="git_sync_smart_every" data-field="smartEvery" value="${esc(smart.everyMessages)}">
+                    </label>
+                    <label class="checkbox_label"><input type="checkbox" id="git_sync_smart_push" data-field="smartPush"${smart.push ? ' checked' : ''}${remotes.length ? '' : ' disabled'}> 自动存档后推送到远程</label>
+                    <label>推送到 <select class="text_pole" id="git_sync_smart_remote" data-field="smartRemote">${remotes.map(name => `<option${name === smart.remote ? ' selected' : ''}>${esc(name)}</option>`).join('') || '<option value="origin">（先添加远程仓库）</option>'}</select></label>
+                    <label class="checkbox_label"><input type="checkbox" id="git_sync_ai_messages" data-field="aiMessages"${smart.aiMessages ? ' checked' : ''}> 用 AI 写提交说明（手动和自动提交都用，使用你当前连接的模型，会消耗少量 token）</label>
+                </div>
+                <div class="git-sync-actions"><button type="button" class="menu_button" data-action="save-smart"><i class="fa-solid fa-floppy-disk"></i> 保存智能存档设置</button></div>
+            </section>
             ${modules.includes('autoBackup') ? `
             <section class="git-sync-panel-card">
                 <h3><i class="fa-solid fa-robot"></i> 自动备份</h3>
@@ -51,6 +67,24 @@ export default {
             try {
                 await gitApi('/settings', { rules: scope.read(), author: { name: field('authorName').value, email: field('authorEmail').value } });
                 toastr.success('设置已保存');
+                await app.refresh('settings');
+            } catch (error) {
+                showError(error, '保存失败');
+            }
+        });
+        body.querySelector('[data-action="save-smart"]').addEventListener('click', async () => {
+            try {
+                await gitApi('/settings', {
+                    smartCommit: {
+                        onChatSwitch: field('smartSwitch').checked,
+                        everyMessages: Number(field('smartEvery').value) || 0,
+                        push: field('smartPush').checked,
+                        remote: field('smartRemote').value,
+                        aiMessages: field('aiMessages').checked,
+                    },
+                });
+                await reloadSmartCommit();
+                toastr.success('智能存档设置已保存');
                 await app.refresh('settings');
             } catch (error) {
                 showError(error, '保存失败');
