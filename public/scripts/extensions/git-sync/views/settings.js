@@ -143,11 +143,13 @@ export default {
             }
         });
         body.querySelector('[data-action="destroy"]').addEventListener('click', async () => {
-            const cloudNote = cloudOn ? `<li>${esc(app.state.hosted.label)}里的备份</li>` : '';
-            if (!await confirmAction(`<h3 class="git-sync-danger-title"><i class="fa-solid fa-triangle-exclamation"></i> 删除后无法恢复</h3>
-                <p>会立刻永久删除：</p>
-                <ul><li>全部存档历史、分支、存档点、安全存档</li>${cloudNote}<li>远程设置和保存的令牌</li></ul>
-                <p>你酒馆里现在的聊天、角色卡等<b>不会</b>被删。${Object.values(settings.remotes).some(remote => remote.provider !== 'hosted') ? '你自己的 GitHub 等仓库也不会被删。' : ''}</p>`, { okButton: '我明白，继续', danger: true })) return;
+            const cloudNote = cloudOn ? `<li><b class="git-sync-del">${esc(app.state.hosted.label)}里的备份</b></li>` : '';
+            if (!await confirmAction(`<h3 class="git-sync-danger-title"><i class="fa-solid fa-triangle-exclamation"></i> 删除后<span class="git-sync-del">无法恢复</span></h3>
+                <div class="git-sync-destroy-list">
+                    <p><i class="fa-solid fa-trash git-sync-del"></i> 会<b class="git-sync-del">立刻永久删除</b>：</p>
+                    <ul><li><b class="git-sync-del">全部存档历史</b>、分支、存档点、安全存档</li>${cloudNote}<li>远程设置和保存的令牌</li></ul>
+                    <p><i class="fa-solid fa-shield-heart git-sync-keep"></i> <b class="git-sync-keep">不会删</b>：你酒馆里现在的<b class="git-sync-keep">聊天、角色卡</b>等${Object.values(settings.remotes).some(remote => remote.provider !== 'hosted') ? '，以及你<b class="git-sync-keep">自己的 GitHub 等仓库</b>' : ''}</p>
+                </div>`, { okButton: '我明白，继续', danger: true })) return;
             const typed = await promptText(`<p>输入你的用户名 <b>${esc(app.state.handle ?? '')}</b> 确认删除</p>`);
             if (!typed) return;
             try {

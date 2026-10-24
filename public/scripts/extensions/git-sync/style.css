@@ -1616,6 +1616,24 @@
     cursor: not-allowed;
 }
 
+.git-sync-del {
+    color: #ff6b6b;
+}
+
+.git-sync-keep {
+    color: #4cc38a;
+}
+
+.git-sync-destroy-list {
+    text-align: left;
+    line-height: 1.6;
+}
+
+.git-sync-destroy-list ul {
+    margin: 4px 0 10px;
+    padding-left: 1.6em;
+}
+
 @media (max-width: 760px) {
     .git-sync-qs-foot {
         justify-content: stretch;
