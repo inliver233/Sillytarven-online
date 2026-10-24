@@ -5,6 +5,7 @@ import { normalizeRemoteUrl } from '../remote-http.js';
 import { applyCommitToWorkTree, createSafetyPoint, currentBranch, ensureRepo, headOid, readSettings, writeSettings } from '../repo.js';
 import { readCredentials, writeCredentials } from '../router.js';
 import { mergeIntoCurrent } from './branches.js';
+import { isReservedRemote } from './hosted.js';
 
 const REMOTE_NAME = /^[\w.-]{1,50}$/;
 
@@ -37,6 +38,7 @@ export default {
             const body = request.body ?? {};
             const name = String(body.name || 'origin').trim();
             if (!REMOTE_NAME.test(name)) throw api.userError(400, '远程名称只能包含字母、数字、-、_ 和 .');
+            if (isReservedRemote(name) || isReservedRemote(String(body.previousName ?? ''))) throw api.userError(400, '酒馆云由本站管理，不能修改');
             let url;
             try {
                 url = normalizeRemoteUrl(body.url, api.policy());
@@ -70,6 +72,7 @@ export default {
 
         router.post('/remote/delete', api.handle(async (ctx, request) => {
             const name = String(request.body?.name ?? '');
+            if (name === 'cloud' && isReservedRemote(name)) throw api.userError(400, '酒馆云由本站管理，不能删除');
             const settings = readSettings(ctx);
             delete settings.remotes[name];
             writeSettings(ctx, settings);

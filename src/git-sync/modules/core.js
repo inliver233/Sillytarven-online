@@ -4,7 +4,7 @@ import { CATEGORIES, HARD_EXCLUDES, sanitizeTrackingRules } from '../tracking.js
 import { commitAll, currentBranch, ensureRepo, getChangeDigest, getStatus, headOid, readSettings, repoExists, sanitizeSmartCommit, writeSettings } from '../repo.js';
 import { PROVIDERS } from '../remotes.js';
 import { getEnabledModuleIds, readCredentials } from '../router.js';
-import { hostedConfig } from './hosted.js';
+import { ensureCloud, hostedConfig, mirrorToCloud } from './hosted.js';
 
 /**
  * Repository creation, overview, tracking scope, status and commits.
@@ -17,9 +17,13 @@ export default {
         /** Everything the panel needs to draw itself. */
         router.post('/state', api.handle(async (ctx, request) => {
             const exists = repoExists(ctx);
+            if (exists) {
+                // Repositories made before 酒馆云 was turned on get connected too.
+                await ensureCloud(ctx, api.userError).catch(error => console.warn('[git-sync] 酒馆云 connect failed', error?.message));
+            }
             const settings = readSettings(ctx);
             const credentials = readCredentials(ctx);
-            const remotes = Object.fromEntries(Object.entries(settings.remotes).map(([name, remote]) => [name, { ...remote, hasToken: Boolean(credentials[name]) }]));
+            const remotes = Object.fromEntries(Object.entries(settings.remotes).map(([name, remote]) => [name, { ...remote, ...(remote.provider === 'hosted' ? { url: '' } : {}), hasToken: Boolean(credentials[name]) }]));
             return {
                 exists,
                 branch: exists ? await currentBranch(ctx) : null,
@@ -44,7 +48,9 @@ export default {
                 settings.rules = sanitizeTrackingRules(request.body.rules);
                 writeSettings(ctx, settings);
             }
-            return { created };
+            // With 酒馆云 on there are no local-only repositories.
+            const cloud = await ensureCloud(ctx, api.userError).then(() => '', error => error?.userMessage || '酒馆云暂时连不上，下次存档时再连');
+            return { created, cloudError: cloud };
         }, { needsRepo: false }));
 
         router.post('/settings', api.handle(async (ctx, request) => {
@@ -81,7 +87,7 @@ export default {
             const message = String(request.body?.message ?? '').slice(0, 5000);
             const result = await commitAll(ctx, settings, { message, author: api.author(request, settings), paths });
             if (!result) throw api.userError(409, '没有需要提交的改动');
-            return result;
+            return { ...result, cloud: await mirrorToCloud(ctx, api.userError, api.policy()) };
         }));
 
         /** Removes the repository and its settings; the user's data is untouched. */

@@ -1,7 +1,8 @@
 import fs from 'node:fs';
 import git from 'isomorphic-git';
 import { getConfigValue } from '../../util.js';
-import { ensureRepo, readSettings, writeSettings } from '../repo.js';
+import { currentBranch, ensureRepo, headOid, readSettings, writeSettings } from '../repo.js';
+import { explainNetworkError, pushRemote } from '../remotes.js';
 
 /**
  * 酒馆云: a Forgejo/Gitea server run by the site, so "save it online" needs no account,
@@ -106,6 +107,88 @@ function describe(site, cfg, repository) {
     return { site, label: cfg.sites[site], exists: Boolean(repository), empty: repository ? Boolean(repository.empty) : true, updatedAt: repository?.updated_at ?? null, sizeKiB: repository?.size ?? 0 };
 }
 
+/** Remote name for a site's repository: `cloud` for this site, `cloud-<site>` for another (read only). */
+function remoteNameFor(cfg, site) {
+    return site === cfg.site ? HOSTED_REMOTE : `${HOSTED_REMOTE}-${site}`;
+}
+
+/** Remote names the user may not add, change or delete while 酒馆云 is on. */
+export function isReservedRemote(name) {
+    return Boolean(hostedConfig()) && (name === HOSTED_REMOTE || name.startsWith(`${HOSTED_REMOTE}-`));
+}
+
+/**
+ * Connects a site's repository as a remote. This site's repository is created when missing;
+ * another site's must exist (restoring a Discord account's backup).
+ * @param {import('../repo.js').RepoContext} ctx
+ * @param {string} site
+ */
+export async function attachCloud(ctx, site, userError) {
+    const cfg = hostedConfig();
+    if (!cfg) throw userError(503, '酒馆云暂时没有开启');
+    if (!allowedSites(cfg, ctx.handle).includes(site)) throw userError(403, '不能使用这个酒馆云仓库');
+    const name = repoName(site, ctx.handle);
+    let { status, data } = await forgejo(cfg, 'GET', `/repos/${cfg.org}/${name}`);
+    if (status === 404 && site === cfg.site) {
+        ({ status, data } = await forgejo(cfg, 'POST', `/orgs/${cfg.org}/repos`, { name, private: true, auto_init: false, default_branch: 'main', description: `${cfg.sites[site]} ${ctx.handle}` }));
+        if (status !== 201) throw userError(502, `酒馆云建仓库失败（${status}）`);
+    } else if (status === 404) {
+        throw userError(404, `${cfg.sites[site]}没有你的备份`);
+    } else if (status !== 200) {
+        throw userError(502, `连不上酒馆云（${status}）`);
+    }
+    await ensureRepo(ctx);
+    const remote = remoteNameFor(cfg, site);
+    const settings = readSettings(ctx);
+    // The address is never stored where the page can read it; hostedAccess rebuilds it.
+    settings.remotes[remote] = { url: '', provider: 'hosted', username: '', hosted: { site } };
+    writeSettings(ctx, settings);
+    await git.addRemote({ fs, gitdir: ctx.gitdir, remote, url: `${cfg.url}/${cfg.org}/${name}.git`, force: true });
+    return { remote, ...describe(site, cfg, data) };
+}
+
+/**
+ * With 酒馆云 on, no repository stays local only: connects this site's repository when the
+ * user's repository has none yet. Errors are left to the caller.
+ * @param {import('../repo.js').RepoContext} ctx
+ */
+export async function ensureCloud(ctx, userError) {
+    const cfg = hostedConfig();
+    if (!cfg || readSettings(ctx).remotes[HOSTED_REMOTE]?.provider === 'hosted') return false;
+    await attachCloud(ctx, cfg.site, userError);
+    return true;
+}
+
+/**
+ * Copies the current branch to this site's 酒馆云 repository. The cloud copy mirrors the
+ * tavern's repository, so it is overwritten (after "回到这个版本" the local branch moves back;
+ * the newer commits stay in the safety points).
+ * @param {import('../repo.js').RepoContext} ctx
+ * @returns {Promise<{ pushed: boolean, error: string }>}
+ */
+export async function mirrorToCloud(ctx, userError, policy) {
+    if (!hostedConfig()) return { pushed: false, error: '' };
+    try {
+        await ensureCloud(ctx, userError);
+        const branch = await currentBranch(ctx);
+        if (!branch || !(await headOid(ctx))) return { pushed: false, error: '' };
+        const access = await hostedAccess(ctx, readSettings(ctx).remotes[HOSTED_REMOTE], userError);
+        await pushRemote(ctx, HOSTED_REMOTE, access, policy, { ref: branch, force: true });
+        return { pushed: true, error: '' };
+    } catch (error) {
+        console.warn('[git-sync] 酒馆云 push failed', error?.message);
+        return { pushed: false, error: hideHostedAddress(error?.userMessage || explainNetworkError(error)) };
+    }
+}
+
+/** Replaces the 酒馆云 address in text that goes to the page. */
+export function hideHostedAddress(text) {
+    const cfg = hostedConfig();
+    if (!cfg || typeof text !== 'string') return text;
+    const host = new URL(cfg.url).host;
+    return text.split(cfg.url).join(cfg.label).split(host).join(cfg.label);
+}
+
 /**
  * @type {import('../router.js').GitModule}
  */
@@ -126,31 +209,11 @@ export default {
             return { available: true, label: cfg.label, site: cfg.site, repositories };
         }, { needsRepo: false }));
 
-        /**
-         * Connects the `cloud` remote: this site's repository (created when missing) or, for
-         * restoring, another site's existing one.
-         */
+        /** Connects this site's repository (`cloud`) or, for restoring, another site's (`cloud-<site>`). */
         router.post('/hosted/connect', api.handle(async (ctx, request) => {
             const cfg = hostedConfig();
             if (!cfg) throw api.userError(503, '酒馆云暂时没有开启');
-            const site = String(request.body?.site || cfg.site);
-            if (!allowedSites(cfg, ctx.handle).includes(site)) throw api.userError(403, '不能使用这个酒馆云仓库');
-            const name = repoName(site, ctx.handle);
-            let { status, data } = await forgejo(cfg, 'GET', `/repos/${cfg.org}/${name}`);
-            if (status === 404 && site === cfg.site) {
-                ({ status, data } = await forgejo(cfg, 'POST', `/orgs/${cfg.org}/repos`, { name, private: true, auto_init: false, default_branch: 'main', description: `${cfg.sites[site]} ${ctx.handle}` }));
-                if (status !== 201) throw api.userError(502, `酒馆云建仓库失败（${status}）`);
-            } else if (status === 404) {
-                throw api.userError(404, `${cfg.sites[site]}没有你的备份`);
-            } else if (status !== 200) {
-                throw api.userError(502, `连不上酒馆云（${status}）`);
-            }
-            await ensureRepo(ctx);
-            const settings = readSettings(ctx);
-            settings.remotes[HOSTED_REMOTE] = { url: `${cfg.url}/${cfg.org}/${name}`, provider: 'hosted', username: '', hosted: { site } };
-            writeSettings(ctx, settings);
-            await git.addRemote({ fs, gitdir: ctx.gitdir, remote: HOSTED_REMOTE, url: `${cfg.url}/${cfg.org}/${name}.git`, force: true });
-            return { remote: HOSTED_REMOTE, ...describe(site, cfg, data) };
+            return attachCloud(ctx, String(request.body?.site || cfg.site), api.userError);
         }, { needsRepo: false }));
     },
 };

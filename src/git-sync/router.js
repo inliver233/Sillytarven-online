@@ -15,7 +15,7 @@ import remotesModule from './modules/remotes.js';
 import tagsModule from './modules/tags.js';
 import safetyModule from './modules/safety.js';
 import autoBackupModule from './modules/auto-backup.js';
-import hostedModule, { hostedAccess, hostedConfig } from './modules/hosted.js';
+import hostedModule, { hideHostedAddress, hostedAccess, hostedConfig } from './modules/hosted.js';
 
 /**
  * Built-in git ("酒馆 Git"): per-user repositories of the user's tavern data.
@@ -147,14 +147,14 @@ const api = {
             } catch (error) {
                 if (response.headersSent) return;
                 if (error?.userMessage) {
-                    return response.status(error.status ?? 400).json({ error: error.userMessage, code: error.code, ...(error.details ? { details: error.details } : {}) });
+                    return response.status(error.status ?? 400).json({ error: hideHostedAddress(error.userMessage), code: error.code, ...(error.details ? { details: error.details } : {}) });
                 }
                 const network = error?.code && error.code !== 'ENOENT' ? explainNetworkError(error) : null;
                 if (network && network !== error.message) {
-                    return response.status(502).json({ error: network, code: error.code });
+                    return response.status(502).json({ error: hideHostedAddress(network), code: error.code });
                 }
                 console.error('[git-sync]', error);
-                return response.status(500).json({ error: error?.message || '操作失败' });
+                return response.status(500).json({ error: hideHostedAddress(error?.message || '操作失败') });
             }
         };
     },

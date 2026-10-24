@@ -403,8 +403,8 @@ export function renderQuickStart(container, app, { onlineOnly = false, onExit } 
                         });
                     },
                 }]),
-                ...(answers.cloud ? [{ label: `连上${esc(cloudLabel)}`, work: () => gitApi('/hosted/connect') }] : []),
-                ...(answers.online ? [{ label: '传到网上', work: () => gitApi('/push', { remote: answers.remote, force: answers.force }) }] : []),
+                ...(answers.cloud && onlineOnly ? [{ label: `连上${esc(cloudLabel)}`, work: () => gitApi('/hosted/connect') }] : []),
+                ...(answers.online ? [{ label: answers.cloud ? `传到${esc(cloudLabel)}` : '传到网上', work: () => gitApi('/push', { remote: answers.remote, force: answers.force || answers.cloud }) }] : []),
                 { label: '打开自动存', work: saveAutoSave },
             ];
             frame(head('fa-gears', '稍等…', '别关页面')
@@ -459,8 +459,9 @@ export function renderQuickStart(container, app, { onlineOnly = false, onExit } 
     const connectCloud = async (site) => {
         try {
             const info = await app.busy('连接中…', async () => {
-                await gitApi('/hosted/connect', site ? { site } : {});
-                return gitApi('/remote/test', { name: 'cloud' });
+                const connected = await gitApi('/hosted/connect', site ? { site } : {});
+                answers.remote = connected.remote;
+                return gitApi('/remote/test', { name: connected.remote });
             });
             if (!info.branches.length) return fail('这份备份是空的');
             answers.branches = info.branches.map(branch => branch.name);
@@ -488,7 +489,8 @@ export function renderQuickStart(container, app, { onlineOnly = false, onExit } 
                 ...(app.state.settings.smartCommit ?? {}),
                 onChatSwitch: true,
                 everyMessages: 20,
-                push: answers.online,
+                // 酒馆云 copies are made by the server after every save.
+                push: answers.online && !answers.cloud,
                 remote: answers.remote,
             },
         });
