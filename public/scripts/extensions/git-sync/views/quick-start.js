@@ -226,31 +226,80 @@ export function renderQuickStart(container, app, { onlineOnly = false, onExit } 
     const screens = {
         /** What it does, as a small looping animation, then one button. */
         intro() {
-            frame(`
-                <div class="git-sync-demo" aria-hidden="true">
+            const scenes = [
+                ['save', '聊天时自动存，' + (cloudLabel ? `放到${esc(cloudLabel)}` : '随时有备份'), `
                     <div class="git-sync-demo-stage">
                         <span class="git-sync-demo-node n1"><i class="fa-solid fa-comments"></i></span>
                         <span class="git-sync-demo-line l1"><i></i></span>
                         <span class="git-sync-demo-node n2"><i class="fa-solid fa-floppy-disk"></i></span>
                         <span class="git-sync-demo-line l2"><i></i></span>
                         <span class="git-sync-demo-node n3"><i class="fa-solid fa-cloud"></i></span>
-                    </div>
+                    </div>`],
+                ['rewind', '存错了？随时回到过去', `
                     <div class="git-sync-demo-timeline">
                         <span class="git-sync-demo-track"></span>
                         ${[1, 2, 3, 4, 5].map(i => `<span class="git-sync-demo-tick k${i}"></span>`).join('')}
                         <span class="git-sync-demo-cursor"><i class="fa-solid fa-backward"></i></span>
-                    </div>
-                    <div class="git-sync-demo-captions">
-                        <span class="c1">你在聊天</span>
-                        <span class="c2">自动存一份</span>
-                        <span class="c3">放到${esc(cloudLabel || '网上')}</span>
-                        <span class="c4">随时回到过去</span>
-                    </div>
+                    </div>`],
+                ['branch', '开个平行世界，试另一种结局', `
+                    <svg class="git-sync-demo-fork" viewBox="0 0 300 90">
+                        <path class="main" d="M10 62 H290"/>
+                        <path class="side" d="M120 62 C150 62 150 22 180 22 H290"/>
+                        <circle class="d1" cx="40" cy="62" r="7"/><circle class="d2" cx="120" cy="62" r="7"/>
+                        <circle class="d3" cx="210" cy="62" r="7"/><circle class="d4" cx="270" cy="62" r="7"/>
+                        <circle class="s1" cx="210" cy="22" r="7"/><circle class="s2" cx="270" cy="22" r="7"/>
+                    </svg>
+                    <div class="git-sync-demo-forklabels"><span class="a">主线</span><span class="b">if 线</span></div>`],
+                ['protect', '重 roll、删除之前，先自动存一份', `
+                    <div class="git-sync-demo-protect">
+                        <span class="git-sync-demo-node p1"><i class="fa-solid fa-rotate"></i></span>
+                        <span class="git-sync-demo-shield"><i class="fa-solid fa-shield-heart"></i></span>
+                        <span class="git-sync-demo-node p2"><i class="fa-solid fa-trash-can"></i></span>
+                    </div>`],
+                ['tags', '给重要时刻起名字，以后好找', `
+                    <div class="git-sync-demo-timeline">
+                        <span class="git-sync-demo-track"></span>
+                        ${[1, 2, 3, 4, 5].map(i => `<span class="git-sync-demo-tick k${i}"></span>`).join('')}
+                        <span class="git-sync-demo-flag f1"><i class="fa-solid fa-bookmark"></i> 第一章完</span>
+                        <span class="git-sync-demo-flag f2"><i class="fa-solid fa-bookmark"></i> 表白前</span>
+                    </div>`],
+            ];
+            frame(`
+                <div class="git-sync-demo" title="点一下看下一个">
+                    ${scenes.map(([id, caption, visual], index) => `
+                    <div class="git-sync-demo-scene scene-${id}${index ? '' : ' on'}" aria-hidden="${index ? 'true' : 'false'}">
+                        <div class="git-sync-demo-visual">${visual}</div>
+                        <div class="git-sync-demo-caption">${caption}</div>
+                    </div>`).join('')}
+                    <div class="git-sync-demo-dots">${scenes.map((_, index) => `<span class="${index ? '' : 'on'}"></span>`).join('')}</div>
                 </div>`
                 + head('fa-code-branch', '酒馆 Git', '自动帮你存聊天、角色卡<br>存错了、删错了都能找回来')
                 + `<div class="git-sync-qs-foot center">${next('开始', 'fa-arrow-right')}</div>
                 <p class="git-sync-qs-beta"><i class="fa-solid fa-flask"></i> 测试版：重要数据请再用“备份与导出”存一份</p>`);
-            container.querySelector('[data-qs="next"]').addEventListener('click', () => show('start'));
+            const demo = container.querySelector('.git-sync-demo');
+            const sceneEls = [...demo.querySelectorAll('.git-sync-demo-scene')];
+            const dots = [...demo.querySelectorAll('.git-sync-demo-dots span')];
+            let index = 0;
+            const showScene = (next) => {
+                sceneEls[index].classList.remove('on');
+                sceneEls[index].setAttribute('aria-hidden', 'true');
+                dots[index].classList.remove('on');
+                index = next % sceneEls.length;
+                // Re-adding the class restarts the scene's animation.
+                void sceneEls[index].offsetWidth;
+                sceneEls[index].classList.add('on');
+                sceneEls[index].setAttribute('aria-hidden', 'false');
+                dots[index].classList.add('on');
+            };
+            const timer = setInterval(() => {
+                if (!demo.isConnected) return clearInterval(timer);
+                showScene(index + 1);
+            }, 3400);
+            demo.addEventListener('click', () => showScene(index + 1));
+            container.querySelector('[data-qs="next"]').addEventListener('click', () => {
+                clearInterval(timer);
+                show('start');
+            });
         },
         /** "只存一部分": big toggles per kind of data. */
         scope() {

@@ -1054,18 +1054,73 @@
     }
 }
 
-/* 快速开始: intro animation — chat → save → cloud, then back in time (8 s loop) */
+/* 快速开始: intro, five short scenes that take turns (3.4 s each) */
 .git-sync-demo {
     --demo-accent: var(--SmartThemeQuoteColor);
+    position: relative;
     display: grid;
-    gap: 14px;
-    padding: 18px 12px 12px;
+    grid-template-columns: 100%;
+    padding: 16px 12px 10px;
     border-radius: 16px;
     background: color-mix(in srgb, var(--SmartThemeQuoteColor) 8%, transparent);
     border: 1px solid var(--SmartThemeBorderColor);
+    cursor: pointer;
+    user-select: none;
 }
 
-.git-sync-demo-stage {
+.git-sync-demo-scene {
+    grid-area: 1 / 1;
+    width: 100%;
+    min-width: 0;
+    display: grid;
+    gap: 12px;
+    opacity: 0;
+    transform: translateX(16px);
+    transition: opacity 0.35s ease, transform 0.35s ease;
+    pointer-events: none;
+}
+
+.git-sync-demo-scene.on {
+    opacity: 1;
+    transform: none;
+}
+
+.git-sync-demo-visual {
+    display: grid;
+    align-items: center;
+    min-height: 92px;
+}
+
+.git-sync-demo-caption {
+    text-align: center;
+    font-weight: 700;
+    font-size: 1.08em;
+}
+
+.git-sync-demo-dots {
+    display: flex;
+    justify-content: center;
+    gap: 6px;
+    margin-top: 10px;
+}
+
+.git-sync-demo-dots span {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--SmartThemeBorderColor);
+    transition: width 0.25s ease;
+}
+
+.git-sync-demo-dots span.on {
+    width: 18px;
+    border-radius: 3px;
+    background: var(--demo-accent);
+}
+
+/* nodes and lines (save, protect) */
+.git-sync-demo-stage,
+.git-sync-demo-protect {
     display: flex;
     align-items: center;
     justify-content: center;
@@ -1082,31 +1137,6 @@
     border-radius: 50%;
     border: 2px solid var(--SmartThemeBorderColor);
     background: var(--SmartThemeBlurTintColor);
-    animation: git-sync-demo-node 8s ease-in-out infinite;
-}
-
-.git-sync-demo-node.n2 {
-    animation-delay: 2s;
-}
-
-.git-sync-demo-node.n3 {
-    animation-delay: 4s;
-}
-
-@keyframes git-sync-demo-node {
-    0%, 30%, 100% {
-        color: inherit;
-        border-color: var(--SmartThemeBorderColor);
-        transform: none;
-        box-shadow: none;
-    }
-
-    6%, 20% {
-        color: var(--demo-accent);
-        border-color: var(--demo-accent);
-        transform: scale(1.12);
-        box-shadow: 0 0 0 6px color-mix(in srgb, var(--demo-accent) 20%, transparent);
-    }
 }
 
 .git-sync-demo-line {
@@ -1126,43 +1156,45 @@
     border-radius: 50%;
     background: var(--demo-accent);
     opacity: 0;
-    animation: git-sync-demo-travel 8s linear infinite;
 }
 
-.git-sync-demo-line.l1 i {
-    animation-delay: 1.2s;
-}
+.on .git-sync-demo-node.n1 { animation: git-sync-demo-glow 0.9s 0.1s both; }
+.on .git-sync-demo-line.l1 i { animation: git-sync-demo-travel 0.7s 0.6s both; }
+.on .git-sync-demo-node.n2 { animation: git-sync-demo-glow 0.9s 1.2s both; }
+.on .git-sync-demo-line.l2 i { animation: git-sync-demo-travel 0.7s 1.7s both; }
+.on .git-sync-demo-node.n3 { animation: git-sync-demo-glow 1.2s 2.3s both; }
 
-.git-sync-demo-line.l2 i {
-    animation-delay: 3.2s;
+@keyframes git-sync-demo-glow {
+    0% { transform: none; }
+    40% {
+        color: var(--demo-accent);
+        border-color: var(--demo-accent);
+        transform: scale(1.14);
+        box-shadow: 0 0 0 7px color-mix(in srgb, var(--demo-accent) 22%, transparent);
+    }
+    100% {
+        color: var(--demo-accent);
+        border-color: var(--demo-accent);
+        transform: none;
+    }
 }
 
 @keyframes git-sync-demo-travel {
-    0% {
-        left: 0;
-        opacity: 1;
-    }
-
-    10% {
-        left: calc(100% - 10px);
-        opacity: 1;
-    }
-
-    11%, 100% {
-        left: calc(100% - 10px);
-        opacity: 0;
-    }
+    0% { left: 0; opacity: 1; }
+    90% { left: calc(100% - 10px); opacity: 1; }
+    100% { left: calc(100% - 10px); opacity: 0; }
 }
 
+/* timeline (rewind, tags) */
 .git-sync-demo-timeline {
     position: relative;
-    height: 26px;
+    height: 60px;
     margin: 0 8%;
 }
 
 .git-sync-demo-track {
     position: absolute;
-    top: 12px;
+    top: 38px;
     left: 0;
     right: 0;
     height: 2px;
@@ -1171,41 +1203,32 @@
 
 .git-sync-demo-tick {
     position: absolute;
-    top: 7px;
+    top: 33px;
     width: 12px;
     height: 12px;
     margin-left: -6px;
     border-radius: 50%;
     background: var(--demo-accent);
-    animation: git-sync-demo-tick 8s ease-out infinite;
 }
 
-.git-sync-demo-tick.k1 { left: 4%; animation-delay: 2.2s; }
-.git-sync-demo-tick.k2 { left: 27%; animation-delay: 2.7s; }
-.git-sync-demo-tick.k3 { left: 50%; animation-delay: 3.2s; }
-.git-sync-demo-tick.k4 { left: 73%; animation-delay: 3.7s; }
-.git-sync-demo-tick.k5 { left: 96%; animation-delay: 4.2s; }
+.git-sync-demo-tick.k1 { left: 4%; }
+.git-sync-demo-tick.k2 { left: 27%; }
+.git-sync-demo-tick.k3 { left: 50%; }
+.git-sync-demo-tick.k4 { left: 73%; }
+.git-sync-demo-tick.k5 { left: 96%; }
+.on .git-sync-demo-tick { animation: git-sync-demo-pop 0.35s both; }
+.on .git-sync-demo-tick.k2 { animation-delay: 0.15s; }
+.on .git-sync-demo-tick.k3 { animation-delay: 0.3s; }
+.on .git-sync-demo-tick.k4 { animation-delay: 0.45s; }
+.on .git-sync-demo-tick.k5 { animation-delay: 0.6s; }
 
-@keyframes git-sync-demo-tick {
-    0% {
-        opacity: 0;
-        transform: scale(0);
-    }
-
-    5%, 60% {
-        opacity: 1;
-        transform: scale(1);
-    }
-
-    68%, 100% {
-        opacity: 0;
-        transform: scale(0);
-    }
+@keyframes git-sync-demo-pop {
+    from { opacity: 0; transform: scale(0); }
 }
 
 .git-sync-demo-cursor {
     position: absolute;
-    top: -2px;
+    top: 24px;
     left: 96%;
     display: grid;
     place-items: center;
@@ -1217,77 +1240,150 @@
     color: var(--SmartThemeBlurTintColor);
     background: var(--demo-accent);
     opacity: 0;
-    animation: git-sync-demo-cursor 8s ease-in-out infinite;
 }
 
-@keyframes git-sync-demo-cursor {
-    0%, 74% {
-        left: 96%;
-        opacity: 0;
-    }
+.on .git-sync-demo-cursor { animation: git-sync-demo-rewind 2.4s 0.8s ease-in-out both; }
 
-    77% {
-        left: 96%;
-        opacity: 1;
-    }
-
-    90%, 97% {
-        left: 27%;
-        opacity: 1;
-    }
-
-    100% {
-        left: 27%;
-        opacity: 0;
-    }
+@keyframes git-sync-demo-rewind {
+    0% { left: 96%; opacity: 0; }
+    15% { left: 96%; opacity: 1; }
+    70%, 100% { left: 27%; opacity: 1; }
 }
 
-.git-sync-demo-captions {
-    position: relative;
-    height: 1.6em;
-    text-align: center;
-    font-weight: 700;
-    font-size: 1.1em;
-}
-
-.git-sync-demo-captions span {
+.git-sync-demo-flag {
     position: absolute;
-    inset: 0;
+    top: 0;
+    padding: 2px 8px;
+    font-size: 0.78em;
+    white-space: nowrap;
+    border-radius: 6px;
+    transform: translateX(-50%);
+    color: var(--SmartThemeBlurTintColor);
+    background: var(--demo-accent);
     opacity: 0;
-    animation: git-sync-demo-caption 8s ease-in-out infinite;
 }
 
-.git-sync-demo-captions .c2 { animation-delay: 2s; }
-.git-sync-demo-captions .c3 { animation-delay: 4s; }
-.git-sync-demo-captions .c4 { animation-delay: 6s; }
+.git-sync-demo-flag.f1 { left: 27%; }
+.git-sync-demo-flag.f2 { left: 73%; }
+.on .git-sync-demo-flag.f1 { animation: git-sync-demo-drop 0.5s 0.9s both; }
+.on .git-sync-demo-flag.f2 { animation: git-sync-demo-drop 0.5s 1.6s both; }
 
-@keyframes git-sync-demo-caption {
-    0%, 25%, 100% {
-        opacity: 0;
-        transform: translateY(6px);
-    }
+@keyframes git-sync-demo-drop {
+    from { opacity: 0; top: -14px; }
+    to { opacity: 1; top: 0; }
+}
 
-    3%, 22% {
-        opacity: 1;
-        transform: none;
-    }
+/* branch */
+.git-sync-demo-fork {
+    width: 100%;
+    max-width: 320px;
+    height: 70px;
+    margin: 0 auto;
+    overflow: visible;
+}
+
+.git-sync-demo-fork path {
+    fill: none;
+    stroke-width: 3;
+    stroke-linecap: round;
+}
+
+.git-sync-demo-fork .main { stroke: var(--SmartThemeBorderColor); }
+.git-sync-demo-fork .side { stroke: #e05d8c; stroke-dasharray: 220; stroke-dashoffset: 220; }
+.git-sync-demo-fork circle { fill: var(--demo-accent); }
+.git-sync-demo-fork .s1,
+.git-sync-demo-fork .s2 { fill: #e05d8c; opacity: 0; }
+.on .git-sync-demo-fork .side { animation: git-sync-demo-draw 0.9s 0.5s ease-out forwards; }
+.on .git-sync-demo-fork .s1 { animation: git-sync-demo-pop 0.3s 1.2s both; opacity: 1; }
+.on .git-sync-demo-fork .s2 { animation: git-sync-demo-pop 0.3s 1.5s both; opacity: 1; }
+.on .git-sync-demo-fork .d3 { animation: git-sync-demo-pop 0.3s 1.9s both; }
+.on .git-sync-demo-fork .d4 { animation: git-sync-demo-pop 0.3s 2.2s both; }
+
+@keyframes git-sync-demo-draw {
+    to { stroke-dashoffset: 0; }
+}
+
+.git-sync-demo-forklabels {
+    display: flex;
+    justify-content: center;
+    gap: 16px;
+    margin-top: -4px;
+    font-size: 0.8em;
+}
+
+.git-sync-demo-forklabels span::before {
+    content: '';
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    margin-right: 5px;
+    border-radius: 50%;
+    background: var(--demo-accent);
+}
+
+.git-sync-demo-forklabels .b::before {
+    background: #e05d8c;
+}
+
+/* protect */
+.git-sync-demo-protect {
+    gap: 18px;
+}
+
+.git-sync-demo-shield {
+    display: grid;
+    place-items: center;
+    width: 3.6em;
+    height: 3.6em;
+    font-size: 1.3em;
+    border-radius: 50%;
+    color: #3fb950;
+    background: color-mix(in srgb, #3fb950 14%, transparent);
+    border: 2px solid color-mix(in srgb, #3fb950 60%, transparent);
+}
+
+.on .git-sync-demo-node.p1 { animation: git-sync-demo-spin 0.9s 0.2s ease-in-out both; }
+.on .git-sync-demo-shield { animation: git-sync-demo-guard 1s 0.9s both; }
+.on .git-sync-demo-node.p2 { animation: git-sync-demo-shake 0.6s 1.8s both; }
+
+@keyframes git-sync-demo-spin {
+    to { transform: rotate(360deg); }
+}
+
+@keyframes git-sync-demo-guard {
+    0% { transform: scale(0.4); opacity: 0; }
+    60% { transform: scale(1.15); opacity: 1; }
+    100% { transform: none; opacity: 1; }
+}
+
+@keyframes git-sync-demo-shake {
+    25% { transform: rotate(-12deg); }
+    50% { transform: rotate(10deg); }
+    75% { transform: rotate(-6deg); }
 }
 
 @media (prefers-reduced-motion: reduce) {
     .git-sync-qs,
     .git-sync-qs-howto li,
-    .git-sync-demo *,
-    .git-sync-demo-captions span {
+    .git-sync-demo * {
         animation: none !important;
+        transition: none !important;
     }
 
-    .git-sync-demo-tick,
+    .git-sync-demo-line i,
+    .git-sync-demo-cursor {
+        display: none;
+    }
+
+    .git-sync-demo-flag,
+    .git-sync-demo-fork .s1,
+    .git-sync-demo-fork .s2,
     .git-sync-qs-howto li {
         opacity: 1;
     }
 
-    .git-sync-demo-captions .c4 {
-        opacity: 1;
+    .git-sync-demo-fork .side {
+        stroke-dashoffset: 0;
     }
 }
 
