@@ -87,9 +87,11 @@ let nativeGitMissing = false;
  * @returns {Promise<string>} stdout
  */
 function runGit(ctx, args, input) {
+    // DATA_ROOT may be relative to the server's directory
+    const gitdir = path.resolve(ctx.gitdir);
     return new Promise((resolve, reject) => {
-        const child = spawn('git', ['-c', `safe.directory=${ctx.gitdir}`, '--git-dir', ctx.gitdir, ...args], {
-            cwd: ctx.gitdir,
+        const child = spawn('git', ['-c', `safe.directory=${gitdir}`, '--git-dir', gitdir, ...args], {
+            cwd: gitdir,
             windowsHide: true,
             stdio: ['pipe', 'pipe', 'pipe'],
             timeout: 10 * 60 * 1000,
@@ -153,7 +155,7 @@ export async function maintainRepository(ctx, { force = false } = {}) {
     const structure = objects.filter(o => types.get(o.oid) !== 'blob');
     const contents = objects.filter(o => types.get(o.oid) === 'blob').sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
 
-    const prefix = path.join(packDir, 'pack');
+    const prefix = path.resolve(packDir, 'pack');
     fs.mkdirSync(packDir, { recursive: true });
     const written = new Set();
     for (const [list, extra] of [[structure, []], [contents, [`--max-pack-size=${MAX_CONTENT_PACK}`]]]) {

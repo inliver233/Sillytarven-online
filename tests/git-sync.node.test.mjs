@@ -98,7 +98,8 @@ test('merging keeps one side per conflicting file and never writes conflict mark
 test('isomorphic-git keeps working on repositories packed by native git', async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tavern-git-pack-'));
     roots.push(root);
-    globalThis.DATA_ROOT = root;
+    // Relative, like the default `dataRoot: ./data`
+    globalThis.DATA_ROOT = path.relative(process.cwd(), root);
     const { execFileSync } = await import('node:child_process');
     const { getRepoContext, ensureRepo, commitAll, readSettings, applyCommitToWorkTree, getStatus, maintainRepository } = await import('../src/git-sync/repo.js');
 
