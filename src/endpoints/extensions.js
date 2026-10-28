@@ -25,23 +25,27 @@ const scheduledCompactions = new Set();
 /**
  * Extensions are cloned with --depth 1, but a plain fetch into a shallow clone downloads every
  * commit made since the clone. Busy repositories grew to hundreds of MB that way, all counted
- * against the user's storage quota. Only ever fetch the branch tips.
+ * against the user's storage quota. Only ever fetch the branch tips, and no tags (each tag
+ * would keep its own history alive).
  * @param {import('simple-git').SimpleGit} git Repository
  */
 async function fetchBranchTips(git) {
-    await git.fetch('origin', ['--depth=1']);
+    await git.fetch('origin', ['--depth=1', '--no-tags']);
 }
 
 /**
+ * Whether the clone holds more than the tips: history behind HEAD, or tags pinning old commits.
  * @param {import('simple-git').SimpleGit} git Repository
- * @returns {Promise<number>} Number of commits reachable from HEAD
+ * @returns {Promise<boolean>}
  */
-async function getHistoryLength(git) {
-    return Number.parseInt(await git.raw(['rev-list', '--count', 'HEAD']), 10) || 0;
+async function hasOldHistory(git) {
+    const historyLength = Number.parseInt(await git.raw(['rev-list', '--count', 'HEAD']), 10) || 0;
+    return historyLength > 1 || (await git.raw(['tag', '--list'])).trim() !== '';
 }
 
 /**
  * Drop the objects a shallow fetch or an update left unreachable (old history and old tips).
+ * Local tags go first: older full fetches brought them in, and they hold the old history.
  * Runs in the background, one repository at a time.
  * @param {string} extensionPath Extension folder
  */
@@ -53,6 +57,10 @@ function scheduleCompaction(extensionPath) {
         scheduledCompactions.delete(key);
         if (!fs.existsSync(path.join(key, '.git'))) return;
         const git = simpleGit({ baseDir: key, ...OPTIONS });
+        const tags = (await git.raw(['tag', '--list'])).split('\n').filter(Boolean);
+        for (let i = 0; i < tags.length; i += 100) {
+            await git.raw(['tag', '--delete', ...tags.slice(i, i + 100)]);
+        }
         await git.raw(['reflog', 'expire', '--expire=now', '--all']);
         await git.raw(['gc', '--prune=now', '--quiet']);
         console.info(`Extension repository has been compacted at ${key}`);
@@ -145,11 +153,11 @@ async function getManifest(extensionPath) {
 /**
  * This function checks if the local repository is up-to-date with the remote repository.
  * @param {string} extensionPath - The path of the extension folder
- * @returns {Promise<{isUpToDate: boolean, remoteUrl: string, historyWasDeep: boolean}>} - Returns the extension information as an object
+ * @returns {Promise<{isUpToDate: boolean, remoteUrl: string, hadOldHistory: boolean}>} - Returns the extension information as an object
  */
 async function checkIfRepoIsUpToDate(extensionPath) {
     const git = simpleGit({ baseDir: extensionPath, ...OPTIONS });
-    const historyWasDeep = await getHistoryLength(git) > 1;
+    const hadOldHistory = await hasOldHistory(git);
     await fetchBranchTips(git);
     const currentBranch = await git.branch();
     const currentCommitHash = await git.revparse(['HEAD']);
@@ -164,14 +172,14 @@ async function checkIfRepoIsUpToDate(extensionPath) {
         return {
             isUpToDate: true,
             remoteUrl: '',
-            historyWasDeep,
+            hadOldHistory,
         };
     }
 
     return {
         isUpToDate: log.total === 0,
         remoteUrl: remotes[0].refs.fetch, // URL of the remote repository
-        historyWasDeep,
+        hadOldHistory,
     };
 }
 
@@ -302,7 +310,7 @@ router.post('/update', async (request, response) => {
             if (!isRepo) {
                 throw new Error(`Directory is not a Git repository at ${extensionPath}`);
             }
-            const { isUpToDate, remoteUrl, historyWasDeep } = await checkIfRepoIsUpToDate(extensionPath);
+            const { isUpToDate, remoteUrl, hadOldHistory } = await checkIfRepoIsUpToDate(extensionPath);
             const currentBranch = await git.branch();
             if (!isUpToDate) {
                 // The fetched tip has no history to merge with; move to it. Untracked files stay.
@@ -311,7 +319,7 @@ router.post('/update', async (request, response) => {
             } else {
                 console.info(`Extension is up to date at ${extensionPath}`);
             }
-            if (!isUpToDate || historyWasDeep) {
+            if (!isUpToDate || hadOldHistory) {
                 scheduleCompaction(extensionPath);
             }
             const fullCommitHash = await git.revparse(['HEAD']);
@@ -519,9 +527,9 @@ router.post('/version', async (request, response) => {
             // get only the working branch
             const currentBranchName = currentBranch.current;
             console.debug(extensionName, currentBranchName, currentCommitHash);
-            const { isUpToDate, remoteUrl, historyWasDeep } = await checkIfRepoIsUpToDate(extensionPath);
+            const { isUpToDate, remoteUrl, hadOldHistory } = await checkIfRepoIsUpToDate(extensionPath);
             // Up to date means the shallow fetch just cut HEAD's history, so the old history can go
-            if (isUpToDate && historyWasDeep) {
+            if (isUpToDate && hadOldHistory) {
                 scheduleCompaction(extensionPath);
             }
 

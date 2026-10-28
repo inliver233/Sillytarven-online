@@ -90,8 +90,10 @@ test('update checks and updates keep extension clones shallow', async t => {
     fs.writeFileSync(path.join(extension, 'user-data.json'), 'kept');
     for (let i = 0; i < 20; i++) commitBlob(upstream, `change ${i}`);
 
+    git(upstream, 'tag', 'v-old', 'HEAD~5');
     const version = await server.post('version', { extensionName: 'shallow-extension' });
     assert.equal(version.status, 200);
+    assert.equal(git(extension, 'tag', '--list'), '', 'checking must not fetch tags');
     assert.equal(version.body.isUpToDate, false);
     assert.equal(Number(git(extension, 'rev-list', '--count', 'origin/main')), 1, 'checking must fetch only the tip');
 
@@ -119,9 +121,13 @@ test('a clone whose history already grew is compacted once it is up to date', as
     t.after(server.close);
 
     assert.equal((await server.post('install', { url: `file://${upstream}` })).status, 200);
-    for (let i = 0; i < 30; i++) commitBlob(upstream, `change ${i}`);
-    // What the old plain fetch + pull left behind
+    for (let i = 0; i < 30; i++) {
+        commitBlob(upstream, `change ${i}`);
+        if (i % 10 === 0) git(upstream, 'tag', `v${i}`);
+    }
+    // What the old plain fetch + pull left behind, including the tags it followed
     git(extension, 'fetch', 'origin');
+    assert.ok(git(extension, 'tag', '--list').includes('v10'));
     git(extension, 'merge', '--ff-only', 'origin/main');
     assert.equal(historyLength(extension), 31);
     const grownKiB = packedKiB(extension);
@@ -131,8 +137,40 @@ test('a clone whose history already grew is compacted once it is up to date', as
     assert.equal(version.body.isUpToDate, true);
     await waitFor(() => packedKiB(extension) < grownKiB / 5);
     assert.equal(historyLength(extension), 1);
+    assert.equal(git(extension, 'tag', '--list'), '');
     assert.equal(fs.readFileSync(path.join(extension, 'version.txt'), 'utf8'), 'change 29');
     assert.equal(git(extension, 'status', '--porcelain'), '');
+});
+
+test('a clone left with only tags pinning old history is compacted too', async t => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'st-extension-tags-'));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const upstream = path.join(root, 'upstream', 'tagged-extension');
+    const extensionsDirectory = path.join(root, 'extensions');
+    const extension = path.join(extensionsDirectory, 'tagged-extension');
+    createUpstream(upstream);
+    const server = await startServer(extensionsDirectory);
+    t.after(server.close);
+
+    assert.equal((await server.post('install', { url: `file://${upstream}` })).status, 200);
+    for (let i = 0; i < 30; i++) {
+        commitBlob(upstream, `change ${i}`);
+        if (i % 10 === 0) git(upstream, 'tag', `v${i}`);
+    }
+    git(extension, 'fetch', 'origin');
+    git(extension, 'merge', '--ff-only', 'origin/main');
+    // HEAD's history already cut, but the followed tags still hold the old commits
+    git(extension, 'fetch', '--depth=1', 'origin');
+    git(extension, 'reflog', 'expire', '--expire=now', '--all');
+    git(extension, 'gc', '--prune=now', '--quiet');
+    assert.equal(historyLength(extension), 1);
+    const pinnedKiB = packedKiB(extension);
+    assert.ok(pinnedKiB > 20 * 64, `expected tags to pin old history, got ${pinnedKiB} KiB`);
+
+    const version = await server.post('version', { extensionName: 'tagged-extension' });
+    assert.equal(version.body.isUpToDate, true);
+    await waitFor(() => packedKiB(extension) < pinnedKiB / 5);
+    assert.equal(git(extension, 'tag', '--list'), '');
 });
 
 test('listing and switching branches does not unshallow the clone', async t => {
