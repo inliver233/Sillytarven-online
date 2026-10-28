@@ -94,3 +94,67 @@ test('merging keeps one side per conflicting file and never writes conflict mark
     const { commit } = await git.readCommit({ fs, gitdir: ctx.gitdir, oid: merged });
     assert.deepEqual(commit.parent, [ours, theirs]);
 });
+
+test('isomorphic-git keeps working on repositories packed by native git', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tavern-git-pack-'));
+    roots.push(root);
+    globalThis.DATA_ROOT = root;
+    const { execFileSync } = await import('node:child_process');
+    const { getRepoContext, ensureRepo, commitAll, readSettings, applyCommitToWorkTree, getStatus, maintainRepository } = await import('../src/git-sync/repo.js');
+
+    const dir = path.join(root, 'packer');
+    const chat = path.join(dir, 'chats', 'A', 'long.jsonl');
+    fs.mkdirSync(path.dirname(chat), { recursive: true });
+    const fresh = () => getRepoContext('packer', dir);
+    const ctx = fresh();
+    const settings = readSettings(ctx);
+    const author = { name: 't', email: 't@t' };
+    const objectStats = () => execFileSync('git', ['--git-dir', ctx.gitdir, 'count-objects', '-v'], { encoding: 'utf8' });
+    const looseKiB = () => Number(objectStats().match(/^size: (\d+)/m)[1]);
+    const packedKiB = () => Number(objectStats().match(/^size-pack: (\d+)/m)[1]);
+
+    await ensureRepo(ctx);
+    fs.writeFileSync(path.join(dir, 'settings.json'), '{"a":1}');
+    const versions = [];
+    let content = '';
+    for (let i = 0; i < 8; i++) {
+        content += `${JSON.stringify({ mes: `message ${i} `.repeat(2000) })}\n`;
+        fs.writeFileSync(chat, content);
+        versions.push({ oid: (await commitAll(fresh(), settings, { author })).oid, content });
+    }
+    const looseBefore = looseKiB();
+
+    assert.equal(await maintainRepository(fresh()), false, 'a small repository is left loose');
+    assert.equal(await maintainRepository(fresh(), { force: true }), true);
+    assert.equal(looseKiB(), 0);
+    assert.ok(packedKiB() > 0 && packedKiB() < looseBefore, `packed ${packedKiB()} KiB from ${looseBefore} KiB loose`);
+    // Commits and trees in a pack of their own, so status/commit/push never load file contents
+    const packDir = path.join(ctx.gitdir, 'objects', 'pack');
+    const layout = fs.readdirSync(packDir).filter(name => name.endsWith('.idx')).map(name => {
+        const types = execFileSync('git', ['verify-pack', '-v', path.join(packDir, name)], { encoding: 'utf8' })
+            .split('\n').map(row => row.split(/\s+/)[1]).filter(type => ['commit', 'tree', 'blob'].includes(type));
+        return new Set(types);
+    });
+    assert.equal(layout.length, 2);
+    assert.ok(layout.some(types => types.has('commit') && types.has('tree') && !types.has('blob')));
+    assert.ok(layout.some(types => types.has('blob') && types.size === 1));
+
+    const log = await git.log({ fs, gitdir: ctx.gitdir, ref: 'main' });
+    assert.equal(log.length, versions.length);
+    const { blob } = await git.readBlob({ fs, gitdir: ctx.gitdir, oid: versions[2].oid, filepath: 'chats/A/long.jsonl' });
+    assert.equal(Buffer.from(blob).toString('utf8'), versions[2].content);
+    assert.deepEqual((await getStatus(fresh(), settings)).changes, []);
+
+    await applyCommitToWorkTree(fresh(), versions[1].oid, { moveBranch: 'main' });
+    assert.equal(fs.readFileSync(chat, 'utf8'), versions[1].content);
+    fs.appendFileSync(chat, '{"mes":"after packing"}\n');
+    const next = (await commitAll(fresh(), settings, { author })).oid;
+    const { commit } = await git.readCommit({ fs, gitdir: ctx.gitdir, oid: next });
+    assert.deepEqual(commit.parent, [versions[1].oid]);
+
+    // Packing again (now with packs present) keeps everything readable
+    await maintainRepository(fresh(), { force: true });
+    const again = await git.readBlob({ fs, gitdir: ctx.gitdir, oid: next, filepath: 'chats/A/long.jsonl' });
+    assert.equal(Buffer.from(again.blob).toString('utf8'), `${versions[1].content}{"mes":"after packing"}\n`);
+    execFileSync('git', ['--git-dir', ctx.gitdir, 'fsck', '--no-progress'], { stdio: 'ignore' });
+});

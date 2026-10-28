@@ -1,4 +1,6 @@
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import git from 'isomorphic-git';
 import { KeyedMutex } from '../keyed-mutex.js';
@@ -46,8 +48,155 @@ export function getRepoContext(handle, dir) {
  * @param {() => Promise<T>} work
  * @returns {Promise<T>}
  */
-export function withRepoLock(ctx, work) {
-    return locks.runExclusive(ctx.handle, work);
+export async function withRepoLock(ctx, work) {
+    try {
+        return await locks.runExclusive(ctx.handle, work);
+    } finally {
+        scheduleMaintenance(ctx);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Packing
+// ---------------------------------------------------------------------------
+
+/**
+ * isomorphic-git writes every object loose and never as a delta, so each save of a grown chat
+ * stores the whole file again (one user reached 530 MB in four days; 140 MB once packed).
+ * Native git packs the repository once enough loose data piled up.
+ *
+ * isomorphic-git reads a whole pack into memory to use one object from it, so the layout
+ * matters: commits and trees (all that status, commit and push read) go in one small pack,
+ * file contents in packs of at most 32 MB, grouped by path so each file's versions delta
+ * against each other. Only restoring or diffing old versions loads a content pack.
+ */
+const PACK_TRIGGER_KIB = 32 * 1024;
+const PACK_TRIGGER_OBJECTS = 2000;
+const MAX_PACKS = 16;
+const MAX_CONTENT_PACK = '32m';
+const maintenanceQueue = new KeyedMutex();
+const pendingMaintenance = new Set();
+/** Loose KiB left after the last packing, per handle (unreachable objects stay loose for a while). */
+const looseAfterPacking = new Map();
+let nativeGitMissing = false;
+
+/**
+ * @param {RepoContext} ctx
+ * @param {string[]} args
+ * @param {string} [input] Written to stdin
+ * @returns {Promise<string>} stdout
+ */
+function runGit(ctx, args, input) {
+    return new Promise((resolve, reject) => {
+        const child = spawn('git', ['-c', `safe.directory=${ctx.gitdir}`, '--git-dir', ctx.gitdir, ...args], {
+            cwd: ctx.gitdir,
+            windowsHide: true,
+            stdio: ['pipe', 'pipe', 'pipe'],
+            timeout: 10 * 60 * 1000,
+        });
+        try {
+            os.setPriority(child.pid, os.constants.priority.PRIORITY_BELOW_NORMAL);
+        } catch {
+            // The process may already be gone; priority is only a courtesy.
+        }
+        const stdout = [];
+        const stderr = [];
+        child.stdout.on('data', chunk => stdout.push(chunk));
+        child.stderr.on('data', chunk => stderr.push(chunk));
+        child.on('error', reject);
+        child.on('close', code => {
+            if (code === 0) return resolve(Buffer.concat(stdout).toString('utf8'));
+            reject(new Error(`git ${args[0]} exited with ${code}: ${Buffer.concat(stderr).toString('utf8').trim()}`));
+        });
+        child.stdin.on('error', () => {});
+        child.stdin.end(input ?? '');
+    });
+}
+
+/**
+ * @param {RepoContext} ctx
+ * @returns {Promise<{ count: number, size: number, packs: number }>} Loose objects, loose KiB, packs
+ */
+async function countObjects(ctx) {
+    const output = await runGit(ctx, ['count-objects', '-v']);
+    const value = name => Number(output.match(new RegExp(`^${name}: (\\d+)`, 'm'))?.[1] ?? 0);
+    return { count: value('count'), size: value('size'), packs: value('packs') };
+}
+
+/**
+ * Repacks the repository when enough loose data piled up (or always with `force`).
+ * Call under the repository lock.
+ * @param {RepoContext} ctx
+ * @param {{ force?: boolean }} [options]
+ * @returns {Promise<boolean>} Whether it repacked
+ */
+export async function maintainRepository(ctx, { force = false } = {}) {
+    if (!repoExists(ctx)) return false;
+    const before = await countObjects(ctx);
+    const newLooseKiB = before.size - Math.min(looseAfterPacking.get(ctx.handle) ?? 0, before.size);
+    if (!force && newLooseKiB < PACK_TRIGGER_KIB && before.count < PACK_TRIGGER_OBJECTS && before.packs <= MAX_PACKS) {
+        return false;
+    }
+
+    const packDir = path.join(ctx.gitdir, 'objects', 'pack');
+    const oldPacks = fs.existsSync(packDir) ? fs.readdirSync(packDir).filter(name => name.endsWith('.pack')).map(name => name.slice(0, -5)) : [];
+
+    // Everything reachable from refs (branches, safety points, remotes) and the index
+    const listing = (await runGit(ctx, ['rev-list', '--objects', '--all', '--indexed-objects'])).split('\n').filter(Boolean);
+    const objects = listing.map(line => {
+        const space = line.indexOf(' ');
+        return space === -1 ? { oid: line, name: '' } : { oid: line.slice(0, space), name: line.slice(space + 1) };
+    });
+    const types = new Map((await runGit(ctx, ['cat-file', '--batch-check=%(objectname) %(objecttype)'], objects.map(o => o.oid).join('\n') + '\n'))
+        .split('\n').filter(Boolean).map(line => line.split(' ')));
+    const line = o => o.name ? `${o.oid} ${o.name}` : o.oid;
+    const structure = objects.filter(o => types.get(o.oid) !== 'blob');
+    const contents = objects.filter(o => types.get(o.oid) === 'blob').sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+
+    const prefix = path.join(packDir, 'pack');
+    fs.mkdirSync(packDir, { recursive: true });
+    const written = new Set();
+    for (const [list, extra] of [[structure, []], [contents, [`--max-pack-size=${MAX_CONTENT_PACK}`]]]) {
+        if (list.length === 0) continue;
+        const names = await runGit(ctx, ['pack-objects', '--quiet', ...extra, prefix], list.map(line).join('\n') + '\n');
+        names.split('\n').filter(Boolean).forEach(hash => written.add(`pack-${hash}`));
+    }
+
+    for (const pack of oldPacks) {
+        if (written.has(pack)) continue;
+        // Index first: readers find packs through their .idx
+        for (const extension of ['.idx', '.pack', '.rev', '.bitmap']) {
+            fs.rmSync(path.join(packDir, pack + extension), { force: true });
+        }
+    }
+    await runGit(ctx, ['prune-packed', '--quiet']);
+    await runGit(ctx, ['prune', '--expire=2.weeks.ago']);
+
+    const after = await countObjects(ctx);
+    looseAfterPacking.set(ctx.handle, after.size);
+    console.info(`[git-sync] packed the repository of ${ctx.handle}: ${before.count} loose objects (${Math.round(before.size / 1024)} MiB) and ${before.packs} packs → ${after.packs} packs`);
+    return true;
+}
+
+/**
+ * Queues packing after work on a repository: one repository at a time, under its lock.
+ * @param {RepoContext} ctx
+ */
+function scheduleMaintenance(ctx) {
+    if (nativeGitMissing || pendingMaintenance.has(ctx.handle)) return;
+    pendingMaintenance.add(ctx.handle);
+    maintenanceQueue.runExclusive('pack', () => locks.runExclusive(ctx.handle, () => {
+        pendingMaintenance.delete(ctx.handle);
+        return maintainRepository(ctx);
+    })).catch(error => {
+        pendingMaintenance.delete(ctx.handle);
+        if (error?.code === 'ENOENT') {
+            nativeGitMissing = true;
+            console.warn('[git-sync] git is not installed; repositories will not be packed.');
+            return;
+        }
+        console.warn(`[git-sync] packing the repository of ${ctx.handle} failed:`, error?.message || error);
+    });
 }
 
 /** @param {RepoContext} ctx */
