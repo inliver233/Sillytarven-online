@@ -17,17 +17,19 @@ export let accountsEnabled = false;
 const SESSION_EXTEND_INTERVAL = 10 * 60 * 1000;
 /** Signed feedback-link parameters are valid for a day; refresh them well before. */
 const FEEDBACK_LINK_REFRESH_INTERVAL = 6 * 60 * 60 * 1000;
-/** @type {{ origin: string, params: Record<string, string>, expiresAt: number } | null} */
+/** @type {{ origin: string, params: Record<string, string> | null, expiresAt: number, url: string } | null} */
 let feedbackLink = null;
 
 async function refreshFeedbackLink() {
     try {
         const response = await fetch('/api/users/feedback-link', { headers: getRequestHeaders() });
         const data = response.ok ? await response.json() : null;
-        feedbackLink = data?.params ? data : null;
+        feedbackLink = data?.params || data?.url ? data : null;
     } catch {
         feedbackLink = null;
     }
+    // ☰ 菜单 →「反馈问题」直接打开问卷，不依赖公告还在不在
+    $('#option_feedback').attr('href', feedbackLink?.url || null).toggleClass('displayNone', !feedbackLink?.url);
 }
 const DEFAULT_INACTIVE_DAYS = 60;
 const INACTIVE_USER_DAY_OPTIONS = [

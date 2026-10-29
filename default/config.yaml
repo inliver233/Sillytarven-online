@@ -383,12 +383,13 @@ enableInvitationCodes: false
 
 # -- FEEDBACK FORM LINKS --
 # Announcement links to the feedback questionnaire carry the signed-in user ({{user}}).
-# With a secret, links to formOrigin are also signed so the questionnaire can tell which
+# With a secret, links to the questionnaire's site are also signed so it can tell which
 # account sent a ticket; the same secret goes into the questionnaire's "link signing secret".
+# With formUrl the chat menu (☰) also gets a "反馈问题" entry that opens the form directly.
 feedback:
   linkSecret: ""
-  # Origin of the questionnaire, e.g. https://example.com
-  formOrigin: ""
+  # Address of the questionnaire, e.g. https://example.com/f/report
+  formUrl: ""
   # Value of the link's "site" parameter (an option of the questionnaire's site question)
   site: ""
 

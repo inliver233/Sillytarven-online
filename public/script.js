@@ -11,7 +11,7 @@ import {
 } from './lib.js';
 
 import { humanizedDateTime, favsToHotswap, getMessageTimeStamp, dragElement, isMobile, initRossMods } from './scripts/RossAscends-mods.js';
-import './scripts/announcements.js';
+import { openAnnouncements } from './scripts/announcements.js';
 import { openChatTransferPanel } from './scripts/chat-transfer.js';
 import { userStatsHandler, statMesProcess, initStats } from './scripts/stats.js';
 import {
@@ -13050,6 +13050,10 @@ jQuery(async function () {
 
         else if (id == 'option_chat_transfer') {
             void openChatTransferPanel();
+        }
+
+        else if (id == 'option_announcements') {
+            void openAnnouncements();
         }
 
         else if (id === 'option_settings') {

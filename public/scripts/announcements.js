@@ -31,26 +31,43 @@ async function checkDailyAnnouncements() {
 }
 
 // 获取并显示公告
-async function fetchAndShowAnnouncements() {
-    try {
-        const response = await fetch('/api/announcements/current', {
-            method: 'GET',
-            headers: {
-                'Content-Type': 'application/json',
-            }
-        });
+async function loadEnabledAnnouncements() {
+    const response = await fetch('/api/announcements/current', {
+        method: 'GET',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+    });
 
-        if (!response.ok) {
-            console.error('Failed to fetch announcements:', response.status);
+    if (!response.ok) {
+        throw new Error(`Failed to fetch announcements: ${response.status}`);
+    }
+
+    const announcements = await response.json();
+    // 筛选有效的公告（仅检查启用状态）
+    return announcements.filter(announcement => announcement.enabled);
+}
+
+/** ☰ 菜单 →「系统公告」：显示全部公告，已经确认过的也显示 */
+export async function openAnnouncements() {
+    try {
+        const validAnnouncements = await loadEnabledAnnouncements();
+        if (validAnnouncements.length === 0) {
+            toastr.info('暂时没有公告');
             return;
         }
+        currentAnnouncements = validAnnouncements;
+        shownAnnouncements = validAnnouncements;
+        showAnnouncementsPopup(validAnnouncements);
+    } catch (error) {
+        console.error('Error opening announcements:', error);
+        toastr.error('公告加载失败，请稍后再试');
+    }
+}
 
-        const announcements = await response.json();
-
-        // 筛选有效的公告（仅检查启用状态）
-        const validAnnouncements = announcements.filter(announcement => {
-            return announcement.enabled;
-        });
+async function fetchAndShowAnnouncements() {
+    try {
+        const validAnnouncements = await loadEnabledAnnouncements();
         const unseen = unseenAnnouncements(validAnnouncements, parseSeen(accountStorage.getItem(SEEN_ANNOUNCEMENTS_KEY)));
 
         if (unseen.length > 0) {

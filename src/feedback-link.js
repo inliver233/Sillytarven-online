@@ -19,38 +19,49 @@ export function signFeedbackParams(secret, params) {
 }
 
 /**
- * @returns {{ secret: string, origin: string, site: string }} Empty secret or origin means unsigned links
+ * `feedback.formUrl` is the questionnaire's address; the older `feedback.formOrigin` (origin only)
+ * still signs announcement links but gives the menu nothing to open.
+ * @returns {{ secret: string, origin: string, formUrl: string, site: string }} Empty secret means unsigned links
  */
 export function getFeedbackLinkConfig() {
     const secret = String(getConfigValue('feedback.linkSecret', '') || '');
     const site = String(getConfigValue('feedback.site', '') || '').trim();
-    let origin = '';
-    try {
-        origin = new URL(String(getConfigValue('feedback.formOrigin', '') || '')).origin;
-    } catch {
-        origin = '';
+    for (const [key, isFormUrl] of [['feedback.formUrl', true], ['feedback.formOrigin', false]]) {
+        try {
+            const url = new URL(String(getConfigValue(key, '') || ''));
+            if (url.protocol === 'https:' || url.protocol === 'http:') {
+                const formUrl = isFormUrl && url.pathname !== '/' ? url.origin + url.pathname : '';
+                return { secret, origin: url.origin, formUrl, site };
+            }
+        } catch {
+            // Not a URL; try the next setting.
+        }
     }
-    return { secret, origin, site };
+    return { secret, origin: '', formUrl: '', site };
 }
 
 /**
- * Link parameters that prove which account opened the feedback form.
+ * The feedback form link for a signed-in user: signed parameters that prove which account opened
+ * it (when a secret is set) and the full address the menu opens (when formUrl is set).
  * @param {string} handle Signed-in user
  * @param {number} [now] Current time in milliseconds
- * @returns {{ origin: string, params: Record<string, string>, expiresAt: number } | null}
+ * @returns {{ origin: string, params: Record<string, string> | null, expiresAt: number, url: string } | null}
  */
 export function createFeedbackLink(handle, now = Date.now()) {
-    const { secret, origin, site } = getFeedbackLinkConfig();
-    if (!secret || !origin || !handle) {
+    const { secret, origin, formUrl, site } = getFeedbackLinkConfig();
+    if (!origin || !handle || (!secret && !formUrl)) {
         return null;
     }
-    const expiresAt = Math.floor(now / 1000) + FEEDBACK_LINK_HOURS * 3600;
     const params = new URLSearchParams();
     if (site) {
         params.set('site', site);
     }
     params.set('user', handle);
+    if (!secret) {
+        return { origin, params: null, expiresAt: 0, url: `${formUrl}?${params}` };
+    }
+    const expiresAt = Math.floor(now / 1000) + FEEDBACK_LINK_HOURS * 3600;
     params.set('exp', String(expiresAt));
     params.set('sig', signFeedbackParams(secret, params));
-    return { origin, params: Object.fromEntries(params), expiresAt: expiresAt * 1000 };
+    return { origin, params: Object.fromEntries(params), expiresAt: expiresAt * 1000, url: formUrl ? `${formUrl}?${params}` : '' };
 }
