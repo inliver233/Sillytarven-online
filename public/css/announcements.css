@@ -198,6 +198,13 @@
     background-color: var(--crimson-hover);
 }
 
+.announcements-confirm-hint {
+    display: block;
+    margin-top: 6px;
+    font-size: 0.8em;
+    opacity: 0.6;
+}
+
 /* 响应式设计 */
 @media (max-width: 768px) {
     .announcements-popup-overlay {

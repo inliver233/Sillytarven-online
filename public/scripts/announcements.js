@@ -1,44 +1,26 @@
 // 公告弹窗功能
 import { renderAnnouncementMarkdownInto } from './announcement-markdown.js';
+import { parseSeen, SEEN_ANNOUNCEMENTS_KEY, serializeSeen, unseenAnnouncements } from './announcement-seen.js';
+import { eventSource, event_types } from './events.js';
+import { accountStorage } from './util/AccountStorage.js';
 
 let announcementsChecked = false; // 防止重复检查
+/** 当前启用的公告和这次弹出的公告，点「我知道了」时记下 */
+let currentAnnouncements = [];
+let shownAnnouncements = [];
 
-// 初始化公告系统
+// 初始化公告系统：等设置加载完（APP_READY）才知道用户看过哪些
 function initializeAnnouncements() {
-    // 如果已经检查过，直接返回
-    if (announcementsChecked) {
-        return;
-    }
-
-    // 检查用户是否已登录并显示公告
-    const checkUserAndAnnouncements = () => {
-        // 检查多种登录状态指示器
-        const isLoggedIn = document.querySelector('#logout_button') ||
-                          document.querySelector('#account_controls') ||
-                          window.currentUser;
-
-        if (isLoggedIn) {
-            announcementsChecked = true; // 标记已检查
-            checkDailyAnnouncements();
-        } else {
-            // 如果用户状态还未加载，继续重试（但限制重试次数）
-            setTimeout(checkUserAndAnnouncements, 1000);
+    eventSource.on(event_types.APP_READY, () => {
+        if (announcementsChecked) {
+            return;
         }
-    };
-
-    // 页面加载完成后检查公告
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', () => {
-            // 延迟执行，等待用户状态加载完成
-            setTimeout(checkUserAndAnnouncements, 1000);
-        });
-    } else {
-        // 页面已加载完成，立即执行
-        setTimeout(checkUserAndAnnouncements, 500);
-    }
+        announcementsChecked = true;
+        checkDailyAnnouncements();
+    });
 }
 
-// 检查并显示公告（每次登录都显示）
+// 检查并显示公告：没确认过当前版本的才弹
 async function checkDailyAnnouncements() {
     try {
         // 每次都获取并显示公告，不再检查时间限制
@@ -69,9 +51,12 @@ async function fetchAndShowAnnouncements() {
         const validAnnouncements = announcements.filter(announcement => {
             return announcement.enabled;
         });
+        const unseen = unseenAnnouncements(validAnnouncements, parseSeen(accountStorage.getItem(SEEN_ANNOUNCEMENTS_KEY)));
 
-        if (validAnnouncements.length > 0) {
-            showAnnouncementsPopup(validAnnouncements);
+        if (unseen.length > 0) {
+            currentAnnouncements = validAnnouncements;
+            shownAnnouncements = unseen;
+            showAnnouncementsPopup(unseen);
         }
     } catch (error) {
         console.error('Error fetching announcements:', error);
@@ -147,6 +132,7 @@ function createAnnouncementsPopupHtml(announcements) {
                     <button type="button" class="announcements-confirm-btn" id="confirmAnnouncementsPopup">
                         我知道了
                     </button>
+                    <small class="announcements-confirm-hint">内容更新后会再提醒你</small>
                 </div>
             </div>
         </div>
@@ -218,8 +204,12 @@ function bindAnnouncementPopupEvents() {
         closeBtn.addEventListener('click', closeAnnouncementsPopup);
     }
 
+    // 「我知道了」记住看过的版本；✕、点外面、Esc 只关这一次，下次还弹
     if (confirmBtn) {
-        confirmBtn.addEventListener('click', closeAnnouncementsPopup);
+        confirmBtn.addEventListener('click', () => {
+            markAnnouncementsSeen();
+            closeAnnouncementsPopup();
+        });
     }
 
     // 点击标题展开/收起；展开后放不下时，把其他展开的公告收起，保证内容完整可读
@@ -255,6 +245,11 @@ function bindAnnouncementPopupEvents() {
             closeAnnouncementsPopup();
         }
     });
+}
+
+function markAnnouncementsSeen() {
+    const seen = parseSeen(accountStorage.getItem(SEEN_ANNOUNCEMENTS_KEY));
+    accountStorage.setItem(SEEN_ANNOUNCEMENTS_KEY, serializeSeen(currentAnnouncements, seen, shownAnnouncements));
 }
 
 // 关闭公告弹窗
