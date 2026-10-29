@@ -381,6 +381,17 @@ enableServerPluginsAutoUpdate: true
 
 enableInvitationCodes: false
 
+# -- FEEDBACK FORM LINKS --
+# Announcement links to the feedback questionnaire carry the signed-in user ({{user}}).
+# With a secret, links to formOrigin are also signed so the questionnaire can tell which
+# account sent a ticket; the same secret goes into the questionnaire's "link signing secret".
+feedback:
+  linkSecret: ""
+  # Origin of the questionnaire, e.g. https://example.com
+  formOrigin: ""
+  # Value of the link's "site" parameter (an option of the questionnaire's site question)
+  site: ""
+
 # -- REGISTRATION CONFIGURATION --
 # Each method can independently allow new accounts and require an invitation
 # code. null inherits the legacy enableInvitationCodes value above.

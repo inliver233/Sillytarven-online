@@ -197,14 +197,31 @@ export function renderAnnouncementMarkdown(markdown) {
 
 /**
  * 把带 {{user}} 的公告链接填上当前用户名，在链接打开前调用。
+ * 指向反馈问卷（signed.origin）的链接改用服务器签名过的参数，问卷据此确认是哪个账号提交的。
  * @param {HTMLAnchorElement} link
  * @param {string} handle
+ * @param {{ origin: string, params: Record<string, string>, expiresAt: number } | null} [signed]
  */
-export function fillAnnouncementLinkUser(link, handle) {
+export function fillAnnouncementLinkUser(link, handle, signed = null) {
     const template = link.dataset.userHref;
-    if (template) {
-        link.setAttribute('href', template.replace(USER_PLACEHOLDER, encodeURIComponent(handle || '')));
+    if (!template) {
+        return;
     }
+    const href = template.replace(USER_PLACEHOLDER, encodeURIComponent(handle || ''));
+    if (signed?.params && signed.expiresAt > Date.now()) {
+        try {
+            const url = new URL(href, window.location.href);
+            if (url.origin === signed.origin) {
+                // 只放签名过的参数：链接里多出的参数会让签名对不上
+                url.search = new URLSearchParams(signed.params).toString();
+                link.setAttribute('href', url.href);
+                return;
+            }
+        } catch {
+            // 不是合法地址，按普通链接处理
+        }
+    }
+    link.setAttribute('href', href);
 }
 
 /**

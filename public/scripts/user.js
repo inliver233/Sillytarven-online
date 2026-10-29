@@ -15,6 +15,20 @@ export let accountsEnabled = false;
 
 // Extend the session every 10 minutes
 const SESSION_EXTEND_INTERVAL = 10 * 60 * 1000;
+/** Signed feedback-link parameters are valid for a day; refresh them well before. */
+const FEEDBACK_LINK_REFRESH_INTERVAL = 6 * 60 * 60 * 1000;
+/** @type {{ origin: string, params: Record<string, string>, expiresAt: number } | null} */
+let feedbackLink = null;
+
+async function refreshFeedbackLink() {
+    try {
+        const response = await fetch('/api/users/feedback-link', { headers: getRequestHeaders() });
+        const data = response.ok ? await response.json() : null;
+        feedbackLink = data?.params ? data : null;
+    } catch {
+        feedbackLink = null;
+    }
+}
 const DEFAULT_INACTIVE_DAYS = 60;
 const INACTIVE_USER_DAY_OPTIONS = [
     { label: '1周 (7天)', value: 7 },
@@ -2394,8 +2408,10 @@ jQuery(() => {
     // Announcement links with "{{user}}" (e.g. the feedback form's ?user={{user}}) get the
     // signed-in handle just before they open, so the form arrives with the name filled in.
     $(document).on('pointerdown click auxclick contextmenu', 'a[data-user-href]', function () {
-        fillAnnouncementLinkUser(this, currentUser?.handle);
+        fillAnnouncementLinkUser(this, currentUser?.handle, feedbackLink);
     });
+    void refreshFeedbackLink();
+    setInterval(() => void refreshFeedbackLink(), FEEDBACK_LINK_REFRESH_INTERVAL);
     initPasskeys({ getHandle: () => currentUser?.handle ?? null });
     setInterval(async () => {
         if (currentUser) {

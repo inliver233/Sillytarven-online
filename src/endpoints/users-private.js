@@ -13,6 +13,7 @@ import { noteStcontrolLogout, stcontrolPrivateAccountGuard } from '../stcontrol.
 import { BackupQuotaError, consumeBackupQuota } from '../backup-limits.js';
 import { recordBackupActivity, registerBackupLiveSource } from '../backup-activity.js';
 import { onActivate, onDrain } from '../process-lifecycle.js';
+import { createFeedbackLink } from '../feedback-link.js';
 
 const userBackupManager = new UserBackupManager({
     directory: path.join(globalThis.DATA_ROOT, '_exports'),
@@ -82,6 +83,14 @@ router.get('/me', async (request, response) => {
         console.error(error);
         return response.sendStatus(500);
     }
+});
+
+// Signed parameters for the feedback form link, so the form knows which account sent a ticket.
+router.get('/feedback-link', (request, response) => {
+    if (!request.user) {
+        return response.sendStatus(403);
+    }
+    return response.json(createFeedbackLink(request.user.profile.handle) ?? {});
 });
 
 router.post('/change-avatar', async (request, response) => {
