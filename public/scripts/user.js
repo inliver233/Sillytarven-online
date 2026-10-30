@@ -55,6 +55,9 @@ function isStcontrolAdminOnlyPage() {
  */
 export async function setUserControls(isEnabled) {
     accountsEnabled = isEnabled;
+    // 反馈链接签名在这里取，不放 jQuery ready：ready 回调可能早于 script.js 跑到 `let token`（它先 await 页面 load），
+    // 那时 getRequestHeaders() 会抛「初始化前访问」，请求发不出去，链接就一直没签名
+    void refreshFeedbackLink();
 
     if (!isEnabled) {
         $('#logout_button').hide();
@@ -2412,7 +2415,6 @@ jQuery(() => {
     $(document).on('pointerdown click auxclick contextmenu', 'a[data-user-href]', function () {
         fillAnnouncementLinkUser(this, currentUser?.handle, feedbackLink);
     });
-    void refreshFeedbackLink();
     setInterval(() => void refreshFeedbackLink(), FEEDBACK_LINK_REFRESH_INTERVAL);
     initPasskeys({ getHandle: () => currentUser?.handle ?? null });
     setInterval(async () => {
