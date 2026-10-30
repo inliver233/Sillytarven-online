@@ -849,6 +849,8 @@ export async function stcontrolPublicAccountGuard(request, response, next) {
     }
     const allowed = new Set(['/list', '/logout', '/heartbeat', '/registration-config', '/me']);
     if (allowed.has(routePath)) return next();
+    // The signed feedback-form link only reads the signed-in user's name; the private router checks the session.
+    if (routePath === '/feedback-link' && ['GET', 'HEAD'].includes(request.method)) return next();
     // Backups are private routes mounted after login; let them through to it.
     if (isStcontrolBackupRequest(request)) return next();
     return writeAccessError(response);

@@ -119,6 +119,17 @@ test('managed mode classifies every actual native account route without an ident
     }
 });
 
+test('signed-in read routes are not shadowed by the public guard that runs first on /api/users', async () => {
+    // users-public is mounted before users-private on the same path, so its guard sees private
+    // requests first; a read the private guard allows must not be refused there.
+    const reads = actualRoutes(routers.privateUsers.router).filter(route => route.method === 'GET');
+    assert.ok(reads.some(route => route.path === '/feedback-link'));
+    for (const route of reads) {
+        const result = await invokeGuard(adapter.stcontrolPublicAccountGuard, route.path, route.method);
+        assert.equal(result.nextCalled, true, `GET ${route.path} is refused by the public guard (${result.statusCode})`);
+    }
+});
+
 test('only independent mode exposes the explicit native login and all other identity entry points stay closed', async () => {
     let result = await invokeGuard(adapter.stcontrolPublicAccountGuard, '/login');
     assert.equal(result.nextCalled, false);
