@@ -49,6 +49,8 @@ export const HARD_EXCLUDES = Object.freeze([
     'vectors/',
     'content.log',
     'stats.json',
+    // Unsent text of the chat input box, rewritten every few keystrokes.
+    '/input-drafts.json',
     '**/*.tmp',
     // A chat's save token: a new random id on every save, no content. Without it the server
     // derives one from the chat itself.

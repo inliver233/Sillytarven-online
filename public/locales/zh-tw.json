@@ -651,7 +651,7 @@
     "Relaxed API URLS": "寬鬆的 API URL 格式",
     "Ask to import the World Info/Lorebook for every new character with embedded lorebook. If unchecked, a brief message will be shown instead": "當新角色含有知識書時，詢問是否要匯入嵌入的世界資訊／知識書。如果未選中，則會顯示簡短的訊息。",
     "Lorebook Import Dialog": "匯入知識書對話框",
-    "Restore unsaved user input on page refresh": "在頁面重新整理時還原未儲存的使用者輸入。",
+    "Restore unsaved user input on page refresh": "重新整理頁面後、或在你的其他裝置上，還原還沒送出的輸入。每個聊天各存一份草稿。",
     "Restore User Input": "還原使用者輸入",
     "Allow repositioning certain UI elements by dragging them. PC only, no effect on mobile": "允許透過拖動重新定位某些 UI 元素。僅適用於 PC 版。",
     "Movable UI Panels": "可拖動的 UI 模式",

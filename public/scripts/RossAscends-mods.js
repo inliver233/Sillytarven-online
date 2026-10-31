@@ -20,7 +20,11 @@ import {
     sendTextareaMessage,
     doNavbarIconClick,
     isSwipingAllowed,
+    this_chid,
+    getCurrentChatId,
+    getRequestHeaders,
 } from '../script.js';
+import { event_types } from './events.js';
 
 import {
     power_user,
@@ -33,7 +37,7 @@ import {
     SECRET_KEYS,
     secret_state,
 } from './secrets.js';
-import { debounce, getStringHash, isValidUrl } from './utils.js';
+import { debounce, getStringHash, isValidUrl, uuidv4 } from './utils.js';
 import { chat_completion_sources, oai_settings } from './openai.js';
 import { getTokenCountAsync } from './tokenizers.js';
 import { textgen_types, textgenerationwebui_settings as textgen_settings, getTextGenServer } from './textgen-settings.js';
@@ -42,6 +46,7 @@ import { debounce_timeout, SWIPE_SOURCE } from './constants.js';
 import { Popup } from './popup.js';
 import { accountStorage } from './util/AccountStorage.js';
 import { getCurrentUserHandle } from './user.js';
+import { createInputDraftSync, inputDraftKey } from './input-drafts.js';
 import { kai_settings } from './kai-settings.js';
 
 var RPanelPin = document.getElementById('rm_button_panel_pin');
@@ -448,26 +453,93 @@ function OpenNavPanels() {
     }
 }
 
-const getUserInputKey = () => getCurrentUserHandle() + '_userInput';
+// 「恢复用户输入」：输入框草稿按聊天保存在本机，并同步到服务器，换台设备也能接着写（见 input-drafts.js）
+/** @type {ReturnType<typeof createInputDraftSync> | null} */
+let inputDrafts = null;
+let lastInputDraftRefresh = 0;
 
-function restoreUserInput() {
-    if (!power_user.restore_user_input) {
-        console.debug('restoreUserInput disabled');
-        return;
-    }
+/** Key of the chat the input box belongs to right now. */
+function currentInputDraftKey() {
+    const groupId = selected_group == null ? null : String(selected_group);
+    const character = groupId === null && this_chid !== undefined ? characters[this_chid] : null;
+    return inputDraftKey({ groupId, characterAvatar: character?.avatar ?? null, chatId: getCurrentChatId() ?? null });
+}
 
-    const userInput = localStorage.getItem(getUserInputKey());
-    if (userInput) {
-        $('#send_textarea').val(userInput)[0].dispatchEvent(new Event('input', { bubbles: true }));
+/**
+ * @param {'GET' | 'POST'} method
+ * @param {any} body
+ * @param {{ keepalive?: boolean }} [options]
+ * @returns {Promise<{ status: number, data: any } | null>}
+ */
+async function inputDraftRequest(method, body, { keepalive = false } = {}) {
+    const payload = method === 'POST' ? JSON.stringify(body) : undefined;
+    const url = method === 'GET' ? `/api/input-drafts?${new URLSearchParams({ key: body.key })}` : '/api/input-drafts';
+    try {
+        const response = await fetch(url, {
+            method,
+            headers: getRequestHeaders(),
+            body: payload,
+            cache: 'no-store',
+            // Lets the last save outlive a closing page; browsers cap such requests at 64 KB.
+            keepalive: keepalive && new Blob([payload ?? '']).size < 60_000,
+        });
+        const data = await response.json().catch(() => null);
+        return { status: response.status, data };
+    } catch {
+        return null;
     }
 }
 
-function saveUserInput() {
-    const userInput = String($('#send_textarea').val());
-    localStorage.setItem(getUserInputKey(), userInput);
-    console.debug('User Input -- ', userInput);
+/** @param {string} text */
+function setSendTextareaText(text) {
+    $('#send_textarea').val(text)[0].dispatchEvent(new Event('input', { bubbles: true }));
 }
-const saveUserInputDebounced = debounce(saveUserInput);
+
+/** @param {{ text: string, use: () => void }} conflict */
+function showInputDraftConflict({ text, use }) {
+    const message = text
+        ? '另一台设备上，这个聊天有一份不一样的草稿。点这里换成那份；接着输入就保留现在这份。'
+        : '这份草稿在另一台设备上已经发出或清空了。点这里把这边也清空；接着输入就保留现在这份。';
+    toastr.info(message, '草稿', { timeOut: 15000, extendedTimeOut: 10000, closeButton: true, onclick: use });
+}
+
+/** Shows and syncs the open chat's draft (also catches a chat switch made while the option was off). */
+function refreshInputDraft() {
+    if (!inputDrafts || !power_user.restore_user_input) return;
+    lastInputDraftRefresh = Date.now();
+    void inputDrafts.switchTo(currentInputDraftKey());
+}
+
+function initInputDrafts() {
+    const handle = getCurrentUserHandle();
+    inputDrafts = createInputDraftSync({
+        request: inputDraftRequest,
+        storage: localStorage,
+        storageKey: `${handle}_inputDrafts`,
+        legacyKey: `${handle}_userInput`,
+        getText: () => String($('#send_textarea').val()),
+        setText: setSendTextareaText,
+        onConflict: showInputDraftConflict,
+        clientId: uuidv4(),
+    });
+    refreshInputDraft();
+    eventSource.on(event_types.CHAT_CHANGED, refreshInputDraft);
+    document.addEventListener('visibilitychange', () => {
+        if (!power_user.restore_user_input) return;
+        if (document.visibilityState === 'hidden') void inputDrafts.hide();
+        else refreshInputDraft();
+    });
+    window.addEventListener('pagehide', () => {
+        if (power_user.restore_user_input) void inputDrafts.hide();
+    });
+    window.addEventListener('online', refreshInputDraft);
+    // Back at this window without the page having been hidden (typed on another device meanwhile).
+    const refreshSoon = () => {
+        if (Date.now() - lastInputDraftRefresh > 3000) refreshInputDraft();
+    };
+    window.addEventListener('focus', refreshSoon);
+    $('#send_textarea').on('focus', refreshSoon);
+}
 
 // Make the DIV element draggable:
 
@@ -887,7 +959,7 @@ export function initRossMods() {
     }
 
     sendTextArea.addEventListener('input', () => {
-        saveUserInputDebounced();
+        if (power_user.restore_user_input) inputDrafts?.input();
 
         if (cssAutofit) {
             // Unset modifications made with a manual resize
@@ -904,7 +976,7 @@ export function initRossMods() {
         else autoFitSendTextArea();
     });
 
-    restoreUserInput();
+    initInputDrafts();
 
     // Swipe gestures (see: https://www.npmjs.com/package/swiped-events)
     document.addEventListener('swiped-left', function (e) {
