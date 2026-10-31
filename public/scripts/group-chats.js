@@ -96,6 +96,7 @@ import {
     markChatLoaded,
     markChatLoadFailed,
     isChatSaveBlocked,
+    isChatLoading,
     canShrinkSavedChat,
     assertChatHistoryPresent,
     reportChatWipeRejected,
@@ -773,6 +774,10 @@ async function saveGroupChat(groupId, shouldSaveGroup, force = false) {
         return false;
     }
     if (isChatSaveBlocked()) {
+        return false;
+    }
+    if (isChatLoading()) {
+        console.warn('Not saving while a chat is loading.');
         return false;
     }
     const chatId = group.chat_id;

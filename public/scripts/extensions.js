@@ -1,7 +1,7 @@
 import { DOMPurify, Popper } from '../lib.js';
 import { startupLap } from './performance-telemetry.js';
 
-import { eventSource, event_types, saveSettings, saveSettingsDebounced, getRequestHeaders, animation_duration, CLIENT_VERSION } from '../script.js';
+import { eventSource, event_types, saveSettings, saveSettingsDebounced, getRequestHeaders, animation_duration, CLIENT_VERSION, getCurrentChatIdentity } from '../script.js';
 import { showLoader } from './loader.js';
 import { POPUP_RESULT, POPUP_TYPE, Popup, callGenericPopup } from './popup.js';
 import { renderTemplate, renderTemplateAsync } from './templates.js';
@@ -83,6 +83,7 @@ export function saveMetadataDebounced() {
     const context = getContext();
     const groupId = context.groupId;
     const characterId = context.characterId;
+    const identity = getCurrentChatIdentity();
 
     cancelDebouncedMetadataSave();
 
@@ -96,6 +97,11 @@ export function saveMetadataDebounced() {
 
         if (characterId !== newContext.characterId) {
             console.warn('Character changed, not saving metadata');
+            return;
+        }
+
+        if (identity !== getCurrentChatIdentity()) {
+            console.warn('Another chat is open, not saving metadata');
             return;
         }
 

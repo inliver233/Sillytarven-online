@@ -686,6 +686,18 @@ export function markChatLoadFailed(error) {
     });
 }
 
+/**
+ * Whether a chat is being opened. Until it has loaded, `chat` and `chat_metadata` hold the
+ * previous chat or nothing while the file name already points at the new chat, so a save
+ * (an extension writing variables, a debounced save) would write the wrong content into it.
+ * The server refuses such saves on the integrity check, which used to end in the
+ * "Chat integrity check failed" popup and a reload.
+ * @returns {boolean}
+ */
+export function isChatLoading() {
+    return chatLoadState.status === 'loading';
+}
+
 /** @returns {boolean} Whether the open chat failed to load (and must not be saved) */
 export function isChatLoadFailed() {
     return chatLoadState.status === 'failed' && chatLoadState.identity === getCurrentChatIdentity();
@@ -2541,6 +2553,7 @@ export async function reloadCurrentChat({ expectedIdentity = getCurrentChatIdent
         if (!isCurrent()) return false;
         resetChatState();
         restoreNeutralChat();
+        markChatLoaded();
         await getCharacters();
         if (!isCurrent()) return false;
         await printMessages();
@@ -8160,6 +8173,7 @@ async function renamePastChats(oldAvatar, newAvatar, newName) {
 export function saveChatDebounced() {
     const chid = this_chid;
     const selectedGroup = selected_group;
+    const identity = getCurrentChatIdentity();
 
     cancelDebouncedChatSave();
 
@@ -8171,6 +8185,11 @@ export function saveChatDebounced() {
 
         if (chid !== this_chid) {
             console.warn('Chat save timeout triggered, but chid changed. Aborting.');
+            return;
+        }
+
+        if (identity !== getCurrentChatIdentity()) {
+            console.warn('Chat save timeout triggered, but another chat is open. Aborting.');
             return;
         }
 
@@ -8517,6 +8536,10 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false } 
     }
 
     if (isChatSaveBlocked()) {
+        return;
+    }
+    if (isChatLoading()) {
+        console.warn('Not saving while a chat is loading.');
         return;
     }
 
