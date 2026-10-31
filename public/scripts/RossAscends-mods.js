@@ -495,12 +495,48 @@ function setSendTextareaText(text) {
     $('#send_textarea').val(text)[0].dispatchEvent(new Event('input', { bubbles: true }));
 }
 
-/** @param {{ text: string, use: () => void }} conflict */
-function showInputDraftConflict({ text, use }) {
-    const message = text
-        ? '另一台设备上，这个聊天有一份不一样的草稿。点这里换成那份；接着输入就保留现在这份。'
-        : '这份草稿在另一台设备上已经发出或清空了。点这里把这边也清空；接着输入就保留现在这份。';
-    toastr.info(message, '草稿', { timeOut: 15000, extendedTimeOut: 10000, closeButton: true, onclick: use });
+/** The draft question on screen, if any: a new one updates it instead of stacking another. */
+let inputDraftToast = null;
+/** @type {(() => void) | null} */
+let inputDraftToastUse = null;
+
+/** @param {{ text: string, reason: 'differs' | 'replaced', use: () => void }} conflict */
+function showInputDraftConflict({ text, reason, use }) {
+    let message;
+    if (!text) {
+        message = '这份草稿在另一台设备上已经发出或清空了。点这里把这边也清空；接着输入就保留现在这份。';
+    } else if (reason === 'replaced') {
+        message = '另一台设备用它那份草稿覆盖了这里的。点这里换成那份；接着输入就保留现在这份。';
+    } else {
+        message = '另一台设备上，这个聊天有一份不一样的草稿。点这里换成那份；接着输入就保留现在这份。';
+    }
+    inputDraftToastUse = use;
+    if (inputDraftToast?.is(':visible')) {
+        inputDraftToast.find('.toast-message').text(message);
+        return;
+    }
+    inputDraftToast = toastr.info(message, '草稿', {
+        timeOut: 15000,
+        extendedTimeOut: 10000,
+        closeButton: true,
+        onclick: () => inputDraftToastUse?.(),
+        onHidden: () => { inputDraftToast = null; },
+    });
+}
+
+/** Unique per browser and kept across page loads, so a device knows when its draft was replaced. */
+function inputDraftDeviceId() {
+    const key = 'inputDraftsDeviceId';
+    let id = localStorage.getItem(key);
+    if (!id) {
+        id = uuidv4();
+        try {
+            localStorage.setItem(key, id);
+        } catch {
+            // Storage blocked: an id for this page only.
+        }
+    }
+    return id;
 }
 
 /** Shows and syncs the open chat's draft (also catches a chat switch made while the option was off). */
@@ -521,6 +557,7 @@ function initInputDrafts() {
         setText: setSendTextareaText,
         onConflict: showInputDraftConflict,
         clientId: uuidv4(),
+        deviceId: inputDraftDeviceId(),
     });
     refreshInputDraft();
     eventSource.on(event_types.CHAT_CHANGED, refreshInputDraft);

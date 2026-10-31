@@ -9,6 +9,9 @@
  *   It replaces the box only when nothing was typed here since the last sync.
  * - Two different versions are never merged or dropped silently: the one on screen
  *   stays, onConflict offers the other, and typing on keeps the one on screen.
+ * - A device that keeps its own version after a conflict tells the server so; the device
+ *   whose text it replaced is then asked too, instead of having its box replaced quietly
+ *   the next time it syncs (it knows itself by a device id that outlives page reloads).
  *
  * Browser APIs come in as options, so the logic also runs in node tests.
  */
@@ -22,6 +25,8 @@ const LOCAL_LIMIT = 50;
  * @property {string} text What the box holds for this chat
  * @property {number} syncedAt Server version this text is based on (0: none)
  * @property {boolean} dirty Changed here since that version
+ * @property {boolean} mine Typed (or kept) on this device rather than taken from another
+ * @property {boolean} forced Kept here over another device's version; the next save says so
  */
 
 /**
@@ -46,15 +51,17 @@ export function inputDraftKey({ groupId = null, characterAvatar = null, chatId =
  * @param {string} [options.legacyKey] The single draft older versions kept; it moves into the first chat opened
  * @param {() => string} options.getText Current text of the box
  * @param {(text: string) => void} options.setText Replaces the box
- * @param {(conflict: { text: string, use: () => void }) => void} options.onConflict Another version exists; use() switches to it
+ * @param {(conflict: { text: string, reason: 'differs' | 'replaced', use: () => void }) => void} options.onConflict
+ *   Another version exists ('differs'), or another device kept its version over this one ('replaced'); use() switches to it
  * @param {string} options.clientId Unique per page
+ * @param {string} options.deviceId Unique per browser, kept across page loads
  * @param {number} [options.pushDelay]
  * @param {() => number} [options.now]
  * @param {typeof setTimeout} [options.setTimer]
  * @param {typeof clearTimeout} [options.clearTimer]
  */
 export function createInputDraftSync({
-    request, storage, storageKey, legacyKey, getText, setText, onConflict, clientId,
+    request, storage, storageKey, legacyKey, getText, setText, onConflict, clientId, deviceId,
     pushDelay = DRAFT_PUSH_DELAY, now = Date.now, setTimer = setTimeout, clearTimer = clearTimeout,
 }) {
     /** @type {string | null} */
@@ -85,6 +92,8 @@ export function createInputDraftSync({
             text: typeof entry?.text === 'string' ? entry.text : '',
             syncedAt: Number(entry?.syncedAt) || 0,
             dirty: Boolean(entry?.dirty),
+            mine: Boolean(entry?.mine),
+            forced: Boolean(entry?.forced),
         };
     }
 
@@ -137,7 +146,7 @@ export function createInputDraftSync({
         const text = getText();
         const local = read(activeKey);
         if (local.text === text) return false;
-        write(activeKey, { text, syncedAt: local.syncedAt, dirty: true });
+        write(activeKey, { ...local, text, dirty: true, mine: true });
         return true;
     }
 
@@ -145,28 +154,31 @@ export function createInputDraftSync({
      * @param {string} key
      * @param {{ text: string, updatedAt: number }} other
      * @param {LocalDraft} local
+     * @param {'differs' | 'replaced'} reason
      */
-    function settleConflict(key, other, local) {
+    function settleConflict(key, other, local, reason) {
         // Left that chat already: stays unsaved and is asked about when it is open again.
         if (key !== activeKey) return;
         cancelTimer();
-        // From here on the text on screen is based on the other version: typing on replaces it,
-        // leaving it alone keeps the other version on the server.
-        write(key, { text: local.text, syncedAt: other.updatedAt, dirty: false });
+        // From here on the text on screen is based on the other version: typing on replaces it (and the
+        // save tells the server so), leaving it alone keeps the other version on the server.
+        write(key, { ...local, syncedAt: other.updatedAt, dirty: false, forced: true });
         // Emptied here (the message was sent): nothing to ask, and the other text is not pulled in.
         if (!local.text) return;
         onConflict({
             text: other.text,
+            reason,
             use: () => {
                 if (key !== activeKey) return;
                 const current = read(key);
                 if (!current.dirty && current.syncedAt === other.updatedAt) {
                     // The server still holds that version: just show it.
-                    write(key, { text: other.text, syncedAt: other.updatedAt, dirty: false });
+                    write(key, { text: other.text, syncedAt: other.updatedAt, dirty: false, mine: false, forced: false });
                     setText(other.text);
                     return;
                 }
-                // This page saved its own version since: save the chosen one over it, like typed text.
+                // Saved or typed here since: save the chosen one over that, like typed text.
+                write(key, { ...current, forced: false });
                 setText(other.text);
                 if (capture()) schedule(0);
             },
@@ -180,15 +192,16 @@ export function createInputDraftSync({
     async function pushNow(key, keepalive = false) {
         const sent = read(key);
         if (!sent.dirty) return;
-        const response = await request('POST', { key, text: sent.text, clientId, baseUpdatedAt: sent.syncedAt }, { keepalive });
+        const body = { key, text: sent.text, clientId, deviceId, baseUpdatedAt: sent.syncedAt, overriding: sent.forced };
+        const response = await request('POST', body, { keepalive });
         // Not through (offline, node busy, too long): stays dirty and goes again on the next change, focus or reconnect.
         if (!response) return;
         const latest = read(key);
         if (response.status === 200) {
             const updatedAt = Number(response.data?.updatedAt) || sent.syncedAt;
-            write(key, { text: latest.text, syncedAt: updatedAt, dirty: latest.text !== sent.text });
+            write(key, { ...latest, syncedAt: updatedAt, dirty: latest.text !== sent.text, forced: false });
         } else if (response.status === 409) {
-            settleConflict(key, readRemote(response.data), latest);
+            settleConflict(key, readRemote(response.data), latest, 'differs');
         }
     }
 
@@ -202,15 +215,18 @@ export function createInputDraftSync({
         if (remote.updatedAt <= local.syncedAt) return;
         if (remote.clientId === clientId) {
             // Saved by this page; the answer got lost on the way.
-            write(key, { text: local.text, syncedAt: remote.updatedAt, dirty: local.text !== remote.text });
+            const same = local.text === remote.text;
+            write(key, { ...local, syncedAt: remote.updatedAt, dirty: !same, forced: local.forced && !same });
             return;
         }
-        if (!local.dirty || local.text === remote.text) {
-            write(key, { text: remote.text, syncedAt: remote.updatedAt, dirty: false });
+        // Another device kept its version over the one typed here: ask, though nothing was typed since.
+        const replacedHere = remote.overrode === deviceId && local.mine && Boolean(local.text) && local.text !== remote.text;
+        if ((!local.dirty || local.text === remote.text) && !replacedHere) {
+            write(key, { text: remote.text, syncedAt: remote.updatedAt, dirty: false, mine: false, forced: false });
             if (getText() !== remote.text) setText(remote.text);
             return;
         }
-        settleConflict(key, remote, local);
+        settleConflict(key, remote, local, local.dirty ? 'differs' : 'replaced');
     }
 
     /** @param {any} data */
@@ -219,6 +235,7 @@ export function createInputDraftSync({
             text: typeof data?.text === 'string' ? data.text : '',
             updatedAt: Number(data?.updatedAt) || 0,
             clientId: typeof data?.clientId === 'string' ? data.clientId : '',
+            overrode: typeof data?.overrode === 'string' ? data.overrode : '',
         };
     }
 
@@ -248,7 +265,7 @@ export function createInputDraftSync({
         if (legacy === null) return;
         storage.removeItem(legacyKey);
         if (legacy && !read(key).text) {
-            write(key, { text: legacy, syncedAt: 0, dirty: true });
+            write(key, { text: legacy, syncedAt: 0, dirty: true, mine: true, forced: false });
         }
     }
 

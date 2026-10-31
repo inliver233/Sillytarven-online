@@ -33,9 +33,13 @@ async function setup(t) {
         await fs.promises.rm(root, { recursive: true, force: true });
     });
 
-    function device(clientId, { legacy } = {}) {
-        const items = new Map(legacy === undefined ? [] : [['me_userInput', legacy]]);
-        const page = { box: '', online: true, conflicts: /** @type {{ text: string, use: () => void }[]} */ ([]) };
+    let pages = 0;
+    /**
+     * A page in a browser. Pass `items` of an earlier page to reload it: same browser storage and device id, new page.
+     * @param {string} name
+     */
+    function device(name, { legacy, items = new Map(legacy === undefined ? [] : [['me_userInput', legacy]]) } = {}) {
+        const page = { box: '', online: true, items, conflicts: /** @type {{ text: string, reason: string, use: () => void }[]} */ ([]) };
         page.drafts = createInputDraftSync({
             request: async (method, body) => {
                 if (!page.online) return null;
@@ -50,7 +54,8 @@ async function setup(t) {
             getText: () => page.box,
             setText: text => { page.box = text; },
             onConflict: conflict => page.conflicts.push(conflict),
-            clientId,
+            clientId: `${name}-page-${++pages}`,
+            deviceId: `${name}-device`,
             pushDelay: 5,
         });
         page.type = async text => {
@@ -143,9 +148,11 @@ test('two different versions are never overwritten silently', async t => {
     assert.equal(phone.conflicts.length, 2);
     await phone.type('phone again, kept');
     assert.equal(await serverText(CHAT_X), 'phone again, kept');
+    // The PC typed nothing since, but its own text was replaced: asked, not swapped.
     await pc.open(CHAT_X);
-    assert.equal(pc.box, 'phone again, kept');
-    assert.equal(pc.conflicts.length, 0);
+    assert.equal(pc.box, 'PC again');
+    assert.equal(pc.conflicts.length, 1);
+    assert.equal(pc.conflicts[0].reason, 'replaced');
 });
 
 test('sending on a device that missed a newer draft neither asks nor pulls that draft in', async t => {
@@ -204,4 +211,65 @@ test('the single draft older versions kept moves into the first chat opened', as
     assert.ok(!pc.legacyLeft());
     assert.equal(pc.storedText(CHAT_X), 'from before the update');
     assert.equal(await serverText(CHAT_X), 'from before the update');
+});
+
+test('a device whose draft another device kept its own over is asked, also after a reload', async t => {
+    const { device, serverText } = await setup(t);
+    const phone = device('phone');
+    let pc = device('pc');
+    await phone.open(CHAT_X);
+    await phone.type('start');
+    await pc.open(CHAT_X);
+
+    phone.online = false;
+    await phone.type('phone version');
+    await pc.type('PC version');
+    phone.online = true;
+    await phone.open(CHAT_X);
+    assert.equal(phone.conflicts.length, 1);
+    await phone.type('phone version, kept'); // keeps its own
+    assert.equal(await serverText(CHAT_X), 'phone version, kept');
+
+    // The PC typed nothing since its last save, but its text was replaced: it asks instead of swapping the box.
+    await pc.open(CHAT_X);
+    assert.equal(pc.box, 'PC version');
+    assert.equal(pc.conflicts.length, 1);
+    assert.equal(pc.conflicts[0].reason, 'replaced');
+    assert.equal(pc.conflicts[0].text, 'phone version, kept');
+
+    // The phone types on; the PC page is reloaded and still asks.
+    await phone.type('phone version, kept, more');
+    pc = device('pc', { items: pc.items });
+    await pc.open(CHAT_X);
+    assert.equal(pc.box, 'PC version');
+    assert.equal(pc.conflicts.length, 1);
+    assert.equal(pc.conflicts[0].reason, 'replaced');
+
+    // Taking the phone's version: from then on the PC follows the phone quietly again.
+    pc.conflicts[0].use();
+    await pc.drafts.flush();
+    assert.equal(pc.box, 'phone version, kept, more');
+    await phone.type('phone version, kept, more, done');
+    await pc.open(CHAT_X);
+    assert.equal(pc.box, 'phone version, kept, more, done');
+    assert.equal(pc.conflicts.length, 1);
+});
+
+test('typing on both devices at once never changes either box under the user', async t => {
+    const { device } = await setup(t);
+    const phone = device('phone');
+    const pc = device('pc');
+    await phone.open(CHAT_X);
+    await pc.open(CHAT_X);
+    for (let round = 1; round <= 4; round++) {
+        // Whoever pauses first saves first; take turns.
+        const [first, second] = round % 2 ? [phone, pc] : [pc, phone];
+        await first.type(`${first === phone ? 'phone' : 'PC'} ${round}`);
+        await second.type(`${second === phone ? 'phone' : 'PC'} ${round}`);
+        await phone.open(CHAT_X);
+        await pc.open(CHAT_X);
+        assert.equal(phone.box, `phone ${round}`);
+        assert.equal(pc.box, `PC ${round}`);
+    }
+    assert.ok(phone.conflicts.length > 0 && pc.conflicts.length > 0, 'both are told the other one is writing too');
 });

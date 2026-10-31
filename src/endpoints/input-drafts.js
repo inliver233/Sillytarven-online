@@ -15,6 +15,11 @@ import { KeyedMutex } from '../keyed-mutex.js';
  * Saves carry the version the client last saw: a save made on top of an older
  * version than the stored one, by another tab or device, is refused with 409 and the
  * stored draft, so the client can ask instead of overwriting it.
+ *
+ * A client that, after such a refusal, keeps its own text saves with `overriding`. The new
+ * version then names the device whose text it replaced (`overrode`), and keeps naming it while
+ * that same device saves on, so that device asks its user instead of quietly taking the text.
+ * A save from any other device is based on what it was shown and clears the mark.
  */
 
 export const INPUT_DRAFTS_FILE = 'input-drafts.json';
@@ -22,14 +27,19 @@ export const MAX_DRAFT_LENGTH = 100_000;
 export const MAX_DRAFTS = 200;
 export const MAX_TOTAL_LENGTH = 1_000_000;
 const MAX_KEY_LENGTH = 600;
-const MAX_CLIENT_ID_LENGTH = 64;
+const MAX_ID_LENGTH = 64;
 /** An emptied draft is kept this long, so devices that still show the old text learn it was sent. */
 const CLEARED_KEEP_MS = 30 * 24 * 60 * 60 * 1000;
 
 const fileLocks = new KeyedMutex();
 
 /**
- * @typedef {{ text: string, updatedAt: number, clientId: string }} StoredDraft
+ * @typedef {object} StoredDraft
+ * @property {string} text
+ * @property {number} updatedAt Version, strictly increasing per draft
+ * @property {string} clientId Page that saved it
+ * @property {string} deviceId Browser that saved it
+ * @property {string} [overrode] Device whose different text this version replaced after a conflict
  */
 
 /**
@@ -76,18 +86,24 @@ export function pruneDrafts(drafts, keep, now) {
 /**
  * Applies one save to the stored drafts.
  * @param {Record<string, StoredDraft>} drafts Modified in place
- * @param {{ key: string, text: string, clientId: string, baseUpdatedAt: number }} save
+ * @param {{ key: string, text: string, clientId: string, deviceId: string, baseUpdatedAt: number, overriding?: boolean }} save
  * @param {number} now
  * @returns {{ updatedAt: number } | { conflict: StoredDraft }}
  */
-export function applyDraftSave(drafts, { key, text, clientId, baseUpdatedAt }, now) {
+export function applyDraftSave(drafts, { key, text, clientId, deviceId, baseUpdatedAt, overriding = false }, now) {
     const current = drafts[key];
     if (current && current.updatedAt > baseUpdatedAt && current.text !== text && current.clientId !== clientId) {
         return { conflict: current };
     }
+    let overrode;
+    if (overriding && current?.text && current.text !== text && current.deviceId !== deviceId) {
+        overrode = current.deviceId;
+    } else if (current?.overrode && current.deviceId === deviceId) {
+        overrode = current.overrode;
+    }
     // Strictly increasing, so a version is never mistaken for the one before it.
     const updatedAt = Math.max(now, (current?.updatedAt ?? 0) + 1);
-    drafts[key] = { text, updatedAt, clientId };
+    drafts[key] = { text, updatedAt, clientId, deviceId, ...(overrode ? { overrode } : {}) };
     pruneDrafts(drafts, key, now);
     return { updatedAt };
 }
@@ -116,14 +132,16 @@ router.get('/', async (request, response) => {
     }
     const draft = (await readDrafts(draftsFile(request)))[key];
     response.set('Cache-Control', 'no-store');
-    return response.json(draft ?? { text: '', updatedAt: 0, clientId: '' });
+    return response.json(draft ?? { text: '', updatedAt: 0, clientId: '', deviceId: '' });
 });
 
 router.post('/', async (request, response) => {
     const key = validKey(request.body?.key);
-    const { text, clientId } = request.body ?? {};
+    const { text, clientId, deviceId } = request.body ?? {};
     const baseUpdatedAt = Number(request.body?.baseUpdatedAt ?? 0);
-    if (!key || typeof text !== 'string' || typeof clientId !== 'string' || !clientId || clientId.length > MAX_CLIENT_ID_LENGTH || !Number.isFinite(baseUpdatedAt)) {
+    const overriding = request.body?.overriding === true;
+    const validId = value => typeof value === 'string' && value.length > 0 && value.length <= MAX_ID_LENGTH;
+    if (!key || typeof text !== 'string' || !validId(clientId) || !validId(deviceId) || !Number.isFinite(baseUpdatedAt)) {
         return response.status(400).json({ error: 'invalid_draft' });
     }
     if (text.length > MAX_DRAFT_LENGTH) {
@@ -133,7 +151,7 @@ router.post('/', async (request, response) => {
     try {
         const result = await fileLocks.runExclusive(file, async () => {
             const drafts = await readDrafts(file);
-            const outcome = applyDraftSave(drafts, { key, text, clientId, baseUpdatedAt }, Date.now());
+            const outcome = applyDraftSave(drafts, { key, text, clientId, deviceId, baseUpdatedAt, overriding }, Date.now());
             if ('updatedAt' in outcome) {
                 await writeFileAtomic(file, JSON.stringify({ version: 1, drafts }), 'utf8');
             }
