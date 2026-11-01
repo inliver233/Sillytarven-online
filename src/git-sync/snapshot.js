@@ -1,7 +1,6 @@
 import { getRepoContext, readSettings, repoExists, withRepoLock, authorOf, commitByCategory } from './repo.js';
-import { canConsumeStorage } from '../storage-quota.js';
 import { MIRROR_SOON_MS, scheduleMirror } from './modules/hosted.js';
-import { getPolicy, userError } from './router.js';
+import { getPolicy, storageRoom, userError } from './router.js';
 
 /**
  * Saves the user's data just before something is deleted, so a deleted character, chat or
@@ -34,12 +33,17 @@ export async function snapshotBeforeDelete(request, response, next) {
         const ctx = getRepoContext(handle, request.user.directories.root);
         if (repoExists(ctx) && readSettings(ctx).smartCommit.beforeDelete) {
             const work = withRepoLock(ctx, async () => {
-                if (!(await canConsumeStorage(request.user.profile, request.user.directories, 1)).allowed) return null;
+                const roomBytes = await storageRoom(request.user.profile, request.user.directories);
+                if (roomBytes <= 0) return null;
                 const settings = readSettings(ctx);
                 const author = authorOf(settings, request.user.profile.name || handle);
-                return commitByCategory(ctx, settings, { message: `${label}前自动存档`, author });
+                return commitByCategory(ctx, settings, { message: `${label}前自动存档`, author, roomBytes });
             }).then(result => {
                 if (result) scheduleMirror(ctx, userError, getPolicy(), MIRROR_SOON_MS);
+            }).catch(error => {
+                // Also after the wait below has given up: a rejection nobody handles would stop the server.
+                // Without room the delete goes ahead unsaved, as it does when the quota is full.
+                console.warn('[git-sync] save before delete skipped', error?.message);
             });
             await Promise.race([work, new Promise(resolve => setTimeout(resolve, WAIT_MS))]);
         }

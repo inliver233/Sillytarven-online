@@ -88,14 +88,15 @@ export default {
          */
         router.post('/commit', api.handle(async (ctx, request) => {
             await api.ensureQuota(request.user.profile, request.user.directories);
+            const roomBytes = await api.storageRoom(request.user.profile, request.user.directories);
             const settings = readSettings(ctx);
             const paths = Array.isArray(request.body?.paths) ? request.body.paths.map(String) : undefined;
             const message = String(request.body?.message ?? '').slice(0, 5000);
             const author = api.author(request, settings);
             const light = Boolean(request.body?.light && paths?.length);
-            const result = light ? await commitFiles(ctx, settings, { message, author, paths })
-                : request.body?.split && !paths ? await commitByCategory(ctx, settings, { message, author })
-                    : await commitAll(ctx, settings, { message, author, paths });
+            const result = light ? await commitFiles(ctx, settings, { message, author, paths, roomBytes })
+                : request.body?.split && !paths ? await commitByCategory(ctx, settings, { message, author, roomBytes })
+                    : await commitAll(ctx, settings, { message, author, paths, roomBytes });
             if (!result) throw api.userError(409, '没有需要提交的改动');
             const scheduled = scheduleMirror(ctx, api.userError, api.policy(), light ? MIRROR_DELAY_MS : MIRROR_SOON_MS);
             return { ...result, cloud: { scheduled } };

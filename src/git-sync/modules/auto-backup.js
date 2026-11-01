@@ -2,10 +2,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import storage from 'node-persist';
 import { getUserDirectories, toKey } from '../../users.js';
-import { canConsumeStorage } from '../../storage-quota.js';
-import { authorOf, commitAll, currentBranch, getRepoContext, readSettings, repoExists, withRepoLock, writeSettings } from '../repo.js';
+import { authorOf, commitAll, CommitTooLargeError, currentBranch, getRepoContext, readSettings, repoExists, withRepoLock, writeSettings } from '../repo.js';
 import { explainNetworkError, pushRemote } from '../remotes.js';
-import { remoteAccessFor, userError } from '../router.js';
+import { commitTooLargeMessage, remoteAccessFor, storageRoom, userError } from '../router.js';
 import { cloudIsBehind, hideHostedAddress, MIRROR_SOON_MS, scheduleMirror } from './hosted.js';
 
 const CHECK_INTERVAL_MS = 10 * 60 * 1000;
@@ -30,10 +29,11 @@ async function runBackup(handle, api, force = false) {
         try {
             const user = await storage.getItem(toKey(handle));
             if (!user) return null;
-            if (!(await canConsumeStorage(user, directories, 1)).allowed) {
+            const roomBytes = await storageRoom(user, directories);
+            if (roomBytes <= 0) {
                 throw new Error('存储空间已满，自动备份已跳过');
             }
-            result.committed = await commitAll(ctx, settings, { message: '自动备份', author: authorOf(settings, handle) });
+            result.committed = await commitAll(ctx, settings, { message: '自动备份', author: authorOf(settings, handle), roomBytes });
             if (result.committed) scheduleMirror(ctx, userError, api.policy(), MIRROR_SOON_MS);
             const remote = settings.remotes[schedule.remote];
             const branch = schedule.branch || await currentBranch(ctx);
@@ -43,7 +43,9 @@ async function runBackup(handle, api, force = false) {
                 result.pushed = true;
             }
         } catch (error) {
-            result.error = hideHostedAddress(explainNetworkError(error));
+            result.error = error instanceof CommitTooLargeError
+                ? `自动备份已跳过：${commitTooLargeMessage(error)}`
+                : hideHostedAddress(explainNetworkError(error));
         }
         const latest = readSettings(ctx);
         latest.autoBackup = { ...latest.autoBackup, lastRunAt: Date.now(), lastError: result.error };

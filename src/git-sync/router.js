@@ -6,7 +6,7 @@ import { invalidateCharacterListCache } from '../character-list-cache.js';
 import { invalidateRecentChatsCache } from '../recent-chats-cache.js';
 import { invalidateSettingsCache } from '../settings-cache.js';
 import { canConsumeStorage } from '../storage-quota.js';
-import { authorOf, getRepoContext, readSettings, repoExists, withRepoLock } from './repo.js';
+import { authorOf, CommitTooLargeError, getRepoContext, readSettings, repoExists, withRepoLock } from './repo.js';
 import { explainNetworkError } from './remotes.js';
 import coreModule from './modules/core.js';
 import historyModule from './modules/history.js';
@@ -101,6 +101,7 @@ export async function remoteAccessFor(ctx, remoteName) {
  * @property {(request: express.Request) => Promise<void>} afterWorkTreeChange
  * @property {typeof userError} userError
  * @property {(user: object, directories: object) => Promise<void>} ensureQuota Refuses work that would grow storage past the user's limit
+ * @property {(user: object, directories: object) => Promise<number>} storageRoom Bytes left for commits (Infinity without a quota)
  */
 
 /**
@@ -113,6 +114,27 @@ export async function ensureQuota(user, directories) {
     if (!quota.allowed) {
         throw userError(507, '存储空间已满（Git 历史也计入空间），无法继续提交或下载。请清理不需要的数据、删除旧分支，或在设置里删除仓库后重建。');
     }
+}
+
+/**
+ * Room left in the user's storage quota, to pass to commits as `roomBytes`.
+ * @param {object} user User record (request.user.profile)
+ * @param {object} directories
+ * @returns {Promise<number>} Bytes; Infinity when quotas are off
+ */
+export async function storageRoom(user, directories) {
+    const quota = await canConsumeStorage(user, directories, 0);
+    return quota.remainingBytes ?? Infinity;
+}
+
+/**
+ * Explains a commit that did not fit, in the user's terms.
+ * @param {CommitTooLargeError} error
+ */
+export function commitTooLargeMessage(error) {
+    const mib = bytes => (bytes / (1024 * 1024)).toFixed(1);
+    return `这次要存进 Git 的内容压缩后约 ${mib(error.estimatedBytes)} MB，但空间只剩 ${mib(error.roomBytes)} MB（Git 历史也计入空间）。`
+        + '这次没有提交，酒馆里的数据不受影响。可以在 Git 设置的「存哪些」里先不存体积大的内容（比如角色卡、世界书），或清理不需要的数据后再试。';
 }
 
 /**
@@ -146,6 +168,9 @@ const api = {
                 if (!response.headersSent) response.json(result ?? { ok: true });
             } catch (error) {
                 if (response.headersSent) return;
+                if (error instanceof CommitTooLargeError) {
+                    return response.status(507).json({ error: commitTooLargeMessage(error), code: 'commit_too_large' });
+                }
                 if (error?.userMessage) {
                     return response.status(error.status ?? 400).json({ error: hideHostedAddress(error.userMessage), code: error.code, ...(error.details ? { details: error.details } : {}) });
                 }
@@ -174,6 +199,7 @@ const api = {
     },
     userError,
     ensureQuota,
+    storageRoom,
 };
 
 export const router = express.Router();

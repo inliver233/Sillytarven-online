@@ -2,6 +2,8 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { promisify } from 'node:util';
+import zlib from 'node:zlib';
 import git from 'isomorphic-git';
 import { KeyedMutex } from '../keyed-mutex.js';
 import { CATEGORIES, createTrackFilter, describePath, isHardExcluded, sanitizeTrackingRules } from './tracking.js';
@@ -468,16 +470,75 @@ export function describeChanges(changes) {
     return parts.join('；') || '没有改动';
 }
 
+const deflate = promisify(zlib.deflate);
+
+/** A commit would store more than the room left in the user's storage quota; nothing was recorded. */
+export class CommitTooLargeError extends Error {
+    /**
+     * @param {number} estimatedBytes What the commit would add
+     * @param {number} roomBytes What is left
+     */
+    constructor(estimatedBytes, roomBytes) {
+        super('commit_too_large');
+        this.estimatedBytes = estimatedBytes;
+        this.roomBytes = roomBytes;
+    }
+}
+
+/**
+ * What recording these changes adds to the repository, at most. Git keeps every new file
+ * compressed, so the files are compressed the same way (a faster level, which comes out a
+ * little larger). Files the repository already holds are counted too: this errs high.
+ * @param {RepoContext} ctx
+ * @param {Change[]} changes
+ * @returns {Promise<number>} Bytes
+ */
+export async function estimateCommitGrowth(ctx, changes) {
+    let total = 0;
+    for (const change of changes) {
+        if (change.kind !== 'added' && change.kind !== 'modified') continue;
+        try {
+            // Asynchronous: compressing a first commit of a whole tavern must not stall the server.
+            total += (await deflate(await fs.promises.readFile(path.join(ctx.dir, change.path)), { level: 1 })).length;
+        } catch {
+            // Gone since the scan: nothing to store.
+        }
+    }
+    return total;
+}
+
+/**
+ * Refuses a commit that would not fit in the room left (a first commit of a whole tavern can
+ * add hundreds of MiB at once, and git history counts toward the quota). Files whose plain size
+ * fits are let through without reading them, so everyday commits cost nothing.
+ * @param {RepoContext} ctx
+ * @param {Change[]} changes
+ * @param {number} [roomBytes] Room left; not finite = no limit
+ */
+async function ensureRoomFor(ctx, changes, roomBytes) {
+    if (!Number.isFinite(roomBytes)) return;
+    const stored = changes.filter(change => change.kind === 'added' || change.kind === 'modified');
+    // Compression can grow data that does not compress by a hair; a commit and trees add a little.
+    const plain = stored.reduce((sum, change) => sum + (change.size ?? 0) * 1.001 + 256, 0);
+    if (plain <= roomBytes) return;
+    const estimated = await estimateCommitGrowth(ctx, stored);
+    if (estimated > roomBytes) {
+        throw new CommitTooLargeError(estimated, roomBytes);
+    }
+}
+
 /**
  * Records the current tracked state. Returns null when there is nothing to record.
  * @param {RepoContext} ctx
  * @param {RepoSettings} settings
- * @param {{ message?: string, author: { name: string, email: string }, paths?: string[] }} options
+ * @param {{ message?: string, author: { name: string, email: string }, paths?: string[], roomBytes?: number }} options
+ *   roomBytes: storage left; a commit that would not fit throws CommitTooLargeError and records nothing
  */
-export async function commitAll(ctx, settings, { message, author, paths }) {
+export async function commitAll(ctx, settings, { message, author, paths, roomBytes }) {
     const { changes, cleanup } = await getStatus(ctx, settings);
     const selected = paths ? changes.filter(change => paths.includes(change.path)) : changes;
     if (!selected.length) return null;
+    await ensureRoomFor(ctx, selected, roomBytes);
     // Start from HEAD so a previous, interrupted operation cannot leak staged files into this commit.
     await resetIndexToHead(ctx);
     return recordChanges(ctx, selected, { message, author, cleanup });
@@ -488,11 +549,12 @@ export async function commitAll(ctx, settings, { message, author, paths }) {
  * is cheap enough to run every few messages. Returns null when they have not changed.
  * @param {RepoContext} ctx
  * @param {RepoSettings} settings
- * @param {{ message?: string, author: { name: string, email: string }, paths: string[] }} options
+ * @param {{ message?: string, author: { name: string, email: string }, paths: string[], roomBytes?: number }} options
  */
-export async function commitFiles(ctx, settings, { message, author, paths }) {
+export async function commitFiles(ctx, settings, { message, author, paths, roomBytes }) {
     const { changes } = await getStatus(ctx, settings, { filepaths: paths });
     if (!changes.length) return null;
+    await ensureRoomFor(ctx, changes, roomBytes);
     const head = await headOid(ctx);
     for (const change of changes) {
         await git.resetIndex({ fs, dir: ctx.dir, gitdir: ctx.gitdir, filepath: change.path, ...(head ? { ref: head } : {}), cache: ctx.cache });
@@ -505,12 +567,14 @@ export async function commitFiles(ctx, settings, { message, author, paths }) {
  * history can be read and restored by kind.
  * @param {RepoContext} ctx
  * @param {RepoSettings} settings
- * @param {{ message?: string, author: { name: string, email: string } }} options The message goes on the chats commit (or the first one)
+ * @param {{ message?: string, author: { name: string, email: string }, roomBytes?: number }} options The message goes on the chats commit (or the first one)
  * @returns {Promise<{ oid: string, summary: string, count: number, commits: { oid: string, summary: string }[] } | null>}
  */
-export async function commitByCategory(ctx, settings, { message, author }) {
+export async function commitByCategory(ctx, settings, { message, author, roomBytes }) {
     const { changes, cleanup } = await getStatus(ctx, settings);
     if (!changes.length) return null;
+    // All or nothing: the commits per kind together must fit.
+    await ensureRoomFor(ctx, changes, roomBytes);
     await resetIndexToHead(ctx);
     const order = CATEGORIES.map(category => category.id);
     const groups = new Map();
