@@ -13,6 +13,7 @@ import { debounce_timeout } from './constants.js';
 import { accountStorage } from './util/AccountStorage.js';
 import { preloadExtensionResources } from './util/extension-resource-preload.js';
 import { getExtensionModuleUrl } from './util/module-url.js';
+import { runExtensionActivateHook } from './util/extension-hooks.js';
 import { getExtensionActivationPlan } from './util/extension-eligibility.js';
 import { SimpleMutex } from './util/SimpleMutex.js';
 import { power_user } from './power-user.js';
@@ -621,18 +622,18 @@ function addExtensionStyle(name, manifest) {
 }
 
 /**
- * Loads a JS file for an extension.
+ * Loads a JS file for an extension, then runs its manifest's `hooks.activate` function if it names one.
  * @param {string} name Extension name
  * @param {object} manifest Extension manifest
- * @returns {Promise<void>} When the script is loaded
+ * @returns {Promise<unknown>} When the script is loaded and activated
  */
 function addExtensionScript(name, manifest) {
     if (!manifest.js) {
         return Promise.resolve();
     }
 
+    const url = getExtensionModuleUrl(name, manifest.js);
     return new Promise((resolve, reject) => {
-        const url = getExtensionModuleUrl(name, manifest.js);
         const id = sanitizeSelector(`${name}-js`);
         let ready = false;
 
@@ -653,7 +654,7 @@ function addExtensionScript(name, manifest) {
             };
             document.body.appendChild(script);
         }
-    });
+    }).then(() => runExtensionActivateHook(name, manifest, () => import(url)));
 }
 
 /**
