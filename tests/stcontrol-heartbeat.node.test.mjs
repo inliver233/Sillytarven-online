@@ -207,3 +207,62 @@ test('the controller admin-only page never starts a heartbeat, so it is not sent
     assert.equal(requests, 0, 'a heartbeat was sent from the admin-only page');
     assert.equal(window.userHeartbeat.forceStart(), null);
 });
+
+/**
+ * Runs user-heartbeat.js in a page with the Controller address in a meta tag, session storage,
+ * and just enough DOM for the notice it may put on screen.
+ * @param {Record<string, string>} session Session storage contents
+ */
+function loadStalePage(session = {}) {
+    const source = fs.readFileSync(new URL('../public/scripts/user-heartbeat.js', import.meta.url), 'utf8');
+    const redirects = [];
+    const appended = [];
+    const element = () => ({ style: {}, children: [], setAttribute(name, value) { this[name] = value; }, append(...nodes) { this.children.push(...nodes); } });
+    const document = {
+        hidden: false,
+        readyState: 'loading',
+        addEventListener() {},
+        querySelector: selector => selector === 'meta[name="stcontrol-controller-url"]' ? { getAttribute: () => 'https://controller.example.test' } : null,
+        getElementById: id => appended.find(node => node.id === id) ?? null,
+        createElement: element,
+        body: { append: node => appended.push(node) },
+    };
+    const window = {
+        addEventListener() {},
+        dispatchEvent() {},
+        location: { assign(url) { redirects.push(url); } },
+        sessionStorage: { getItem: key => session[key] ?? null, setItem: (key, value) => { session[key] = String(value); } },
+        toastr: { error() {} },
+    };
+    vm.runInNewContext(source, {
+        Boolean, CustomEvent: class { constructor(type) { this.type = type; } }, Date, Number, console: { log() {}, warn() {} },
+        document, fetch: async () => ({ ok: true }), navigator: { userAgent: 'test' },
+        setInterval: () => 1, clearInterval() {}, setTimeout(callback, delay) { if (delay === 0) callback(); },
+        URLSearchParams, window,
+    }, { filename: 'user-heartbeat.js' });
+    return { window, redirects, appended, session };
+}
+
+test('a page that goes stale before it knows the Controller is sent to the address in the page', () => {
+    // A new tab: no session storage yet, and /api/users/me never answered.
+    const page = loadStalePage();
+    page.window.userHeartbeat.handleStcontrolSessionStale();
+    assert.deepEqual(page.redirects, ['https://controller.example.test']);
+    assert.ok(Number(page.session.stcontrolStaleRedirectAt) > 0);
+    assert.equal(page.appended.length, 0);
+});
+
+test('a page stale again right after the Controller is not bounced back, it shows a way there', () => {
+    const page = loadStalePage({ stcontrolStaleRedirectAt: String(Date.now() - 5_000) });
+    page.window.userHeartbeat.handleStcontrolSessionStale();
+    assert.deepEqual(page.redirects, [], 'no redirect loop');
+    assert.equal(page.appended.length, 1);
+    const notice = page.appended[0];
+    assert.equal(notice.id, 'stcontrol-stale-notice');
+    const link = notice.children[0].children.find(child => child.href);
+    assert.equal(link.href, 'https://controller.example.test');
+
+    const later = loadStalePage({ stcontrolStaleRedirectAt: String(Date.now() - 120_000) });
+    later.window.userHeartbeat.handleStcontrolSessionStale();
+    assert.deepEqual(later.redirects, ['https://controller.example.test'], 'a minute later it goes again');
+});

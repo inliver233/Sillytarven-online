@@ -28,6 +28,43 @@ function writeSessionValue(key, value) {
     }
 }
 
+/** @returns {string} The Controller address the server put in the page (managed nodes), or '' */
+function readPageControllerUrl() {
+    const url = document.querySelector('meta[name="stcontrol-controller-url"]')?.getAttribute('content') || '';
+    return /^https?:\/\//i.test(url) ? url : '';
+}
+
+/** A page sent to the Controller less than this ago that comes back stale is not sent again. */
+const STALE_REDIRECT_PAUSE_MS = 60_000;
+
+/**
+ * Covers the page (the loader included) with a way back to the Controller, for when the page
+ * is not sent there by itself.
+ * @param {string} controllerUrl Controller address, or ''
+ */
+function showStaleSessionNotice(controllerUrl) {
+    if (document.getElementById('stcontrol-stale-notice')) return;
+    const overlay = document.createElement('div');
+    overlay.id = 'stcontrol-stale-notice';
+    overlay.setAttribute('role', 'alertdialog');
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.6);';
+    const card = document.createElement('div');
+    card.style.cssText = 'max-width:22rem;margin:1rem;padding:1.5rem;border-radius:12px;background:#222;color:#eee;font:15px/1.6 sans-serif;text-align:center;box-shadow:0 8px 30px rgba(0,0,0,.5);';
+    const text = document.createElement('p');
+    text.style.margin = '0 0 1rem';
+    text.textContent = '登录已过期，请回到统一总控重新进入。';
+    card.append(text);
+    if (controllerUrl) {
+        const link = document.createElement('a');
+        link.href = controllerUrl;
+        link.textContent = '去统一总控';
+        link.style.cssText = 'display:inline-block;padding:.5rem 1.25rem;border-radius:8px;background:#4a7dff;color:#fff;text-decoration:none;';
+        card.append(link);
+    }
+    overlay.append(card);
+    document.body.append(overlay);
+}
+
 class UserHeartbeat {
     constructor() {
         this.heartbeatInterval = null;
@@ -240,16 +277,23 @@ class UserHeartbeat {
         if (this.stcontrolSessionStale) return;
         this.stcontrolSessionStale = true;
         this.stop();
-        const message = '当前页面会话已过期，请通过统一总控重新登录。';
-        if (window.toastr?.error) window.toastr.error(message);
-        else if (typeof window.alert === 'function') window.alert(message);
         if (typeof window.dispatchEvent === 'function' && typeof CustomEvent === 'function') {
             window.dispatchEvent(new CustomEvent('stcontrol-session-stale'));
         }
-        const controllerUrl = this.stcontrolControllerUrl || readSessionValue('stcontrolControllerUrl');
-        if (controllerUrl && typeof window.location?.assign === 'function') {
+        // A page opened in a new tab knows the address only from the page itself: it goes stale
+        // before /api/users/me ever answers.
+        const controllerUrl = this.stcontrolControllerUrl || readSessionValue('stcontrolControllerUrl') || readPageControllerUrl();
+        const lastRedirect = Number(readSessionValue('stcontrolStaleRedirectAt')) || 0;
+        if (controllerUrl && Date.now() - lastRedirect > STALE_REDIRECT_PAUSE_MS && typeof window.location?.assign === 'function') {
+            writeSessionValue('stcontrolStaleRedirectAt', String(Date.now()));
+            const message = '当前页面会话已过期，请通过统一总控重新登录。';
+            if (window.toastr?.error) window.toastr.error(message);
+            else if (typeof window.alert === 'function') window.alert(message);
             setTimeout(() => window.location.assign(controllerUrl), 0);
+            return;
         }
+        // No address, or back from the Controller and stale again at once: no automatic loop.
+        showStaleSessionNotice(controllerUrl);
     }
 
     /**

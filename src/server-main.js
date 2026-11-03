@@ -92,7 +92,7 @@ import { migrateGroupChatsMetadataFormat } from './endpoints/groups.js';
 import { initializeUserInvitationSystem } from './user-invitations.js';
 import { getRegistrationMethodConfig } from './registration-policy.js';
 import { beginEndpointPerformance, finalizeRequestPerformance, performanceRequestStartMiddleware } from './performance-monitor.js';
-import { stcontrolOAuthGuard, stcontrolPublicAccountGuard } from './stcontrol.js';
+import { getStcontrolControllerUrl, isStcontrolEnabled, stcontrolOAuthGuard, stcontrolPublicAccountGuard } from './stcontrol.js';
 import { DISCORD_PUBLIC_PAGES, handleDiscordInteraction, isDiscordApplicationEnabled } from './discord-public-endpoints.js';
 
 // Work around a node v20.0.0, v20.1.0, and v20.2.0 bug. The issue was fixed in v20.3.0.
@@ -386,20 +386,42 @@ function getAssetVersion() {
     return assetVersioning.version;
 }
 
+/** @returns {string} The Controller's login address on a managed node, else '' */
+function getControllerAddress() {
+    const url = isStcontrolEnabled() ? getStcontrolControllerUrl() : '';
+    return /^https?:\/\//i.test(url) ? url : '';
+}
+
+/**
+ * Puts the Controller's address in the page. A page opened with an expired managed session
+ * cannot ask the server for it (every request answers "stale session" before the user is
+ * known), and without it the page stays on the loader instead of sending the user to log in.
+ * @param {string} html index.html
+ * @param {string} url Controller address, or '' for none
+ * @returns {string}
+ */
+function addControllerAddress(html, url) {
+    if (!url) return html;
+    const escaped = url.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return html.replace('</head>', `    <meta name="stcontrol-controller-url" content="${escaped}">\n</head>`);
+}
+
 /**
  * Sends index.html, with the import map when versioned assets are enabled.
  * Anything unexpected falls back to the page as it is on disk.
  * @param {import('express').Response} response Response
  */
 function sendAppPage(response) {
+    const controllerUrl = getControllerAddress();
     if (versionedAssetsEnabled) {
         try {
             const indexFile = path.join(publicDirectory, 'index.html');
             const version = getAssetVersion();
             const stats = fs.statSync(indexFile);
-            const key = `${version}:${stats.size}:${stats.mtimeMs}`;
+            const key = `${version}:${stats.size}:${stats.mtimeMs}:${controllerUrl}`;
             if (assetVersioning.pageKey !== key) {
-                assetVersioning.page = transformAppHtml(fs.readFileSync(indexFile, 'utf8'), { version });
+                const page = transformAppHtml(fs.readFileSync(indexFile, 'utf8'), { version });
+                assetVersioning.page = page && addControllerAddress(page, controllerUrl);
                 assetVersioning.pageKey = key;
                 if (!assetVersioning.page) {
                     console.warn('index.html does not have the expected shape; serving it without versioned assets.');
@@ -410,6 +432,13 @@ function sendAppPage(response) {
             }
         } catch (error) {
             console.warn('Could not version the app assets; serving the page as is.', error);
+        }
+    }
+    if (controllerUrl) {
+        try {
+            return response.type('html').send(addControllerAddress(fs.readFileSync(path.join(publicDirectory, 'index.html'), 'utf8'), controllerUrl));
+        } catch (error) {
+            console.warn('Could not add the Controller address to the page.', error);
         }
     }
     return response.sendFile('index.html', { root: publicDirectory });
