@@ -4564,7 +4564,9 @@ router.post('/search', validateAvatarUrlMiddleware, async function (request, res
                     const filePath = path.join(directoryPath, fileName);
                     const totalBytes = getChatTotalBytes(filePath);
                     return {
-                        file_name: fileName,
+                        // The chat ID without ".jsonl", like group chats and upstream: the past chats list
+                        // opens, renames, deletes and exports by it, and the server adds the extension.
+                        file_name: path.parse(fileName).name,
                         file_size: formatBytes(totalBytes),
                         path: filePath,
                     };
