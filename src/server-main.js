@@ -402,7 +402,7 @@ const versionedAssetsEnabled = getConfigValue('performance.versionedAssets', tru
 const assetVersioning = { version: null, checkedAt: 0, pageKey: null, page: null };
 const assetCdn = getAssetCdnConfig();
 
-/** @returns {{baseUrl: string, timeZones: string[]}|null} CDN mirror of /v/ for some visitors, if configured */
+/** @returns {{baseUrl: string, timeZones: string[]}|null} CDN mirror of /v/ (for browsers in timeZones, or all when empty), if configured */
 function getAssetCdnConfig() {
     const configured = getConfigValue('performance.assetCdn.baseUrl', '');
     const baseUrl = normalizeAssetCdnBaseUrl(configured);
@@ -412,7 +412,7 @@ function getAssetCdnConfig() {
     }
     const zones = getConfigValue('performance.assetCdn.timeZones', []);
     const timeZones = Array.isArray(zones) ? zones.filter(zone => typeof zone === 'string' && zone) : [];
-    return timeZones.length ? { baseUrl, timeZones } : null;
+    return { baseUrl, timeZones };
 }
 
 /** @returns {string} Version of the files served under /v/, rechecked every few seconds */

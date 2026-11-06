@@ -148,14 +148,15 @@ export function normalizeAssetCdnBaseUrl(value) {
 
 /**
  * The import map for a page that may load the app's modules from a CDN mirror of /v/
- * (e.g. a host inside mainland China). The page is the same for every visitor, so a
- * cache in front of it cannot mix up visitors: the browser picks the mirror by its time
- * zone. Absolute imports inside mirrored modules resolve against the mirror, so they are
+ * (e.g. a domain whose DNS sends mainland China to a local CDN and everyone else to
+ * Cloudflare). The page is the same for every visitor, so a cache in front of it cannot
+ * mix up visitors. With time zones listed, only browsers in them use the mirror; with
+ * none, every browser does. Absolute imports inside mirrored modules resolve against the mirror, so they are
  * mapped too. If a module cannot be loaded from the mirror (down, or no CORS), the page notes
  * it and loads everything from this server for a day; before the app starts it reloads
  * once to do so. localStorage "st-asset-cdn" = "on" / "off" overrides the choice.
  * @param {Record<string, string>} imports Import map entries for this server
- * @param {{baseUrl: string, timeZones: string[]}} cdn Mirror address and the time zones that use it
+ * @param {{baseUrl: string, timeZones: string[]}} cdn Mirror address, and the time zones that use it (empty = all)
  * @returns {string} Inline script that adds the import map
  */
 function getAssetCdnScript(imports, cdn) {
@@ -167,7 +168,8 @@ function getAssetCdnScript(imports, cdn) {
             var choice = localStorage.getItem('st-asset-cdn');
             var failedAt = Number(localStorage.getItem(KEY)) || 0;
             var zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-            use = choice === 'on' || (choice !== 'off' && o.zones.indexOf(zone) !== -1 && Date.now() - failedAt > 864e5);
+            var inZone = o.zones.length === 0 || o.zones.indexOf(zone) !== -1;
+            use = choice === 'on' || (choice !== 'off' && inZone && Date.now() - failedAt > 864e5);
         } catch (e) { use = false; }
         Object.keys(o.imports).forEach(function (key) {
             var versioned = o.imports[key].indexOf('/v/') === 0;

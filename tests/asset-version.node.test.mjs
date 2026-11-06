@@ -178,6 +178,17 @@ test('a CDN mirror of /v/ is used by pages in its time zones and dropped when it
     assert.doesNotMatch(hostile, /alert\(1\)<\/script>/);
 });
 
+test('with no time zones listed, every page uses the CDN mirror', () => {
+    const html = '<html><head></head><body><script type="module" src="script.js"></script></body></html>';
+    const page = transformAppHtml(html, { version: 'abc123def456', cdn: { baseUrl: 'https://s1.example.cn', timeZones: [] } });
+    for (const zone of ['Asia/Shanghai', 'America/New_York', 'Europe/Berlin']) {
+        assert.equal(runCdnScript(page, { zone }).imports['/scripts/'], 'https://s1.example.cn/v/abc123def456/scripts/', zone);
+    }
+    assert.equal(runCdnScript(page, { zone: 'Asia/Shanghai', storage: { 'st-asset-cdn': 'off' } }).imports['/scripts/'], '/v/abc123def456/scripts/');
+    const recentFailure = { 'st-asset-cdn-failed': String(Date.now() - 60_000) };
+    assert.equal(runCdnScript(page, { zone: 'Europe/Berlin', storage: recentFailure }).imports['/scripts/'], '/v/abc123def456/scripts/');
+});
+
 test('the CDN mirror address is checked', () => {
     assert.equal(normalizeAssetCdnBaseUrl('https://static.example.cn/'), 'https://static.example.cn');
     assert.equal(normalizeAssetCdnBaseUrl(' https://cdn.example.cn/st// '), 'https://cdn.example.cn/st');
