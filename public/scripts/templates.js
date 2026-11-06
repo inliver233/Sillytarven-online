@@ -1,5 +1,6 @@
 import { DOMPurify, Handlebars } from '../lib.js';
 import { applyLocale } from './i18n.js';
+import { getVersionedAssetUrl } from './util/module-url.js';
 
 /**
  * @type {Map<string, function>}
@@ -61,7 +62,7 @@ export async function renderTemplateAsync(templateId, templateData = {}, sanitiz
     async function fetchTemplateAsync(pathToTemplate) {
         let template = TEMPLATE_CACHE.get(pathToTemplate);
         if (!template) {
-            const templateContent = await getUrlAsync(pathToTemplate);
+            const templateContent = await getUrlAsync(getVersionedAssetUrl(pathToTemplate));
             template = Handlebars.compile(templateContent);
             TEMPLATE_CACHE.set(pathToTemplate, template);
         }
@@ -103,7 +104,7 @@ export function renderTemplate(templateId, templateData = {}, sanitize = true, l
     function fetchTemplateSync(pathToTemplate) {
         let template = TEMPLATE_CACHE.get(pathToTemplate);
         if (!template) {
-            const templateContent = getUrlSync(pathToTemplate);
+            const templateContent = getUrlSync(getVersionedAssetUrl(pathToTemplate));
             template = Handlebars.compile(templateContent);
             TEMPLATE_CACHE.set(pathToTemplate, template);
         }

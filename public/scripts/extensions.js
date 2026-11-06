@@ -575,7 +575,7 @@ async function getManifests(names) {
 
     for (const name of names) {
         const promise = new Promise((resolve, reject) => {
-            fetch(`/scripts/extensions/${name}/manifest.json`).then(async response => {
+            fetch(getExtensionModuleUrl(name, 'manifest.json')).then(async response => {
                 if (response.ok) {
                     const json = await response.json();
                     obj[name] = json;
@@ -877,7 +877,7 @@ function addExtensionLocale(name, manifest) {
         return Promise.resolve();
     }
 
-    return fetch(`/scripts/extensions/${name}/${localeFile}`)
+    return fetch(getExtensionModuleUrl(name, localeFile))
         .then(async response => {
             if (!response.ok) {
                 throw new Error(`HTTP ${response.status}: ${response.statusText}`);
