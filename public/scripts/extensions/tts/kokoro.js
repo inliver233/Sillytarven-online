@@ -88,7 +88,12 @@ export class KokoroTtsProvider {
                 }
 
                 // Create a new worker
-                this.worker = new Worker(new URL('./kokoro-worker.js', import.meta.url), { type: 'module' });
+                // A worker must come from the page's own origin, while this module may be on a CDN mirror.
+                const workerUrl = new URL('./kokoro-worker.js', import.meta.url);
+                const sameOriginWorkerUrl = workerUrl.origin === location.origin
+                    ? workerUrl
+                    : new URL(workerUrl.pathname.replace(/^.*?(?=\/v\/[0-9a-f]+\/)/, ''), location.origin);
+                this.worker = new Worker(sameOriginWorkerUrl, { type: 'module' });
 
                 // Set up message handling
                 this.worker.onmessage = this.handleWorkerMessage.bind(this);

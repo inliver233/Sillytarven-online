@@ -1,9 +1,15 @@
+const MODULE_URL = new URL(import.meta.url);
+const VERSION_PATH = /^.*?\/v\/[0-9a-f]{6,64}(?=\/)/.exec(MODULE_URL.pathname)?.[0];
+
 /**
  * The /v/<version> prefix the app's modules were loaded under through the import
  * map in index.html (see src/asset-version.js), or '' when the page loads them by
- * their plain URLs (no import map support, or versioned assets disabled).
+ * their plain URLs (no import map support, or versioned assets disabled). When the
+ * modules come from a CDN mirror, the prefix is the mirror's full address.
  */
-const VERSION_PREFIX = /^\/v\/[0-9a-f]+(?=\/)/.exec(new URL(import.meta.url).pathname)?.[0] ?? '';
+const VERSION_PREFIX = VERSION_PATH
+    ? (MODULE_URL.origin === globalThis.location?.origin ? '' : MODULE_URL.origin) + VERSION_PATH
+    : '';
 
 /**
  * URL of an extension's JavaScript module as the import map resolves it. A module

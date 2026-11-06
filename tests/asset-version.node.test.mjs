@@ -3,8 +3,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test, { after } from 'node:test';
+import vm from 'node:vm';
 
-import { computeAssetVersion, createVersionedAssetsMiddleware, transformAppHtml } from '../src/asset-version.js';
+import { computeAssetVersion, createVersionedAssetsMiddleware, normalizeAssetCdnBaseUrl, transformAppHtml } from '../src/asset-version.js';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'st-asset-version-'));
 after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -56,15 +57,17 @@ test('versioned URLs are rewritten, cached by version, and limited to the app mo
     const middleware = createVersionedAssetsMiddleware(() => 'abc123def456');
     const run = (url, method = 'GET') => {
         const request = { url, method, get path() { return this.url.split('?')[0]; } };
-        const response = { locals: {}, status: null, sendStatus(code) { this.status = code; return this; } };
+        const response = { locals: {}, headers: {}, status: null, sendStatus(code) { this.status = code; return this; }, setHeader(name, value) { this.headers[name] = value; } };
         let nextCalled = false;
         middleware(request, response, () => { nextCalled = true; });
-        return { url: request.url, locals: response.locals, status: response.status, nextCalled };
+        return { url: request.url, locals: response.locals, headers: response.headers, status: response.status, nextCalled };
     };
 
     const current = run('/v/abc123def456/scripts/extensions/regex/engine.js?x=1');
     assert.equal(current.url, '/scripts/extensions/regex/engine.js?x=1');
     assert.equal(current.locals.versionedAssetCacheControl, 'public, max-age=31536000, immutable');
+    assert.equal(current.headers['Access-Control-Allow-Origin'], '*', 'a CDN mirror serves them cross-origin');
+    assert.equal(current.headers['Cross-Origin-Resource-Policy'], 'cross-origin');
     assert.equal(run('/v/abc123def456/lib.js').url, '/lib.js');
     assert.equal(run('/v/0123456789ab/script.js').locals.versionedAssetCacheControl, 'no-store');
 
@@ -77,6 +80,7 @@ test('versioned URLs are rewritten, cached by version, and limited to the app mo
     assert.equal(plain.url, '/scripts/i18n.js');
     assert.equal(plain.nextCalled, true);
     assert.deepEqual(plain.locals, {});
+    assert.deepEqual(plain.headers, {});
     assert.equal(run('/v/abc123def456/script.js', 'POST').locals.versionedAsset, undefined);
 });
 
@@ -93,4 +97,92 @@ test('the version changes when a served file changes', () => {
 
     fs.writeFileSync(path.join(root, 'scripts', 'a.js'), 'a changed');
     assert.notEqual(computeAssetVersion(root, null), first);
+});
+
+/**
+ * Runs the import map script of a page that has a CDN mirror, with a stand-in browser.
+ * @param {string} page Page
+ * @param {{zone: string, storage?: Record<string, string>}} browser Time zone and localStorage
+ */
+function runCdnScript(page, { zone, storage = {} }) {
+    const script = /<script>(\(function \(o\)[\s\S]*?)<\/script>/.exec(page)[1];
+    const listeners = {};
+    let inserted = null;
+    const context = {
+        localStorage: { getItem: key => storage[key] ?? null, setItem: (key, value) => { storage[key] = value; } },
+        Intl: { DateTimeFormat: () => ({ resolvedOptions: () => ({ timeZone: zone }) }) },
+        document: { createElement: () => ({}), currentScript: { after: element => { inserted = element; } } },
+        addEventListener: (type, listener) => { listeners[type] = listener; },
+        location: { origin: 'https://example.org', reload: () => { context.reloaded = true; } },
+        reloaded: false,
+    };
+    context.window = context;
+    vm.runInNewContext(script, context);
+    return { type: inserted.type, imports: JSON.parse(inserted.textContent).imports, listeners, storage, context };
+}
+
+test('a CDN mirror of /v/ is used by pages in its time zones and dropped when it fails', () => {
+    const html = '<html><head></head><body><script type="module" src="script.js"></script></body></html>';
+    const cdn = { baseUrl: 'https://static.example.cn/st', timeZones: ['Asia/Shanghai'] };
+    const page = transformAppHtml(html, { version: 'abc123def456', cdn });
+    assert.doesNotMatch(page, /<script type="importmap">/, 'the map is chosen in the browser');
+    assert.ok(page.indexOf('static.example.cn') < page.indexOf('</head>'));
+    assert.match(page, /<script type="module">import "\/script\.js";<\/script>/);
+
+    const china = runCdnScript(page, { zone: 'Asia/Shanghai' });
+    assert.equal(china.type, 'importmap');
+    assert.equal(china.imports['/scripts/'], 'https://static.example.cn/st/v/abc123def456/scripts/');
+    assert.equal(china.imports['/script.js'], 'https://static.example.cn/st/v/abc123def456/script.js');
+    assert.equal(china.imports['/scripts/extensions/third-party/'], '/scripts/extensions/third-party/', 'third-party stays here');
+    // "/scripts/x.js" imported by a mirrored module resolves to the mirror's root.
+    assert.equal(china.imports['https://static.example.cn/scripts/'], 'https://static.example.cn/st/v/abc123def456/scripts/');
+    assert.equal(china.imports['https://static.example.cn/lib.js'], 'https://static.example.cn/st/v/abc123def456/lib.js');
+    assert.equal(china.imports['https://static.example.cn/scripts/extensions/third-party/'], 'https://example.org/scripts/extensions/third-party/');
+
+    const elsewhere = runCdnScript(page, { zone: 'America/New_York' });
+    assert.equal(elsewhere.imports['/scripts/'], '/v/abc123def456/scripts/');
+    assert.equal(Object.keys(elsewhere.imports).some(key => key.includes('static.example.cn')), false);
+    assert.equal(elsewhere.listeners.error, undefined);
+
+    assert.equal(runCdnScript(page, { zone: 'Asia/Shanghai', storage: { 'st-asset-cdn': 'off' } }).imports['/scripts/'], '/v/abc123def456/scripts/');
+    assert.equal(runCdnScript(page, { zone: 'Europe/Berlin', storage: { 'st-asset-cdn': 'on' } }).imports['/scripts/'], 'https://static.example.cn/st/v/abc123def456/scripts/');
+    const recentFailure = { 'st-asset-cdn-failed': String(Date.now() - 60_000) };
+    assert.equal(runCdnScript(page, { zone: 'Asia/Shanghai', storage: recentFailure }).imports['/scripts/'], '/v/abc123def456/scripts/');
+    const oldFailure = { 'st-asset-cdn-failed': String(Date.now() - 2 * 864e5) };
+    assert.equal(runCdnScript(page, { zone: 'Asia/Shanghai', storage: oldFailure }).imports['/scripts/'], 'https://static.example.cn/st/v/abc123def456/scripts/');
+
+    // A module of this server failing is not the mirror's fault.
+    const unrelated = runCdnScript(page, { zone: 'Asia/Shanghai' });
+    unrelated.listeners.error({ target: { tagName: 'SCRIPT', src: 'https://example.org/scripts/extensions/third-party/x/index.js' } });
+    unrelated.listeners.error({ target: { tagName: 'IMG', src: '' } });
+    assert.equal(unrelated.storage['st-asset-cdn-failed'], undefined);
+    assert.equal(unrelated.context.reloaded, false);
+
+    // The app's entry modules cannot be loaded from the mirror: note it and reload from here.
+    const broken = runCdnScript(page, { zone: 'Asia/Shanghai' });
+    broken.listeners.error({ target: { tagName: 'SCRIPT', src: '' } });
+    assert.ok(Number(broken.storage['st-asset-cdn-failed']) > 0);
+    assert.equal(broken.context.reloaded, true);
+    assert.equal(runCdnScript(page, { zone: 'Asia/Shanghai', storage: broken.storage }).imports['/scripts/'], '/v/abc123def456/scripts/');
+
+    // A lazy import failing after the app started is noted for the next load, without a reload.
+    const late = runCdnScript(page, { zone: 'Asia/Shanghai' });
+    late.context.SillyTavern = {};
+    late.listeners.unhandledrejection({ reason: new TypeError('Failed to fetch dynamically imported module: https://static.example.cn/st/v/abc123def456/scripts/a.js') });
+    assert.ok(Number(late.storage['st-asset-cdn-failed']) > 0);
+    late.listeners.error({ target: { tagName: 'SCRIPT', src: 'https://static.example.cn/st/v/abc123def456/scripts/b.js' } });
+    assert.equal(late.context.reloaded, false);
+
+    // Configuration cannot close the script early.
+    const hostile = transformAppHtml(html, { version: 'abc123def456', cdn: { baseUrl: 'https://static.example.cn', timeZones: ['</script><script>alert(1)</script>'] } });
+    assert.doesNotMatch(hostile, /alert\(1\)<\/script>/);
+});
+
+test('the CDN mirror address is checked', () => {
+    assert.equal(normalizeAssetCdnBaseUrl('https://static.example.cn/'), 'https://static.example.cn');
+    assert.equal(normalizeAssetCdnBaseUrl(' https://cdn.example.cn/st// '), 'https://cdn.example.cn/st');
+    assert.equal(normalizeAssetCdnBaseUrl('http://127.0.0.1:8152'), 'http://127.0.0.1:8152');
+    for (const value of ['', '   ', 'static.example.cn', 'ftp://static.example.cn', 'https://static.example.cn/?x=1', 'https://a:b@static.example.cn', 'javascript:alert(1)', null, 42]) {
+        assert.equal(normalizeAssetCdnBaseUrl(value), null, String(value));
+    }
 });

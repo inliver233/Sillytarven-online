@@ -94,10 +94,11 @@ const MODULE_SCRIPT_PATTERN = /<script type="module" src="([^"]+)"><\/script>/g;
  * Returns null when the page does not have the expected shape, so the caller
  * serves it unchanged.
  * @param {string} html index.html
- * @param {{version: string}} options Version
+ * @param {{version: string, cdn?: {baseUrl: string, timeZones: string[]}|null}} options Version,
+ * and a CDN mirror of /v/ for pages opened in the given time zones (see getAssetCdnScript)
  * @returns {string|null} Page
  */
-export function transformAppHtml(html, { version }) {
+export function transformAppHtml(html, { version, cdn = null }) {
     if (!/^[0-9a-f]{6,64}$/.test(version) || !html.includes('</head>') || html.includes('type="importmap"')) {
         return null;
     }
@@ -123,7 +124,75 @@ export function transformAppHtml(html, { version }) {
         ...VERSIONED_FOLDERS.map(folder => [folder, `${prefix}${folder}`]),
         [UNVERSIONED_FOLDER, UNVERSIONED_FOLDER],
     ]);
-    return styled.replace('</head>', `    <script type="importmap">${JSON.stringify({ imports })}</script>\n</head>`);
+    const importMap = cdn
+        ? getAssetCdnScript(imports, cdn)
+        : `<script type="importmap">${JSON.stringify({ imports })}</script>`;
+    return styled.replace('</head>', `    ${importMap}\n</head>`);
+}
+
+/**
+ * Checks the configured CDN mirror address.
+ * @param {unknown} value Base URL, e.g. https://static.example.cn or https://cdn.example.cn/st
+ * @returns {string|null} The address without a trailing slash, or null when it is not usable
+ */
+export function normalizeAssetCdnBaseUrl(value) {
+    if (typeof value !== 'string' || !value.trim()) return null;
+    try {
+        const url = new URL(value.trim());
+        if (!['http:', 'https:'].includes(url.protocol) || url.search || url.hash || url.username || url.password) return null;
+        return `${url.origin}${url.pathname.replace(/\/+$/, '')}`;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * The import map for a page that may load the app's modules from a CDN mirror of /v/
+ * (e.g. a host inside mainland China). The page is the same for every visitor, so a
+ * cache in front of it cannot mix up visitors: the browser picks the mirror by its time
+ * zone. Absolute imports inside mirrored modules resolve against the mirror, so they are
+ * mapped too. If a module cannot be loaded from the mirror (down, or no CORS), the page notes
+ * it and loads everything from this server for a day; before the app starts it reloads
+ * once to do so. localStorage "st-asset-cdn" = "on" / "off" overrides the choice.
+ * @param {Record<string, string>} imports Import map entries for this server
+ * @param {{baseUrl: string, timeZones: string[]}} cdn Mirror address and the time zones that use it
+ * @returns {string} Inline script that adds the import map
+ */
+function getAssetCdnScript(imports, cdn) {
+    const origin = new URL(cdn.baseUrl).origin;
+    const options = JSON.stringify({ imports, cdn: cdn.baseUrl, origin, zones: cdn.timeZones }).replace(/</g, '\\u003c');
+    return `<script>(function (o) {
+        var KEY = 'st-asset-cdn-failed', use = false, map = document.createElement('script'), mapped = {};
+        try {
+            var choice = localStorage.getItem('st-asset-cdn');
+            var failedAt = Number(localStorage.getItem(KEY)) || 0;
+            var zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+            use = choice === 'on' || (choice !== 'off' && o.zones.indexOf(zone) !== -1 && Date.now() - failedAt > 864e5);
+        } catch (e) { use = false; }
+        Object.keys(o.imports).forEach(function (key) {
+            var versioned = o.imports[key].indexOf('/v/') === 0;
+            mapped[key] = use && versioned ? o.cdn + o.imports[key] : o.imports[key];
+            // A module from the mirror resolves an absolute import ("/scripts/x.js") against the mirror.
+            if (use) mapped[o.origin + key] = versioned ? o.cdn + o.imports[key] : location.origin + o.imports[key];
+        });
+        if (use) {
+            var fail = function (reload) {
+                try { localStorage.setItem(KEY, String(Date.now())); } catch (e) { return; }
+                if (reload && !window.SillyTavern) location.reload();
+            };
+            addEventListener('error', function (event) {
+                var target = event.target;
+                if (target && target.tagName === 'SCRIPT' && (!target.src || target.src.indexOf(o.cdn) === 0)) fail(true);
+            }, true);
+            addEventListener('unhandledrejection', function (event) {
+                var reason = event.reason && (event.reason.message || String(event.reason));
+                if (typeof reason === 'string' && reason.indexOf(o.cdn) !== -1) fail(false);
+            });
+        }
+        map.type = 'importmap';
+        map.textContent = JSON.stringify({ imports: mapped });
+        document.currentScript.after(map);
+    })(${options});</script>`;
 }
 
 /**
@@ -144,6 +213,10 @@ export function createVersionedAssetsMiddleware(getVersion) {
         }
         response.locals.versionedAsset = true;
         response.locals.versionedAssetCacheControl = match[1] === getVersion() ? IMMUTABLE_CACHE_CONTROL : 'no-store';
+        // Public files that a CDN mirror may serve to the app's page from another origin:
+        // a cross-origin module or fetch needs CORS, which the mirror keeps from this response.
+        response.setHeader('Access-Control-Allow-Origin', '*');
+        response.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
         const query = request.url.indexOf('?');
         request.url = match[2] + (query >= 0 ? request.url.slice(query) : '');
         return next();

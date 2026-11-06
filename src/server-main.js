@@ -49,6 +49,7 @@ import {
     computeAssetVersion,
     createVersionedAssetsMiddleware,
     getVersionedAssetCacheControl,
+    normalizeAssetCdnBaseUrl,
     transformAppHtml,
 } from './asset-version.js';
 import basicAuthMiddleware from './middleware/basicAuth.js';
@@ -399,6 +400,20 @@ const publicDirectory = path.join(serverDirectory, 'public');
 // The app's modules under /v/<version>/ with a long-lived cache (see asset-version.js).
 const versionedAssetsEnabled = getConfigValue('performance.versionedAssets', true, 'boolean');
 const assetVersioning = { version: null, checkedAt: 0, pageKey: null, page: null };
+const assetCdn = getAssetCdnConfig();
+
+/** @returns {{baseUrl: string, timeZones: string[]}|null} CDN mirror of /v/ for some visitors, if configured */
+function getAssetCdnConfig() {
+    const configured = getConfigValue('performance.assetCdn.baseUrl', '');
+    const baseUrl = normalizeAssetCdnBaseUrl(configured);
+    if (!baseUrl) {
+        if (String(configured ?? '').trim()) console.warn('performance.assetCdn.baseUrl is not a usable http(s) address; serving the app\'s modules from this server.');
+        return null;
+    }
+    const zones = getConfigValue('performance.assetCdn.timeZones', []);
+    const timeZones = Array.isArray(zones) ? zones.filter(zone => typeof zone === 'string' && zone) : [];
+    return timeZones.length ? { baseUrl, timeZones } : null;
+}
 
 /** @returns {string} Version of the files served under /v/, rechecked every few seconds */
 function getAssetVersion() {
@@ -444,7 +459,7 @@ function sendAppPage(response) {
             const stats = fs.statSync(indexFile);
             const key = `${version}:${stats.size}:${stats.mtimeMs}:${controllerUrl}`;
             if (assetVersioning.pageKey !== key) {
-                const page = transformAppHtml(fs.readFileSync(indexFile, 'utf8'), { version });
+                const page = transformAppHtml(fs.readFileSync(indexFile, 'utf8'), { version, cdn: assetCdn });
                 assetVersioning.page = page && addControllerAddress(page, controllerUrl);
                 assetVersioning.pageKey = key;
                 if (!assetVersioning.page) {

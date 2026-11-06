@@ -287,6 +287,18 @@ performance:
   longChatDomRenderOptimization:
     enabled: true
   # Memoize the complete /version payload while package.json and Git HEAD/ref stay unchanged.
+  # Load the app's own modules (everything under /v/<version>/) from a CDN mirror for
+  # pages opened in the time zones below, e.g. a CDN inside mainland China. The CDN pulls
+  # /v/... from this server (responses are public, immutable and allow CORS). A page that
+  # cannot load from the mirror falls back to this server for a day. Empty = off.
+  assetCdn:
+    baseUrl: ''
+    timeZones:
+      - Asia/Shanghai
+      - Asia/Chongqing
+      - Asia/Harbin
+      - Asia/Urumqi
+      - Asia/Kashgar
   versionMemo:
     enabled: true
     ttlMs: 30000
