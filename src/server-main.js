@@ -21,6 +21,7 @@ import { serverDirectory } from './server-directory.js';
 
 import { serverEvents, EVENT_NAMES } from './server-events.js';
 import { loadPlugins } from './plugin-loader.js';
+import { forwardAsyncRouteErrors, requestErrorHandler } from './express-async-errors.js';
 import { migrateLegacyFreeGeminiChannels } from './free-gemini-channels.js';
 import {
     initUserStorage,
@@ -117,6 +118,8 @@ if (!cliArgs.enableIPv6 && !cliArgs.enableIPv4) {
     process.exit(1);
 }
 
+// Errors of async route handlers fail the request instead of exiting the server.
+forwardAsyncRouteErrors();
 const app = express();
 // Under the hot-reload keeper, a handover lets requests that write finish first.
 app.use(trackPendingWrites);
@@ -722,13 +725,15 @@ async function postSetupTasks(result) {
 }
 
 /**
- * Registers a not-found error response if a not-found error page exists. Should only be called after all other middlewares have been registered.
+ * Registers a not-found error response if a not-found error page exists, then the last error handler.
+ * Should only be called after all other middlewares have been registered.
  */
 function apply404Middleware() {
     const notFoundWebpage = safeReadFileSync(path.join(serverDirectory, 'public/error/url-not-found.html')) ?? '';
     app.use((req, res) => {
         res.status(404).send(notFoundWebpage);
     });
+    app.use(requestErrorHandler);
 }
 
 /**
