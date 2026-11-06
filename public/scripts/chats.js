@@ -685,7 +685,7 @@ export function formatCreatorNotes(text, avatarId) {
     const preference = new StylesPreference(avatarId);
     const sanitizeStyles = !preference.get();
     const decodeStyleParam = { prefix: sanitizeStyles ? '#creator_notes_spoiler ' : '' };
-    /** @type {import('dompurify').Config & { MESSAGE_SANITIZE: boolean }} */
+    /** @type {DOMPurify.Config} */
     const config = {
         RETURN_DOM: false,
         RETURN_DOM_FRAGMENT: false,
@@ -832,11 +832,9 @@ async function openExternalMediaOverridesDialog() {
 
     if (power_user.external_media_allowed_overrides.includes(entityId)) {
         template.find('#forbid_media_override_allowed').prop('checked', true);
-    }
-    else if (power_user.external_media_forbidden_overrides.includes(entityId)) {
+    } else if (power_user.external_media_forbidden_overrides.includes(entityId)) {
         template.find('#forbid_media_override_forbidden').prop('checked', true);
-    }
-    else {
+    } else {
         template.find('#forbid_media_override_global').prop('checked', true);
     }
 
@@ -1678,8 +1676,7 @@ async function runScraper(scraperId, target, callback) {
 
         toastr.success(t`Scraped ${files.length} files from ${scraperId} to ${target}.`, t`Data Bank`);
         callback();
-    }
-    catch (error) {
+    } catch (error) {
         console.error('Scraping failed', error);
         toastr.error(t`Check browser console for details.`, t`Scraping failed`);
     }
@@ -1911,13 +1908,13 @@ export function addDOMPurifyHooks() {
     });
 
     DOMPurify.addHook('uponSanitizeAttribute', (node, data, config) => {
-        if (!config['MESSAGE_SANITIZE']) {
+        if (!config.MESSAGE_SANITIZE) {
             return;
         }
 
         /* Retain the classes on UI elements of messages that interact with the main UI */
         const permittedNodeTypes = ['BUTTON', 'DIV'];
-        if (config['MESSAGE_ALLOW_SYSTEM_UI'] && node.classList.contains('menu_button') && permittedNodeTypes.includes(node.nodeName)) {
+        if (config.MESSAGE_ALLOW_SYSTEM_UI && node.classList.contains('menu_button') && permittedNodeTypes.includes(node.nodeName)) {
             return;
         }
 
@@ -1938,7 +1935,7 @@ export function addDOMPurifyHooks() {
     });
 
     DOMPurify.addHook('uponSanitizeElement', (node, _, config) => {
-        if (!config['MESSAGE_SANITIZE']) {
+        if (!config.MESSAGE_SANITIZE) {
             return;
         }
 
@@ -2239,6 +2236,11 @@ export function initChatUtilities() {
         wrapper.classList.add('flexFlowColumn', 'justifyCenter', 'alignitemscenter');
         const textarea = document.createElement('textarea');
         textarea.dataset.for = broId;
+        if (bro[0].dataset.macros !== undefined) {
+            textarea.dataset.macros = bro[0].dataset.macros;
+            textarea.dataset.macrosAutocomplete = 'always'; // Always show autocomplete in expanded editor
+            textarea.dataset.macrosAutocompleteStyle = 'expanded'; // Use expanded autocomplete style
+        }
         textarea.value = String(contentEditable ? bro[0].innerText : bro.val());
         textarea.classList.add('height100p', 'wide100p', 'maximized_textarea');
         bro.hasClass('monospace') && textarea.classList.add('monospace');
@@ -2286,11 +2288,14 @@ export function initChatUtilities() {
         await callGenericPopup(wrapper, POPUP_TYPE.TEXT, '', { wide: true, large: true });
     });
 
-    $(document).on('click', 'body .mes .mes_text', function () {
+    $(document).on('click', 'body .mes .mes_text, body .mes .mes_reasoning', function (event) {
         if (!power_user.click_to_edit) return;
         if (window.getSelection().toString()) return;
         if ($('.edit_textarea').length) return;
         $(this).closest('.mes').find('.mes_edit').trigger('click');
+        if ($(event.target).closest('.mes_reasoning').length) {
+            $('.reasoning_edit_textarea').trigger('focus');
+        }
     });
 
     $(document).on('click', '.open_media_overrides', openExternalMediaOverridesDialog);

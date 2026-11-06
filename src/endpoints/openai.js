@@ -8,7 +8,8 @@ import express from 'express';
 import { getConfigValue, mergeObjectWithYaml, excludeKeysByYaml, trimV1, delay } from '../util.js';
 import { setAdditionalHeaders } from '../additional-headers.js';
 import { readSecret, SECRET_KEYS } from './secrets.js';
-import { AIMLAPI_HEADERS, OPENROUTER_HEADERS, ZAI_ENDPOINT } from '../constants.js';
+import { POLLINATIONS_ENDPOINT } from '../constants.js';
+import { AIMLAPI_HEADERS, OPENROUTER_HEADERS, SILICONFLOW_ENDPOINT, ZAI_ENDPOINT } from '../constants.js';
 
 export const router = express.Router();
 
@@ -73,7 +74,7 @@ router.post('/caption-image', async (request, response) => {
             key = readSecret(request.user.directories, SECRET_KEYS.COHERE);
         }
 
-        if (request.body.api === 'moonshot') {
+        if (request.body.api === 'moonshot' && !request.body.reverse_proxy) {
             key = readSecret(request.user.directories, SECRET_KEYS.MOONSHOT);
         }
 
@@ -89,12 +90,25 @@ router.post('/caption-image', async (request, response) => {
             key = readSecret(request.user.directories, SECRET_KEYS.ELECTRONHUB);
         }
 
-        if (request.body.api === 'zai') {
+        if (request.body.api === 'zai' && !request.body.reverse_proxy) {
             key = readSecret(request.user.directories, SECRET_KEYS.ZAI);
+        }
+
+        if (request.body.api === 'zai') {
             bodyParams.max_tokens = 4096; // default is 1024
         }
 
-        const noKeyTypes = ['custom', 'ooba', 'koboldcpp', 'vllm', 'llamacpp', 'pollinations'];
+        if (request.body.api === 'pollinations') {
+            const isAnonymous = request.body.pollinations_endpoint === POLLINATIONS_ENDPOINT.ANONYMOUS;
+            key = isAnonymous ? 'anonymous' : readSecret(request.user.directories, SECRET_KEYS.POLLINATIONS);
+            bodyParams.seed = Math.floor(Math.random() * Math.pow(2, 32));
+        }
+
+        if (request.body.api === 'workers_ai') {
+            key = readSecret(request.user.directories, SECRET_KEYS.WORKERS_AI);
+        }
+
+        const noKeyTypes = ['custom', 'ooba', 'koboldcpp', 'vllm', 'llamacpp'];
         if (!key && !request.body.reverse_proxy && !noKeyTypes.includes(request.body.api)) {
             console.warn('No key found for API', request.body.api);
             return response.sendStatus(400);
@@ -170,11 +184,11 @@ router.post('/caption-image', async (request, response) => {
         }
 
         if (request.body.api === 'pollinations') {
-            headers = { Authorization: '' };
-            apiUrl = 'https://text.pollinations.ai/openai/chat/completions';
+            const isAnonymous = request.body.pollinations_endpoint === POLLINATIONS_ENDPOINT.ANONYMOUS;
+            apiUrl = isAnonymous ? 'https://text.pollinations.ai/v1/chat/completions' : 'https://gen.pollinations.ai/v1/chat/completions';
         }
 
-        if (request.body.api === 'moonshot') {
+        if (request.body.api === 'moonshot' && !request.body.reverse_proxy) {
             apiUrl = 'https://api.moonshot.ai/v1/chat/completions';
         }
 
@@ -190,40 +204,35 @@ router.post('/caption-image', async (request, response) => {
             apiUrl = 'https://api.electronhub.ai/v1/chat/completions';
         }
 
-        if (request.body.api === 'zai') {
+        if (request.body.api === 'zai' && !request.body.reverse_proxy) {
             apiUrl = request.body.zai_endpoint === ZAI_ENDPOINT.CODING
                 ? 'https://api.z.ai/api/coding/paas/v4/chat/completions'
                 : 'https://api.z.ai/api/paas/v4/chat/completions';
+        }
 
-            // Handle video inlining for Z.AI
-            if (/data:video\/\w+;base64,/.test(request.body.image)) {
-                const message = body.messages.find(msg => Array.isArray(msg.content));
-                if (message) {
-                    const imgContent = message.content.find(c => c.type === 'image_url');
-                    if (imgContent) {
-                        imgContent.type = 'video_url';
-                        imgContent.video_url = imgContent.image_url;
-                        delete imgContent.image_url;
-                    }
+        // Handle video inlining for Z.AI
+        if (request.body.api === 'zai' && /data:video\/\w+;base64,/.test(request.body.image)) {
+            const message = body.messages.find(msg => Array.isArray(msg.content));
+            if (message) {
+                const imgContent = message.content.find(c => c.type === 'image_url');
+                if (imgContent) {
+                    imgContent.type = 'video_url';
+                    imgContent.video_url = imgContent.image_url;
+                    delete imgContent.image_url;
                 }
             }
         }
 
-        if (['koboldcpp', 'vllm', 'llamacpp', 'ooba'].includes(request.body.api)) {
-            apiUrl = `${trimV1(request.body.server_url)}/v1/chat/completions`;
+        if (request.body.api === 'workers_ai') {
+            const accountId = String(request.body.workers_ai_account_id || '').trim();
+            if (!accountId) {
+                return response.status(400).send({ error: 'Cloudflare Workers AI Account ID is required' });
+            }
+            apiUrl = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/ai/v1/chat/completions`;
         }
 
-        if (request.body.api === 'ooba') {
-            const imgMessage = body.messages.pop();
-            body.messages.push({
-                role: 'user',
-                content: imgMessage?.content?.[0]?.text,
-            });
-            body.messages.push({
-                role: 'user',
-                content: [],
-                image_url: imgMessage?.content?.[1]?.image_url?.url,
-            });
+        if (['koboldcpp', 'vllm', 'llamacpp', 'ooba'].includes(request.body.api)) {
+            apiUrl = `${trimV1(request.body.server_url)}/v1/chat/completions`;
         }
 
         setAdditionalHeaders(request, { headers }, apiUrl);
@@ -255,8 +264,7 @@ router.post('/caption-image', async (request, response) => {
         }
 
         return response.json({ caption });
-    }
-    catch (error) {
+    } catch (error) {
         console.error(error);
         response.status(500).send('Internal server error');
     }
@@ -397,9 +405,9 @@ router.post('/electronhub/models', async (request, response) => {
             console.warn('ElectronHub models request failed', result.statusText, text);
             return response.status(500).send(text);
         }
-
+        /** @type {any} */
         const data = await result.json();
-        const models = data && Array.isArray(data['data']) ? data['data'] : [];
+        const models = data && Array.isArray(data.data) ? data.data : [];
         return response.json(models);
     } catch (error) {
         console.error('ElectronHub models fetch failed', error);
@@ -482,6 +490,128 @@ router.post('/chutes/models/embedding', async (request, response) => {
         return response.json(data.items);
     } catch (error) {
         console.error('Chutes embedding models fetch failed', error);
+        response.sendStatus(500);
+    }
+});
+
+router.post('/nanogpt/models/embedding', async (request, response) => {
+    try {
+        const key = readSecret(request.user.directories, SECRET_KEYS.NANOGPT);
+
+        if (!key) {
+            console.warn('No NanoGPT key found');
+            return response.sendStatus(400);
+        }
+
+        const result = await fetch('https://nano-gpt.com/api/v1/embedding-models', {
+            method: 'GET',
+            headers: {
+                'Authorization': `Bearer ${key}`,
+                'Accept-Encoding': 'identity',
+            },
+        });
+
+        if (!result.ok) {
+            const text = await result.text();
+            console.warn('NanoGPT embedding models request failed', result.statusText, text);
+            return response.status(500).send(text);
+        }
+
+        /** @type {any} */
+        const data = await result.json();
+
+        if (!Array.isArray(data?.data)) {
+            console.warn('NanoGPT embedding models response invalid', data);
+            return response.sendStatus(500);
+        }
+        return response.json(data.data);
+    } catch (error) {
+        console.error('NanoGPT embedding models fetch failed', error);
+        response.sendStatus(500);
+    }
+});
+
+router.post('/siliconflow/models/embedding', async (request, response) => {
+    try {
+        const key = readSecret(request.user.directories, SECRET_KEYS.SILICONFLOW);
+
+        if (!key) {
+            console.warn('No SiliconFlow key found');
+            return response.sendStatus(400);
+        }
+
+        const apiUrl = request.body.siliconflow_endpoint === SILICONFLOW_ENDPOINT.CN
+            ? 'https://api.siliconflow.cn/v1/models?type=text&sub_type=embedding'
+            : 'https://api.siliconflow.com/v1/models?type=text&sub_type=embedding';
+
+        const result = await fetch(apiUrl, {
+            method: 'GET',
+            headers: {
+                Authorization: `Bearer ${key}`,
+            },
+        });
+
+        if (!result.ok) {
+            const text = await result.text();
+            console.warn('SiliconFlow embedding models request failed', result.statusText, text);
+            return response.status(500).send(text);
+        }
+
+        /** @type {any} */
+        const data = await result.json();
+
+        if (!Array.isArray(data?.data)) {
+            console.warn('SiliconFlow embedding models response invalid', data);
+            return response.sendStatus(500);
+        }
+
+        return response.json(data.data);
+    } catch (error) {
+        console.error('SiliconFlow embedding models fetch failed', error);
+        response.sendStatus(500);
+    }
+});
+
+router.post('/workers-ai/models/embedding', async (request, response) => {
+    try {
+        const key = readSecret(request.user.directories, SECRET_KEYS.WORKERS_AI);
+
+        if (!key) {
+            console.warn('No Workers AI key found');
+            return response.sendStatus(400);
+        }
+
+        const accountId = String(request.body.workers_ai_account_id || '').trim();
+        if (!accountId) {
+            console.warn('No Workers AI account ID found');
+            return response.sendStatus(400);
+        }
+
+        const apiUrl = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/ai/models/search?task=Text+Embeddings&per_page=100`;
+        const result = await fetch(apiUrl, {
+            method: 'GET',
+            headers: {
+                Authorization: `Bearer ${key}`,
+            },
+        });
+
+        if (!result.ok) {
+            const text = await result.text();
+            console.warn('Workers AI embedding models request failed', result.statusText, text);
+            return response.status(500).send(text);
+        }
+
+        /** @type {any} */
+        const data = await result.json();
+
+        if (!Array.isArray(data?.result)) {
+            console.warn('Workers AI embedding models response invalid', data);
+            return response.sendStatus(500);
+        }
+
+        return response.json(data.result.map(m => ({ ...m, id: m.name })));
+    } catch (error) {
+        console.error('Workers AI embedding models fetch failed', error);
         response.sendStatus(500);
     }
 });

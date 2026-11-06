@@ -3,6 +3,7 @@ import path from 'node:path';
 
 import express from 'express';
 import _ from 'lodash';
+import bytes from 'bytes';
 
 import { SETTINGS_FILE } from '../constants.js';
 import { getConfigValue, generateTimestamp, removeOldBackups } from '../util.js';
@@ -27,6 +28,10 @@ const settingsCache = new SettingsCache({
     maxBytes: getConfigValue('performance.settingsCache.maxBytes', 100 * 1024 * 1024, 'number'),
 });
 registerSettingsCache(settingsCache);
+const ENABLE_REQUEST_COMPRESSION = !!getConfigValue('performance.requestCompression.enabled', false, 'boolean');
+const REQUEST_COMPRESSION_MIN = bytes.parse(getConfigValue('performance.requestCompression.minPayloadSize', '256kb'));
+const REQUEST_COMPRESSION_MAX = bytes.parse(getConfigValue('performance.requestCompression.maxPayloadSize', '8mb'));
+const REQUEST_COMPRESSION_TIMEOUT = Number(getConfigValue('performance.requestCompression.timeout', 3000, 'number'));
 
 // 10 minutes
 const AUTOSAVE_INTERVAL = 10 * 60 * 1000;
@@ -175,6 +180,12 @@ function loadSettingsPayload(request) {
             chat_paging_enabled: ENABLE_CHAT_PAGING,
             long_chat_dom_render_optimization_enabled: ENABLE_LONG_CHAT_DOM_RENDER_OPTIMIZATION,
             telemetry_enabled: ENABLE_TELEMETRY,
+            request_compression: {
+                enabled: ENABLE_REQUEST_COMPRESSION,
+                minPayloadSize: REQUEST_COMPRESSION_MIN || 0,
+                maxPayloadSize: REQUEST_COMPRESSION_MAX || 0,
+                timeout: REQUEST_COMPRESSION_TIMEOUT || 0,
+            },
         },
     });
 }

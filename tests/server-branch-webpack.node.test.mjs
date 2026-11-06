@@ -32,7 +32,9 @@ test('the production browser library bundle compiles with the locked dependencie
 
     try {
         assert.equal(stats.hasErrors(), false, stats.toString({ colors: false }));
-        const bundlePath = path.join(outputRoot, '_webpack', webpack.version, 'output', 'lib.js');
+        // The output folder is keyed by app version, Git revision and webpack version.
+        const bundlePath = path.join(compiler.options.output.path, 'lib.js');
+        assert.ok(bundlePath.startsWith(path.join(outputRoot, '_webpack')), bundlePath);
         const bundle = fs.readFileSync(bundlePath, 'utf8');
         assert.ok(bundle.length > 1_000_000, 'browser library bundle is unexpectedly small');
         assert.match(bundle, /showdown/i);

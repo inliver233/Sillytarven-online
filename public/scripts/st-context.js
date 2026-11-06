@@ -54,6 +54,7 @@ import {
     swipe_right,
     swipe_left,
     generateRaw,
+    generateRawData,
     showSwipeButtons,
     hideSwipeButtons,
     deleteMessage,
@@ -66,19 +67,25 @@ import {
     getMediaIndex,
     scrollChatToBottom,
     scrollOnMediaLoad,
+    getOneCharacter,
+    getCharacterSource,
 } from '../script.js';
 import {
     extension_settings,
+    getExtensionManifest,
     ModuleWorkerWrapper,
     openThirdPartyExtensionMenu,
     renderExtensionTemplate,
     renderExtensionTemplateAsync,
     saveMetadataDebounced,
+    UNSET_VALUE,
     writeExtensionField,
+    writeExtensionFieldBulk,
 } from './extensions.js';
 import { groups, openGroupChat, selected_group, unshallowGroupMembers } from './group-chats.js';
 import { addLocaleData, getCurrentLocale, t, translate } from './i18n.js';
 import { hideLoader, showLoader } from './loader.js';
+import { loader } from './action-loader.js';
 import { MacrosParser } from './macros.js';
 import { getChatCompletionModel, oai_settings } from './openai.js';
 import { callGenericPopup, Popup, POPUP_RESULT, POPUP_TYPE } from './popup.js';
@@ -89,20 +96,22 @@ import { ScraperManager } from './scrapers.js';
 import { executeSlashCommands, executeSlashCommandsWithOptions, registerSlashCommand } from './slash-commands.js';
 import { SlashCommand } from './slash-commands/SlashCommand.js';
 import { ARGUMENT_TYPE, SlashCommandArgument, SlashCommandNamedArgument } from './slash-commands/SlashCommandArgument.js';
+import { SlashCommandEnumValue } from './slash-commands/SlashCommandEnumValue.js';
 import { SlashCommandParser } from './slash-commands/SlashCommandParser.js';
-import { tag_map, tags } from './tags.js';
+import { tag_map, tags, importTags } from './tags.js';
 import { getTextGenServer, textgenerationwebui_settings } from './textgen-settings.js';
 import { tokenizers, getTextTokens, getTokenCount, getTokenCountAsync, getTokenizerModel } from './tokenizers.js';
 import { ToolManager } from './tool-calling.js';
 import { accountStorage } from './util/AccountStorage.js';
-import { timestampToMoment, uuidv4 } from './utils.js';
-import { addGlobalVariable, addLocalVariable, decrementGlobalVariable, decrementLocalVariable, deleteGlobalVariable, deleteLocalVariable, getGlobalVariable, getLocalVariable, incrementGlobalVariable, incrementLocalVariable, setGlobalVariable, setLocalVariable } from './variables.js';
-import { convertCharacterBook, getWorldInfoPrompt, loadWorldInfo, reloadEditor, saveWorldInfo, updateWorldInfoList } from './world-info.js';
+import { timestampToMoment, uuidv4, importFromExternalUrl } from './utils.js';
+import { addGlobalVariable, addLocalVariable, decrementGlobalVariable, decrementLocalVariable, deleteGlobalVariable, deleteLocalVariable, existsGlobalVariable, existsLocalVariable, getGlobalVariable, getLocalVariable, incrementGlobalVariable, incrementLocalVariable, setGlobalVariable, setLocalVariable } from './variables.js';
+import { convertCharacterBook, getWorldInfoPrompt, loadWorldInfo, reloadEditor, saveWorldInfo, updateWorldInfoList, world_names } from './world-info.js';
 import { ChatCompletionService, TextCompletionService } from './custom-request.js';
 import { ConnectionManagerRequestService } from './extensions/shared.js';
 import { updateReasoningUI, parseReasoningFromString, getReasoningTemplateByName } from './reasoning.js';
 import { IGNORE_SYMBOL } from './constants.js';
 import { macros } from './macros/macro-system.js';
+import { MessageFormatter } from './message-formatter.js';
 
 /**
  * Id of the open chat, once its whole history is in `chat`. While a chat is being opened
@@ -172,6 +181,7 @@ export function getContext() {
         SlashCommand,
         SlashCommandArgument,
         SlashCommandNamedArgument,
+        SlashCommandEnumValue,
         ARGUMENT_TYPE,
         executeSlashCommandsWithOptions,
         /** @deprecated Use SlashCommandParser.addCommandObject() instead */
@@ -198,7 +208,9 @@ export function getContext() {
         /** @deprecated Use callGenericPopup or Popup instead. */
         callPopup,
         callGenericPopup,
+        /** @deprecated Use loader.show instead. */
         showLoader,
+        /** @deprecated Use loader.hide instead. */
         hideLoader,
         mainApi: main_api,
         extensionSettings: extension_settings,
@@ -206,7 +218,9 @@ export function getContext() {
         getTokenizerModel,
         generateQuietPrompt,
         generateRaw,
+        generateRawData,
         writeExtensionField,
+        writeExtensionFieldBulk,
         getThumbnailUrl,
         selectCharacterById,
         messageFormatting,
@@ -229,7 +243,11 @@ export function getContext() {
         textCompletionSettings: textgenerationwebui_settings,
         powerUserSettings: power_user,
         getCharacters,
+        getOneCharacter,
         getCharacterCardFields,
+        getCharacterSource,
+        importFromExternalUrl,
+        importTags,
         uuidv4,
         humanizedDateTime,
         updateMessageBlock,
@@ -240,6 +258,8 @@ export function getContext() {
         scrollChatToBottom,
         scrollOnMediaLoad,
         macros,
+        messageFormatter: MessageFormatter,
+        loader,
         swipe: {
             left: swipe_left,
             right: swipe_right,
@@ -258,6 +278,7 @@ export function getContext() {
                 add: addLocalVariable,
                 inc: incrementLocalVariable,
                 dec: decrementLocalVariable,
+                has: existsLocalVariable,
             },
             global: {
                 get: getGlobalVariable,
@@ -266,6 +287,7 @@ export function getContext() {
                 add: addGlobalVariable,
                 inc: incrementGlobalVariable,
                 dec: decrementGlobalVariable,
+                has: existsGlobalVariable,
             },
         },
         loadWorldInfo,
@@ -274,6 +296,7 @@ export function getContext() {
         updateWorldInfoList,
         convertCharacterBook,
         getWorldInfoPrompt,
+        getWorldInfoNames: () => Array.isArray(world_names) ? [...world_names] : [],
         CONNECT_API_MAP,
         getTextGenServer,
         extractMessageFromData,
@@ -289,9 +312,13 @@ export function getContext() {
         getReasoningTemplateByName,
         unshallowCharacter,
         unshallowGroupMembers,
+        getExtensionManifest,
         openThirdPartyExtensionMenu,
         symbols: {
             ignore: IGNORE_SYMBOL,
+        },
+        constants: {
+            unset: UNSET_VALUE,
         },
     };
 }

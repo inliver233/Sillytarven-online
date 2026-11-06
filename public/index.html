@@ -48,6 +48,7 @@
     <link rel="stylesheet" type="text/css" href="css/secrets.css">
     <link rel="stylesheet" type="text/css" href="css/backgrounds.css">
     <link rel="stylesheet" type="text/css" href="css/chat-backups.css">
+    <link rel="stylesheet" type="text/css" href="css/streaming-display.css">
     <link rel="stylesheet" type="text/css" href="style.css">
     <link rel="stylesheet" type="text/css" href="css/inliver-motion.css">
     <link rel="stylesheet" type="text/css" href="css/st-tailwind.css">
@@ -758,7 +759,7 @@
                                         </span>
                                     </div>
                                 </div>
-                                <div class="range-block" data-source="openai,claude,aimlapi,openrouter,ai21,makersuite,vertexai,mistralai,custom,cohere,perplexity,groq,siliconflow,electronhub,chutes,nanogpt,deepseek,xai,pollinations,moonshot,fireworks,cometapi,azure_openai,zai">
+                                <div class="range-block" data-source="openai,claude,aimlapi,openrouter,ai21,makersuite,vertexai,mistralai,custom,cohere,perplexity,groq,siliconflow,minimax,electronhub,chutes,nanogpt,deepseek,xai,pollinations,moonshot,fireworks,cometapi,azure_openai,zai,workers_ai">
                                     <div class="range-block-title" data-i18n="Temperature">
                                         Temperature
                                     </div>
@@ -771,7 +772,7 @@
                                         </div>
                                     </div>
                                 </div>
-                                <div class="range-block" data-source="openai,aimlapi,openrouter,custom,cohere,perplexity,groq,siliconflow,mistralai,electronhub,nanogpt,deepseek,xai,pollinations,moonshot,fireworks,cometapi,azure_openai,chutes">
+                                <div class="range-block" data-source="openai,aimlapi,openrouter,custom,cohere,perplexity,groq,siliconflow,mistralai,electronhub,nanogpt,deepseek,xai,pollinations,moonshot,fireworks,cometapi,azure_openai,chutes,workers_ai">
                                     <div class="range-block-title" data-i18n="Frequency Penalty">
                                         Frequency Penalty
                                     </div>
@@ -784,7 +785,7 @@
                                         </div>
                                     </div>
                                 </div>
-                                <div class="range-block" data-source="openai,aimlapi,openrouter,custom,cohere,perplexity,groq,siliconflow,mistralai,electronhub,nanogpt,deepseek,xai,pollinations,moonshot,fireworks,cometapi,azure_openai,chutes">
+                                <div class="range-block" data-source="openai,aimlapi,openrouter,custom,cohere,perplexity,groq,siliconflow,mistralai,electronhub,nanogpt,deepseek,xai,pollinations,moonshot,fireworks,cometapi,azure_openai,chutes,workers_ai">
                                     <div class="range-block-title" data-i18n="Presence Penalty">
                                         Presence Penalty
                                     </div>
@@ -797,7 +798,7 @@
                                         </div>
                                     </div>
                                 </div>
-                                <div class="range-block" data-source="claude,aimlapi,openrouter,makersuite,vertexai,cohere,perplexity,electronhub,chutes,nanogpt">
+                                <div class="range-block" data-source="claude,aimlapi,openrouter,makersuite,vertexai,cohere,perplexity,electronhub,chutes,nanogpt,workers_ai">
                                     <div class="range-block-title" data-i18n="Top K">
                                         Top K
                                     </div>
@@ -810,7 +811,7 @@
                                         </div>
                                     </div>
                                 </div>
-                                <div class="range-block" data-source="openai,claude,aimlapi,openrouter,ai21,makersuite,vertexai,mistralai,custom,cohere,perplexity,groq,siliconflow,electronhub,chutes,nanogpt,deepseek,xai,pollinations,moonshot,fireworks,cometapi,azure_openai,zai">
+                                <div class="range-block" data-source="openai,claude,aimlapi,openrouter,ai21,makersuite,vertexai,mistralai,custom,cohere,perplexity,groq,siliconflow,minimax,electronhub,chutes,nanogpt,deepseek,xai,pollinations,moonshot,fireworks,cometapi,azure_openai,zai,workers_ai">
                                     <div class="range-block-title" data-i18n="Top P">
                                         Top P
                                     </div>
@@ -823,7 +824,7 @@
                                         </div>
                                     </div>
                                 </div>
-                                <div class="range-block" data-source="openrouter,nanogpt,chutes">
+                                <div class="range-block" data-source="openrouter,nanogpt,chutes,workers_ai">
                                     <div class="range-block-title" data-i18n="Repetition Penalty">
                                         Repetition Penalty
                                     </div>
@@ -870,18 +871,21 @@
                                     <div class="inline-drawer-content">
                                         <div class="range-block m-t-1">
                                             <div class="justifyLeft" data-i18n="Main">Main</div>
+                                            <i class="editor_maximize fa-solid fa-maximize right_menu_button" data-for="main_prompt_quick_edit_textarea" data-i18n="[title]Expand the editor"></i>
                                             <div class="wide100p">
                                                 <textarea id="main_prompt_quick_edit_textarea" class="text_pole textarea_compact autoSetHeight" rows="6" placeholder="&mdash;" data-pm-prompt="main"></textarea>
                                             </div>
                                         </div>
                                         <div class="range-block m-t-1">
                                             <div class="justifyLeft" data-i18n="Auxiliary">Auxiliary</div>
+                                            <i class="editor_maximize fa-solid fa-maximize right_menu_button" data-for="nsfw_prompt_quick_edit_textarea" data-i18n="[title]Expand the editor"></i>
                                             <div class="wide100p">
                                                 <textarea id="nsfw_prompt_quick_edit_textarea" class="text_pole textarea_compact autoSetHeight" rows="6" placeholder="&mdash;" data-pm-prompt="nsfw"></textarea>
                                             </div>
                                         </div>
                                         <div class="range-block m-t-1">
                                             <div class="justifyLeft" data-i18n="Post-History Instructions">Post-History Instructions</div>
+                                            <i class="editor_maximize fa-solid fa-maximize right_menu_button" data-for="jailbreak_prompt_quick_edit_textarea" data-i18n="[title]Expand the editor"></i>
                                             <div class="wide100p">
                                                 <textarea id="jailbreak_prompt_quick_edit_textarea" class="text_pole textarea_compact autoSetHeight" rows="6" placeholder="&mdash;" data-pm-prompt="jailbreak"></textarea>
                                             </div>
@@ -1047,7 +1051,7 @@
                                         </div>
                                     </div>
                                 </div>
-                                <div class="range-block" data-source="openai,openrouter,mistralai,custom,cohere,groq,electronhub,chutes,nanogpt,xai,pollinations,aimlapi,makersuite,vertexai,azure_openai">
+                                <div class="range-block" data-source="openai,openrouter,mistralai,custom,cohere,groq,electronhub,chutes,nanogpt,xai,pollinations,aimlapi,makersuite,vertexai,azure_openai,workers_ai">
                                     <div class="range-block-title justifyLeft" data-i18n="Seed">
                                         Seed
                                     </div>
@@ -1330,8 +1334,8 @@
                                             <span data-i18n="Top K">Top K</span>
                                             <div class="fa-solid fa-circle-info opacity50p" title="Top K sets a maximum amount of top tokens that can be chosen from.&#13;E.g Top K is 20, this means only the 20 highest ranking tokens will be kept (regardless of their probabilities being diverse or limited).&#13;Set to 0 (or -1, depending on your backend) to disable." data-i18n="[title]Top_K_desc"></div>
                                         </small>
-                                        <input class="neo-range-slider" type="range" id="top_k_textgenerationwebui" name="volume" min="-1" max="200" step="1">
-                                        <input class="neo-range-input" type="number" min="-1" max="200" step="1" data-for="top_k_textgenerationwebui" id="top_k_counter_textgenerationwebui">
+                                        <input class="neo-range-slider" type="range" id="top_k_textgenerationwebui" name="volume" min="-1" max="500" step="1">
+                                        <input class="neo-range-input" type="number" min="-1" max="500" step="1" data-for="top_k_textgenerationwebui" id="top_k_counter_textgenerationwebui">
                                     </div>
                                     <div data-tg-samplers="top_p" class="alignitemscenter flex-container flexFlowColumn flexBasis30p flexGrow flexShrink gap0">
                                         <small>
@@ -1460,6 +1464,28 @@
                                         <input class="neo-range-slider" type="range" id="max_tokens_second_textgenerationwebui" name="volume" min="0" max="20" step="1" />
                                         <input class="neo-range-input" type="number" min="0" max="20" step="1" data-for="max_tokens_second_textgenerationwebui" id="max_tokens_second_counter_textgenerationwebui">
                                     </div>
+
+                                    <div data-tg-type="koboldcpp, llamacpp, ooba, tabby" id="adaptive_p_block" class="wide100p">
+                                        <h4 class="wide100p textAlignCenter">
+                                            <label data-i18n="Adaptive-P">Adaptive-P</label>
+                                            <a href="https://github.com/MrJackSpade/adaptive-p-docs" target="_blank">
+                                                <div class="fa-solid fa-circle-info opacity50p"></div>
+                                            </a>
+                                        </h4>
+                                        <div class="flex-container flexFlowRow alignitemscenter gap10px flexShrink">
+                                            <div data-tg-samplers="adaptive_target" class="alignitemscenter flex-container marginBot5 flexFlowColumn flexGrow flexShrink gap0">
+                                                <small data-i18n="Target">Target</small>
+                                                <input class="neo-range-slider" type="range" id="adaptive_target_textgenerationwebui" min="-0.01" max="1" step="0.01" />
+                                                <input class="neo-range-input" type="number" min="-0.01" max="1" step="0.01" data-for="adaptive_target_textgenerationwebui" id="adaptive_target_counter_textgenerationwebui">
+                                            </div>
+                                            <div data-tg-samplers="adaptive_decay" class="alignitemscenter flex-container marginBot5 flexFlowColumn flexGrow flexShrink gap0">
+                                                <small data-i18n="Decay">Decay</small>
+                                                <input class="neo-range-slider" type="range" id="adaptive_decay_textgenerationwebui" min="0" max="0.99" step="0.01" />
+                                                <input class="neo-range-input" type="number" min="0" max="0.99" step="0.01" data-for="adaptive_decay_textgenerationwebui" id="adaptive_decay_counter_textgenerationwebui">
+                                            </div>
+                                        </div>
+                                    </div>
+
                                     <div data-tg-type="mancer, ooba, koboldcpp, aphrodite, tabby" data-tg-samplers="smoothing_factor" id="smoothingBlock" name="smoothingBlock" class="wide100p">
                                         <h4 class="wide100p textAlignCenter">
                                             <label data-i18n="Smooth Sampling">Smooth Sampling</label>
@@ -1870,6 +1896,7 @@
                                             <div data-name="tfs" draggable="true"><span>Tail Free Sampling</span><small></small></div>
                                             <div data-name="top_a" draggable="true"><span>Top A</span><small></small></div>
                                             <div data-name="min_p" draggable="true"><span>Min P</span><small></small></div>
+                                            <div data-name="adaptive_p" draggable="true"><span>Adaptive-P</span><small></small></div>
                                             <div data-name="mirostat" draggable="true"><span>Mirostat</span><small></small></div>
                                             <div data-name="xtc" draggable="true"><span>XTC</span><small></small></div>
                                             <div data-name="encoder_repetition_penalty" draggable="true"><span>Encoder Repetition Penalty</span><small></small></div>
@@ -2021,7 +2048,7 @@
                                             </span>
                                         </div>
                                     </div>
-                                    <div class="range-block" data-source="makersuite,vertexai,aimlapi,openrouter,claude,xai,electronhub,chutes,nanogpt">
+                                    <div class="range-block" data-source="makersuite,vertexai,aimlapi,openrouter,claude,electronhub,chutes,nanogpt">
                                         <label for="openai_enable_web_search" class="checkbox_label flexWrap widthFreeExpand">
                                             <input id="openai_enable_web_search" type="checkbox" />
                                             <span data-i18n="Enable web search">Enable web search</span>
@@ -2035,7 +2062,7 @@
                                             </b>
                                         </div>
                                     </div>
-                                    <div class="range-block" data-source="openai,cohere,mistralai,custom,claude,aimlapi,openrouter,groq,siliconflow,deepseek,makersuite,vertexai,ai21,xai,pollinations,moonshot,fireworks,cometapi,electronhub,chutes,azure_openai,zai">
+                                    <div class="range-block" data-source="openai,cohere,mistralai,custom,claude,aimlapi,openrouter,groq,siliconflow,minimax,deepseek,makersuite,vertexai,ai21,xai,pollinations,moonshot,fireworks,cometapi,electronhub,chutes,azure_openai,zai,nanogpt,workers_ai">
                                         <label for="openai_function_calling" class="checkbox_label flexWrap widthFreeExpand">
                                             <input id="openai_function_calling" type="checkbox" />
                                             <span data-i18n="Enable function calling">Enable function calling</span>
@@ -2049,8 +2076,46 @@
                                             <span data-i18n="enable_functions_desc_3">Can be utilized by various extensions to provide additional functionality.</span>
                                             <strong data-i18n="enable_functions_desc_4">Not supported when Prompt Post-Processing with "no tools" is used!</strong>
                                         </div>
+                                        <div id="tool_call_recurse_limit_block" class="range-block wide100p">
+                                            <div class="range-block-title">
+                                                <small data-i18n="Tool Call Recurse Limit">Tool Call Recurse Limit</small>
+                                                <div class="fa-solid fa-circle-info opacity50p margin5" data-i18n="[title]Maximum number of tool call recursion steps per generation." title="Maximum number of tool call recursion steps per generation."></div>
+                                            </div>
+                                            <div class="range-block-range-and-counter">
+                                                <div class="range-block-range">
+                                                    <input type="range" id="tool_call_recurse_limit" name="tool_call_recurse_limit" min="1" max="50" step="1">
+                                                </div>
+                                                <div class="range-block-counter">
+                                                    <input type="number" min="1" max="50" step="1" data-for="tool_call_recurse_limit" id="tool_call_recurse_limit_counter">
+                                                </div>
+                                            </div>
+                                        </div>
                                     </div>
-                                    <div class="range-block" data-source="openai,aimlapi,openrouter,mistralai,makersuite,vertexai,claude,custom,xai,pollinations,moonshot,cohere,cometapi,nanogpt,electronhub,azure_openai,zai,siliconflow,chutes">
+                                    <div class="range-block" data-source="openrouter,custom">
+                                        <div class="flex-container flexFlowColumn wide100p textAlignCenter marginTop10">
+                                            <div class="flex-container oneline-dropdown">
+                                                <label for="tool_reasoning_mode" data-i18n="Interleaved Thinking">
+                                                    Interleaved Thinking
+                                                </label>
+                                                <select id="tool_reasoning_mode">
+                                                    <option data-i18n="Disabled" value="disabled">Disabled</option>
+                                                    <option data-i18n="Since Last User Message" value="since_last_user">Since Last User Message</option>
+                                                    <option data-i18n="Active Tool Chain" value="active_chain">Active Tool Chain</option>
+                                                </select>
+                                            </div>
+                                        </div>
+                                        <div class="toggle-description justifyLeft">
+                                            <span data-i18n="openrouter_interleaved_thinking_hint">
+                                                Sends reasoning from preceding assistant turns with tool-call requests to maintain interleaved thinking context.
+                                            </span>
+                                        </div>
+                                        <div id="openrouter_interleaved_thinking_disabled_hint" class="toggle-description justifyLeft" style="display:none;">
+                                            <em data-i18n="Enable &quot;Request model reasoning&quot; to use Interleaved Thinking.">
+                                                Enable "Request model reasoning" to use Interleaved Thinking.
+                                            </em>
+                                        </div>
+                                    </div>
+                                    <div class="range-block" data-source="openai,aimlapi,openrouter,mistralai,makersuite,vertexai,claude,custom,xai,pollinations,moonshot,cohere,cometapi,nanogpt,electronhub,azure_openai,zai,siliconflow,chutes,workers_ai">
                                         <label for="openai_media_inlining" class="checkbox_label flexWrap widthFreeExpand">
                                             <input id="openai_media_inlining" type="checkbox" />
                                             <span data-i18n="Send inline media">Send inline media</span>
@@ -2063,7 +2128,7 @@
                                                     <i class="icon-supported fa-solid fa-film" title="Supported by the current model" data-i18n="[title]Supported by the current model"></i>
                                                     <i class="icon-unsupported fa-solid fa-film" title="Unsupported by the current model" data-i18n="[title]Unsupported by the current model"></i>
                                                 </div>
-                                                <div id="openai_audio_inlining_supported" data-source="makersuite,vertexai,openrouter">
+                                                <div id="openai_audio_inlining_supported" data-source="makersuite,vertexai,openrouter,openai,custom">
                                                     <i class="icon-supported fa-solid fa-music" title="Supported by the current model" data-i18n="[title]Supported by the current model"></i>
                                                     <i class="icon-unsupported fa-solid fa-music" title="Unsupported by the current model" data-i18n="[title]Unsupported by the current model"></i>
                                                 </div>
@@ -2074,7 +2139,7 @@
                                             <strong data-source="makersuite,vertexai" data-i18n="video_inlining_hint_4">Videos must be less than 20 MB and under 1 minute long.</strong>
                                             <strong data-source="makersuite,vertexai" data-i18n="audio_inlining_hint_2">Audio must be less than 20 MB.</strong>
                                         </div>
-                                        <div class="flex-container flexFlowColumn wide100p textAlignCenter marginTop10" data-source="openai,custom,xai,pollinations,cohere,cometapi,nanogpt,moonshot,aimlapi,openrouter,mistralai,electronhub,azure_openai,zai,siliconflow,chutes,makersuite,vertexai">
+                                        <div class="flex-container flexFlowColumn wide100p textAlignCenter marginTop10" data-source="openai,custom,xai,pollinations,cohere,cometapi,nanogpt,moonshot,aimlapi,openrouter,mistralai,electronhub,azure_openai,zai,siliconflow,chutes,makersuite,vertexai,workers_ai">
                                             <div class="flex-container oneline-dropdown">
                                                 <label for="openai_inline_image_quality" data-i18n="Inline Image Quality">
                                                     Inline Image Quality
@@ -2135,7 +2200,7 @@
                                             </div>
                                         </div>
                                     </div>
-                                    <div class="range-block" data-source="deepseek,aimlapi,openrouter,custom,claude,xai,makersuite,vertexai,pollinations,moonshot,mistralai,fireworks,cometapi,electronhub,chutes,azure_openai,nanogpt,zai">
+                                    <div class="range-block" data-source="deepseek,aimlapi,openrouter,custom,claude,xai,makersuite,vertexai,pollinations,moonshot,mistralai,fireworks,cometapi,electronhub,chutes,azure_openai,nanogpt,zai,workers_ai">
                                         <label for="openai_show_thoughts" class="checkbox_label widthFreeExpand">
                                             <input id="openai_show_thoughts" type="checkbox" />
                                             <span data-i18n="Request model reasoning">Request model reasoning</span>
@@ -2144,12 +2209,15 @@
                                             <span data-i18n="Allows the model to return its thinking process.">
                                                 Allows the model to return its thinking process.
                                             </span>
-                                            <strong data-i18n="This setting affects visibility only." data-source-mode="except" data-source="zai">
+                                            <strong data-i18n="This setting enables or disables reasoning generation by the model." data-source="deepseek,zai,moonshot">
+                                                This setting enables or disables reasoning generation by the model.
+                                            </strong>
+                                            <strong data-i18n="This setting affects visibility only." data-source-mode="except" data-source="zai,moonshot,openrouter,deepseek">
                                                 This setting affects visibility only.
                                             </strong>
                                         </div>
                                     </div>
-                                    <div class="flex-container flexFlowColumn wide100p textAlignCenter marginTop10" data-source="openai,custom,claude,xai,makersuite,vertexai,aimlapi,openrouter,pollinations,perplexity,cometapi,electronhub,azure_openai,chutes">
+                                    <div class="flex-container flexFlowColumn wide100p textAlignCenter marginTop10" data-source="openai,custom,claude,xai,makersuite,vertexai,aimlapi,openrouter,pollinations,perplexity,cometapi,electronhub,azure_openai,chutes,nanogpt,deepseek,fireworks">
                                         <div class="flex-container oneline-dropdown" title="Constrains effort on reasoning for reasoning models.&#10;Reducing reasoning effort can result in faster responses and fewer tokens used on reasoning in a response." data-i18n="[title]Constrains effort on reasoning for reasoning models.">
                                             <label for="openai_reasoning_effort">
                                                 <span data-i18n="Reasoning Effort">Reasoning Effort</span>
@@ -2163,11 +2231,17 @@
                                                 <option data-i18n="openai_reasoning_effort_high" value="high">High</option>
                                                 <option data-i18n="openai_reasoning_effort_maximum" value="max">Maximum</option>
                                             </select>
-                                            <div class="toggle-description justifyLeft marginBot5" data-source="openai,custom,xai,aimlapi,openrouter,pollinations,perplexity,cometapi,electronhub,azure_openai,chutes" data-i18n="OpenAI-style options: low, medium, high. Minimum and maximum are aliased to low and high. Auto does not send an effort level.">
-                                                OpenAI-style options: low, medium, high. Minimum and maximum are aliased to low and high. Auto does not send an effort level.
+                                            <div class="toggle-description justifyLeft marginBot5" data-source="openai,custom,xai,aimlapi,openrouter,pollinations,perplexity,cometapi,electronhub,azure_openai,chutes" data-i18n="OpenAI-compatible effort levels vary by model. Minimum and maximum may use model-specific aliases. Auto does not send an effort level.">
+                                                OpenAI-compatible effort levels vary by model. Minimum and maximum may use model-specific aliases. Auto does not send an effort level.
                                             </div>
-                                            <div class="toggle-description justifyLeft marginBot5" data-source="claude" data-i18n="Allocates a portion of the response length for thinking (min: 1024 tokens, low: 10%, medium: 25%, high: 50%, max: 95%), but minimum 1024 tokens. Auto does not request thinking.">
-                                                Allocates a portion of the response length for thinking (min: 1024 tokens, low: 10%, medium: 25%, high: 50%, max: 95%), but minimum 1024 tokens. Auto does not request thinking.
+                                            <div class="toggle-description justifyLeft marginBot5" data-source="fireworks" data-i18n="Fireworks supports low, medium, high, and max as distinct effort levels. Minimum is aliased to low. Auto does not send an effort level.">
+                                                Fireworks supports low, medium, high, and max as distinct effort levels. Minimum is aliased to low. Auto does not send an effort level.
+                                            </div>
+                                            <strong class="toggle-description justifyLeft marginBot5" data-source="openrouter">
+                                                Request model reasoning = Off with Reasoning Effort = Minimum disables reasoning entirely on models that support that, but can cause errors with some models.
+                                            </strong>
+                                            <div class="toggle-description justifyLeft marginBot5" data-source="claude" data-i18n="Selects an effort level on adaptive-thinking models. On older Claude models, it allocates a portion of the response length to thinking. Auto does not request thinking.">
+                                                Selects an effort level on adaptive-thinking models. On older Claude models, it allocates a portion of the response length to thinking. Auto does not request thinking.
                                             </div>
                                             <div class="toggle-description justifyLeft marginBot5" data-source="makersuite,vertexai">
                                                 <span data-i18n="Sets a dynamic reasoning depth level for thinking (Flash 3/Pro 3). High and low are supported by both, minimal and medium are Flash 3 only. Auto lets the model decide.">
@@ -2194,6 +2268,9 @@
                                             <div class="toggle-description justifyLeft marginBot5" data-i18n="Constrains the verbosity of the model's response.">
                                                 Constrains the verbosity of the model's response.
                                             </div>
+                                            <strong class="toggle-description justifyLeft marginBot5" data-source="claude">
+                                                On adaptive-thinking Claude models, a non-automatic Reasoning Effort takes precedence over Verbosity.
+                                            </strong>
                                         </div>
                                     </div>
                                     <div class="range-block" data-source="claude">
@@ -2454,7 +2531,8 @@
                                     <small data-i18n="Click Authorize below or get the key from">
                                         Click "Authorize" below or get the key from </small> <a target="_blank" href="https://openrouter.ai/keys/">OpenRouter</a>.
                                     <br>
-                                    <a href="https://openrouter.ai/account" target="_blank" data-i18n="View Remaining Credits">View Remaining Credits</a>
+                                    <a href="https://openrouter.ai/settings/credits" target="_blank" class="openrouter_view_credits" data-i18n="View Remaining Credits">View Remaining Credits</a>
+                                    <span class="openrouter_credits_display marginLeft5"></span>
                                 </div>
                                 <div class="flex-container">
                                     <input id="api_key_openrouter-tg" name="api_key_openrouter" class="text_pole flex1 api_key_openrouter" value="" type="text" autocomplete="off">
@@ -2472,13 +2550,30 @@
                                     </select>
                                 </div>
                                 <div>
-                                    <h4 data-i18n="Model Providers">Model Providers</h4>
+                                    <h4>
+                                        <span data-i18n="Model Providers">Model Providers</span>
+                                        <i id="openrouter_provider_warning_text" class="fa-solid fa-circle-exclamation displayNone" title="Deselect inapplicable provider(s) or select an applicable provider to avoid a 404 error."></i>
+                                    </h4>
                                     <select id="openrouter_providers_text" class="openrouter_providers" multiple>
                                     </select>
-                                    <label class="checkbox_label" data-tg-samplers="openrouter_allow_fallbacks" data-i18n="[title]Automatically chooses an alternative provider if chosen providers can't serve your request." for="openrouter_allow_fallbacks_textgenerationwebui" title="Automatically chooses an alternative provider if chosen providers can't serve your request.">
+                                    <label class="checkbox_label" data-i18n="[title]Automatically chooses an alternative provider if chosen providers can't serve your request." for="openrouter_allow_fallbacks_textgenerationwebui" title="Automatically chooses an alternative provider if chosen providers can't serve your request.">
                                         <input id="openrouter_allow_fallbacks_textgenerationwebui" type="checkbox" />
                                         <span data-i18n="Allow fallback providers">Allow fallback providers</span>
                                     </label>
+                                </div>
+                                <div>
+                                    <h4 data-i18n="Model Quantizations">Model Quantizations</h4>
+                                    <select id="openrouter_quantizations_text" class="openrouter_quantizations" multiple>
+                                        <option data-i18n="Integer (4 bit)" value="int4">Integer (4 bit)</option>
+                                        <option data-i18n="Integer (8 bit)" value="int8">Integer (8 bit)</option>
+                                        <option data-i18n="Floating point (4 bit)" value="fp4">Floating point (4 bit)</option>
+                                        <option data-i18n="Floating point (6 bit)" value="fp6">Floating point (6 bit)</option>
+                                        <option data-i18n="Floating point (8 bit)" value="fp8">Floating point (8 bit)</option>
+                                        <option data-i18n="Floating point (16 bit)" value="fp16">Floating point (16 bit)</option>
+                                        <option data-i18n="Brain floating point (16 bit)" value="bf16">Brain floating point (16 bit)</option>
+                                        <option data-i18n="Floating point (32 bit)" value="fp32">Floating point (32 bit)</option>
+                                        <option data-i18n="Unknown" value="unknown">Unknown</option>
+                                    </select>
                                 </div>
                             </div>
                             <div data-tg-type="infermaticai" class="flex-container flexFlowColumn">
@@ -2563,8 +2658,19 @@
                                     <small data-i18n="Example: http://127.0.0.1:5000">Example: http://127.0.0.1:5000</small>
                                     <input id="generic_api_url_text" name="generic_api_url" class="text_pole wide100p" value="" autocomplete="off" data-server-history="generic">
                                 </div>
-                                <datalist id="generic_model_fill"></datalist>
-                                <input id="generic_model_textgenerationwebui" list="generic_model_fill" class="text_pole wide100p" placeholder="Model ID (optional)" data-i18n="[placeholder]Model ID (optional)" type="text">
+                                <h4 data-i18n="Enter a Model ID">Enter a Model ID</h4>
+                                <div class="flex-container">
+                                    <input list="generic_model_fill" id="generic_model_textgenerationwebui" class="text_pole wide100p" placeholder="Model ID (optional)" data-i18n="[placeholder]Model ID (optional)" type="text" autocomplete="off">
+                                    <datalist id="generic_model_fill"></datalist>
+                                </div>
+                                <h4 data-i18n="Available Models">Available Models</h4>
+                                <div class="flex-container">
+                                    <select id="generic_model_select" class="text_pole wide100p">
+                                        <option value="" data-i18n="-- Connect to the API --">
+                                            -- Connect to the API --
+                                        </option>
+                                    </select>
+                                </div>
                             </div>
                             <div data-tg-type="ooba" class="flex-container flexFlowColumn">
                                 <div class="flex-container flexFlowColumn">
@@ -2886,6 +2992,7 @@
                                 <option value="azure_openai">Azure OpenAI</option>
                                 <option value="chutes">Chutes</option>
                                 <option value="claude">Claude</option>
+                                <option value="workers_ai">Cloudflare Workers AI</option>
                                 <option value="cohere">Cohere</option>
                                 <!-- Temporarily disabled. -->
                                 <!-- <option value="cometapi">CometAPI</option> -->
@@ -2897,6 +3004,7 @@
                                 <option value="free-gemini">free-gemini（管理员福利）</option>
                                 <option value="vertexai">Google Vertex AI</option>
                                 <option value="mistralai">MistralAI</option>
+                                <option value="minimax">MiniMax</option>
                                 <option value="moonshot">Moonshot AI</option>
                                 <option value="nanogpt">NanoGPT</option>
                                 <option value="openrouter">OpenRouter</option>
@@ -2926,7 +3034,7 @@
                             </select>
                             <small class="notes">自动模式会聚合所有可用渠道的模型；明确选择渠道时，该渠道作为首选路由。管理员更新渠道后，重新切换到该来源可强制刷新列表。</small>
                         </div>
-                        <div class="inline-drawer wide100p" data-source="openai,claude,mistralai,makersuite,vertexai,deepseek,xai">
+                        <div class="inline-drawer wide100p" data-source="openai,claude,mistralai,makersuite,vertexai,deepseek,xai,zai,moonshot">
                             <div class="inline-drawer-toggle inline-drawer-header">
                                 <b data-i18n="Reverse Proxy">Reverse Proxy</b>
                                 <div class="fa-solid fa-circle-chevron-down inline-drawer-icon down"></div>
@@ -2985,12 +3093,12 @@
                                     <br>
                                 </div>
                                 <div class="flex-container width100p">
-                                    <input id="openai_proxy_password" type="password" class="text_pole flex1" placeholder="" form="openai_form" autocomplete="off" />
-                                    <div id="openai_proxy_password_show" title="Peek a password" data-i18n="[title]Peek a password" class="menu_button fa-solid fa-eye-slash fa-fw"></div>
+                                    <input id="openai_proxy_access_key" type="text" class="text_pole flex1 masked-secret" placeholder="" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" />
+                                    <div id="openai_proxy_access_key_show" title="Peek a password" data-i18n="[title]Peek a password" class="menu_button fa-solid fa-eye-slash fa-fw"></div>
                                 </div>
                             </div>
                         </div>
-                        <div id="ReverseProxyWarningMessage" data-source="openai,claude,mistralai,makersuite,vertexai,deepseek,xai">
+                        <div id="ReverseProxyWarningMessage" data-source="openai,claude,mistralai,makersuite,vertexai,deepseek,xai,zai,moonshot">
                             <div class="reverse_proxy_warning">
                                 <b>
                                     <div data-i18n="Using a proxy that you're not running yourself is a risk to your data privacy.">
@@ -3040,10 +3148,34 @@
                             <div>
                                 <h4 data-i18n="OpenAI Model">OpenAI Model</h4>
                                 <select id="model_openai_select">
+                                    <optgroup label="GPT-6">
+                                        <option value="gpt-6-astra">gpt-6-astra</option>
+                                    </optgroup>
+                                    <optgroup label="GPT-5.6">
+                                        <option value="gpt-5.6">gpt-5.6</option>
+                                        <option value="gpt-5.6-sol">gpt-5.6-sol</option>
+                                        <option value="gpt-5.6-terra">gpt-5.6-terra</option>
+                                        <option value="gpt-5.6-luna">gpt-5.6-luna</option>
+                                    </optgroup>
+                                    <optgroup label="GPT-5.5">
+                                        <option value="gpt-5.5">gpt-5.5</option>
+                                        <option value="gpt-5.5-2026-04-23">gpt-5.5-2026-04-23</option>
+                                    </optgroup>
+                                    <optgroup label="GPT-5.4">
+                                        <option value="gpt-5.4">gpt-5.4</option>
+                                        <option value="gpt-5.4-2026-03-05">gpt-5.4-2026-03-05</option>
+                                        <option value="gpt-5.4-mini">gpt-5.4-mini</option>
+                                        <option value="gpt-5.4-mini-2026-03-17">gpt-5.4-mini-2026-03-17</option>
+                                        <option value="gpt-5.4-nano">gpt-5.4-nano</option>
+                                        <option value="gpt-5.4-nano-2026-03-17">gpt-5.4-nano-2026-03-17</option>
+                                    </optgroup>
+                                    <optgroup label="GPT-5.3">
+                                        <option value="gpt-5.3-chat-latest">gpt-5.3-chat-latest (deprecated)</option>
+                                    </optgroup>
                                     <optgroup label="GPT-5.2">
                                         <option value="gpt-5.2">gpt-5.2</option>
                                         <option value="gpt-5.2-2025-12-11">gpt-5.2-2025-12-11</option>
-                                        <option value="gpt-5.2-chat-latest">gpt-5.2-chat-latest</option>
+                                        <option value="gpt-5.2-chat-latest">gpt-5.2-chat-latest (deprecated)</option>
                                     </optgroup>
                                     <optgroup label="GPT-5.1">
                                         <option value="gpt-5.1">gpt-5.1</option>
@@ -3052,69 +3184,56 @@
                                     </optgroup>
                                     <optgroup label="GPT-5">
                                         <option value="gpt-5">gpt-5</option>
-                                        <option value="gpt-5-2025-08-07">gpt-5-2025-08-07</option>
+                                        <option value="gpt-5-2025-08-07">gpt-5-2025-08-07 (deprecated)</option>
                                         <option value="gpt-5-chat-latest">gpt-5-chat-latest</option>
                                         <option value="gpt-5-mini">gpt-5-mini</option>
-                                        <option value="gpt-5-mini-2025-08-07">gpt-5-mini-2025-08-07</option>
+                                        <option value="gpt-5-mini-2025-08-07">gpt-5-mini-2025-08-07 (deprecated)</option>
                                         <option value="gpt-5-nano">gpt-5-nano</option>
-                                        <option value="gpt-5-nano-2025-08-07">gpt-5-nano-2025-08-07</option>
-                                    </optgroup>
-                                    <optgroup label="GPT-4o">
-                                        <option value="gpt-4o">gpt-4o</option>
-                                        <option value="gpt-4o-2024-11-20">gpt-4o-2024-11-20</option>
-                                        <option value="gpt-4o-2024-08-06">gpt-4o-2024-08-06</option>
-                                        <option value="gpt-4o-2024-05-13">gpt-4o-2024-05-13</option>
-                                        <option value="chatgpt-4o-latest">chatgpt-4o-latest</option>
-                                    </optgroup>
-                                    <optgroup label="GPT-4o mini">
-                                        <option value="gpt-4o-mini">gpt-4o-mini</option>
-                                        <option value="gpt-4o-mini-2024-07-18">gpt-4o-mini-2024-07-18</option>
+                                        <option value="gpt-5-nano-2025-08-07">gpt-5-nano-2025-08-07 (deprecated)</option>
                                     </optgroup>
                                     <optgroup label="GPT-4.1">
                                         <option value="gpt-4.1">gpt-4.1</option>
                                         <option value="gpt-4.1-2025-04-14">gpt-4.1-2025-04-14</option>
                                         <option value="gpt-4.1-mini">gpt-4.1-mini</option>
                                         <option value="gpt-4.1-mini-2025-04-14">gpt-4.1-mini-2025-04-14</option>
-                                        <option value="gpt-4.1-nano">gpt-4.1-nano</option>
-                                        <option value="gpt-4.1-nano-2025-04-14">gpt-4.1-nano-2025-04-14</option>
+                                        <option value="gpt-4.1-nano">gpt-4.1-nano (deprecated)</option>
+                                        <option value="gpt-4.1-nano-2025-04-14">gpt-4.1-nano-2025-04-14 (deprecated)</option>
                                     </optgroup>
-                                    <optgroup label="o1">
-                                        <option value="o1">o1</option>
-                                        <option value="o1-2024-12-17">o1-2024-12-17</option>
-                                        <option value="o1-mini">o1-mini</option>
-                                        <option value="o1-mini-2024-09-12">o1-mini-2024-09-12</option>
-                                        <option value="o1-preview">o1-preview</option>
-                                        <option value="o1-preview-2024-09-12">o1-preview-2024-09-12</option>
+                                    <optgroup label="o4">
+                                        <option value="o4-mini">o4-mini (deprecated)</option>
+                                        <option value="o4-mini-2025-04-16">o4-mini-2025-04-16 (deprecated)</option>
                                     </optgroup>
                                     <optgroup label="o3">
                                         <option value="o3">o3</option>
-                                        <option value="o3-2025-04-16">o3-2025-04-16</option>
-                                        <option value="o3-mini">o3-mini</option>
-                                        <option value="o3-mini-2025-01-31">o3-mini-2025-01-31</option>
+                                        <option value="o3-2025-04-16">o3-2025-04-16 (deprecated)</option>
+                                        <option value="o3-mini">o3-mini (deprecated)</option>
+                                        <option value="o3-mini-2025-01-31">o3-mini-2025-01-31 (deprecated)</option>
                                     </optgroup>
-                                    <optgroup label="o4">
-                                        <option value="o4-mini">o4-mini</option>
-                                        <option value="o4-mini-2025-04-16">o4-mini-2025-04-16</option>
+                                    <optgroup label="o1">
+                                        <option value="o1">o1 (deprecated)</option>
+                                        <option value="o1-2024-12-17">o1-2024-12-17 (deprecated)</option>
                                     </optgroup>
-                                    <optgroup label="GPT-4.5">
-                                        <option value="gpt-4.5-preview">gpt-4.5-preview</option>
-                                        <option value="gpt-4.5-preview-2025-02-27">gpt-4.5-preview-2025-02-27</option>
+                                    <optgroup label="GPT-4o">
+                                        <option value="gpt-4o">gpt-4o</option>
+                                        <option value="gpt-4o-2024-11-20">gpt-4o-2024-11-20</option>
+                                        <option value="gpt-4o-2024-08-06">gpt-4o-2024-08-06</option>
+                                        <option value="gpt-4o-2024-05-13">gpt-4o-2024-05-13</option>
+                                    </optgroup>
+                                    <optgroup label="GPT-4o mini">
+                                        <option value="gpt-4o-mini">gpt-4o-mini</option>
+                                        <option value="gpt-4o-mini-2024-07-18">gpt-4o-mini-2024-07-18</option>
                                     </optgroup>
                                     <optgroup label="GPT-4 Turbo and GPT-4">
-                                        <option value="gpt-4-turbo">gpt-4-turbo</option>
-                                        <option value="gpt-4-turbo-2024-04-09">gpt-4-turbo-2024-04-09</option>
-                                        <option value="gpt-4-turbo-preview">gpt-4-turbo-preview</option>
-                                        <option value="gpt-4-0125-preview">gpt-4-0125-preview (2024)</option>
-                                        <option value="gpt-4-1106-preview">gpt-4-1106-preview (2023)</option>
-                                        <option value="gpt-4">gpt-4</option>
-                                        <option value="gpt-4-0613">gpt-4-0613 (2023)</option>
-                                        <option value="gpt-4-0314">gpt-4-0314 (2023)</option>
+                                        <option value="gpt-4-turbo">gpt-4-turbo (deprecated)</option>
+                                        <option value="gpt-4-turbo-2024-04-09">gpt-4-turbo-2024-04-09 (deprecated)</option>
+                                        <option value="gpt-4">gpt-4 (deprecated)</option>
+                                        <option value="gpt-4-0613">gpt-4-0613 (2023, deprecated)</option>
                                     </optgroup>
                                     <optgroup label="GPT-3.5 Turbo">
-                                        <option value="gpt-3.5-turbo">gpt-3.5-turbo</option>
-                                        <option value="gpt-3.5-turbo-0125">gpt-3.5-turbo-0125 (2024)</option>
-                                        <option value="gpt-3.5-turbo-1106">gpt-3.5-turbo-1106 (2023)</option>
-                                        <option value="gpt-3.5-turbo-instruct">gpt-3.5-turbo-instruct</option>
+                                        <option value="gpt-3.5-turbo">gpt-3.5-turbo (deprecated)</option>
+                                        <option value="gpt-3.5-turbo-0125">gpt-3.5-turbo-0125 (2024, deprecated)</option>
+                                        <option value="gpt-3.5-turbo-1106">gpt-3.5-turbo-1106 (2023, deprecated)</option>
+                                        <option value="gpt-3.5-turbo-instruct">gpt-3.5-turbo-instruct (deprecated)</option>
                                     </optgroup>
                                     <optgroup label="Other">
                                         <option value="babbage-002">babbage-002</option>
@@ -3149,27 +3268,24 @@
                                 <h4 data-i18n="Claude Model">Claude Model</h4>
                                 <select id="model_claude_select">
                                     <optgroup label="Versions">
+                                        <option value="claude-fable-5-1">claude-fable-5-1</option>
+                                        <option value="claude-fable-5">claude-fable-5</option>
+                                        <option value="claude-opus-5">claude-opus-5</option>
+                                        <option value="claude-sonnet-5">claude-sonnet-5</option>
+                                        <option value="claude-opus-4-8">claude-opus-4-8</option>
+                                        <option value="claude-opus-4-7">claude-opus-4-7</option>
+                                        <option value="claude-opus-4-6">claude-opus-4-6</option>
                                         <option value="claude-opus-4-5">claude-opus-4-5</option>
                                         <option value="claude-opus-4-5-20251101">claude-opus-4-5-20251101</option>
+                                        <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
                                         <option value="claude-sonnet-4-5">claude-sonnet-4-5</option>
                                         <option value="claude-sonnet-4-5-20250929">claude-sonnet-4-5-20250929</option>
                                         <option value="claude-haiku-4-5">claude-haiku-4-5</option>
                                         <option value="claude-haiku-4-5-20251001">claude-haiku-4-5-20251001</option>
-                                        <option value="claude-opus-4-1">claude-opus-4-1</option>
-                                        <option value="claude-opus-4-1-20250805">claude-opus-4-1-20250805</option>
-                                        <option value="claude-opus-4-0">claude-opus-4-0</option>
-                                        <option value="claude-opus-4-20250514">claude-opus-4-20250514</option>
-                                        <option value="claude-sonnet-4-0">claude-sonnet-4-0</option>
-                                        <option value="claude-sonnet-4-20250514">claude-sonnet-4-20250514</option>
-                                        <option value="claude-3-7-sonnet-latest">claude-3-7-sonnet-latest</option>
-                                        <option value="claude-3-7-sonnet-20250219">claude-3-7-sonnet-20250219</option>
-                                        <option value="claude-3-5-sonnet-latest">claude-3-5-sonnet-latest</option>
-                                        <option value="claude-3-5-sonnet-20241022">claude-3-5-sonnet-20241022</option>
-                                        <option value="claude-3-5-sonnet-20240620">claude-3-5-sonnet-20240620</option>
-                                        <option value="claude-3-5-haiku-latest">claude-3-5-haiku-latest</option>
-                                        <option value="claude-3-5-haiku-20241022">claude-3-5-haiku-20241022</option>
-                                        <option value="claude-3-opus-20240229">claude-3-opus-20240229</option>
-                                        <option value="claude-3-haiku-20240307">claude-3-haiku-20240307</option>
+                                        <option value="claude-opus-4-0">claude-opus-4-0 (deprecated)</option>
+                                        <option value="claude-opus-4-20250514">claude-opus-4-20250514 (deprecated)</option>
+                                        <option value="claude-sonnet-4-0">claude-sonnet-4-0 (deprecated)</option>
+                                        <option value="claude-sonnet-4-20250514">claude-sonnet-4-20250514 (deprecated)</option>
                                     </optgroup>
                                 </select>
                             </div>
@@ -3180,7 +3296,8 @@
                                 <small data-i18n="Click Authorize below or get the key from">
                                     Click "Authorize" below or get the key from </small> <a target="_blank" href="https://openrouter.ai/keys/">OpenRouter</a>.
                                 <br>
-                                <a href="https://openrouter.ai/account" target="_blank" data-i18n="View Remaining Credits">View Remaining Credits</a>
+                                <a href="https://openrouter.ai/settings/credits" target="_blank" class="openrouter_view_credits" data-i18n="View Remaining Credits">View Remaining Credits</a>
+                                <span class="openrouter_credits_display marginLeft5"></span>
                             </div>
                             <div class="flex-container">
                                 <input id="api_key_openrouter" name="api_key_openrouter" class="text_pole flex1 api_key_openrouter" value="" type="text" autocomplete="off">
@@ -3199,38 +3316,11 @@
                                 <input id="openrouter_use_fallback" type="checkbox" />
                                 <span data-i18n="Allow fallback models">Allow fallback models</span>
                             </label>
-                            <div class="marginTopBot5">
-                                <div class="inline-drawer wide100p">
-                                    <div class="inline-drawer-toggle inline-drawer-header">
-                                        <b data-i18n="OpenRouter Model Sorting">OpenRouter Model Sorting</b>
-                                        <div class="fa-solid fa-circle-chevron-down inline-drawer-icon down"></div>
-                                    </div>
-                                    <div class="inline-drawer-content m-b-1">
-                                        <div class="marginTopBot5">
-                                            <label for="openrouter_sort_models" class="checkbox_label">
-                                                <select id="openrouter_sort_models">
-                                                    <option data-i18n="Alphabetically" value="alphabetically">Alphabetically</option>
-                                                    <option data-i18n="Price" value="pricing.prompt">Price (cheapest)</option>
-                                                    <option data-i18n="Context Size" value="context_length">Context Size</option>
-                                                </select>
-                                            </label>
-                                        </div>
-                                        <div class="marginTopBot5">
-                                            <label for="openrouter_group_models" class="checkbox_label">
-                                                <input id="openrouter_group_models" type="checkbox" />
-                                                <span data-i18n="Group by vendors">Group by vendors</span>
-                                            </label>
-                                            <div class="toggle-description justifyLeft wide100p">
-                                                <span data-i18n="Group by vendors Description">
-                                                    Put OpenAI models in one group, Anthropic models in other group, etc. Can be combined with sorting.
-                                                </span>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
                             <div>
-                                <h4 data-i18n="Model Providers">Model Providers</h4>
+                                <h4>
+                                    <span data-i18n="Model Providers">Model Providers</span>
+                                    <i id="openrouter_provider_warning_chat" class="fa-solid fa-circle-exclamation displayNone" title="Deselect inapplicable provider(s) or select an applicable provider to avoid a 404 error."></i>
+                                </h4>
                                 <select id="openrouter_providers_chat" class="openrouter_providers" multiple>
                                 </select>
                                 <label class="checkbox_label marginTopBot5" for="openrouter_allow_fallbacks" data-i18n="[title]Automatically chooses an alternative provider if chosen providers can't serve your request." title="Automatically chooses an alternative provider if chosen providers can't serve your request.">
@@ -3242,6 +3332,20 @@
                                 <i class="fa-solid fa-lightbulb"></i>
                                 <span data-i18n="To use instruct formatting, switch to OpenRouter under Text Completion API.">To use instruct formatting, switch to OpenRouter under Text Completion API.</span>
                             </small>
+                            <div>
+                                <h4 data-i18n="Model Quantizations">Model Quantizations</h4>
+                                <select id="openrouter_quantizations_chat" class="openrouter_quantizations" multiple>
+                                    <option data-i18n="Integer (4 bit)" value="int4">Integer (4 bit)</option>
+                                    <option data-i18n="Integer (8 bit)" value="int8">Integer (8 bit)</option>
+                                    <option data-i18n="Floating point (4 bit)" value="fp4">Floating point (4 bit)</option>
+                                    <option data-i18n="Floating point (6 bit)" value="fp6">Floating point (6 bit)</option>
+                                    <option data-i18n="Floating point (8 bit)" value="fp8">Floating point (8 bit)</option>
+                                    <option data-i18n="Floating point (16 bit)" value="fp16">Floating point (16 bit)</option>
+                                    <option data-i18n="Brain floating point (16 bit)" value="bf16">Brain floating point (16 bit)</option>
+                                    <option data-i18n="Floating point (32 bit)" value="fp32">Floating point (32 bit)</option>
+                                    <option data-i18n="Unknown" value="unknown">Unknown</option>
+                                </select>
+                            </div>
                         </form>
                         <form id="ai21_form" data-source="ai21" action="javascript:void(null);" method="post" enctype="multipart/form-data">
                             <h4 data-i18n="AI21 API Key">AI21 API Key</h4>
@@ -3289,43 +3393,40 @@
                             <div>
                                 <h4 data-i18n="Google Model">Google Model</h4>
                                 <select id="model_google_select">
+                                    <optgroup label="Gemini 3.7">
+                                        <option value="gemini-3.7-flash">gemini-3.7-flash</option>
+                                    </optgroup>
+                                    <optgroup label="Gemini 3.6">
+                                        <option value="gemini-3.6-flash">gemini-3.6-flash</option>
+                                    </optgroup>
+                                    <optgroup label="Gemini 3.5">
+                                        <option value="gemini-3.5-flash">gemini-3.5-flash</option>
+                                        <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite</option>
+                                    </optgroup>
+                                    <optgroup label="Gemini 3.1">
+                                        <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview</option>
+                                        <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite</option>
+                                        <option value="gemini-3.1-flash-image">gemini-3.1-flash-image</option>
+                                    </optgroup>
                                     <optgroup label="Gemini 3.0">
-                                        <option value="gemini-3-pro-preview">gemini-3-pro-preview</option>
-                                        <option value="gemini-3-pro-image-preview">gemini-3-pro-image-preview</option>
+                                        <option value="gemini-3-pro-image">gemini-3-pro-image</option>
                                         <option value="gemini-3-flash-preview">gemini-3-flash-preview</option>
                                     </optgroup>
                                     <optgroup label="Gemini 2.5">
                                         <option value="gemini-2.5-pro">gemini-2.5-pro</option>
-                                        <option value="gemini-2.5-pro-preview-06-05">gemini-2.5-pro-preview-06-05</option>
-                                        <option value="gemini-2.5-pro-preview-05-06">gemini-2.5-pro-preview-05-06</option>
-                                        <option value="gemini-2.5-pro-preview-03-25">gemini-2.5-pro-preview-03-25</option>
                                         <option value="gemini-2.5-flash">gemini-2.5-flash</option>
-                                        <option value="gemini-2.5-flash-preview-09-2025">gemini-2.5-flash-preview-09-2025</option>
-                                        <option value="gemini-2.5-flash-preview-05-20">gemini-2.5-flash-preview-05-20</option>
                                         <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite</option>
-                                        <option value="gemini-2.5-flash-lite-preview-09-2025">gemini-2.5-flash-lite-preview-09-2025</option>
-                                        <option value="gemini-2.5-flash-lite-preview-06-17">gemini-2.5-flash-lite-preview-06-17</option>
                                         <option value="gemini-2.5-flash-image">gemini-2.5-flash-image</option>
-                                        <option value="gemini-2.5-flash-image-preview">gemini-2.5-flash-image-preview</option>
                                     </optgroup>
                                     <optgroup label="Gemini 2.0">
-                                        <option value="gemini-2.0-pro-exp-02-05">gemini-2.0-pro-exp-02-05 → 2.5-exp-03-25</option>
-                                        <option value="gemini-2.0-pro-exp">gemini-2.0-pro-exp → 2.5-exp-03-25</option>
-                                        <option value="gemini-exp-1206">gemini-exp-1206 → 2.5-exp-03-25</option>
-                                        <option value="gemini-2.0-flash-001">gemini-2.0-flash-001</option>
-                                        <option value="gemini-2.0-flash-exp-image-generation">gemini-2.0-flash-exp-image-generation</option>
-                                        <option value="gemini-2.0-flash-preview-image-generation">gemini-2.0-flash-preview-image-generation</option>
-                                        <option value="gemini-2.0-flash-exp">gemini-2.0-flash-exp</option>
-                                        <option value="gemini-2.0-flash">gemini-2.0-flash</option>
-                                        <option value="gemini-2.0-flash-thinking-exp-01-21">gemini-2.0-flash-thinking-exp-01-21 → 2.5-flash-preview-05-20</option>
-                                        <option value="gemini-2.0-flash-thinking-exp-1219">gemini-2.0-flash-thinking-exp-1219 → 2.5-flash-preview-05-20</option>
-                                        <option value="gemini-2.0-flash-thinking-exp">gemini-2.0-flash-thinking-exp → 2.5-flash-preview-05-20</option>
-                                        <option value="gemini-2.0-flash-lite-001">gemini-2.0-flash-lite-001</option>
-                                        <option value="gemini-2.0-flash-lite-preview-02-05">gemini-2.0-flash-lite-preview-02-05</option>
-                                        <option value="gemini-2.0-flash-lite-preview">gemini-2.0-flash-lite-preview</option>
-                                        <option value="gemini-2.0-flash-lite">gemini-2.0-flash-lite</option>
+                                        <option value="gemini-2.0-flash-001">gemini-2.0-flash-001 (deprecated)</option>
+                                        <option value="gemini-2.0-flash">gemini-2.0-flash (deprecated)</option>
+                                        <option value="gemini-2.0-flash-lite-001">gemini-2.0-flash-lite-001 (deprecated)</option>
+                                        <option value="gemini-2.0-flash-lite">gemini-2.0-flash-lite (deprecated)</option>
                                     </optgroup>
                                     <optgroup label="Gemma">
+                                        <option value="gemma-4-31b-it">gemma-4-31b-it</option>
+                                        <option value="gemma-4-26b-a4b-it">gemma-4-26b-a4b-it</option>
                                         <option value="gemma-3n-e4b-it">gemma-3n-e4b-it</option>
                                         <option value="gemma-3n-e2b-it">gemma-3n-e2b-it</option>
                                         <option value="gemma-3-27b-it">gemma-3-27b-it</option>
@@ -3462,9 +3563,23 @@
                                 <h4 data-i18n="Google Model">Google Model</h4>
                                 <select id="model_vertexai_select">
                                     <!-- data-mode="full" is for models that require a service account -->
+                                    <optgroup label="Gemini 3.7">
+                                        <option value="gemini-3.7-flash">gemini-3.7-flash</option>
+                                    </optgroup>
+                                    <optgroup label="Gemini 3.6">
+                                        <option value="gemini-3.6-flash">gemini-3.6-flash</option>
+                                    </optgroup>
+                                    <optgroup label="Gemini 3.5">
+                                        <option value="gemini-3.5-flash">gemini-3.5-flash</option>
+                                        <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite</option>
+                                    </optgroup>
+                                    <optgroup label="Gemini 3.1">
+                                        <option value="gemini-3.1-pro-preview">gemini-3.1-pro-preview</option>
+                                        <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite</option>
+                                        <option value="gemini-3.1-flash-image">gemini-3.1-flash-image</option>
+                                    </optgroup>
                                     <optgroup label="Gemini 3.0">
-                                        <option value="gemini-3-pro-preview">gemini-3-pro-preview</option>
-                                        <option value="gemini-3-pro-image-preview">gemini-3-pro-image-preview</option>
+                                        <option value="gemini-3-pro-image">gemini-3-pro-image</option>
                                         <option value="gemini-3-flash-preview">gemini-3-flash-preview</option>
                                     </optgroup>
                                     <optgroup label="Gemini 2.5">
@@ -3472,14 +3587,11 @@
                                         <option value="gemini-2.5-flash">gemini-2.5-flash</option>
                                         <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite</option>
                                         <option value="gemini-2.5-flash-image">gemini-2.5-flash-image</option>
-                                        <option value="gemini-2.5-flash-image-preview">gemini-2.5-flash-image-preview</option>
                                     </optgroup>
                                     <optgroup label="Gemini 2.0">
-                                        <option value="gemini-2.0-flash-exp" data-mode="full">gemini-2.0-flash-exp</option>
-                                        <option value="gemini-2.0-flash-preview-image-generation" data-mode="full">gemini-2.0-flash-preview-image-generation</option>
-                                        <option value="gemini-2.0-flash">gemini-2.0-flash</option>
-                                        <option value="gemini-2.0-flash-001">gemini-2.0-flash-001</option>
-                                        <option value="gemini-2.0-flash-lite-001">gemini-2.0-flash-lite-001</option>
+                                        <option value="gemini-2.0-flash">gemini-2.0-flash (deprecated)</option>
+                                        <option value="gemini-2.0-flash-001">gemini-2.0-flash-001 (deprecated)</option>
+                                        <option value="gemini-2.0-flash-lite-001">gemini-2.0-flash-lite-001 (deprecated)</option>
                                     </optgroup>
                                 </select>
                             </div>
@@ -3533,9 +3645,40 @@
                             <div data-for="api_key_siliconflow" class="neutral_warning" data-i18n="For privacy reasons, your API key will be hidden after you click 'Connect'.">
                                 For privacy reasons, your API key will be hidden after you click 'Connect'.
                             </div>
+                            <h4 data-i18n="SiliconFlow Endpoint">SiliconFlow Endpoint</h4>
+                            <select id="siliconflow_endpoint">
+                                <option value="global" data-i18n="Global (siliconflow.com)">Global (siliconflow.com)</option>
+                                <option value="cn" data-i18n="China (siliconflow.cn)">China (siliconflow.cn)</option>
+                            </select>
                             <h4>SiliconFlow Model</h4>
                             <select id="model_siliconflow_select">
                                 <option value="" data-i18n="-- Connect to the API --">-- Connect to the API --</option>
+                            </select>
+                        </div>
+                        <div id="minimax_form" data-source="minimax">
+                            <h4 data-i18n="MiniMax API Key">MiniMax API Key</h4>
+                            <div class="flex-container">
+                                <input id="api_key_minimax" name="api_key_minimax" class="text_pole flex1" value="" type="text" autocomplete="off">
+                                <div title="Manage API keys" data-i18n="[title]Manage API keys" class="menu_button fa-solid fa-key fa-fw manage-api-keys" data-key="api_key_minimax"></div>
+                            </div>
+                            <div data-for="api_key_minimax" class="neutral_warning" data-i18n="For privacy reasons, your API key will be hidden after you click 'Connect'.">
+                                For privacy reasons, your API key will be hidden after you click 'Connect'.
+                            </div>
+                            <h4 data-i18n="MiniMax Endpoint">MiniMax Endpoint</h4>
+                            <select id="minimax_endpoint">
+                                <option value="global" data-i18n="Global (minimax.io)">Global (minimax.io)</option>
+                                <option value="cn" data-i18n="China (minimaxi.com)">China (minimaxi.com)</option>
+                            </select>
+                            <h4 data-i18n="MiniMax Model">MiniMax Model</h4>
+                            <select id="model_minimax_select">
+                                <option value="MiniMax-M2.7">MiniMax-M2.7</option>
+                                <option value="MiniMax-M2.7-highspeed">MiniMax-M2.7-highspeed</option>
+                                <option value="MiniMax-M2.5">MiniMax-M2.5</option>
+                                <option value="MiniMax-M2.5-highspeed">MiniMax-M2.5-highspeed</option>
+                                <option value="MiniMax-M2.1">MiniMax-M2.1</option>
+                                <option value="MiniMax-M2.1-highspeed">MiniMax-M2.1-highspeed</option>
+                                <option value="MiniMax-M2">MiniMax-M2</option>
+                                <option value="M2-her">M2-her</option>
                             </select>
                         </div>
                         <div id="electronhub_form" data-source="electronhub">
@@ -3556,37 +3699,6 @@
                                     <option value="" data-i18n="-- Connect to the API --">-- Connect to the API --</option>
                                 </select>
                             </div>
-                            <div class="marginTopBot5">
-                                <div class="inline-drawer wide100p">
-                                    <div class="inline-drawer-toggle inline-drawer-header">
-                                        <b data-i18n="Electron Hub Model Sorting">Electron Hub Model Sorting</b>
-                                        <div class="fa-solid fa-circle-chevron-down inline-drawer-icon down"></div>
-                                    </div>
-                                    <div class="inline-drawer-content m-b-1">
-                                        <div class="marginTopBot5">
-                                            <label for="electronhub_sort_models" class="checkbox_label">
-                                                <select id="electronhub_sort_models">
-                                                    <option data-i18n="Alphabetically" value="alphabetically">Alphabetically</option>
-                                                    <option data-i18n="Input Price" value="pricing.input">Input Price (cheapest)</option>
-                                                    <option data-i18n="Output Price" value="pricing.output">Output Price (cheapest)</option>
-                                                    <option data-i18n="Context Size" value="context_length">Context Size</option>
-                                                </select>
-                                            </label>
-                                        </div>
-                                        <div class="marginTopBot5">
-                                            <label for="electronhub_group_models" class="checkbox_label">
-                                                <input id="electronhub_group_models" type="checkbox" />
-                                                <span data-i18n="Group by vendors">Group by vendors</span>
-                                            </label>
-                                            <div class="toggle-description justifyLeft wide100p">
-                                                <span data-i18n="Group by vendors Description">
-                                                    Put OpenAI models in one group, Anthropic models in other group, etc. Can be combined with sorting.
-                                                </span>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
                         </div>
                         <div id="chutes_form" data-source="chutes">
                             <h4 data-i18n="Chutes API Key">Chutes API Key</h4>
@@ -3606,29 +3718,11 @@
                                     <option value="" data-i18n="-- Connect to the API --">-- Connect to the API --</option>
                                 </select>
                             </div>
-                            <div class="marginTopBot5">
-                                <div class="inline-drawer wide100p">
-                                    <div class="inline-drawer-toggle inline-drawer-header">
-                                        <b data-i18n="Chutes Model Sorting">Chutes Model Sorting</b>
-                                        <div class="fa-solid fa-circle-chevron-down inline-drawer-icon down"></div>
-                                    </div>
-                                    <div class="inline-drawer-content m-b-1">
-                                        <div class="marginTopBot5">
-                                            <label for="chutes_sort_models" class="checkbox_label">
-                                                <select id="chutes_sort_models">
-                                                    <option data-i18n="Alphabetically" value="alphabetically">Alphabetically</option>
-                                                    <option data-i18n="Input Price" value="pricing.input">Input Price (cheapest)</option>
-                                                    <option data-i18n="Output Price" value="pricing.output">Output Price (cheapest)</option>
-                                                    <option data-i18n="Context Size" value="context_length">Context Size</option>
-                                                </select>
-                                            </label>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
                         </div>
                         <div id="nanogpt_form" data-source="nanogpt">
                             <h4 data-i18n="NanoGPT API Key">NanoGPT API Key</h4>
+                            <a href="https://nano-gpt.com/balance" target="_blank" rel="noopener noreferrer" class="nanogpt_view_credits" data-i18n="View Remaining Credits">View Remaining Credits</a>
+                            <span class="nanogpt_credits_display marginLeft5"></span>
                             <div class="flex-container">
                                 <input id="api_key_nanogpt" name="api_key_nanogpt" class="text_pole flex1" value="" type="text" autocomplete="off">
                                 <div title="Manage API keys" data-i18n="[title]Manage API keys" class="menu_button fa-solid fa-key fa-fw manage-api-keys" data-key="api_key_nanogpt"></div>
@@ -3639,6 +3733,39 @@
                             <div>
                                 <h4 data-i18n="NanoGPT Model">NanoGPT Model</h4>
                                 <select id="model_nanogpt_select">
+                                    <option value="" data-i18n="-- Connect to the API --">-- Connect to the API --</option>
+                                </select>
+                            </div>
+                            <div>
+                                <h4>
+                                    <span data-i18n="Model Providers">Model Providers</span>
+                                    <i id="nanogpt_provider_warning" class="fa-solid fa-circle-exclamation displayNone" title="Deselect inapplicable provider(s) or select an applicable provider to avoid a 404 error."></i>
+                                </h4>
+                                <select id="nanogpt_provider">
+                                    <option value="" data-i18n="Auto">Auto</option>
+                                </select>
+                                <label class="checkbox_label marginTopBot5" for="nanogpt_payg_override" data-i18n="[title]Force NanoGPT pay-as-you-go billing for this request." title="Force NanoGPT pay-as-you-go billing for this request.">
+                                    <input id="nanogpt_payg_override" type="checkbox" />
+                                    <span data-i18n="Use pay-as-you-go billing">Use pay-as-you-go billing</span>
+                                </label>
+                            </div>
+                        </div>
+                        <div id="workers_ai_form" data-source="workers_ai">
+                            <h4><a href="https://dash.cloudflare.com/?to=/:account/ai/workers-ai/api-quick-start" target="_blank" rel="noopener noreferrer" data-i18n="Cloudflare Workers AI API Key">Cloudflare Workers AI API Key</a></h4>
+                            <div class="flex-container">
+                                <input id="api_key_workers_ai" name="api_key_workers_ai" class="text_pole flex1" value="" type="text" autocomplete="off">
+                                <div title="Manage API keys" data-i18n="[title]Manage API keys" class="menu_button fa-solid fa-key fa-fw manage-api-keys" data-key="api_key_workers_ai"></div>
+                            </div>
+                            <div data-for="api_key_workers_ai" class="neutral_warning" data-i18n="For privacy reasons, your API key will be hidden after you click 'Connect'.">
+                                For privacy reasons, your API key will be hidden after you click 'Connect'.
+                            </div>
+                            <h4><a href="https://dash.cloudflare.com/?to=/:account/workers-and-pages" target="_blank" rel="noopener noreferrer" data-i18n="Cloudflare Account ID">Cloudflare Account ID</a></h4>
+                            <div class="flex-container">
+                                <input id="workers_ai_account_id" class="text_pole flex1" value="" type="text" autocomplete="off" placeholder="e.g. 023e105f4ecef8ad9ca31a8372d0c353" data-i18n="[placeholder]e.g. 023e105f4ecef8ad9ca31a8372d0c353">
+                            </div>
+                            <div>
+                                <h4 data-i18n="Workers AI Model">Workers AI Model</h4>
+                                <select id="model_workers_ai_select">
                                     <option value="" data-i18n="-- Connect to the API --">-- Connect to the API --</option>
                                 </select>
                             </div>
@@ -3655,9 +3782,7 @@
                             <div>
                                 <h4 data-i18n="DeepSeek Model">DeepSeek Model</h4>
                                 <select id="model_deepseek_select">
-                                    <option value="deepseek-chat">deepseek-chat</option>
-                                    <option value="deepseek-coder">deepseek-coder</option>
-                                    <option value="deepseek-reasoner">deepseek-reasoner</option>
+                                    <option value="" data-i18n="-- Connect to the API --">-- Connect to the API --</option>
                                 </select>
                             </div>
                         </div>
@@ -3831,19 +3956,29 @@
                             </select>
                         </div>
                         <div id="pollinations_form" data-source="pollinations">
+                            <h4 data-i18n="Pollinations Endpoint">Pollinations Endpoint</h4>
+                            <select id="pollinations_endpoint">
+                                <option value="anonymous" data-i18n="Anonymous (No Key)">Anonymous (No Key)</option>
+                                <option value="authenticated" data-i18n="Authenticated (API Key)">Authenticated (API Key)</option>
+                            </select>
+                            <div id="pollinations_key_section">
+                                <h4>
+                                    <a href="https://enter.pollinations.ai/" target="_blank" rel="noopener noreferrer" data-i18n="Pollinations API Key">
+                                        Pollinations API Key
+                                    </a>
+                                </h4>
+                                <div class="flex-container">
+                                    <input id="api_key_pollinations" name="api_key_pollinations" class="text_pole flex1" value="" type="text" placeholder="sk_..." autocomplete="off">
+                                    <div title="Manage API keys" data-i18n="[title]Manage API keys" class="menu_button fa-solid fa-key fa-fw manage-api-keys" data-key="api_key_pollinations"></div>
+                                </div>
+                                <div data-for="api_key_pollinations" class="neutral_warning" data-i18n="For privacy reasons, your API key will be hidden after you click 'Connect'.">
+                                    For privacy reasons, your API key will be hidden after you click 'Connect'.
+                                </div>
+                            </div>
                             <h4 data-i18n="Pollinations Model">Pollinations Model</h4>
                             <select id="model_pollinations_select">
                                 <!-- Populated by JavaScript -->
                             </select>
-                            <div class="info-block hint">
-                                <a href="https://pollinations.ai/" target="_blank" rel="noopener noreferrer" data-i18n="Provided free of charge by Pollinations.AI">
-                                    Provided free of charge by Pollinations.AI
-                                </a>
-                                <br>
-                                <span data-i18n="Avoid sending sensitive information. Provider's outputs may include ads.">
-                                    Avoid sending sensitive information. Provider's outputs may include ads.
-                                </span>
-                            </div>
                         </div>
                         <div id="moonshot_form" data-source="moonshot">
                             <h4>
@@ -3892,7 +4027,14 @@
                             </select>
                             <h4 data-i18n="Z.AI Model">Z.AI Model</h4>
                             <select id="model_zai_select">
+                                <option value="glm-5.2">glm-5.2</option>
+                                <option value="glm-5-turbo">glm-5-turbo</option>
+                                <option value="glm-5v-turbo">glm-5v-turbo</option>
+                                <option value="glm-5.1">glm-5.1</option>
+                                <option value="glm-5">glm-5</option>
                                 <option value="glm-4.7">glm-4.7</option>
+                                <option value="glm-4.7-flash">glm-4.7-flash</option>
+                                <option value="glm-4.7-flashx">glm-4.7-flashx</option>
                                 <option value="glm-4.6">glm-4.6</option>
                                 <option value="glm-4.6v">glm-4.6v</option>
                                 <option value="glm-4.6v-flash">glm-4.6v-flash</option>
@@ -3932,7 +4074,7 @@
                             <!-- Azure API Key -->
                             <h4><span data-i18n="Azure API Key">Azure API Key</span></h4>
                             <div class="flex-container">
-                                <input id="api_key_azure_openai" data-setting="api_key_azure_openai" class="text_pole flex1" type="password" autocomplete="off">
+                                <input id="api_key_azure_openai" data-setting="api_key_azure_openai" class="text_pole flex1" type="text" autocomplete="off">
                                 <div title="Manage API keys" data-i18n="[title]Manage API keys" class="menu_button fa-solid fa-key fa-fw manage-api-keys" data-key="api_key_azure_openai"></div>
                             </div>
                             <div class="neutral_warning" data-i18n="For privacy reasons, your API key will be hidden after you click 'Connect'." data-for="api_key_azure_openai">
@@ -3948,6 +4090,37 @@
                             </div>
                             <div>
                                 <small data-i18n="The underlying model of your deployment. This is detected automatically when you connect.">The underlying model of your deployment. This is detected automatically when you connect.</small>
+                            </div>
+                        </div>
+                        <div id="model_sorting_form" data-source="openrouter,chutes,electronhub,nanogpt,aimlapi">
+                            <div class="inline-drawer wide100p">
+                                <div class="inline-drawer-toggle inline-drawer-header">
+                                    <b data-i18n="Model Sorting">Model Sorting</b>
+                                    <div class="fa-solid fa-circle-chevron-down inline-drawer-icon down"></div>
+                                </div>
+                                <div class="inline-drawer-content m-b-1">
+                                    <div class="marginTopBot5">
+                                        <label for="cc_sort_models" class="checkbox_label">
+                                            <select id="cc_sort_models">
+                                                <option data-i18n="Alphabetically" value="alphabetically">Alphabetically</option>
+                                                <option data-i18n="Prompt Price (cheapest)" value="pricing.prompt">Prompt Price (cheapest)</option>
+                                                <option data-i18n="Completion Price (cheapest)" value="pricing.completion">Completion Price (cheapest)</option>
+                                                <option data-i18n="Context Size" value="context_length">Context Size</option>
+                                            </select>
+                                        </label>
+                                    </div>
+                                    <div class="marginTopBot5">
+                                        <label for="cc_group_models" class="checkbox_label">
+                                            <input id="cc_group_models" type="checkbox" />
+                                            <span data-i18n="Group by vendors">Group by vendors</span>
+                                        </label>
+                                        <div class="toggle-description justifyLeft wide100p">
+                                            <span data-i18n="Group by vendors Description">
+                                                Put OpenAI models in one group, Anthropic models in other group, etc. Can be combined with sorting.
+                                            </span>
+                                        </div>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                         <div id="prompt_post_processing_form">
@@ -4063,7 +4236,7 @@
                                         <small data-i18n="Story String">Story String</small>
                                         <i class="editor_maximize fa-solid fa-maximize right_menu_button" data-for="context_story_string" title="Expand the editor" data-i18n="[title]Expand the editor"></i>
                                     </label>
-                                    <textarea id="context_story_string" class="text_pole textarea_compact autoSetHeight"></textarea>
+                                    <textarea id="context_story_string" data-macros class="text_pole textarea_compact autoSetHeight"></textarea>
                                 </div>
                                 <div class="flex-container flexFlowColumn" data-cc-null>
                                     <div id="context_story_string_position_block">
@@ -4100,7 +4273,7 @@
                                             <small data-i18n="Example Separator">Example Separator</small>
                                         </label>
                                         <div>
-                                            <textarea id="context_example_separator" class="text_pole textarea_compact autoSetHeight"></textarea>
+                                            <textarea id="context_example_separator" data-macros class="text_pole textarea_compact autoSetHeight"></textarea>
                                         </div>
                                     </div>
                                     <div class="flex1">
@@ -4108,7 +4281,7 @@
                                             <small data-i18n="Chat Start">Chat Start</small>
                                         </label>
                                         <div>
-                                            <textarea id="context_chat_start" class="text_pole textarea_compact autoSetHeight"></textarea>
+                                            <textarea id="context_chat_start" data-macros class="text_pole textarea_compact autoSetHeight"></textarea>
                                         </div>
                                     </div>
                                 </div>
@@ -4272,11 +4445,11 @@
                                 <div class="flex-container">
                                     <div class="flexAuto" title="Inserted before a User message and as a last prompt line when impersonating." data-i18n="[title]Inserted before a User message and as a last prompt line when impersonating.">
                                         <small data-i18n="User Prefix">User Message Prefix</small>
-                                        <textarea id="instruct_input_sequence" class="text_pole textarea_compact autoSetHeight"></textarea>
+                                        <textarea id="instruct_input_sequence" data-macros class="text_pole textarea_compact autoSetHeight"></textarea>
                                     </div>
                                     <div class="flexAuto" title="Inserted after a User message." data-i18n="[title]Inserted after a User message.">
                                         <small data-i18n="User Suffix">User Message Suffix</small>
-                                        <textarea id="instruct_input_suffix" class="text_pole wide100p textarea_compact autoSetHeight"></textarea>
+                                        <textarea id="instruct_input_suffix" data-macros class="text_pole wide100p textarea_compact autoSetHeight"></textarea>
                                     </div>
                                 </div>
                             </details>
@@ -4285,11 +4458,11 @@
                                 <div class="flex-container">
                                     <div class="flexAuto" title="Inserted before an Assistant message and as a last prompt line when generating an AI reply." data-i18n="[title]Inserted before an Assistant message and as a last prompt line when generating an AI reply.">
                                         <small data-i18n="Assistant Prefix">Assistant Message Prefix</small>
-                                        <textarea id="instruct_output_sequence" class="text_pole wide100p textarea_compact autoSetHeight"></textarea>
+                                        <textarea id="instruct_output_sequence" data-macros class="text_pole wide100p textarea_compact autoSetHeight"></textarea>
                                     </div>
                                     <div class="flexAuto" title="Inserted after an Assistant message." data-i18n="[title]Inserted after an Assistant message.">
                                         <small data-i18n="Assistant Suffix">Assistant Message Suffix</small>
-                                        <textarea id="instruct_output_suffix" class="text_pole wide100p textarea_compact autoSetHeight"></textarea>
+                                        <textarea id="instruct_output_suffix" data-macros class="text_pole wide100p textarea_compact autoSetHeight"></textarea>
                                     </div>
                                 </div>
                             </details>
@@ -4298,11 +4471,11 @@
                                 <div class="flex-container">
                                     <div class="flexAuto" id="instruct_system_sequence_block" title="Inserted before a System (added by slash commands or extensions) message." data-i18n="[title]Inserted before a System (added by slash commands or extensions) message.">
                                         <small data-i18n="System Prefix">System Message Prefix</small>
-                                        <textarea id="instruct_system_sequence" class="text_pole textarea_compact autoSetHeight"></textarea>
+                                        <textarea id="instruct_system_sequence" data-macros class="text_pole textarea_compact autoSetHeight"></textarea>
                                     </div>
                                     <div class="flexAuto" id="instruct_system_suffix_block" title="Inserted after a System message." data-i18n="[title]Inserted after a System message.">
                                         <small data-i18n="System Suffix">System Message Suffix</small>
-                                        <textarea id="instruct_system_suffix" class="text_pole wide100p textarea_compact autoSetHeight"></textarea>
+                                        <textarea id="instruct_system_suffix" data-macros class="text_pole wide100p textarea_compact autoSetHeight"></textarea>
                                     </div>
                                 </div>
                                 <div class="flexBasis100p" title="If enabled, System Sequences will be the same as User Sequences." data-i18n="[title]If enabled, System Sequences will be the same as User Sequences.">
@@ -4317,37 +4490,37 @@
                                 <div class="flex-container">
                                     <div class="flexAuto" title="Inserted before the first Assistant's message." data-i18n="[title]Inserted before the first Assistant's message.">
                                         <small data-i18n="First Assistant Prefix">First Assistant Prefix</small>
-                                        <textarea id="instruct_first_output_sequence" class="text_pole textarea_compact autoSetHeight"></textarea>
+                                        <textarea id="instruct_first_output_sequence" data-macros class="text_pole textarea_compact autoSetHeight"></textarea>
                                     </div>
                                     <div class="flexAuto" title="Inserted before the last Assistant's message or as a last prompt line when generating an AI reply (except a neutral/system role)." data-i18n="[title]instruct_last_output_sequence">
                                         <small data-i18n="Last Assistant Prefix">Last Assistant Prefix</small>
-                                        <textarea id="instruct_last_output_sequence" class="text_pole wide100p textarea_compact autoSetHeight"></textarea>
+                                        <textarea id="instruct_last_output_sequence" data-macros class="text_pole wide100p textarea_compact autoSetHeight"></textarea>
                                     </div>
                                 </div>
                                 <div class="flex-container">
                                     <div class="flexAuto" title="Inserted before the first User's message." data-i18n="[title]Inserted before the first User's message.">
                                         <small data-i18n="First User Prefix">First User Prefix</small>
-                                        <textarea id="instruct_first_input_sequence" class="text_pole textarea_compact autoSetHeight"></textarea>
+                                        <textarea id="instruct_first_input_sequence" data-macros class="text_pole textarea_compact autoSetHeight"></textarea>
                                     </div>
-                                    <div class="flexAuto" title="Inserted before the last User's message." data-i18n="[title]instruct_last_input_sequence">
+                                    <div class="flexAuto" title="Inserted before the last User's message or as a last prompt line when generating an impersonation." data-i18n="[title]instruct_last_input_sequence">
                                         <small data-i18n="Last User Prefix">Last User Prefix</small>
-                                        <textarea id="instruct_last_input_sequence" class="text_pole wide100p textarea_compact autoSetHeight"></textarea>
+                                        <textarea id="instruct_last_input_sequence" data-macros class="text_pole wide100p textarea_compact autoSetHeight"></textarea>
                                     </div>
                                 </div>
                                 <div class="flex-container">
                                     <div class="flexAuto" title="Will be inserted as a last prompt line when using system/neutral generation." data-i18n="[title]Will be inserted as a last prompt line when using system/neutral generation.">
                                         <small data-i18n="System Instruction Prefix">System Instruction Prefix</small>
-                                        <textarea id="instruct_last_system_sequence" class="text_pole textarea_compact autoSetHeight"></textarea>
+                                        <textarea id="instruct_last_system_sequence" data-macros class="text_pole textarea_compact autoSetHeight"></textarea>
                                     </div>
                                     <div class="flexAuto" title="If a stop sequence is generated, everything past it will be removed from the output (inclusive)." data-i18n="[title]If a stop sequence is generated, everything past it will be removed from the output (inclusive).">
                                         <small data-i18n="Stop Sequence">Stop Sequence</small>
-                                        <textarea id="instruct_stop_sequence" class="text_pole textarea_compact autoSetHeight"></textarea>
+                                        <textarea id="instruct_stop_sequence" data-macros class="text_pole textarea_compact autoSetHeight"></textarea>
                                     </div>
                                 </div>
                                 <div class="flex-container">
                                     <div class="flexAuto" title="Will be inserted at the start of the chat history if it doesn't start with a User message." data-i18n="[title]Will be inserted at the start of the chat history if it doesn't start with a User message.">
                                         <small data-i18n="User Filler Message">User Filler Message</small>
-                                        <textarea id="instruct_user_alignment_message" class="text_pole textarea_compact autoSetHeight"></textarea>
+                                        <textarea id="instruct_user_alignment_message" data-macros class="text_pole textarea_compact autoSetHeight"></textarea>
                                     </div>
                                 </div>
                             </details>
@@ -4385,7 +4558,7 @@
                                     <small data-i18n="Prompt Content">Prompt Content</small>
                                     <i class="editor_maximize fa-solid fa-maximize right_menu_button" data-for="sysprompt_content" title="Expand the editor" data-i18n="[title]Expand the editor"></i>
                                 </label>
-                                <textarea id="sysprompt_content" class="text_pole textarea_compact autoSetHeight"></textarea>
+                                <textarea id="sysprompt_content" data-macros class="text_pole textarea_compact autoSetHeight"></textarea>
                             </div>
 
                             <div>
@@ -4393,7 +4566,7 @@
                                     <small data-i18n="Post-History Instructions">Post-History Instructions</small>
                                     <i class="editor_maximize fa-solid fa-maximize right_menu_button" data-for="sysprompt_post_history" title="Expand the editor" data-i18n="[title]Expand the editor"></i>
                                 </label>
-                                <textarea id="sysprompt_post_history" class="text_pole textarea_compact autoSetHeight"></textarea>
+                                <textarea id="sysprompt_post_history" data-macros class="text_pole textarea_compact autoSetHeight"></textarea>
                             </div>
                         </div>
 
@@ -4518,17 +4691,17 @@
                                     <div class="flex-container">
                                         <div class="flex1" title="Inserted before the reasoning content." data-i18n="[title]reasoning_prefix">
                                             <small data-i18n="Prefix">Prefix</small>
-                                            <textarea id="reasoning_prefix" class="text_pole textarea_compact autoSetHeight"></textarea>
+                                            <textarea id="reasoning_prefix" data-macros class="text_pole textarea_compact autoSetHeight"></textarea>
                                         </div>
                                         <div class="flex1" title="Inserted after the reasoning content." data-i18n="[title]reasoning_suffix">
                                             <small data-i18n="Suffix">Suffix</small>
-                                            <textarea id="reasoning_suffix" class="text_pole textarea_compact autoSetHeight"></textarea>
+                                            <textarea id="reasoning_suffix" data-macros class="text_pole textarea_compact autoSetHeight"></textarea>
                                         </div>
                                     </div>
                                     <div class="flex-container">
                                         <div class="flex1" title="Inserted between the reasoning and the message content." data-i18n="[title]reasoning_separator">
                                             <small data-i18n="Separator">Separator</small>
-                                            <textarea id="reasoning_separator" class="text_pole textarea_compact autoSetHeight"></textarea>
+                                            <textarea id="reasoning_separator" data-macros class="text_pole textarea_compact autoSetHeight"></textarea>
                                         </div>
                                     </div>
                                 </details>
@@ -4550,7 +4723,7 @@
                                     </span>
                                 </small>
                                 <div>
-                                    <input id="markdown_escape_strings" class="text_pole textarea_compact" type="text" data-i18n="[placeholder]comma delimited,no spaces between" placeholder="comma delimited,no spaces between" />
+                                    <input id="markdown_escape_strings" data-macros class="text_pole textarea_compact" type="text" data-i18n="[placeholder]comma delimited,no spaces between" placeholder="comma delimited,no spaces between" />
                                 </div>
                             </div>
 
@@ -4562,7 +4735,7 @@
                                         </span>
                                     </small>
                                     <div>
-                                        <textarea id="start_reply_with" class="text_pole textarea_compact autoSetHeight"></textarea>
+                                        <textarea id="start_reply_with" data-macros class="text_pole textarea_compact autoSetHeight"></textarea>
                                     </div>
                                     <label class="checkbox_label" for="chat-show-reply-prefix-checkbox">
                                         <input id="chat-show-reply-prefix-checkbox" type="checkbox" />
@@ -4739,7 +4912,7 @@
                             <input type="file" id="world_import_file" accept=".json,.lorebook,.png" name="avatar" hidden>
                             <div id="world_create_button" class="menu_button menu_button_icon">
                                 <i class="fa-solid fa-globe"></i>
-                                <span data-i18n="New">New</span>
+                                <span data-i18n="Create">Create</span>
                             </div>
                             <small data-i18n="or">or</small>
                             <select id="world_editor_select">
@@ -4869,7 +5042,7 @@
                         <div name="themeElements" class="flex-container flexFlowColumn flexNoGap">
                             <!-- <h4><span data-i18n="UI Colors">Theme Settings</span></h4> -->
                             <div name="AvatarAndChatDisplay" class="flex-container flexFlowColumn">
-                                <div class="flex-container alignItemsBaseline" title="This style applies to all avatars globaly, including your Persona, Character Managment, Account selection, etc." data-i18n="[title]This style applies to all avatars globaly, including your Persona, Character Managment, Account selection, etc.">
+                                <div class="flex-container alignItemsBaseline" title="This style applies to all avatars globaly, including your Persona, Character Management, Account selection, etc." data-i18n="[title]This style applies to all avatars globaly, including your Persona, Character Management, Account selection, etc.">
                                     <span data-i18n="Avatar Style:">Avatars:</span>
                                     <select id="avatar_style" class="widthNatural flex1 margin0 text_pole">
                                         <option value="0" data-i18n="Circle">Circle</option>
@@ -5470,18 +5643,26 @@
                                     <div class="fa-solid fa-circle-chevron-down inline-drawer-icon down"></div>
                                 </div>
                                 <div class="inline-drawer-content">
-                                    <label for="stscript_autocomplete_state">
-                                        <small data-i18n="Visibility">Visibility</small>
-                                    </label>
-                                    <select id="stscript_autocomplete_state">
-                                        <option value="0" data-i18n="Don't show">Don't show</option>
-                                        <option value="1" data-i18n="Input length > 1">Input length > 1</option>
-                                        <option value="2" data-i18n="Always show">Always show</option>
-                                    </select>
+                                    <div class="flex1" title="When to show the autocomplete for slash commands and macros." data-i18n="[title]When to show the autocomplete for slash commands and macros.">
+                                        <label for="stscript_autocomplete_state">
+                                            <small data-i18n="Visibility">Visibility</small>
+                                        </label>
+                                        <select id="stscript_autocomplete_state">
+                                            <option value="0" data-i18n="Don't show">Don't show</option>
+                                            <option value="1" data-i18n="Input length > 1">Input length > 1</option>
+                                            <option value="2" data-i18n="Always show">Always show</option>
+                                        </select>
+                                    </div>
                                     <label class="checkbox_label" for="stscript_autocomplete_autoHide">
                                         <input id="stscript_autocomplete_autoHide" type="checkbox" />
                                         <small data-i18n="Automatically hide details">
                                             Automatically hide details
+                                        </small>
+                                    </label>
+                                    <label class="checkbox_label" for="stscript_autocomplete_showInAllMacroFields" title="Show macro autocomplete in all macro-enabled fields. When off, autocomplete only shows in expanded editors or when pressing Ctrl+Space." data-i18n="[title]Show macro autocomplete in all macro-enabled fields. When off, autocomplete only shows in expanded editors or when pressing Ctrl+Space.">
+                                        <input id="stscript_autocomplete_showInAllMacroFields" type="checkbox" />
+                                        <small data-i18n="Show in all macro fields">
+                                            Show in all macro fields
                                         </small>
                                     </label>
                                     <div class="flex-container">
@@ -5600,6 +5781,10 @@
                             <i class="fa-solid fa-wand-magic"></i>
                             <span data-i18n="Auto-select">Auto-select</span>
                         </div>
+                        <button id="bg_add_folder_button" class="menu_button menu_button_icon" data-i18n="[title]New Folder" title="New Folder">
+                            <i class="fa-solid fa-folder-plus"></i>
+                            <span data-i18n="New Folder">New Folder</span>
+                        </button>
                         <label for="add_bg_button" id="add_background_button_top" class="menu_button menu_button_icon" data-i18n="[title]Add a new background" title="Add a new background">
                             <i class="fa-solid fa-upload"></i>
                             <span data-i18n="Add Background">Add Background</span>
@@ -5607,6 +5792,12 @@
                     </div>
                     <div class="bg-header-row-2">
                         <input id="bg-filter" class="text_pole" type="search" data-i18n="[placeholder]Search..." placeholder="Search..." />
+                        <select id="bg-sort" class="text_pole margin0" title="Sort backgrounds" data-i18n="[title]Sort backgrounds">
+                            <option value="az" data-i18n="A-Z">A-Z</option>
+                            <option value="za" data-i18n="Z-A">Z-A</option>
+                            <option value="newest" data-i18n="Newest">Newest</option>
+                            <option value="oldest" data-i18n="Oldest">Oldest</option>
+                        </select>
                     </div>
                 </div>
                 <div id="bg_tabs" class="heading-container-with-controls">
@@ -5618,6 +5809,14 @@
                             <a href="#bg_chat_tab" data-i18n="Chat">Chat</a>
                         </li>
                         <div class="heading-controls">
+                            <button id="bg_group_add_to_folder_button" class="menu_button menu_button_icon" style="display:none;" data-i18n="[title]Add selected backgrounds to folder" title="Add selected backgrounds to folder">
+                                <i class="fa-solid fa-folder-tree"></i>
+                                <span data-i18n="Add to Folder">Add to Folder</span>
+                            </button>
+                            <button id="bg_selection_mode_button" class="menu_button menu_button_icon" data-i18n="[title]Select backgrounds for bulk folder actions" title="Select backgrounds for bulk folder actions">
+                                <i class="fa-solid fa-edit"></i>
+                                <span id="bg_group_select_count" style="display:none;"></span>
+                            </button>
                             <button id="bg_thumb_zoom_out" class="menu_button menu_button_icon" title="Make thumbnails smaller" data-i18n="[title]Make thumbnails smaller">
                                 <i class="fa-solid fa-minus"></i>
                             </button>
@@ -5627,6 +5826,19 @@
                         </div>
                     </ul>
                     <div id="bg_global_tab" class="bg_tab_panel">
+                        <div id="bg_folder_breadcrumb" class="bg_folder_breadcrumb" style="display:none;">
+                            <button id="bg_back_to_folders" class="menu_button menu_button_icon">
+                                <i class="fa-solid fa-arrow-left"></i>
+                                <span data-i18n="Back">Back</span>
+                            </button>
+                            <span id="bg_current_folder_name" class="bg_current_folder_name"></span>
+                            <span class="expander"></span>
+                            <button id="bg_folder_remove_selected_button" class="menu_button menu_button_icon" style="display:none;" data-i18n="[title]Remove selected backgrounds from this folder" title="Remove selected backgrounds from this folder">
+                                <i class="fa-solid fa-folder-minus"></i>
+                                <span data-i18n="Remove from Folder">Remove from Folder</span>
+                            </button>
+                        </div>
+                        <div id="bg_folder_grid" class="bg_list bg_folder_grid"></div>
                         <div id="bg_menu_content" class="bg_list"></div>
                     </div>
                     <div id="bg_chat_tab" class="bg_tab_panel">
@@ -5791,19 +6003,25 @@
                                     <div class="persona_controls_buttons_block buttons_block">
                                         <div id="persona_rename_button" class="menu_button fa-solid fa-pencil" title="Rename Persona" data-i18n="[title]Rename Persona"></div>
                                         <div id="sync_name_button" class="menu_button fa-solid fa-sync" title="Click to set user name for all messages" data-i18n="[title]Click to set user name for all messages"></div>
-                                        <div id="persona_lore_button" class="menu_button fa-solid fa-globe" title="Persona Lore&#10;Alt+Click to open the lorebook" data-i18n="[title]Persona Lore Alt+Click to open the lorebook"></div>
+                                        <div id="persona_lore_button" class="menu_button fa-solid fa-globe" title="Persona Lore&#10;&#10;Click to load&#10;Shift/Alt-click or long-press to open 'Link to Persona Lorebook' popup" data-i18n="[title]persona_lore_button_title"></div>
 
                                         <div id="persona_set_image_button" class="menu_button fa-solid fa-image" title="Change Persona Image" data-i18n="[title]Change Persona Image"></div>
                                         <div id="persona_duplicate_button" class="menu_button fa-solid fa-clone" title="Duplicate Persona" data-i18n="[title]Duplicate Persona"></div>
                                         <div id="persona_delete_button" class="menu_button fa-solid fa-skull red_button" title="Delete Persona" data-i18n="[title]Delete Persona"></div>
                                     </div>
+                                    <label class="flex1 height100p" for="persona-management-dropdown">
+                                        <select id="persona-management-dropdown" class="text_pole">
+                                            <option value="default" disabled selected data-i18n="More...">More...</option>
+                                            <option id="persona_lorebook_link" data-i18n="Link to Persona Lorebook">Link to Persona Lorebook</option>
+                                        </select>
+                                    </label>
                                 </div>
 
                                 <h4 class="flex-container alignItemsBaseline">
                                     <span data-i18n="Persona Description">Persona Description</span>
                                     <i class="editor_maximize fa-solid fa-maximize right_menu_button" data-for="persona_description" title="Expand the editor" data-i18n="[title]Expand the editor"></i>
                                 </h4>
-                                <textarea id="persona_description" name="persona_description" data-i18n="[placeholder]Example: [{{user}} is a 28-year-old Romanian cat girl.]" placeholder="Example:&#10;[{{user}} is a 28-year-old Romanian cat girl.]" class="text_pole textarea_compact" value="" autocomplete="off" rows="8"></textarea>
+                                <textarea id="persona_description" name="persona_description" data-macros data-i18n="[placeholder]Example: [{{user}} is a 28-year-old Romanian cat girl.]" placeholder="Example:&#10;[{{user}} is a 28-year-old Romanian cat girl.]" class="text_pole textarea_compact" value="" autocomplete="off" rows="8"></textarea>
 
                                 <div class="flex-container justifySpaceBetween">
                                     <h4 data-i18n="Position">Position</h4>
@@ -5962,8 +6180,8 @@
                                                 <div id="favorite_button" class="menu_button fa-solid fa-star" title="Add to Favorites" data-i18n="[title]Add to Favorites"></div>
                                                 <input type="hidden" id="fav_checkbox" name="fav" />
                                                 <div id="advanced_div" class="menu_button fa-solid fa-book " title="Advanced Definitions" data-i18n="[title]Advanced Definition"></div>
-                                                <div id="world_button" class="menu_button fa-solid fa-globe" title="Character Lore&#10;&#10;Click to load&#10;Shift-click to open 'Link to World Info' popup" data-i18n="[title]world_button_title"></div>
-                                                <div class="chat_lorebook_button menu_button fa-solid fa-passport" title="Chat Lore&#10;Alt+Click to open the lorebook" data-i18n="[title]Chat Lore Alt+Click to open the lorebook"></div>
+                                                <div id="world_button" class="menu_button fa-solid fa-globe" title="Character Lore&#10;&#10;Click to load&#10;Shift/Alt-click or long-press to open 'Link to World Info' popup" data-i18n="[title]world_button_title"></div>
+                                                <div class="chat_lorebook_button menu_button fa-solid fa-passport" title="Chat Lore&#10;&#10;Click to load&#10;Shift/Alt-click or long-press to open 'Link to Chat Lorebook' popup" data-i18n="[title]chat_lorebook_button_title"></div>
                                                 <div id="char_connections_button" class="menu_button fa-solid fa-face-smile" title="Connected Personas" data-i18n="[title]Connected Personas"></div>
                                                 <div id="export_button" class="menu_button fa-solid fa-file-export " title="Export and Download" data-i18n="[title]Export and Download"></div>
                                                 <!-- <div id="set_chat_character_settings" class="menu_button fa-solid fa-scroll" title="Set a chat scenario override"></div> -->
@@ -6062,7 +6280,7 @@
                                         </span>
                                     </div>
                                 </div>
-                                <textarea id="description_textarea" class="mdHotkeys" data-i18n="[placeholder]Describe your character's physical and mental traits here." placeholder="Describe your character's physical and mental traits here." name="description" placeholder=""></textarea>
+                                <textarea id="description_textarea" class="mdHotkeys" data-macros data-i18n="[placeholder]Describe your character's physical and mental traits here." placeholder="Describe your character's physical and mental traits here." name="description" placeholder=""></textarea>
                                 <div class="extension_token_counter">
                                     <span data-i18n="extension_token_counter">Tokens:</span> <span data-token-counter="description_textarea" data-token-permanent="true">counting...</span>
                                 </div>
@@ -6082,7 +6300,7 @@
                                         </span>
                                     </div>
                                 </div>
-                                <textarea class="mdHotkeys" id="firstmessage_textarea" data-i18n="[placeholder]This will be the first message from the character that starts every chat." placeholder="This will be the first message from the character that starts every chat." name="first_mes" placeholder=""></textarea>
+                                <textarea id="firstmessage_textarea" class="mdHotkeys" data-macros data-i18n="[placeholder]This will be the first message from the character that starts every chat." placeholder="This will be the first message from the character that starts every chat." name="first_mes" placeholder=""></textarea>
                                 <div class="extension_token_counter">
                                     <span data-i18n="extension_token_counter">Tokens:</span> <span data-token-counter="firstmessage_textarea">counting...</span>
                                 </div>
@@ -6114,8 +6332,14 @@
                                 <div id="group-metadata-controls" class="marginTopBot5">
                                     <div class="flex-container wide100p">
                                         <input id="rm_group_chat_name" class="text_pole flex1" type="text" name="chat_name" data-i18n="[placeholder]Chat Name (Optional)" placeholder="Chat Name (Optional)" />
-                                        <div class="chat_lorebook_button menu_button fa-solid fa-passport" title="Chat Lore" data-i18n="[title]Chat Lore"></div>
+                                        <div class="chat_lorebook_button menu_button fa-solid fa-passport" title="Chat Lore&#10;&#10;Click to load&#10;Shift/Alt-click or long-press to open 'Link to Chat Lorebook' popup" data-i18n="[title]chat_lorebook_button_title"></div>
                                     </div>
+                                    <label class="flex1 height100p" for="group-chat-lorebook-dropdown">
+                                        <select id="group-chat-lorebook-dropdown" class="text_pole">
+                                            <option value="default" disabled selected data-i18n="More...">More...</option>
+                                            <option id="group_chat_lorebook_link" data-i18n="Link to Chat Lorebook">Link to Chat Lorebook</option>
+                                        </select>
+                                    </label>
                                     <div id="group_tags_div" class="wide100p">
                                         <div class="tag_controls">
                                             <input id="groupTagInput" class="text_pole textarea_compact tag_input flex1 margin0" data-i18n="[placeholder]Search / Create Tags" placeholder="Search / Create tags" />
@@ -6212,6 +6436,12 @@
                             </div>
                             <div class="inline-drawer-content">
                                 <div id="currentGroupMembers" name="Current Group Members" class="flex-container flexFlowColumn overflowYAuto flex1">
+                                    <div id="rm_group_members_header">
+                                        <input id="rm_group_members_filter" class="text_pole margin0" type="search" data-i18n="[placeholder]Search..." placeholder="Search..." />
+                                    </div>
+                                    <div class="rm_tag_controls">
+                                        <div class="tags rm_tag_filter"></div>
+                                    </div>
                                     <div id="rm_group_members_pagination" class="rm_group_members_pagination group_pagination"></div>
                                     <div id="rm_group_members" class="rm_group_members overflowYAuto flex-container" group_empty_text="Group is empty." data-i18n="[group_empty_text]Group is empty."></div>
                                 </div>
@@ -6223,7 +6453,7 @@
                                 <div class="fa-solid fa-circle-chevron-down inline-drawer-icon down"></div>
                             </div>
                             <div class="inline-drawer-content">
-                                <div name="Unadded Char List" class="flex-container flexFlowColumn overflowYAuto flex1">
+                                <div id="unaddedCharList" name="Unadded Char List" class="flex-container flexFlowColumn overflowYAuto flex1">
                                     <div id="rm_group_add_members_header">
                                         <input id="rm_group_filter" class="text_pole margin0" type="search" data-i18n="[placeholder]Search..." placeholder="Search..." />
                                     </div>
@@ -6400,7 +6630,7 @@
                             <span data-i18n="Main Prompt">Main Prompt</span>
                             <i class="editor_maximize fa-solid fa-maximize right_menu_button" data-for="system_prompt_textarea" title="Expand the editor" data-i18n="[title]Expand the editor"></i>
                         </h4>
-                        <textarea id="system_prompt_textarea" name="system_prompt" data-i18n="[placeholder]Any contents here will replace the default Main Prompt used for this character. (v2 spec: system_prompt)" placeholder="Any contents here will replace the default Main Prompt used for this character.&#10;(v2 spec: system_prompt)" form="form_create" class="text_pole" autocomplete="off" rows="3"></textarea>
+                        <textarea id="system_prompt_textarea" name="system_prompt" data-macros data-i18n="[placeholder]Any contents here will replace the default Main Prompt used for this character. (v2 spec: system_prompt)" placeholder="Any contents here will replace the default Main Prompt used for this character.&#10;(v2 spec: system_prompt)" form="form_create" class="text_pole" autocomplete="off" rows="3"></textarea>
                         <div class="extension_token_counter">
                             <span data-i18n="extension_token_counter">Tokens:</span> <span data-token-counter="system_prompt_textarea">counting...</span>
                         </div>
@@ -6410,7 +6640,7 @@
                             <span data-i18n="Post-History Instructions">Post-History Instructions</span>
                             <i class="editor_maximize fa-solid fa-maximize right_menu_button" data-for="post_history_instructions_textarea" title="Expand the editor" data-i18n="[title]Expand the editor"></i>
                         </h4>
-                        <textarea id="post_history_instructions_textarea" name="post_history_instructions" data-i18n="[placeholder]Any contents here will replace the default Post-History Instructions used for this character. (v2 spec: post_history_instructions)" placeholder="Any contents here will replace the default Post-History Instructions used for this character.&#10;(v2 spec: post_history_instructions)" form="form_create" class="text_pole" autocomplete="off" rows="3"></textarea>
+                        <textarea id="post_history_instructions_textarea" name="post_history_instructions" data-macros data-i18n="[placeholder]Any contents here will replace the default Post-History Instructions used for this character. (v2 spec: post_history_instructions)" placeholder="Any contents here will replace the default Post-History Instructions used for this character.&#10;(v2 spec: post_history_instructions)" form="form_create" class="text_pole" autocomplete="off" rows="3"></textarea>
                         <div class="extension_token_counter">
                             <span data-i18n="extension_token_counter">Tokens:</span> <span data-token-counter="post_history_instructions_textarea">counting...</span>
                         </div>
@@ -6463,7 +6693,7 @@
                     <i class="editor_maximize fa-solid fa-maximize right_menu_button" data-for="personality_textarea" title="Expand the editor" data-i18n="[title]Expand the editor"></i>
                     <a href="https://docs.sillytavern.app/usage/core-concepts/characterdesign/#personality-summary" class="notes-link" target="_blank"><span class="fa-solid fa-circle-question note-link-span"></span></a>
                 </h4>
-                <textarea id="personality_textarea" name="personality" data-i18n="[placeholder](A brief description of the personality)" placeholder="(A brief description of the personality)" form="form_create" class="text_pole" autocomplete="off" rows="4"></textarea>
+                <textarea id="personality_textarea" name="personality" data-macros data-i18n="[placeholder](A brief description of the personality)" placeholder="(A brief description of the personality)" form="form_create" class="text_pole" autocomplete="off" rows="4"></textarea>
                 <div class="extension_token_counter">
                     <span data-i18n="extension_token_counter">Tokens:</span> <span data-token-counter="personality_textarea" data-token-permanent="true">counting...</span>
                 </div>
@@ -6476,7 +6706,7 @@
                         <span class="fa-solid fa-circle-question note-link-span"></span>
                     </a>
                 </h4>
-                <textarea id="scenario_pole" name="scenario" data-i18n="[placeholder](Circumstances and context of the interaction)" placeholder="(Circumstances and context of the interaction)" class="text_pole" value="" autocomplete="off" form="form_create" rows="4"></textarea>
+                <textarea id="scenario_pole" name="scenario" data-macros data-i18n="[placeholder](Circumstances and context of the interaction)" placeholder="(Circumstances and context of the interaction)" class="text_pole" value="" autocomplete="off" form="form_create" rows="4"></textarea>
                 <div class="extension_token_counter">
                     <span data-i18n="extension_token_counter">Tokens:</span> <span data-token-counter="scenario_pole" data-token-permanent="true">counting...</span>
                 </div>
@@ -6489,7 +6719,7 @@
                         </span>
                         <i class="editor_maximize fa-solid fa-maximize right_menu_button" data-for="depth_prompt_prompt" title="Expand the editor" data-i18n="[title]Expand the editor"></i>
                     </h4>
-                    <textarea id="depth_prompt_prompt" name="depth_prompt_prompt" class="text_pole" rows="5" autocomplete="off" form="form_create" data-i18n="[placeholder](Text to be inserted in-chat @ designated depth and role)" placeholder="(Text to be inserted in-chat @ designated depth and role)"></textarea>
+                    <textarea id="depth_prompt_prompt" name="depth_prompt_prompt" data-macros class="text_pole" rows="5" autocomplete="off" form="form_create" data-i18n="[placeholder](Text to be inserted in-chat @ designated depth and role)" placeholder="(Text to be inserted in-chat @ designated depth and role)"></textarea>
                 </div>
                 <div>
                     <h4>
@@ -6539,7 +6769,7 @@
                         </a>
                     </h5>
                 </div>
-                <textarea id="mes_example_textarea" class="flexGrow mdHotkeys" name="mes_example" data-i18n="[placeholder](Examples of chat dialog. Begin each example with START on a new line.)" placeholder="(Examples of chat dialog. Begin each example with &lt;START&gt; on a new line.)" form="form_create" rows="6"></textarea>
+                <textarea id="mes_example_textarea" class="flexGrow mdHotkeys" name="mes_example" data-macros data-i18n="[placeholder](Examples of chat dialog. Begin each example with START on a new line.)" placeholder="(Examples of chat dialog. Begin each example with &lt;START&gt; on a new line.)" form="form_create" rows="6"></textarea>
                 <div class="extension_token_counter">
                     <span data-i18n="extension_token_counter">Tokens:</span> <span data-token-counter="mes_example_textarea">counting...</span>
                 </div>
@@ -6593,8 +6823,32 @@
                     <div data-action="copy" class="jg-button jg-copy fa-solid fa-file-arrow-up" data-i18n="[title]Copy to global backgrounds" title="Copy to global backgrounds"></div>
                     <div data-action="edit" class="jg-button jg-edit fa-solid fa-pen-to-square fa-fw pointer" data-i18n="[title]Rename Background" title="Rename Background"></div>
                     <div data-action="delete" class="jg-button jg-delete fa-solid fa-trash-can fa-fw pointer" data-i18n="[title]Delete Background" title="Delete Background"></div>
+                    <div data-action="folder" class="jg-button jg-folder fa-solid fa-folder fa-fw pointer" data-i18n="[title]Add to folder" title="Add to folder"></div>
+                    <div data-action="set-cover" class="jg-button jg-set-cover fa-solid fa-image fa-fw pointer" data-i18n="[title]Set as folder cover" title="Set as folder cover"></div>
                 </div>
                 <div class="BGSampleTitle"></div>
+            </div>
+        </div>
+        <div id="bg_folder_tile_template" class="template_element">
+            <div class="bg_folder_tile" data-folder-id="">
+                <div class="bg_folder_tile_cover"></div>
+                <div class="bg_folder_tile_overlay">
+                    <i class="fa-solid fa-folder"></i>
+                    <span class="bg_folder_tile_name"></span>
+                </div>
+                <div class="mobile-only-menu-toggle">
+                    <i class="fa-solid fa-ellipsis-vertical"></i>
+                </div>
+                <div class="bg_folder_tile_menu jg-menu">
+                    <div data-action="rename-folder" class="jg-button fa-solid fa-pen-to-square fa-fw pointer" data-i18n="[title]Rename folder" title="Rename folder"></div>
+                    <div data-action="delete-folder" class="jg-button fa-solid fa-trash-can fa-fw pointer" data-i18n="[title]Delete folder" title="Delete folder"></div>
+                </div>
+            </div>
+        </div>
+        <div id="bg_new_folder_template" class="template_element">
+            <div class="bg_folder_tile bg_new_folder_tile">
+                <i class="fa-solid fa-folder-plus fa-2x"></i>
+                <span data-i18n="New Folder">New Folder</span>
             </div>
         </div>
         <!-- templates for JS to reuse when needed -->
@@ -6647,7 +6901,7 @@
                                 <small class="chat_file_size select_chat_block_filename_item"></small>
                                 <small class="chat_messages_num select_chat_block_filename_item"></small>
                             </div>
-                            <div class="flex-container gap10px">
+                            <div class="select_chat_actions flex-container gap10px">
                                 <div title="Export JSONL chat file" data-format="jsonl" class="exportRawChatButton opacity50p hoverglow fa-solid fa-file-export" data-i18n="[title]Export JSONL chat file"></div>
                                 <div title="Download chat as plain text document" data-format="txt" class="exportChatButton opacity50p hoverglow fa-solid fa-file-lines" data-i18n="[title]Download chat as plain text document"></div>
                                 <div title="Delete chat file" file_name="" class="PastChat_cross opacity50p hoverglow fa-solid fa-skull" data-i18n="[title]Delete chat file"></div>
@@ -7236,7 +7490,7 @@
                                 <span>&nbsp;</span>
                                 <span id="completion_prompt_manager_popup_entry_source"></span>
                             </div>
-                            <textarea id="completion_prompt_manager_popup_entry_form_prompt" class="text_pole" name="prompt" placeholder="The prompt to be sent." data-i18n="[placeholder]The prompt to be sent."></textarea>
+                            <textarea id="completion_prompt_manager_popup_entry_form_prompt" class="text_pole" name="prompt" data-macros data-macros-autocomplete="always" data-macros-autocomplete-style="expanded" placeholder="The prompt to be sent." data-i18n="[placeholder]The prompt to be sent."></textarea>
                         </div>
                         <div class="completion_prompt_manager_popup_entry_form_footer">
                             <a id="completion_prompt_manager_popup_entry_form_close" title="Close" data-i18n="[title]close" class="fa-solid fa-close menu_button"></a>
@@ -7280,6 +7534,7 @@
                                 <div title="Toggle media display style" class="mes_button mes_media_gallery fa-solid fa-photo-film" data-i18n="[title]Toggle media display style"></div>
                                 <div title="Toggle media display style" class="mes_button mes_media_list fa-solid fa-table-cells-large" data-i18n="[title]Toggle media display style"></div>
                                 <div title="Embed file or image" class="mes_button mes_embed fa-solid fa-paperclip" data-i18n="[title]Embed file or image"></div>
+                                <div title="Jump to swipe history" class="mes_button mes_swipe_picker fa-solid fa-bookmark" data-i18n="[title]Jump to swipe history" style="display: none;"></div>
                                 <div title="Create checkpoint" class="mes_button mes_create_bookmark fa-regular fa-solid fa-flag-checkered" data-i18n="[title]Create checkpoint"></div>
                                 <div title="Create branch" class="mes_button mes_create_branch fa-regular fa-code-branch" data-i18n="[title]Create Branch"></div>
                                 <div title="Copy" class="mes_button mes_copy fa-solid fa-copy " data-i18n="[title]Copy"></div>
@@ -7522,7 +7777,7 @@
                             </div>
                         </div>
                     </summary>
-                    <textarea name="alternate_greetings" data-i18n="[placeholder](This will be the first message from the character that starts every chat)" placeholder="(This will be the first message from the character that starts every chat)" class="text_pole textarea_compact alternate_greeting_text mdHotkeys" value="" autocomplete="off" rows="12"></textarea>
+                    <textarea data-macros name="alternate_greetings" data-i18n="[placeholder](This will be the first message from the character that starts every chat)" placeholder="(This will be the first message from the character that starts every chat)" class="text_pole textarea_compact alternate_greeting_text mdHotkeys" value="" autocomplete="off" rows="12"></textarea>
                 </details>
             </div>
         </div>
@@ -7612,7 +7867,7 @@
                             <b data-i18n="Unique to this chat">Unique to this chat</b>.<br>
                             <span data-i18n="Checkpoints inherit the Note from their parent, and can be changed individually after that.">Checkpoints inherit the Note from their parent, and can be changed individually after that.</span><br>
                         </small>
-                        <textarea id="extension_floating_prompt" class="text_pole textarea_compact" rows="8"></textarea>
+                        <textarea id="extension_floating_prompt" data-macros class="text_pole textarea_compact" rows="8"></textarea>
                         <div class="extension_token_counter">
                             <span data-i18n="extension_token_counter">Tokens:</span> <span id="extension_floating_prompt_token_counter">0</span>
                         </div>
@@ -7669,7 +7924,7 @@
                     <div class="inline-drawer-content">
                         <small data-i18n="Will be automatically added as the author's note for this character. Will be used in groups, but can't be modified when a group chat is open.">Will be automatically added as the author's note for this character. Will be used in groups, but
                             can't be modified when a group chat is open.</small>
-                        <textarea id="extension_floating_chara" class="text_pole textarea_compact" rows="8" placeholder="Example:&#10;[Scenario: wacky adventures; Genre: romantic comedy; Style: verbose, creative]"></textarea>
+                        <textarea id="extension_floating_chara" data-macros class="text_pole textarea_compact" rows="8" placeholder="Example:&#10;[Scenario: wacky adventures; Genre: romantic comedy; Style: verbose, creative]"></textarea>
                         <div class="extension_token_counter">
                             <span data-i18n="extension_token_counter">Tokens:</span> <span id="extension_floating_chara_token_counter">0</span>
                         </div>
@@ -7701,7 +7956,7 @@
                     </div>
                     <div class="inline-drawer-content">
                         <small data-i18n="Will be automatically added as the Author's Note for all new chats.">Will be automatically added as the Author's Note for all new chats.</small>
-                        <textarea id="extension_floating_default" class="text_pole textarea_compact" rows="8" placeholder="Example:&#10;[Scenario: wacky adventures; Genre: romantic comedy; Style: verbose, creative]"></textarea>
+                        <textarea id="extension_floating_default" data-macros class="text_pole textarea_compact" rows="8" placeholder="Example:&#10;[Scenario: wacky adventures; Genre: romantic comedy; Style: verbose, creative]"></textarea>
                         <div class="extension_token_counter">
                             <span data-i18n="extension_token_counter">Tokens:</span> <span id="extension_floating_default_token_counter">0</span>
                         </div>

@@ -3,9 +3,9 @@ import crypto from 'node:crypto';
 import storage from 'node-persist';
 import express from 'express';
 import { RateLimiterMemory, RateLimiterRes } from 'rate-limiter-flexible';
-import { getIpFromRequest, getRealIpFromHeader } from '../express-common.js';
+import { getIpAddress, retryAfter } from '../express-common.js';
 import { color, Cache, getConfigValue } from '../util.js';
-import { KEY_PREFIX, getUserAvatar, toKey, getPasswordHash, getPasswordSalt, getAllUserHandles, getUserDirectories, ensurePublicDirectoriesExist, ensureUserDirectoriesExist, makeUserAccountPermanent, normalizeHandle } from '../users.js';
+import { KEY_PREFIX, getUserAvatar, toKey, getPasswordHash, getPasswordSalt, getAllUserHandles, getUserDirectories, ensurePublicDirectoriesExist, ensureUserDirectoriesExist, makeUserAccountPermanent, normalizeHandle, getAccountVersion } from '../users.js';
 import { validateInvitationCode, useInvitationCode } from '../invitation-codes.js';
 import { isUserIssuedInvitation } from '../user-invitation-policy.js';
 import { checkForNewContent, CONTENT_TYPES } from './content-manager.js';
@@ -20,21 +20,23 @@ const DISCREET_LOGIN = getConfigValue('enableDiscreetLogin', false, 'boolean');
 const PREFER_REAL_IP_HEADER = getConfigValue('rateLimiting.preferRealIpHeader', false, 'boolean');
 const USER_STORAGE_ENABLED = getConfigValue('userStorage.enabled', false, 'boolean');
 const USER_STORAGE_DEFAULT_LIMIT_MIB = getConfigValue('userStorage.defaultLimitMiB', 0, 'number');
+const LOGIN_POINTS = getConfigValue('rateLimiting.accountsLoginMaxAttempts', 5, 'number');
+const RECOVER_POINTS = getConfigValue('rateLimiting.accountsRecoverMaxAttempts', 5, 'number');
 const MFA_CACHE = new Cache(5 * 60 * 1000);
 const VERIFICATION_CODE_CACHE = new Cache(5 * 60 * 1000); // 验证码缓存，5分钟有效
 const registrationLocks = new Set();
 
-const getIpAddress = (request) => PREFER_REAL_IP_HEADER ? getRealIpFromHeader(request) : getIpFromRequest(request);
+const generateRecoveryCode = () => Array.from({ length: 6 }, () => crypto.randomInt(0, 10)).join('');
 
 export const router = express.Router();
 router.use(stcontrolPublicAccountGuard);
 router.post('/me', stcontrolHandoffHandler);
 const loginLimiter = new RateLimiterMemory({
-    points: 5,
+    points: LOGIN_POINTS > 0 ? LOGIN_POINTS : Number.MAX_SAFE_INTEGER,
     duration: 60,
 });
 const recoverLimiter = new RateLimiterMemory({
-    points: 5,
+    points: RECOVER_POINTS > 0 ? RECOVER_POINTS : Number.MAX_SAFE_INTEGER,
     duration: 300,
 });
 const registerLimiter = new RateLimiterMemory({
@@ -118,7 +120,7 @@ router.post('/login', async (request, response) => {
             return response.status(400).json({ error: '缺少必填字段' });
         }
 
-        const ip = getIpAddress(request);
+        const ip = getIpAddress(request, PREFER_REAL_IP_HEADER);
         await loginLimiter.consume(ip);
 
         const normalizedHandle = normalizeHandle(request.body.handle);
@@ -191,6 +193,7 @@ router.post('/login', async (request, response) => {
 
         await loginLimiter.delete(ip);
         request.session.handle = user.handle;
+        request.session.version = getAccountVersion(user);
         request.session.userId = user.id || user.handle;
 
         if (request.stcontrolIndependentLogin) {
@@ -209,8 +212,8 @@ router.post('/login', async (request, response) => {
         return response.json({ handle: user.handle });
     } catch (error) {
         if (error instanceof RateLimiterRes) {
-            console.error('Login failed: Rate limited from', getIpAddress(request));
-            return response.status(429).json({ error: '尝试次数过多，请稍后重试或恢复密码' });
+            console.error('Login failed: Rate limited from', getIpAddress(request, PREFER_REAL_IP_HEADER));
+            return retryAfter(response, error).status(429).json({ error: '尝试次数过多，请稍后重试或恢复密码' });
         }
 
         console.error('Login failed:', error);
@@ -287,7 +290,7 @@ router.post('/send-verification', async (request, response) => {
             return response.status(400).json({ error: '缺少必填字段' });
         }
 
-        const ip = getIpAddress(request);
+        const ip = getIpAddress(request, PREFER_REAL_IP_HEADER);
         await sendVerificationLimiter.consume(ip);
 
         // 检查邮件服务是否可用
@@ -318,7 +321,7 @@ router.post('/send-verification', async (request, response) => {
         return response.json({ success: true });
     } catch (error) {
         if (error instanceof RateLimiterRes) {
-            console.error('Send verification failed: Rate limited from', getIpAddress(request));
+            console.error('Send verification failed: Rate limited from', getIpAddress(request, PREFER_REAL_IP_HEADER));
             return response.status(429).send({ error: '发送次数过多，请稍后重试' });
         }
 
@@ -334,7 +337,7 @@ router.post('/recover-step1', async (request, response) => {
             return response.status(400).json({ error: '缺少必填字段' });
         }
 
-        const ip = getIpAddress(request);
+        const ip = getIpAddress(request, PREFER_REAL_IP_HEADER);
         await recoverLimiter.consume(ip);
 
         // 规范化用户名
@@ -364,7 +367,7 @@ router.post('/recover-step1', async (request, response) => {
             return response.status(400).json({ error: '该账户未绑定邮箱，无法通过邮箱找回密码。请联系管理员。' });
         }
 
-        const mfaCode = String(crypto.randomInt(1000, 9999));
+        const mfaCode = generateRecoveryCode();
 
         // 尝试通过邮件发送恢复码
         if (isEmailServiceAvailable()) {
@@ -396,8 +399,8 @@ router.post('/recover-step1', async (request, response) => {
         });
     } catch (error) {
         if (error instanceof RateLimiterRes) {
-            console.error('Recover step 1 failed: Rate limited from', getIpAddress(request));
-            return response.status(429).send({ error: '尝试次数过多，请稍后重试或联系管理员' });
+            console.error('Recover step 1 failed: Rate limited from', getIpAddress(request, PREFER_REAL_IP_HEADER));
+            return retryAfter(response, error).status(429).send({ error: '尝试次数过多，请稍后重试或联系管理员' });
         }
 
         console.error('Recover step 1 failed:', error);
@@ -422,7 +425,12 @@ router.post('/recover-step2', async (request, response) => {
 
         /** @type {import('../users.js').User} */
         const user = await storage.getItem(toKey(normalizedHandle));
-        const ip = getIpAddress(request);
+        const ip = getIpAddress(request, PREFER_REAL_IP_HEADER);
+        const rateLimit = await recoverLimiter.get(ip);
+
+        if (rateLimit !== null && rateLimit.consumedPoints > recoverLimiter.points) {
+            throw rateLimit;
+        }
 
         if (!user) {
             console.error('Recover step 2 failed: User', request.body.handle, 'not found');
@@ -453,13 +461,17 @@ router.post('/recover-step2', async (request, response) => {
             await storage.setItem(toKey(normalizedHandle), user);
         }
 
+        if (request.session && request.session.handle === user.handle) {
+            request.session.version = getAccountVersion(user);
+        }
+
         await recoverLimiter.delete(ip);
         MFA_CACHE.remove(user.handle);
         return response.sendStatus(204);
     } catch (error) {
         if (error instanceof RateLimiterRes) {
-            console.error('Recover step 2 failed: Rate limited from', getIpAddress(request));
-            return response.status(429).send({ error: '尝试次数过多，请稍后重试或联系管理员' });
+            console.error('Recover step 2 failed: Rate limited from', getIpAddress(request, PREFER_REAL_IP_HEADER));
+            return retryAfter(response, error).status(429).send({ error: '尝试次数过多，请稍后重试或联系管理员' });
         }
 
         console.error('Recover step 2 failed:', error);
@@ -535,7 +547,7 @@ router.post('/register', async (request, response) => {
             return response.status(400).json({ error: '密码长度至少6位' });
         }
 
-        const ip = getIpAddress(request);
+        const ip = getIpAddress(request, PREFER_REAL_IP_HEADER);
         await registerLimiter.consume(ip);
 
         // 验证邀请码（如果启用）
@@ -646,7 +658,7 @@ router.post('/register', async (request, response) => {
         }
     } catch (error) {
         if (error instanceof RateLimiterRes) {
-            console.error('Register failed: Rate limited from', getIpAddress(request));
+            console.error('Register failed: Rate limited from', getIpAddress(request, PREFER_REAL_IP_HEADER));
             return response.status(429).send({ error: '尝试次数过多，请稍后重试' });
         }
 

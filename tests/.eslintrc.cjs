@@ -12,6 +12,8 @@ module.exports = {
     env: {
         es6: true,
         node: true,
+        browser: true,
+        jquery: true,
         'jest/globals': true,
     },
     parserOptions: {
@@ -36,6 +38,7 @@ module.exports = {
         'node_modules/**/*',
     ],
     globals: {
+        SillyTavern: 'readonly',
     },
     rules: {
         'no-unused-vars': ['error', { args: 'none' }],

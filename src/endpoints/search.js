@@ -8,6 +8,7 @@ import { decode } from 'html-entities';
 import { readSecret, SECRET_KEYS } from './secrets.js';
 import { trimV1 } from '../util.js';
 import { setAdditionalHeaders } from '../additional-headers.js';
+import { getUntrustedRequestAgent } from '../private-request-filter.js';
 
 export const router = express.Router();
 
@@ -85,7 +86,7 @@ async function extractTranscript(videoPageBody, lang) {
         } catch (e) {
             return undefined;
         }
-    })()?.['playerCaptionsTracklistRenderer'];
+    })()?.playerCaptionsTracklistRenderer;
 
     if (!captions) {
         throw new Error('Transcript disabled');
@@ -460,7 +461,10 @@ router.post('/visit', async (request, response) => {
 
         console.info('Visiting web URL', url);
 
-        const result = await fetch(url, { headers: visitHeaders });
+        // The URL checks above only guard the literal input. The agent enforces the actual network
+        // boundary: it blocks connections to private addresses after DNS resolution, on every redirect
+        // hop, and pins the connection to the validated IP to prevent DNS rebinding.
+        const result = await fetch(url, { headers: visitHeaders, agent: getUntrustedRequestAgent() });
 
         if (!result.ok) {
             console.error(`Visit failed ${result.status} ${result.statusText}`);

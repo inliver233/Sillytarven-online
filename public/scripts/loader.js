@@ -1,8 +1,11 @@
 // public/scripts/loader.js
-import { POPUP_RESULT, POPUP_TYPE, Popup } from './popup.js';
+import { loader } from './action-loader.js';
 
-/** @type {Popup} */
-let loaderPopup;
+/**
+ * Handle for the legacy loader created by showLoader() after the first screen.
+ * @type {import('./action-loader.js').ActionLoaderHandle|null}
+ */
+let legacyLoaderHandle = null;
 let preloaderYoinked = false;
 
 /**
@@ -29,7 +32,9 @@ export function updateLoaderProgress(percentage, statusText) {
 /**
  * 显示载入屏
  * - 首屏场景：#preloader 仍在 DOM 中，确保可见并推进基础进度
- * - 后续场景：#preloader 已被移除，回退到 Popup 备用加载器
+ * - 后续场景：#preloader 已被移除，改用 action-loader 的阻塞加载层
+ *
+ * @deprecated For later loads use `showActionLoader()` from action-loader.js.
  * @param {string} [statusText] 可选的状态文本
  */
 export function showLoader(statusText = '加载中...') {
@@ -42,47 +47,43 @@ export function showLoader(statusText = '加载中...') {
         return;
     }
 
-    // 备用 Popup 加载器 (后续加载场景)
-    if (loaderPopup) loaderPopup.complete(POPUP_RESULT.CANCELLED);
-    loaderPopup = new Popup(`
-        <div id="loader">
-            <div id="load-spinner" class="fa-solid fa-circle-notch fa-spin fa-2x" style="color: #3b82f6;"></div>
-        </div>`, POPUP_TYPE.DISPLAY, null, { transparent: true, animation: 'none', wide: true, large: true });
-    loaderPopup.closeButton.style.display = 'none';
-    loaderPopup.show();
+    // Hide any existing legacy loader first to maintain old behavior
+    if (legacyLoaderHandle && legacyLoaderHandle.isActive) {
+        legacyLoaderHandle.hide();
+    }
+
+    // Create a blocking loader with no toast (matches old behavior)
+    legacyLoaderHandle = loader.show({
+        slug: 'legacy-loader',
+        blocking: true,
+        toastMode: loader.ToastMode.NONE,
+    });
 }
 
 /**
- * 隐藏载入屏：将进度推到 100%，380ms 平滑淡出后移除 #preloader
+ * 隐藏载入屏：首屏时将进度推到 100%，380ms 平滑淡出后移除 #preloader；
+ * 之后隐藏 showLoader() 创建的加载层。
+ *
+ * @deprecated For later loads use `hideActionLoader()` or `handle.hide()` from action-loader.js.
  * @returns {Promise<void>}
  */
 export async function hideLoader() {
-    return new Promise((resolve) => {
+    const preloader = document.getElementById('preloader');
+    if (preloader) {
         updateLoaderProgress(100, '加载完成，准备就绪！');
+        preloader.style.opacity = '0';
+        preloader.style.filter = 'blur(12px)';
+        await new Promise(resolve => setTimeout(resolve, 380));
+        yoinkPreloader();
+        return;
+    }
 
-        const preloader = document.getElementById('preloader');
-        if (preloader) {
-            preloader.style.opacity = '0';
-            preloader.style.filter = 'blur(12px)';
+    if (!legacyLoaderHandle || !legacyLoaderHandle.isActive) {
+        return;
+    }
 
-            setTimeout(() => {
-                yoinkPreloader();
-                resolve();
-            }, 380);
-            return;
-        }
-
-        if (loaderPopup) {
-            loaderPopup.complete(POPUP_RESULT.AFFIRMATIVE)
-                .catch((err) => console.error('Error completing loaderPopup:', err))
-                .finally(() => {
-                    loaderPopup = null;
-                    resolve();
-                });
-        } else {
-            resolve();
-        }
-    });
+    await legacyLoaderHandle.hide();
+    legacyLoaderHandle = null;
 }
 
 function yoinkPreloader() {

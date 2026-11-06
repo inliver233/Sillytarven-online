@@ -4,7 +4,7 @@ import { promises as fsPromises } from 'node:fs';
 import storage from 'node-persist';
 import express from 'express';
 
-import { getUserAvatar, toKey, getPasswordHash, getPasswordSalt, createBackupArchive, ensurePublicDirectoriesExist, toAvatarKey, normalizeHandle, getUserDirectories } from '../users.js';
+import { getUserAvatar, toKey, getPasswordHash, getPasswordSalt, createBackupArchive, ensurePublicDirectoriesExist, toAvatarKey, normalizeHandle, getUserDirectories, getAccountVersion } from '../users.js';
 import { SETTINGS_FILE } from '../constants.js';
 import { checkForNewContent, CONTENT_TYPES } from './content-manager.js';
 import { BackupJobError, UserBackupManager } from '../user-backup-manager.js';
@@ -14,6 +14,7 @@ import { BackupQuotaError, consumeBackupQuota } from '../backup-limits.js';
 import { recordBackupActivity, registerBackupLiveSource } from '../backup-activity.js';
 import { onActivate, onDrain } from '../process-lifecycle.js';
 import { createFeedbackLink } from '../feedback-link.js';
+import { getConfigValue } from '../util.js';
 
 const userBackupManager = new UserBackupManager({
     directory: path.join(globalThis.DATA_ROOT, '_exports'),
@@ -194,6 +195,12 @@ router.post('/change-password', async (request, response) => {
         }
 
         await storage.setItem(toKey(normalizedHandle), user);
+
+        // Update session version to keep the current session valid after password change
+        if (request.session && request.session.handle === user.handle) {
+            request.session.version = getAccountVersion(user);
+        }
+
         return response.sendStatus(204);
     } catch (error) {
         console.error(error);
@@ -203,6 +210,13 @@ router.post('/change-password', async (request, response) => {
 
 router.post('/backup', async (request, response) => {
     try {
+        const allowFullDataBackup = !!getConfigValue('backups.allowFullDataBackup', true, 'boolean');
+
+        if (!allowFullDataBackup) {
+            console.warn('Backup failed: Full data backup is disabled in configuration');
+            return response.status(403).json({ error: 'Full data backup is disabled' });
+        }
+
         const handle = request.body.handle;
 
         if (!handle) {
@@ -235,6 +249,11 @@ router.post('/backup', async (request, response) => {
 
 router.post('/backup/start', async (request, response) => {
     try {
+        if (!getConfigValue('backups.allowFullDataBackup', true, 'boolean')) {
+            console.warn('Backup failed: Full data backup is disabled in configuration');
+            return response.status(403).json({ error: 'Full data backup is disabled' });
+        }
+
         const handle = normalizeHandle(request.body?.handle);
         if (!handle) {
             return response.status(400).json({ error: 'Missing or invalid handle' });

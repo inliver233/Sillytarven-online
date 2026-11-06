@@ -1,6 +1,7 @@
 import { EventEmitter } from '../lib/eventemitter.js';
 
 export const event_types = {
+    APP_INITIALIZED: 'app_initialized',
     APP_READY: 'app_ready',
     EXTRAS_CONNECTED: 'extras_connected',
     MESSAGE_SWIPED: 'message_swiped',
@@ -17,6 +18,8 @@ export const event_types = {
     IMPERSONATE_READY: 'impersonate_ready',
     CHAT_CHANGED: 'chat_id_changed',
     CHAT_CONTEXT_INVALIDATED: 'chat_context_invalidated',
+    // TODO: Naming convention is inconsistent with other events
+    CHAT_LOADED: 'chatLoaded',
     GENERATION_AFTER_COMMANDS: 'GENERATION_AFTER_COMMANDS',
     GENERATION_STARTED: 'generation_started',
     GENERATION_STOPPED: 'generation_stopped',
@@ -49,6 +52,7 @@ export const event_types = {
     FORCE_SET_BACKGROUND: 'force_set_background',
     CHAT_DELETED: 'chat_deleted',
     CHAT_CREATED: 'chat_created',
+    CHAT_RENAMED: 'chat_renamed',
     GROUP_CHAT_DELETED: 'group_chat_deleted',
     GROUP_CHAT_CREATED: 'group_chat_created',
     GENERATE_BEFORE_COMBINE_PROMPTS: 'generate_before_combine_prompts',
@@ -95,6 +99,17 @@ export const event_types = {
     WORLDINFO_ENTRIES_LOADED: 'worldinfo_entries_loaded',
     WORLDINFO_SCAN_DONE: 'worldinfo_scan_done',
     MEDIA_ATTACHMENT_DELETED: 'media_attachment_deleted',
+    PERSONA_CHANGED: 'persona_changed',
+    PERSONA_CREATED: 'persona_created',
+    PERSONA_UPDATED: 'persona_updated',
+    PERSONA_RENAMED: 'persona_renamed',
+    PERSONA_DELETED: 'persona_deleted',
+    TTS_JOB_STARTED: 'tts_job_started',
+    TTS_AUDIO_READY: 'tts_audio_ready',
+    TTS_JOB_COMPLETE: 'tts_job_complete',
+    ITEMIZED_PROMPTS_LOADED: 'itemized_prompts_loaded',
+    ITEMIZED_PROMPTS_SAVED: 'itemized_prompts_saved',
+    ITEMIZED_PROMPTS_DELETED: 'itemized_prompts_deleted',
 };
 
-export const eventSource = new EventEmitter([event_types.APP_READY]);
+export const eventSource = new EventEmitter([event_types.APP_READY, event_types.APP_INITIALIZED]);

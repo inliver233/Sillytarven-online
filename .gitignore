@@ -26,6 +26,7 @@ public/stats.json
 /docker/user
 /docker/extensions
 /docker/data
+/docker/dist
 .DS_Store
 public/settings.json
 /thumbnails
@@ -33,6 +34,7 @@ whitelist.txt
 .vscode/**
 !.vscode/extensions.json
 .idea/
+.windsurf/
 secrets.json
 /dist
 /backups/

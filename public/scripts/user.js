@@ -706,8 +706,7 @@ async function changePassword(handle, callback) {
             toastr.success('Password changed successfully', 'Password Changed');
         }
         callback();
-    }
-    catch (error) {
+    } catch (error) {
         console.error('Error changing password:', error);
     }
 }
@@ -1066,7 +1065,6 @@ async function changeName(handle, name, callback) {
 
         toastr.success('Name changed successfully', 'Name Changed');
         callback();
-
     } catch (error) {
         console.error('Error changing name:', error);
     }
@@ -1106,7 +1104,6 @@ async function restoreSnapshot(name, callback) {
     } catch (error) {
         console.error('Error restoring snapshot:', error);
     }
-
 }
 
 /**
@@ -1146,7 +1143,7 @@ async function getSnapshots() {
     try {
         const response = await fetch('/api/settings/get-snapshots', {
             method: 'POST',
-            headers: getRequestHeaders(),
+            headers: getRequestHeaders({ omitContentType: true }),
         });
 
         if (!response.ok) {
@@ -1172,7 +1169,7 @@ async function makeSnapshot(callback) {
     try {
         const response = await fetch('/api/settings/make-snapshot', {
             method: 'POST',
-            headers: getRequestHeaders(),
+            headers: getRequestHeaders({ omitContentType: true }),
         });
 
         if (!response.ok) {
@@ -1212,7 +1209,6 @@ async function viewSettingsSnapshots() {
                     const content = await loadSnapshotContent(snapshot.name);
                     contentBlock.val(content);
                 }
-
             });
             template.find('.snapshotList').append(snapshotBlock);
         }
@@ -1263,7 +1259,6 @@ async function resetEverything(callback) {
     } catch (error) {
         console.error('Error resetting everything:', error);
     }
-
 }
 
 function formatStorageMiB(value) {
@@ -2331,7 +2326,7 @@ async function logout() {
         // 发送登出请求
     await fetch('/api/users/logout', {
         method: 'POST',
-        headers: getRequestHeaders(),
+        headers: getRequestHeaders({ omitContentType: true }),
     });
 } catch (error) {
     console.warn('Logout request failed:', error);
@@ -2378,7 +2373,7 @@ async function extendUserSession() {
     try {
         const response = await fetch('/api/ping?extend=1', {
             method: 'POST',
-            headers: getRequestHeaders(),
+            headers: getRequestHeaders({ omitContentType: true }),
         });
 
         if (!response.ok) {

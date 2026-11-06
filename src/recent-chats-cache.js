@@ -42,13 +42,14 @@ export class RecentChatsCache {
      * @param {object} options.directories Trusted user directories
      * @param {number} options.max Requested result limit
      * @param {boolean} options.metadata Whether metadata is included
+     * @param {string} [options.variant] Other request options that change the result (e.g. pinned chats)
      * @param {() => Promise<object[]>} options.load Native list builder
      * @returns {Promise<{value: object[], state: 'hit'|'miss'|'shared'}>}
      */
-    async get({ userKey, directories, max, metadata, load }) {
+    async get({ userKey, directories, max, metadata, variant = '', load }) {
         const trustedKey = String(userKey);
         const signature = await this.#getSignature(trustedKey, directories);
-        const key = this.#cacheKey(trustedKey, max, metadata);
+        const key = this.#cacheKey(trustedKey, max, metadata, variant);
         this.#trackVariant(trustedKey, key);
         return await this.cache.getOrLoad(key, {
             signature,
@@ -86,8 +87,8 @@ export class RecentChatsCache {
         return `${Buffer.byteLength(userKey, 'utf8')}:${userKey}:`;
     }
 
-    #cacheKey(userKey, max, metadata) {
-        return `${this.#cachePrefix(userKey)}${String(max)}:${Number(Boolean(metadata))}`;
+    #cacheKey(userKey, max, metadata, variant = '') {
+        return `${this.#cachePrefix(userKey)}${String(max)}:${Number(Boolean(metadata))}:${String(variant)}`;
     }
 
     #trackVariant(userKey, key) {

@@ -10,7 +10,12 @@ import express from 'express';
 // The fixtures are local repositories; production only accepts HTTP(S) extension URLs.
 process.env.SILLYTAVERN_EXTENSIONS_ALLOWLOCALREPOSITORIES = 'true';
 
-import { normalizeExtensionCloneUrl, router } from '../src/endpoints/extensions.js';
+import { fileURLToPath } from 'node:url';
+import { setConfigFilePath } from '../src/util.js';
+
+// The extension routes read `extensions.enabled` on every request.
+setConfigFilePath(fileURLToPath(new URL('../default/config.yaml', import.meta.url)));
+const { normalizeExtensionCloneUrl, router } = await import('../src/endpoints/extensions.js');
 
 function createRepository(directory, manifest) {
     fs.mkdirSync(directory, { recursive: true });

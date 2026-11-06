@@ -8,6 +8,7 @@ import {
     Popper,
     initLibraryShims,
     default as libs,
+    lodash,
 } from './lib.js';
 
 import { humanizedDateTime, favsToHotswap, getMessageTimeStamp, dragElement, isMobile, initRossMods } from './scripts/RossAscends-mods.js';
@@ -67,12 +68,10 @@ import {
     renameGroupMember,
     createNewGroupChat,
     getGroupAvatar,
-    editGroup,
     deleteGroupChat,
     renameGroupChat,
     importGroupChat,
     getGroupBlock,
-    getGroupCharacterCards,
     getGroupCharacterCardsLazy,
     getGroupDepthPrompts,
 } from './scripts/group-chats.js';
@@ -192,8 +191,9 @@ import {
 } from './scripts/utils.js';
 import { debounce_timeout, GENERATION_TYPE_TRIGGERS, IGNORE_SYMBOL, inject_ids, MEDIA_DISPLAY, MEDIA_SOURCE, MEDIA_TYPE, OVERSWIPE_BEHAVIOR, SCROLL_BEHAVIOR, SWIPE_DIRECTION, SWIPE_SOURCE, SWIPE_STATE } from './scripts/constants.js';
 
-import { cancelDebouncedMetadataSave, doDailyExtensionUpdatesCheck, extension_settings, initExtensions, loadExtensionSettings, runGenerationInterceptors, saveMetadataDebounced } from './scripts/extensions.js';
+import { cancelDebouncedMetadataSave, doDailyExtensionUpdatesCheck, extension_settings, initExtensions, loadExtensionSettings, runGenerationInterceptors } from './scripts/extensions.js';
 import { COMMENT_NAME_DEFAULT, CONNECT_API_MAP, executeSlashCommandsOnChatInput, initDefaultSlashCommands, initSlashCommandAutoComplete, isExecutingCommandsFromChatInput, pauseScriptExecution, stopScriptExecution, UNIQUE_APIS } from './scripts/slash-commands.js';
+import { initMacroAutoComplete } from './scripts/autocomplete/MacroAutoComplete.js';
 import {
     tag_map,
     tags,
@@ -217,7 +217,7 @@ import {
     tag_import_setting,
     applyCharacterTagsToMessageDivs,
 } from './scripts/tags.js';
-import { initSecrets, readSecretState } from './scripts/secrets.js';
+import { checkOpenRouterAuth, initSecrets, readSecretState } from './scripts/secrets.js';
 import { markdownExclusionExt } from './scripts/showdown-exclusion.js';
 import { markdownUnderscoreExt } from './scripts/showdown-underscore.js';
 import { NOTE_MODULE_NAME, initAuthorsNote, metadata_keys, setFloatingPrompt, shouldWIAddPrompt } from './scripts/authors-note.js';
@@ -249,6 +249,7 @@ import {
 } from './scripts/personas.js';
 import { getBackgrounds, initBackgrounds, loadBackgroundSettings, background_settings } from './scripts/backgrounds.js';
 import { hideLoader, showLoader, updateLoaderProgress } from './scripts/loader.js';
+import { loader } from './scripts/action-loader.js';
 import { initializePerformanceTelemetry, recordPerformanceSample, recordStartupMilestone, startupLap, finishStartupLaps } from './scripts/performance-telemetry.js';
 import { BulkEditOverlay } from './scripts/BulkEditOverlay.js';
 import { initTextGenModels } from './scripts/textgen-models.js';
@@ -279,7 +280,7 @@ import { extractReasoningFromData, extractReasoningSignatureFromData, initReason
 import { accountStorage } from './scripts/util/AccountStorage.js';
 import { initWelcomeScreen, openPermanentAssistantChat, openPermanentAssistantCard, getPermanentAssistantAvatar } from './scripts/welcome-screen.js';
 import { initDataMaid } from './scripts/data-maid.js';
-import { clearItemizedPrompts, deleteItemizedPrompts, findItemizedPromptSet, initItemizedPrompts, itemizedParams, itemizedPrompts, loadItemizedPrompts, promptItemize, replaceItemizedPromptText, saveItemizedPrompts } from './scripts/itemized-prompts.js';
+import { clearItemizedPrompts, deleteItemizedPromptForMessage, deleteItemizedPrompts, findItemizedPromptSet, initItemizedPrompts, itemizedParams, itemizedPrompts, loadItemizedPrompts, promptItemize, replaceItemizedPromptText, saveItemizedPrompts, swapItemizedPrompts } from './scripts/itemized-prompts.js';
 import { getSystemMessageByType, initSystemMessages, SAFETY_CHAT, sendSystemMessage, system_message_types, system_messages } from './scripts/system-messages.js';
 import { event_types, eventSource } from './scripts/events.js';
 import { initAccessibility } from './scripts/a11y.js';
@@ -294,8 +295,12 @@ import { initDomHandlers } from './scripts/dom-handlers.js';
 import { SimpleMutex } from './scripts/util/SimpleMutex.js';
 import { AudioPlayer } from './scripts/audio-player.js';
 import { MacroEnvBuilder } from './scripts/macros/engine/MacroEnvBuilder.js';
+import { MessageFormatter } from './scripts/message-formatter.js';
 import { MacroEngine } from './scripts/macros/engine/MacroEngine.js';
 import { addChatBackupsBrowser } from './scripts/chat-backups.js';
+import { onboardingExperimentalMacroEngine } from './scripts/macros/engine/MacroDiagnostics.js';
+import { compressRequest, setRequestCompressionConfig } from './scripts/request-compression.js';
+import { canJumpToSwipeForMessage, canOpenSwipePickerForMessage, initSwipePicker } from './scripts/swipe-picker.js';
 
 /**
  * @typedef {Object<string, any>} ChatMessage
@@ -371,6 +376,8 @@ export {
     /** @deprecated Use appendMediaToMessage instead. */
     appendMediaToMessage as appendImageToMessage,
     importCharacterChat,
+    /** @deprecated Use getMaxPromptTokens instead. */
+    getMaxPromptTokens as getMaxContextSize,
 };
 
 /**
@@ -403,11 +410,35 @@ toastr.options = {
         // so the toasts still show up inside there.
         fixToastrForDialogs();
     },
-    onShown: function () {
-        // Set tooltip to the notification message
-        $(this).attr('title', t`Tap to close`);
-    },
 };
+
+// Run once during startup
+toastr.subscribe(function (args) {
+    if (args.state !== 'visible') {
+        return;
+    }
+
+    const $container = toastr.getContainer(args.options, false);
+    if (!$container || !$container.length) {
+        return;
+    }
+
+    // toastr has already inserted the element at this point
+    const $toast = args.options.newestOnTop
+        ? $container.children().first()
+        : $container.children().last();
+
+    // Meaning of "clickable":
+    // Interactable unless tapToDismiss was explicitly false
+    const isInteractable = args.options.tapToDismiss !== false;
+    $toast.toggleClass('interactable', isInteractable);
+    if (isInteractable) {
+        $toast.attr('title', t`Tap to close`);
+    } else {
+        $toast.removeAttr('title');
+        $toast.addClass('toast-non-interactable');
+    }
+});
 
 export const characterGroupOverlay = new BulkEditOverlay();
 
@@ -457,7 +488,7 @@ let importFlashTimeout;
 export let isChatSaving = false;
 let chat_create_date = '';
 let firstRun = false;
-let settingsReady = false;
+export let settingsReady = false;
 let currentVersion = '0.0.0';
 export let displayVersion = 'SillyTavern';
 
@@ -584,8 +615,7 @@ export function reloadMarkdownProcessor() {
 export function getCurrentChatId() {
     if (selected_group) {
         return groups.find(x => x.id == selected_group)?.chat_id;
-    }
-    else if (this_chid !== undefined) {
+    } else if (this_chid !== undefined) {
         return characters[this_chid]?.chat;
     }
 }
@@ -876,7 +906,7 @@ function getPromptHistorySource() {
     if (!chatHydration?.hydrated) {
         return chat;
     }
-    const budget = Math.max(Number(getMaxContextSize()) || 0, 4096) * PROMPT_BACKFILL_CHARS_PER_TOKEN;
+    const budget = Math.max(Number(getMaxPromptTokens()) || 0, 4096) * PROMPT_BACKFILL_CHARS_PER_TOKEN;
     let chars = 0;
     let start = chat.length;
     while (start > 0) {
@@ -1024,6 +1054,7 @@ export let is_send_press = false; //Send generation
 export const isGenerating = () => (is_send_press || is_group_generating);
 
 let this_del_mes = -1;
+let deleteToolCallsInDeleteMode = true;
 
 /** @type {string} */
 let this_edit_mes_chname = '';
@@ -1042,8 +1073,7 @@ export let recentSwipes = 0;
 export let extension_prompts = {};
 
 export let main_api;// = "kobold";
-/** @type {AbortController} */
-let abortController;
+let abortController = new AbortController();
 
 //css
 var css_send_form_display = $('<div id=send_form></div>').css('display');
@@ -1169,7 +1199,7 @@ export async function pingServer() {
     try {
         const result = await fetch('api/ping', {
             method: 'POST',
-            headers: getRequestHeaders(),
+            headers: getRequestHeaders({ omitContentType: true }),
         });
 
         if (!result.ok) {
@@ -1226,7 +1256,7 @@ async function firstLoadInit() {
     initKoboldSettings();
     initNovelAISettings();
     initSystemPrompts();
-    initExtensions();
+    await initExtensions();
     initExtensionSlashCommands();
     ToolManager.initToolSlashCommands();
     startupLap('core-init');
@@ -1234,12 +1264,12 @@ async function firstLoadInit() {
     await initSystemMessages();
     startupLap('presets');
     await getSettings();
+    await checkOpenRouterAuth();
     updateLoaderProgress(60, '正在装载标签、宏与界面配置...');
     initKeyboard();
     initDynamicStyles();
     initTags();
     initBookmarks();
-    initMacros();
     updateLoaderProgress(80, '正在同步角色卡与用户数据...');
     startupLap('ui-config');
     await getUserAvatars(true, user_avatar);
@@ -1257,6 +1287,7 @@ async function firstLoadInit() {
     startupLap('personas');
     await initSlashCommandAutoComplete();
     startupLap('autocomplete');
+    initMacroAutoComplete();
     initWorldInfo();
     initHorde();
     initRossMods();
@@ -1276,10 +1307,12 @@ async function firstLoadInit() {
     initDataMaid();
     initItemizedPrompts();
     initAccessibility();
+    initSwipePicker();
     addDebugFunctions();
     doDailyExtensionUpdatesCheck();
     startupLap('ui-final');
     updateLoaderProgress(95, '正在构建界面面板与欢迎屏...');
+    await eventSource.emit(event_types.APP_INITIALIZED);
     await hideLoader();
     startupLap('hide-loader');
     recordStartupMilestone('first-ui');
@@ -1388,13 +1421,14 @@ export async function selectCharacterById(id, { switchMenu = true } = {}) {
     if (selected_group || String(this_chid) !== String(id)) {
         //if clicked on a different character from what was currently selected
         if (!is_send_press) {
-            await clearChat();
-            cancelTtsPlay();
+            setCharacterId(undefined);
+            setCharacterName('');
             resetSelectedGroup();
+            await clearChat({ clearData: true });
+            cancelTtsPlay();
             this_edit_mes_id = undefined;
             selected_button = 'character_edit';
             setCharacterId(id);
-            chat.length = 0;
             chat_metadata = {};
             await getChat();
         }
@@ -1460,8 +1494,7 @@ function getCharacterBlock(item, id) {
     const description = item.data?.creator_notes || '';
     if (description) {
         template.find('.ch_description').text(description);
-    }
-    else {
+    } else {
         template.find('.ch_description').hide();
     }
 
@@ -1469,8 +1502,7 @@ function getCharacterBlock(item, id) {
     const auxFieldValue = (item.data && item.data[auxFieldName]) || '';
     if (auxFieldValue) {
         template.find('.character_version').text(auxFieldValue);
-    }
-    else {
+    } else {
         template.find('.character_version').hide();
     }
 
@@ -1507,7 +1539,8 @@ export async function printCharacters(fullRefresh = false) {
 
     // We are actually always reprinting filters, as it "doesn't hurt", and this way they are always up to date
     printTagFilters(tag_filter_type.character);
-    printTagFilters(tag_filter_type.group_member);
+    printTagFilters(tag_filter_type.group_members_list);
+    printTagFilters(tag_filter_type.group_candidates_list);
 
     // We are also always reprinting the lists on character/group edit window, as these ones doesn't get updated otherwise
     applyTagsOnCharacterSelect();
@@ -1733,8 +1766,8 @@ export async function getOneCharacter(avatarUrl) {
 
     if (response.ok) {
         const getData = await response.json();
-        getData['name'] = DOMPurify.sanitize(getData['name']);
-        getData['chat'] = String(getData['chat']);
+        getData.name = DOMPurify.sanitize(getData.name);
+        getData.chat = String(getData.chat);
 
         const indexOf = characters.findIndex(x => x.avatar === avatarUrl);
 
@@ -1746,7 +1779,7 @@ export async function getOneCharacter(avatarUrl) {
     }
 }
 
-function getCharacterSource(chId = this_chid) {
+export function getCharacterSource(chId = this_chid) {
     const character = characters[chId];
 
     if (!character) {
@@ -1800,14 +1833,14 @@ export async function getCharacters() {
         characters.splice(0, characters.length);
         for (let i = 0; i < getData.length; i++) {
             characters[i] = getData[i];
-            characters[i]['name'] = DOMPurify.sanitize(characters[i]['name']);
+            characters[i].name = DOMPurify.sanitize(characters[i].name);
 
             // For dropped-in cards
-            if (!characters[i]['chat']) {
-                characters[i]['chat'] = `${characters[i]['name']} - ${humanizedDateTime()}`;
+            if (!characters[i].chat) {
+                characters[i].chat = `${characters[i].name} - ${humanizedDateTime()}`;
             }
 
-            characters[i]['chat'] = String(characters[i]['chat']);
+            characters[i].chat = String(characters[i].chat);
         }
 
         if (previousAvatar) {
@@ -1862,7 +1895,7 @@ export async function deleteCharacterChatByName(characterId, fileName) {
     // Make sure all the data is loaded.
     await unshallowCharacter(characterId);
 
-    /** @type {import('./scripts/char-data.js').v1CharData} */
+    /** @type {Character} */
     const character = characters[characterId];
     if (!character) {
         console.warn(`Character with ID ${characterId} not found.`);
@@ -1899,8 +1932,7 @@ export async function deleteCharacterChatByName(characterId, fileName) {
 }
 
 export async function replaceCurrentChat() {
-    await clearChat();
-    chat.length = 0;
+    await clearChat({ clearData: true });
 
     const chatsResponse = await fetch('/api/characters/chats', {
         method: 'POST',
@@ -1912,17 +1944,15 @@ export async function replaceCurrentChat() {
         const chats = Object.values(await chatsResponse.json());
         chats.sort((a, b) => sortMoments(timestampToMoment(a.last_mes), timestampToMoment(b.last_mes)));
 
-        // pick existing chat
         if (chats.length && typeof chats[0] === 'object') {
+            // pick existing chat
             characters[this_chid].chat = chats[0].file_name.replace('.jsonl', '');
             invalidateCurrentChatContext();
             $('#selected_chat_pole').val(characters[this_chid].chat);
             saveCharacterDebounced();
             await getChat();
-        }
-
-        // start new chat
-        else {
+        } else {
+            // start new chat
             characters[this_chid].chat = `${name2} - ${humanizedDateTime()}`;
             invalidateCurrentChatContext();
             $('#selected_chat_pole').val(characters[this_chid].chat);
@@ -2061,7 +2091,7 @@ export async function getPromptBackfillMessages({ cachedOnly = false } = {}) {
     }
 
     const loadedChars = chat.reduce((total, message) => total + getMessagePromptChars(message), 0);
-    const contextTokens = Math.max(Number(getMaxContextSize()) || 0, 4096);
+    const contextTokens = Math.max(Number(getMaxPromptTokens()) || 0, 4096);
     const charBudget = contextTokens * PROMPT_BACKFILL_CHARS_PER_TOKEN - loadedChars;
     if (charBudget > promptBackfill.chars && promptBackfill.hasMore) {
         if (!promptBackfill.loading) {
@@ -2407,6 +2437,48 @@ export async function printMessages() {
 }
 
 /**
+ * Visually updates all chat messages including and after index by removing them, then adding them.
+ * @param {object} [options] Options
+ * @param {ChatMessage[]} [options.targetChat=chat] All messages in chat before startIndex will remain unchanged.
+ * @param {Number} [options.startIndex=0] Everything including and after startIndex will be replaced.
+ * @param {Boolean} [options.fade=true] When false, the swipe chevrons will not fade in.
+ */
+export async function redisplayChat({ targetChat = chat, startIndex = 0, fade = true } = {}) {
+    const messageElements = chatElement.find('.mes');
+    messageElements.removeClass('last_mes');
+
+    //Remove messages after index.
+    messageElements.filter(`.mes[mesid="${startIndex}"]`).nextAll('.mes').addBack().remove();
+
+    const t1 = performance.now();
+
+    const messages = targetChat.slice(startIndex);
+
+    if (messages.length > 0) {
+        const newMessageElements = messages.map((message, offset) => {
+            const i = startIndex + offset;
+            const messageElement = updateMessageElement(message, { messageId: i });
+
+            return messageElement[0];
+        });
+
+        //The last_mes has been removed, add it to the new last message.
+        newMessageElements.at(-1).classList.add('last_mes');
+
+        //Append to chat in one DOM update.
+        chatElement.append(newMessageElements);
+
+        applyCharacterTagsToMessageDivs({ mesIds: lodash.range(startIndex, targetChat.length, 1) });
+    }
+
+    refreshSwipeButtons(false, fade);
+    applyStylePins();
+    updateEditArrowClasses();
+
+    console.info(`Rendered ${targetChat.length - startIndex} messages in ${((performance.now() - t1) / 1000).toFixed(3)} seconds.`);
+}
+
+/**
  * Scrolls to the bottom once the chat's images and media have loaded (within a second).
  * @param {object} [options] Options
  * @param {boolean} [options.force] Scroll even when "Auto-scroll Chat" is off (a chat was just opened)
@@ -2458,7 +2530,12 @@ export function cancelDebouncedChatSave() {
     }
 }
 
-export async function clearChat() {
+/**
+ * Visually removes all chat message elements.
+ * @param {object} [options] Options
+ * @param {boolean} [options.clearData=false] Optionally clear the chat array's contents.
+ */
+export async function clearChat({ clearData = false } = {}) {
     cancelDebouncedChatSave();
     cancelDebouncedMetadataSave();
     closeMessageEditor();
@@ -2476,12 +2553,33 @@ export async function clearChat() {
 
     await saveItemizedPrompts(getCurrentChatId());
     itemizedPrompts.length = 0;
+
+    if (clearData) chat.length = 0;
 }
 
 export async function deleteLastMessage() {
+    deleteItemizedPromptForMessage(chat.length - 1);
     chat.length = chat.length - 1;
     chatElement.children('.mes').last().remove();
     await eventSource.emit(event_types.MESSAGE_DELETED, chat.length);
+}
+
+function getMessageDeletionStartId(id, deleteToolCalls = true) {
+    const message = chat[id];
+    if (!deleteToolCalls || message?.is_user || message?.is_system) {
+        return id;
+    }
+
+    let startId = id;
+    while (startId > 0) {
+        const previousMessage = chat[startId - 1];
+        if (!previousMessage?.is_system || !Array.isArray(previousMessage.extra?.tool_invocations)) {
+            break;
+        }
+        startId--;
+    }
+
+    return startId;
 }
 
 /**
@@ -2489,8 +2587,9 @@ export async function deleteLastMessage() {
  * @param {number} id The ID of the message to delete.
  * @param {number} [swipeDeletionIndex] Deletes the swipe with that index.
  * @param {boolean} [askConfirmation=false] Whether to ask for confirmation before deleting.
+ * @param {boolean} [deleteToolCalls=true] Whether to delete preceding tool-call messages.
  */
-export async function deleteMessage(id, swipeDeletionIndex = undefined, askConfirmation = false) {
+export async function deleteMessage(id, swipeDeletionIndex = undefined, askConfirmation = false, deleteToolCalls = true) {
     const canDeleteSwipe = swipeDeletionIndex !== undefined && swipeDeletionIndex !== null;
     if (canDeleteSwipe) {
         if (swipeDeletionIndex < 0) {
@@ -2528,12 +2627,19 @@ export async function deleteMessage(id, swipeDeletionIndex = undefined, askConfi
         return;
     }
 
-    chat.splice(id, 1);
-    messageElement.remove();
+    const firstMessageId = getMessageDeletionStartId(id, deleteToolCalls);
+    const messageIds = Array.from({ length: id - firstMessageId + 1 }, (_, index) => id - index);
 
-    chat_metadata['tainted'] = true;
+    // Delete from the end so earlier indices remain stable.
+    for (const messageId of messageIds) {
+        chat.splice(messageId, 1);
+        chatElement.find(`.mes[mesid="${messageId}"]`).remove();
+        deleteItemizedPromptForMessage(messageId);
+    }
 
-    const startIndex = [0, minId].includes(id) ? id : null;
+    chat_metadata.tainted = true;
+
+    const startIndex = firstMessageId <= minId ? firstMessageId : null;
     updateViewMessageIds(startIndex);
     saveChatDebounced();
 
@@ -2589,21 +2695,26 @@ export async function reloadCurrentChat({ expectedIdentity = getCurrentChatIdent
  * Send the message currently typed into the chat box.
  */
 export async function sendTextareaMessage() {
+    // Don't proceed mid-swipe. A message being edited does not block sending.
+    if (swipeState === SWIPE_STATE.SWIPING) return;
+    if (isChatSaveBlocked()) return;
     if (is_send_press) return;
     if (isExecutingCommandsFromChatInput) return;
-    if (isChatSaveBlocked()) return;
+
+    hideSwipeButtons(); //Swipe buttons must be hidden now, otherwise concurrent generations are possible.
 
     let generateType = 'normal';
     // "Continue on send" is activated when the user hits "send" (or presses enter) on an empty chat box, and the last
     // message was sent from a character (not the user or the system).
     const textareaText = String($('#send_textarea').val());
+    const lastMessage = chat[chat.length - 1];
     if (power_user.continue_on_send &&
         !hasPendingFileAttachment() &&
         !textareaText &&
         !selected_group &&
         chat.length &&
-        !chat[chat.length - 1]['is_user'] &&
-        !chat[chat.length - 1]['is_system']
+        !lastMessage.is_user &&
+        !lastMessage.is_system
     ) {
         generateType = 'continue';
     }
@@ -2612,19 +2723,41 @@ export async function sendTextareaMessage() {
         await newAssistantChat({ temporary: false });
     }
 
-    return await Generate(generateType);
+    let generation = await Generate(generateType);
+    showSwipeButtons();
+    return generation;
 }
 
 /**
- * Formats the message text into an HTML string using Markdown and other formatting.
- * @param {string} mes Message text
- * @param {string} ch_name Character name
- * @param {boolean} isSystem If the message was sent by the system
- * @param {boolean} isUser If the message was sent by the user
- * @param {number} messageId Message index in chat array
- * @param {object} [sanitizerOverrides] DOMPurify sanitizer option overrides
- * @param {boolean} [isReasoning] If the message is reasoning output
- * @returns {string} HTML string
+ * Formats raw message text into an HTML string ready for DOM insertion.
+ *
+ * The pipeline is, in order:
+ *   1. Prompt-bias stripping (message 0 only)
+ *   2. Comment / hidden-message normalisation
+ *   3. `beforeRegex` extension hooks (see {@link MessageFormatter})
+ *   4. Custom regex rules (`getRegexedString`)
+ *   5. `afterRegex` extension hooks
+ *   6. Markdown auto-fix (`fixMarkdown`)
+ *   7. HTML tag encoding (`encode_tags`)
+ *   8. Showdown Markdown → HTML conversion
+ *   9. `afterMarkdown` extension hooks
+ *  10. Name-prefix stripping (`allow_name2_display`)
+ *  11. DOMPurify sanitization
+ *
+ * All extension hooks run **before** DOMPurify (steps 3, 5, 9) so their
+ * output is always sanitised.
+ *
+ * @param {string} mes - Raw message text.
+ * @param {string} ch_name - Character name associated with the message.
+ * @param {boolean} isSystem - Whether the message is a system message.
+ * @param {boolean} isUser - Whether the message was sent by the user.
+ * @param {number} messageId - Index of the message in the chat array, or -1
+ *   for transient messages (e.g. streaming previews).
+ * @param {Partial<DOMPurify.Config>} [sanitizerOverrides] - DOMPurify option
+ *   overrides. Merged on top of the default config.
+ * @param {boolean} [isReasoning=false] - Whether the message is reasoning/thinking
+ *   output (affects regex placement and some display rules).
+ * @returns {string} Sanitized HTML string ready to assign to `innerHTML`.
  */
 export function messageFormatting(mes, ch_name, isSystem, isUser, messageId, sanitizerOverrides = {}, isReasoning = false) {
     if (!mes) {
@@ -2681,12 +2814,20 @@ export function messageFormatting(mes, ch_name, isSystem, isUser, messageId, san
         const indexOf = usableMessages.findIndex(x => x.index === Number(messageId));
         const depth = messageId >= 0 && indexOf !== -1 ? (usableMessages.length - indexOf - 1) : undefined;
 
+        mes = MessageFormatter.runStage(MessageFormatter.stage.BEFORE_REGEX, mes,
+            { ch_name, isSystem, isUser, messageId, isReasoning },
+        );
+
         // Always override the character name
         mes = getRegexedString(mes, regexPlacement, {
             characterOverride: ch_name,
             isMarkdown: true,
             depth: depth,
         });
+
+        mes = MessageFormatter.runStage(MessageFormatter.stage.AFTER_REGEX, mes,
+            { ch_name, isSystem, isUser, messageId, isReasoning },
+        );
     }
 
     if (power_user.auto_fix_generated_markdown) {
@@ -2765,13 +2906,17 @@ export function messageFormatting(mes, ch_name, isSystem, isUser, messageId, san
         mes = mes.replace(/<code(.*)>[\s\S]*?<\/code>/g, function (match) {
             return match.replace(/&amp;/g, '&');
         });
+
+        mes = MessageFormatter.runStage(MessageFormatter.stage.AFTER_MARKDOWN, mes,
+            { ch_name, isSystem, isUser, messageId, isReasoning },
+        );
     }
 
     if (!power_user.allow_name2_display && ch_name && !isUser && !isSystem) {
         mes = mes.replace(new RegExp(`(^|\n)${escapeRegex(ch_name)}:`, 'g'), '$1');
     }
 
-    /** @type {{ RETURN_DOM_FRAGMENT: false; RETURN_DOM: false; [key: string]: any }} */
+    /** @type {DOMPurify.Config} */
     const config = {
         RETURN_DOM: false,
         RETURN_DOM_FRAGMENT: false,
@@ -2788,36 +2933,33 @@ export function messageFormatting(mes, ch_name, isSystem, isUser, messageId, san
 }
 
 /**
+ * Creates an Image element for the given API/model icon.
+ * The image references the matching SVG file from `/img/` and includes a tooltip with API and model info.
+ * The caller is responsible for appending the image to the DOM and optionally calling `SVGInject` on it.
+ *
+ * @param {string} apiName - API identifier matching an SVG file in /img/ (e.g. 'openai', 'openrouter', 'claude')
+ * @param {string} [modelName=''] - Model name shown in the tooltip
+ * @returns {HTMLImageElement} The image element (not yet in the DOM)
+ */
+export function createModelIcon(apiName, modelName = '') {
+    const image = new Image();
+    image.classList.add('icon-svg');
+    image.src = `/img/${apiName}.svg`;
+    image.title = modelName ? `${apiName} - ${modelName}` : apiName;
+    return image;
+}
+
+/**
  * Inserts or replaces an SVG icon adjacent to the provided message's timestamp.
  *
- * If the `extra.api` is "openai" and `extra.model` contains the substring "claude",
- * the function fetches the "claude.svg". Otherwise, it fetches the SVG named after
- * the value in `extra.api`.
- *
  * @param {JQuery<HTMLElement>} mes - The message element containing the timestamp where the icon should be inserted or replaced.
- * @param {Object} extra - Contains the API and model details.
- * @param {string} extra.api - The name of the API, used to determine which SVG to fetch.
- * @param {string} extra.model - The model name, used to check for the substring "claude".
+ * @param {ChatMessageExtra} extra - Contains the API and model details.
  */
 function insertSVGIcon(mes, extra) {
-    // Determine the SVG filename
-    let modelName;
+    const apiName = extra?.api || '';
 
-    // Claude on OpenRouter or Anthropic
-    if (extra.api === 'openai' && extra.model?.toLowerCase().includes('claude')) {
-        modelName = 'claude';
-    }
-    // OpenAI on OpenRouter
-    else if (extra.api === 'openai' && extra.model?.toLowerCase().includes('openai')) {
-        modelName = 'openai';
-    }
-    // OpenRouter website model or other models
-    else if (extra.api === 'openai' && (extra.model === null || extra.model?.toLowerCase().includes('/'))) {
-        modelName = 'openrouter';
-    }
-    // Everything else
-    else {
-        modelName = extra.api;
+    if (!apiName) {
+        return;
     }
 
     const insertOrReplaceSVG = (image, className, targetSelector, insertBefore) => {
@@ -2833,66 +2975,14 @@ function insertSVGIcon(mes, extra) {
         };
     };
 
-    const createModelImage = (className, targetSelector, insertBefore) => {
-        const image = new Image();
-        image.classList.add('icon-svg', className);
-        image.src = `/img/${modelName}.svg`;
-        image.title = `${extra?.api ? extra.api + ' - ' : ''}${extra?.model ?? ''}`;
+    const insertIcon = (className, targetSelector, insertBefore) => {
+        const image = createModelIcon(apiName, extra?.model);
+        image.classList.add(className);
         insertOrReplaceSVG(image, className, targetSelector, insertBefore);
     };
 
-    createModelImage('timestamp-icon', '.timestamp');
-    createModelImage('thinking-icon', '.mes_reasoning_header_title', true);
-}
-
-
-function getMessageFromTemplate({
-    mesId,
-    swipeId,
-    characterName,
-    isUser,
-    avatarImg,
-    bias,
-    isSystem,
-    title,
-    timerValue,
-    timerTitle,
-    bookmarkLink,
-    forceAvatar,
-    timestamp,
-    tokenCount,
-    extra,
-    type,
-}) {
-    const mes = messageTemplate.clone();
-    mes.attr({
-        'mesid': mesId,
-        'swipeid': swipeId,
-        'ch_name': characterName,
-        'is_user': isUser,
-        'is_system': !!isSystem,
-        'bookmark_link': bookmarkLink,
-        'force_avatar': !!forceAvatar,
-        'timestamp': timestamp,
-        ...(type ? { type } : {}),
-    });
-    mes.find('.avatar img').attr('src', avatarImg);
-    mes.find('.ch_name .name_text').text(characterName);
-    mes.find('.mes_bias').html(bias);
-    mes.find('.timestamp').text(timestamp).attr('title', `${extra?.api ? extra.api + ' - ' : ''}${extra?.model ?? ''}`);
-    mes.find('.mesIDDisplay').text(`#${mesId}`);
-    tokenCount && mes.find('.tokenCounterDisplay').text(`${tokenCount}t`);
-    title && mes.attr('title', title);
-    timerValue && mes.find('.mes_timer').attr('title', timerTitle).text(timerValue);
-    bookmarkLink && updateBookmarkDisplay(mes);
-
-    updateReasoningUI(mes);
-
-    if (power_user.timestamp_model_icon && extra?.api) {
-        insertSVGIcon(mes, extra);
-    }
-
-    return mes;
+    insertIcon('timestamp-icon', '.timestamp');
+    insertIcon('thinking-icon', '.mes_reasoning_header_title', true);
 }
 
 /**
@@ -3120,7 +3210,7 @@ export function appendMediaToMessage(mes, messageElement, scrollBehavior = SCROL
     // Set media display attribute
     messageElement.attr('data-media-display', mediaDisplay);
     // Toggle text visibility
-    messageElement.find('.mes_text').toggleClass('displayNone', hideMessageText);
+    messageElement.find('.mes_text').toggleClass('inline_media', hideMessageText);
 
     /**
      * Appends a single image attachment to the message element.
@@ -3367,190 +3457,218 @@ export function addCopyToCodeBlocks(messageElement) {
     }
 }
 
+/**
+ * Shows or hides the Prompt display button
+ * @param {ChatMessage} message Message object
+ * @param {object} options Options
+ * @param {number} [options.messageId] Message ID
+ * @param {JQuery<HTMLElement>} [options.messageElement] Message element
+ * @return {void}
+ */
+function updateMessageItemizedPromptButton(message, { messageId = chat.indexOf(message), messageElement = chatElement.find(`.mes[mesid="${messageId}"]`) }) {
+    //if we have itemized messages, and the array isn't null..
+    if (!message.is_user && Array.isArray(itemizedPrompts) && itemizedPrompts.length > 0) {
+        const itemizedPrompt = itemizedPrompts.find(x => Number(x.mesId) === Number(messageId));
+        if (itemizedPrompt) {
+            messageElement.find('.mes_prompt').show();
+        }
+    }
+}
+
+/**
+ * Gets messageFormatting for a ChatMessage object.
+ * @param {ChatMessage} message
+ * @param {object} options Options
+ * @param {number} [options.messageId] Message ID
+ * @returns {string} Formatted message HTML
+ */
+function getMessageTextHTML(message, { messageId = chat.indexOf(message) }) {
+    // if mes.extra.uses_system_ui is true, set an override on the sanitizer options
+    /** @type {Partial<DOMPurify.Config>} */
+    const sanitizerOverrides = message.extra?.uses_system_ui ? { MESSAGE_ALLOW_SYSTEM_UI: true } : {};
+
+    return messageFormatting(
+        message.extra?.display_text || message.mes,
+        message.name,
+        message.is_system,
+        message.is_user,
+        messageId,
+        sanitizerOverrides,
+        false,
+    );
+}
 
 /**
  * Adds a single message to the chat.
  * @param {ChatMessage} mes Message object
  * @param {object} [options] Options
- * @param {string} [options.type='normal'] Message type
+ * @param {string} [options.type=undefined|'swipe'] Deprecated. Use updateMessageElement instead.
  * @param {number} [options.insertAfter=null] Message ID to insert the new message after
  * @param {boolean} [options.scroll=true] Whether to scroll to the new message
  * @param {number} [options.insertBefore=null] Message ID to insert the new message before
  * @param {number} [options.forceId=null] Force the message ID
- * @param {boolean} [options.showSwipes=true] Whether to show swipe buttons
- * @returns {void}
+ * @param {boolean} [options.showSwipes=true] Whether to refresh the swipe buttons.
+ * @returns {JQuery<HTMLElement>} The newly added message element
  */
-export function addOneMessage(mes, { type = 'normal', insertAfter = null, scroll = true, insertBefore = null, forceId = null, showSwipes = true } = {}) {
-    let messageText = mes['mes'];
-    const momentDate = timestampToMoment(mes.send_date);
-    const timestamp = momentDate.isValid() ? momentDate.format('LL LT') : '';
-
-    if (mes?.extra?.display_text) {
-        messageText = mes.extra.display_text;
-    }
-
-    // Forbidden black magic
-    // This allows to use "continue" on user messages
-    if (type === 'swipe' && mes.swipe_id === undefined) {
-        mes.swipe_id = 0;
-        mes.swipes = [mes.mes];
-    }
-
-    let avatarImg = getThumbnailUrl('persona', user_avatar);
-    const isSystem = mes.is_system;
-    const title = mes.title;
-
-    //for non-user mesages
-    if (!mes['is_user']) {
-        if (mes.force_avatar) {
-            avatarImg = mes.force_avatar;
-        } else if (this_chid === undefined) {
-            avatarImg = system_avatar;
-        } else {
-            if (characters[this_chid].avatar !== 'none') {
-                avatarImg = getThumbnailUrl('avatar', characters[this_chid].avatar);
-            } else {
-                avatarImg = default_avatar;
-            }
-        }
-        //old processing:
-        //if messge is from sytem, use the name provided in the message JSONL to proceed,
-        //if not system message, use name2 (char's name) to proceed
-        //characterName = mes.is_system || mes.force_avatar ? mes.name : name2;
-    } else if (mes['is_user'] && mes['force_avatar']) {
-        // Special case for persona images.
-        avatarImg = mes['force_avatar'];
-    }
-
-    // if mes.extra.uses_system_ui is true, set an override on the sanitizer options
-    const sanitizerOverrides = mes.extra?.uses_system_ui ? { MESSAGE_ALLOW_SYSTEM_UI: true } : {};
-
-    messageText = messageFormatting(
-        messageText,
-        mes.name,
-        isSystem,
-        mes.is_user,
-        chat.indexOf(mes),
-        sanitizerOverrides,
-        false,
-    );
-    const bias = messageFormatting(mes.extra?.bias ?? '', '', false, false, -1, {}, false);
-    let bookmarkLink = mes?.extra?.bookmark_link ?? '';
-
-    let params = {
-        mesId: forceId ?? chat.length - 1,
-        swipeId: mes.swipe_id ?? 0,
-        characterName: mes.name,
-        isUser: mes.is_user,
-        avatarImg: avatarImg,
-        bias: bias,
-        isSystem: isSystem,
-        title: title,
-        bookmarkLink: bookmarkLink,
-        forceAvatar: mes.force_avatar,
-        timestamp: timestamp,
-        extra: mes.extra,
-        tokenCount: mes.extra?.token_count ?? 0,
-        type: mes.extra?.type ?? '',
-        ...formatGenerationTimer(mes.gen_started, mes.gen_finished, mes.extra?.token_count, mes.extra?.reasoning_duration, mes.extra?.time_to_first_token),
-    };
-
-    const renderedMessage = getMessageFromTemplate(params);
-
-    if (type !== 'swipe') {
-        if (!insertAfter && !insertBefore) {
-            chatElement.append(renderedMessage);
-        }
-        else if (insertAfter) {
-            const target = chatElement.find(`.mes[mesid="${insertAfter}"]`);
-            $(renderedMessage).insertAfter(target);
-        } else {
-            const target = chatElement.find(`.mes[mesid="${insertBefore}"]`);
-            $(renderedMessage).insertBefore(target);
-        }
-    }
-
+export function addOneMessage(mes, { type = undefined, insertAfter = null, scroll = true, insertBefore = null, forceId = null, showSwipes = true } = {}) {
     // Callers push the new message to chat before calling addOneMessage
-    const newMessageId = typeof forceId == 'number' ? forceId : chat.length - 1;
-
-    const newMessage = chatElement.find(`[mesid="${newMessageId}"]`);
-    const isSmallSys = mes?.extra?.isSmallSys;
-
-    if (isSmallSys === true) {
-        newMessage.addClass('smallSysMes');
-    }
-
-    if (Array.isArray(mes?.extra?.tool_invocations)) {
-        newMessage.addClass('toolCall');
-    }
-
-    //shows or hides the Prompt display button
-    let mesIdToFind = type === 'swipe' ? params.mesId - 1 : params.mesId;  //Number(newMessage.attr('mesId'));
-
-    //if we have itemized messages, and the array isn't null..
-    if (params.isUser === false && Array.isArray(itemizedPrompts) && itemizedPrompts.length > 0) {
-        const itemizedPrompt = itemizedPrompts.find(x => Number(x.mesId) === Number(mesIdToFind));
-        if (itemizedPrompt) {
-            newMessage.find('.mes_prompt').show();
+    const messageId = (() => {
+        if (typeof forceId === 'number') {
+            return forceId;
         }
-    }
+        if (typeof insertBefore === 'number') {
+            return insertBefore - 1;
+        }
+        if (typeof insertAfter === 'number') {
+            return insertAfter + 1;
+        }
+        const index = chat.indexOf(mes);
+        if (index !== -1) {
+            return index;
+        }
+        return chat.length - 1;
+    })();
 
-    newMessage.find('.avatar img').on('error', function () {
-        $(this).hide();
-        $(this).parent().html('<div class="missing-avatar fa-solid fa-user-slash"></div>');
-    });
+    let messageElement;
 
     if (type === 'swipe') {
-        const messageId = forceId ?? chat.length - 1;
-        const swipeMessage = chatElement.find(`[mesid="${messageId}"]`);
-        swipeMessage.attr('swipeid', params.swipeId);
-        swipeMessage.find('.mes_text').html(messageText).attr('title', title);
-        swipeMessage.find('.timestamp').text(timestamp).attr('title', `${params.extra.api} - ${params.extra.model}`);
-        updateReasoningUI(swipeMessage);
-        appendMediaToMessage(mes, swipeMessage, scroll ? SCROLL_BEHAVIOR.ADJUST : SCROLL_BEHAVIOR.NONE);
-        if (power_user.timestamp_model_icon && params.extra?.api) {
-            insertSVGIcon(swipeMessage, params.extra);
-        }
-
-        if (mes.swipe_id == mes.swipes.length - 1) {
-            swipeMessage.find('.mes_timer').text(params.timerValue).attr('title', params.timerTitle);
-            swipeMessage.find('.tokenCounterDisplay').text(`${params.tokenCount}t`);
-        } else {
-            swipeMessage.find('.mes_timer').empty();
-            swipeMessage.find('.tokenCounterDisplay').empty();
-        }
+        // Forbidden black magic
+        // This allows to use "continue" on user messages
+        mes.swipe_id ??= 0;
+        mes.swipes ??= [mes.mes];
+        //This keeps listeners intact.
+        messageElement = chatElement.find(`[mesid="${messageId}"]`);
+        updateMessageElement(mes, { messageId, messageElement, adjustMediaScroll: scroll ? SCROLL_BEHAVIOR.ADJUST : SCROLL_BEHAVIOR.NONE });
     } else {
-        const messageId = forceId ?? chat.length - 1;
-        chatElement.find(`[mesid="${messageId}"] .mes_text`).append(messageText);
-        appendMediaToMessage(mes, newMessage, scroll ? SCROLL_BEHAVIOR.ADJUST : SCROLL_BEHAVIOR.NONE);
+        messageElement = updateMessageElement(mes, { messageId, adjustMediaScroll: scroll ? SCROLL_BEHAVIOR.ADJUST : SCROLL_BEHAVIOR.NONE });
+        if (typeof insertAfter === 'number' && insertAfter >= 0) {
+            const target = chatElement.find(`.mes[mesid="${insertAfter}"]`);
+            $(messageElement).insertAfter(target);
+        } else if (typeof insertBefore === 'number' && insertBefore >= 0) {
+            const target = chatElement.find(`.mes[mesid="${insertBefore}"]`);
+            $(messageElement).insertBefore(target);
+        } else {
+            chatElement.append(messageElement);
+        }
     }
 
-    addCopyToCodeBlocks(newMessage);
-
-    // Set the swipes counter for all non-user messages.
-    if (!params.isUser) {
-        updateSwipeCounter(newMessageId);
-    }
 
     //last_mes should always be updated.
     chatElement.find('.mes').removeClass('last_mes');
     chatElement.find('.mes').last().addClass('last_mes');
-    if (showSwipes) {
-        refreshSwipeButtons();
-    }
 
+    if (showSwipes) refreshSwipeButtons();
     // Don't scroll if not inserting last
     if (!insertAfter && !insertBefore && scroll) {
         scrollChatToBottom();
     }
 
-    applyCharacterTagsToMessageDivs({ mesIds: newMessageId });
+    applyCharacterTagsToMessageDivs({ mesIds: messageId });
     updateEditArrowClasses();
 
     if (type !== 'swipe' && scroll && !insertAfter && !insertBefore) {
-        newMessage.addClass('st-new-message');
-        setTimeout(() => newMessage.removeClass('st-new-message'), 600);
+        messageElement.addClass('st-new-message');
+        setTimeout(() => messageElement.removeClass('st-new-message'), 600);
     }
+    return messageElement;
+}
+
+/**
+ * Creates the element of a single message as if it were the last message or at forceMesId
+ * @param {ChatMessage} mes Message object
+ * @param {object} [options] Options
+ * @param {number} [options.messageId=chat.length - 1] Force the message ID
+ * @param {JQuery<HTMLElement>} [options.messageElement=messageTemplate.clone()] This message element will be updated with the ChatMessage object.
+ * @param {SCROLL_BEHAVIOR} [options.adjustMediaScroll=SCROLL_BEHAVIOR.NONE] Scroll behavior option passed to appendMediaToMessage.
+ * @returns {JQuery<HTMLElement>} Rendered HTMLElement.
+ */
+export function updateMessageElement(mes, { messageId = chat.length - 1, messageElement = messageTemplate.clone(), adjustMediaScroll = SCROLL_BEHAVIOR.NONE } = {}) {
+    let avatarImg = getThumbnailUrl('persona', user_avatar);
+
+    //for non-user messages
+    if (!mes.is_user) {
+        if (mes.force_avatar) {
+            avatarImg = mes.force_avatar;
+        } else if (this_chid === undefined) {
+            avatarImg = system_avatar;
+        } else if (characters[this_chid] && characters[this_chid].avatar !== 'none') {
+            avatarImg = getThumbnailUrl('avatar', characters[this_chid].avatar);
+        } else {
+            avatarImg = default_avatar;
+        }
+        //old processing:
+        //if message is from system, use the name provided in the message JSONL to proceed,
+        //if not system message, use name2 (char's name) to proceed
+        //characterName = mes.is_system || mes.force_avatar ? mes.name : name2;
+    } else if (mes.is_user && mes.force_avatar) {
+        // Special case for persona images.
+        avatarImg = mes.force_avatar;
+    }
+    const momentDate = timestampToMoment(mes.send_date);
+    const timestamp = momentDate.isValid() ? momentDate.format('LL LT') : '';
+    const messageHTML = getMessageTextHTML(mes, { messageId });
+    const bookmarkLink = mes?.extra?.bookmark_link;
+    const tokenCount = mes.extra?.token_count;
+    const { timerValue, timerTitle } = formatGenerationTimer(mes.gen_started, mes.gen_finished, mes.extra?.token_count, mes.extra?.reasoning_duration, mes.extra?.time_to_first_token);
+
+    messageElement.attr({
+        'mesid': messageId,
+        'swipeid': mes.swipe_id ?? 0,
+        'ch_name': mes.name,
+        'is_user': mes.is_user,
+        'is_system': !!mes.is_system,
+        'bookmark_link': bookmarkLink,
+        'force_avatar': !!mes.force_avatar,
+        'timestamp': timestamp,
+        // ...(type ?? { type }),
+        'type': mes.extra?.type ?? '',
+    });
+
+    messageElement.find('.avatar img').attr('src', avatarImg);
+    messageElement.find('.ch_name .name_text').text(mes.name);
+    messageElement.find('.timestamp').text(timestamp).attr('title', `${mes.extra?.api ? mes.extra.api + ' - ' : ''}${mes.extra?.model ?? ''}`);
+    messageElement.find('.mesIDDisplay').text(`#${messageId}`);
+    tokenCount && messageElement.find('.tokenCounterDisplay').text(`${tokenCount}t`);
+    mes.title && messageElement.attr('title', mes.title);
+    timerValue && messageElement.find('.mes_timer').attr('title', timerTitle).text(timerValue);
+    bookmarkLink && updateBookmarkDisplay(messageElement);
+
+    if (mes.extra?.bias !== '') {
+        const bias = messageFormatting(mes.extra?.bias, '', false, false, -1, {}, false);
+        messageElement.find('.mes_bias').html(bias);
+    }
+
+    updateReasoningUI(messageElement);
+
+    if (power_user.timestamp_model_icon && mes.extra?.api) {
+        insertSVGIcon(messageElement, mes.extra);
+    }
+
+    if (mes?.extra?.isSmallSys === true) {
+        messageElement.addClass('smallSysMes');
+    }
+
+    if (Array.isArray(mes?.extra?.tool_invocations)) {
+        messageElement.addClass('toolCall');
+    }
+
+    updateMessageItemizedPromptButton(mes, { messageId, messageElement });
+
+    messageElement.find('.avatar img').on('error', function () {
+        $(this).hide();
+        $(this).parent().html('<div class="missing-avatar fa-solid fa-user-slash"></div>');
+    });
+
+    appendMediaToMessage(mes, messageElement, adjustMediaScroll);
+    messageElement.find('.mes_text').html(messageHTML);
+    addCopyToCodeBlocks(messageElement);
+
+    // Set the swipes counter for all non-user messages.
+    if (!mes.is_user) {
+        updateSwipeCounter(messageId, { message: mes, messageElement });
+    }
+
+    return messageElement;
 }
 
 /**
@@ -3769,6 +3887,21 @@ export function substituteParamsLegacy(content, _name1, _name2, _original, _grou
         });
     }
 
+    // Try to roughly detect experimental macro features to show the onboarding if needed.
+    // This does not have to be 100% accurate, only best effort what we can quickly check.
+    // Only do this if the warning wasn't shown yet, to prevent needless regex checks.
+    if (accountStorage.getItem('slash_command_experimental_engine_warning_shown') !== 'true') {
+        let feature = /** @type {string|null} */ (null);
+        if (/{{\s*if/.test(content)) feature = '{{if}} macro';
+        else if (/{{\s*\//.test(content)) feature = 'scoped macro';
+        else if (/{{\s*[!?~#/]/.test(content)) feature = 'macro flags';
+        else if (/{{\s*[.$]/.test(content)) feature = 'variable shorthands';
+        else if (/\{\{(?:(?!\}\}).)*\{\{(?=[\s\S]*?\}\}[\s\S]*?\}\})/.test(content)) feature = 'nested macro';
+        else if (/{{(?:greeting|charFirstMessage)(?:::\d+)?}}/i.test(content)) feature = 'greeting macro';
+
+        if (feature) void onboardingExperimentalMacroEngine(feature);
+    }
+
     const environment = {};
 
     if (typeof _original === 'string') {
@@ -3882,12 +4015,17 @@ export function substituteParamsLegacy(content, _name1, _name2, _original, _grou
  * @param {string} [options.original] - The original message for {{original}} substitution.
  * @param {string} [options.groupOverride] - The group members list for {{group}} substitution.
  * @param {boolean} [options.replaceCharacterCard=true] - Whether to replace character card macros.
- * @param {Record<string,string|MacroHandler>} [options.dynamicMacros={}] - Additional environment variables as dynamic macros for substitution. Registered as macro functions.
+ * @param {Record<string, import('./scripts/macros/engine/MacroEnv.types.js').DynamicMacroValue>} [options.dynamicMacros={}] - Additional environment variables as dynamic macros for substitution. Registered as macro functions.
  * @param {(x: string) => string} [options.postProcessFn=(x) => x] - Post-processing function for each substituted macro.
  * @returns {string} The string with substituted parameters.
  */
 export function substituteParams(content, options = {}) {
     if (!content) return '';
+
+    if (typeof content !== 'string') {
+        console.warn('substituteParams: content will be coerced to string', content);
+        content = String(content);
+    }
 
     // Handle legacy signature calls to substituteParams
     // We'll simply re-route them to a temporary legacy function. In the future, we'll remove this and cleanly build the options object ourselves.
@@ -3922,9 +4060,15 @@ export function substituteParams(content, options = {}) {
  * Gets stopping sequences for the prompt.
  * @param {boolean} isImpersonate A request is made to impersonate a user
  * @param {boolean} isContinue A request is made to continue the message
+ * @param {string} [api] Optional API name to get API-specific stopping sequences for
  * @returns {string[]} Array of stopping strings
  */
-export function getStoppingStrings(isImpersonate, isContinue) {
+export function getStoppingStrings(isImpersonate, isContinue, api = main_api) {
+    // Only custom stop strings apply to Chat Completion
+    if (api === 'openai') {
+        return getCustomStoppingStrings();
+    }
+
     const result = [];
 
     if (power_user.context.names_as_stop_strings) {
@@ -4250,11 +4394,13 @@ export function baseChatReplace(value, name1Override = null, name2Override = nul
  * @property {string} version Character version
  * @property {string} charDepthPrompt Character depth note
  * @property {string} creatorNotes Character creator notes
+ * @property {string} firstMessage Character first message / greeting
+ * @property {string[]} alternateGreetings Character alternate greetings
  */
 
 /**
  * Helper to create an object with lazy, memoized getters from a map of field resolvers.
- * @param {Record<string, () => string>} resolvers Map of field names to resolver functions
+ * @param {Record<string, () => string|string[]>} resolvers Map of field names to resolver functions
  * @returns {CharacterCardFields} Object with lazy getters
  */
 export function createLazyFields(resolvers) {
@@ -4292,12 +4438,12 @@ export function getCharacterCardFieldsLazy({ chid = undefined } = {}) {
     const useGroupCards = selected_group && character;
     const groupCardsLazy = useGroupCards ? getGroupCharacterCardsLazy(selected_group, Number(currentChid)) : null;
 
-    /** @type {Record<string, () => string>} */
+    /** @type {Record<string, () => string|string[]>} */
     const resolvers = {
         persona: () => baseChatReplace(power_user.persona_description?.trim()),
         system: () => {
             if (!character) return '';
-            const systemPrompt = chat_metadata['system_prompt'] || character.data?.system_prompt || '';
+            const systemPrompt = chat_metadata.system_prompt || character.data?.system_prompt || '';
             return power_user.prefer_character_prompt ? baseChatReplace(systemPrompt.trim()) : '';
         },
         jailbreak: () => {
@@ -4327,14 +4473,25 @@ export function getCharacterCardFieldsLazy({ chid = undefined } = {}) {
         scenario: () => {
             if (groupCardsLazy) return groupCardsLazy.scenario;
             if (!character) return '';
-            const scenarioText = chat_metadata['scenario'] || character.scenario || '';
+            const scenarioText = chat_metadata.scenario || character.scenario || '';
             return baseChatReplace(scenarioText.trim());
         },
         mesExamples: () => {
             if (groupCardsLazy) return groupCardsLazy.mesExamples;
             if (!character) return '';
-            const exampleDialog = chat_metadata['mes_example'] || character.mes_example || '';
+            const exampleDialog = chat_metadata.mes_example || character.mes_example || '';
             return baseChatReplace(exampleDialog.trim());
+        },
+        firstMessage: () => {
+            if (!character) return '';
+            const firstMes = character.first_mes?.trim() || '';
+            return baseChatReplace(firstMes);
+        },
+        alternateGreetings: () => {
+            if (!character) return [];
+            const altGreetings = character.data?.alternate_greetings;
+            if (!Array.isArray(altGreetings)) return [];
+            return altGreetings.map(greeting => baseChatReplace(greeting?.trim()));
         },
     };
 
@@ -4347,55 +4504,24 @@ export function getCharacterCardFieldsLazy({ chid = undefined } = {}) {
  * @param {number} [options.chid] Optional character index
  * @returns {CharacterCardFields} Character card fields
  */
-export function getCharacterCardFields({ chid = null } = {}) {
-    const currentChid = chid ?? this_chid;
+export function getCharacterCardFields({ chid = undefined } = {}) {
+    const lazy = getCharacterCardFieldsLazy({ chid });
 
-    const result = {
-        system: '',
-        mesExamples: '',
-        description: '',
-        personality: '',
-        persona: '',
-        scenario: '',
-        jailbreak: '',
-        version: '',
-        charDepthPrompt: '',
-        creatorNotes: '',
+    // Resolve all lazy fields into a plain object
+    return {
+        system: lazy.system,
+        mesExamples: lazy.mesExamples,
+        description: lazy.description,
+        personality: lazy.personality,
+        persona: lazy.persona,
+        scenario: lazy.scenario,
+        jailbreak: lazy.jailbreak,
+        version: lazy.version,
+        charDepthPrompt: lazy.charDepthPrompt,
+        creatorNotes: lazy.creatorNotes,
+        firstMessage: lazy.firstMessage,
+        alternateGreetings: lazy.alternateGreetings,
     };
-    result.persona = baseChatReplace(power_user.persona_description?.trim(), name1, name2);
-
-    const character = characters[currentChid];
-
-    if (!character) {
-        return result;
-    }
-
-    const scenarioText = chat_metadata['scenario'] || character.scenario || '';
-    const exampleDialog = chat_metadata['mes_example'] || character.mes_example || '';
-    const systemPrompt = chat_metadata['system_prompt'] || character.data?.system_prompt || '';
-
-    result.description = baseChatReplace(character.description?.trim(), name1, name2);
-    result.personality = baseChatReplace(character.personality?.trim(), name1, name2);
-    result.scenario = baseChatReplace(scenarioText.trim(), name1, name2);
-    result.mesExamples = baseChatReplace(exampleDialog.trim(), name1, name2);
-    result.system = power_user.prefer_character_prompt ? baseChatReplace(systemPrompt.trim(), name1, name2) : '';
-    result.jailbreak = power_user.prefer_character_jailbreak ? baseChatReplace(character.data?.post_history_instructions?.trim(), name1, name2) : '';
-    result.version = character.data?.character_version ?? '';
-    result.charDepthPrompt = baseChatReplace(character.data?.extensions?.depth_prompt?.prompt?.trim(), name1, name2);
-    result.creatorNotes = baseChatReplace(character.data?.creator_notes?.trim(), name1, name2);
-
-    if (selected_group) {
-        const groupCards = getGroupCharacterCards(selected_group, Number(currentChid));
-
-        if (groupCards) {
-            result.description = groupCards.description;
-            result.personality = groupCards.personality;
-            result.scenario = groupCards.scenario;
-            result.mesExamples = groupCards.mesExamples;
-        }
-    }
-
-    return result;
 }
 
 /**
@@ -4520,7 +4646,7 @@ class StreamingProcessor {
     }
 
     markUIGenStopped() {
-        activateSendButtons();
+        unblockGeneration();
     }
 
     async onStartStreaming(text) {
@@ -4581,39 +4707,39 @@ class StreamingProcessor {
             this.sendTextarea.value = processedText;
             this.sendTextarea.dispatchEvent(new Event('input', { bubbles: true }));
         } else {
-            const mesChanged = chat[messageId]['mes'] !== processedText;
+            const mesChanged = chat[messageId].mes !== processedText;
             await this.#checkDomElements(messageId);
             this.#updateMessageBlockVisibility();
             const currentTime = new Date();
-            chat[messageId]['mes'] = processedText;
-            chat[messageId]['gen_started'] = this.timeStarted;
-            chat[messageId]['gen_finished'] = currentTime;
-            if (!chat[messageId]['extra']) {
-                chat[messageId]['extra'] = {};
+            chat[messageId].mes = processedText;
+            chat[messageId].gen_started = this.timeStarted;
+            chat[messageId].gen_finished = currentTime;
+            if (!chat[messageId].extra) {
+                chat[messageId].extra = {};
             }
-            chat[messageId]['extra']['time_to_first_token'] = this.timeToFirstToken;
+            chat[messageId].extra.time_to_first_token = this.timeToFirstToken;
 
             // Update reasoning
             await this.reasoningHandler.process(messageId, mesChanged, this.promptReasoning);
-            processedText = chat[messageId]['mes'];
+            processedText = chat[messageId].mes;
 
             // Token count update.
             const tokenCountText = this.reasoningHandler.reasoning + processedText;
             const currentTokenCount = isFinal && power_user.message_token_count_enabled ? await getTokenCountAsync(tokenCountText, 0) : 0;
             if (currentTokenCount) {
-                chat[messageId]['extra']['token_count'] = currentTokenCount;
+                chat[messageId].extra.token_count = currentTokenCount;
                 if (this.messageTokenCounterDom instanceof HTMLElement) {
                     this.messageTokenCounterDom.textContent = `${currentTokenCount}t`;
                 }
             }
 
-            if ((this.type == 'swipe' || this.type === 'continue') && Array.isArray(chat[messageId]['swipes'])) {
-                chat[messageId]['swipes'][chat[messageId]['swipe_id']] = processedText;
-                chat[messageId]['swipe_info'][chat[messageId]['swipe_id']] = {
-                    'send_date': chat[messageId]['send_date'],
-                    'gen_started': chat[messageId]['gen_started'],
-                    'gen_finished': chat[messageId]['gen_finished'],
-                    'extra': structuredClone(chat[messageId]['extra']),
+            if ((this.type == 'swipe' || this.type === 'continue') && Array.isArray(chat[messageId].swipes)) {
+                chat[messageId].swipes[chat[messageId].swipe_id] = processedText;
+                chat[messageId].swipe_info[chat[messageId].swipe_id] = {
+                    'send_date': chat[messageId].send_date,
+                    'gen_started': chat[messageId].gen_started,
+                    'gen_finished': chat[messageId].gen_finished,
+                    'extra': structuredClone(chat[messageId].extra),
                 };
             }
 
@@ -4665,15 +4791,24 @@ class StreamingProcessor {
         }
     }
 
-    async onFinishStreaming(messageId, text) {
-        this.markUIGenStopped();
+    /**
+     * Finalizes an intermediary message after generation is complete, or a tool call is performed.
+     * Performs essential message processing (code blocks, reasoning, swipes, attachments, events)
+     * without the heavier finish operations (UI unlock - optional, auto-swipe, sound, save chat).
+     * @param {number} messageId - The message ID to finalize.
+     * @param {string} text - The message text.
+     * @param {Object} options - Additional options for finalization.
+     * @param {boolean} options.unlockUI - Whether to unlock the generation UI.
+     */
+    async finalizeIntermediaryMessage(messageId, text, { unlockUI = true }) {
         await this.onProgressStreaming(messageId, text, true);
-        addCopyToCodeBlocks(chatElement.find(`.mes[mesid="${messageId}"]`));
+        const messageElement = chatElement.find(`.mes[mesid="${messageId}"]`);
+        const message = chat[messageId];
+        addCopyToCodeBlocks(messageElement);
 
         await this.reasoningHandler.finish(messageId);
 
         if (Array.isArray(this.swipes) && this.swipes.length > 0) {
-            const message = chat[messageId];
             const swipeInfoExtra = structuredClone(message.extra ?? {});
             delete swipeInfoExtra.token_count;
             delete swipeInfoExtra.reasoning;
@@ -4686,19 +4821,26 @@ class StreamingProcessor {
             };
             const swipeInfoArray = Array(this.swipes.length).fill().map(() => structuredClone(swipeInfo));
             parseReasoningInSwipes(this.swipes, swipeInfoArray, message.extra?.reasoning_duration);
-            chat[messageId].swipes.push(...this.swipes);
-            chat[messageId].swipe_info.push(...swipeInfoArray);
+            message.swipes.push(...this.swipes);
+            message.swipe_info.push(...swipeInfoArray);
         }
 
+        syncMesToSwipe(messageId);
+        saveLogprobsForActiveMessage(this.messageLogprobs.filter(Boolean), this.continueMessage);
+
         if (Array.isArray(this.images) && this.images.length > 0) {
-            await processImageAttachment(chat[messageId], { imageUrls: this.images });
-            appendMediaToMessage(chat[messageId], $(this.messageDom));
+            await processImageAttachment(message, { imageUrls: this.images });
+            appendMediaToMessage(message, $(this.messageDom));
         }
 
         // Store reasoning signature for models that support multi-turn context
         if (this.reasoningSignature) {
-            chat[messageId].extra = chat[messageId].extra || {};
-            chat[messageId].extra.reasoning_signature = this.reasoningSignature;
+            message.extra = message.extra || {};
+            message.extra.reasoning_signature = this.reasoningSignature;
+        }
+
+        if (unlockUI) {
+            this.markUIGenStopped();
         }
 
         if (this.type !== 'impersonate') {
@@ -4708,15 +4850,17 @@ class StreamingProcessor {
             await eventSource.emit(event_types.IMPERSONATE_READY, text);
         }
 
-        syncMesToSwipe(messageId);
-        saveLogprobsForActiveMessage(this.messageLogprobs.filter(Boolean), this.continueMessage);
-        await saveChatConditional();
-        unblockGeneration();
+        updateSwipeCounter(messageId, { message, messageElement });
+    }
+
+    async onFinishStreaming(messageId, text) {
+        await this.finalizeIntermediaryMessage(messageId, text, { unlockUI: true });
 
         const isAborted = this.abortController.signal.aborted;
         if (!isAborted && power_user.auto_swipe && generatedTextFiltered(text)) {
-            return swipe_right();
+            return await swipe(null, SWIPE_DIRECTION.RIGHT, { source: SWIPE_SOURCE.AUTO_SWIPE, repeated: true, forceMesId: chat.length - 1 });
         }
+        await saveChatConditional();
 
         playMessageSound();
     }
@@ -4739,13 +4883,13 @@ class StreamingProcessor {
 
     setFirstSwipe(messageId) {
         if (this.type !== 'swipe' && this.type !== 'impersonate') {
-            if (Array.isArray(chat[messageId]['swipes']) && chat[messageId]['swipes'].length === 1 && chat[messageId]['swipe_id'] === 0) {
-                chat[messageId]['swipes'][0] = chat[messageId]['mes'];
-                chat[messageId]['swipe_info'][0] = {
-                    'send_date': chat[messageId]['send_date'],
-                    'gen_started': chat[messageId]['gen_started'],
-                    'gen_finished': chat[messageId]['gen_finished'],
-                    'extra': structuredClone(chat[messageId]['extra']),
+            if (Array.isArray(chat[messageId].swipes) && chat[messageId].swipes.length === 1 && chat[messageId].swipe_id === 0) {
+                chat[messageId].swipes[0] = chat[messageId].mes;
+                chat[messageId].swipe_info[0] = {
+                    'send_date': chat[messageId].send_date,
+                    'gen_started': chat[messageId].gen_started,
+                    'gen_finished': chat[messageId].gen_finished,
+                    'extra': structuredClone(chat[messageId].extra),
                 };
             }
         }
@@ -4757,9 +4901,9 @@ class StreamingProcessor {
     }
 
     /**
-     * @returns {Generator<{ text: string, swipes: string[], logprobs: import('./scripts/logprobs.js').TokenLogprobs, toolCalls: any[], state: any }, void, void>}
+     * @returns {AsyncGenerator<{ text: string, swipes: string[], logprobs: import('./scripts/logprobs.js').TokenLogprobs, toolCalls: any[], state: any }, void, void>}
      */
-    *nullStreamingGeneration() {
+    async* nullStreamingGeneration() {
         throw new Error('Generation function for streaming is not hooked up');
     }
 
@@ -4774,7 +4918,7 @@ class StreamingProcessor {
         // when streaming, we cache the result of getStoppingStrings instead of calling it once per token.
         const isImpersonate = this.type == 'impersonate';
         const isContinue = this.type == 'continue';
-        this.stoppingStrings = getStoppingStrings(isImpersonate, isContinue);
+        this.stoppingStrings = getStoppingStrings(isImpersonate, isContinue, main_api);
 
         try {
             const sw = new Stopwatch(1000 / power_user.streaming_fps);
@@ -4804,8 +4948,7 @@ class StreamingProcessor {
             }
             const seconds = (timestamps[timestamps.length - 1] - timestamps[0]) / 1000;
             console.warn(`Stream stats: ${timestamps.length} tokens, ${seconds.toFixed(2)} seconds, rate: ${Number(timestamps.length / seconds).toFixed(2)} TPS`);
-        }
-        catch (err) {
+        } catch (err) {
             // in the case of a self-inflicted abort, we have already cleaned up
             if (!this.isFinished) {
                 console.error(err);
@@ -4834,9 +4977,7 @@ export function createRawPrompt(prompt, api, instructOverride, quietToLoud, syst
 
     // If the prompt was given as a string, convert to a message-style object assuming user role
     if (typeof prompt === 'string') {
-        const message = api === 'openai'
-            ? { role: 'user', content: prompt.trim() }
-            : { role: 'system', content: prompt };
+        const message = { role: 'user', content: prompt.trim() };
         prompt = [message];
     } else {  // checks for message-style object
         if (prompt.length === 0 && !systemPrompt) throw Error('No messages provided');
@@ -4863,7 +5004,12 @@ export function createRawPrompt(prompt, api, instructOverride, quietToLoud, syst
     // prepend system prompt, if provided
     if (systemPrompt) {
         systemPrompt = substituteParams(systemPrompt);
-        systemPrompt = isInstruct ? (formatInstructModeStoryString(systemPrompt) + '\n') : systemPrompt.trim();
+        systemPrompt = isInstruct ? formatInstructModeStoryString(systemPrompt) : systemPrompt.trim();
+        if (isInstruct && systemPrompt.length > 0 && !systemPrompt.endsWith('\n')) {
+            if (power_user.instruct.wrap && !power_user.instruct.story_string_suffix) {
+                systemPrompt += '\n';
+            }
+        }
         prompt.unshift({ role: 'system', content: systemPrompt });
     }
 
@@ -4884,8 +5030,6 @@ export function createRawPrompt(prompt, api, instructOverride, quietToLoud, syst
 }
 
 /**
- * Generates a message using the provided prompt.
- * If the prompt is an array of chat-style messages and not using chat completion, it will be converted to a text prompt.
  * @typedef {object} GenerateRawParams
  * @prop {string | object[]} [prompt] Prompt to generate a message from. Can be a string or an array of chat-style messages, i.e. [{role: '', content: ''}, ...]
  * @prop {string} [api] API to use. Main API is used if not specified.
@@ -4895,16 +5039,16 @@ export function createRawPrompt(prompt, api, instructOverride, quietToLoud, syst
  * @prop {number} [responseLength] Maximum response length. If unset, the global default value is used.
  * @prop {boolean} [trimNames] Whether to allow trimming "{{user}}:" and "{{char}}:" from the response.
  * @prop {string} [prefill] An optional prefill for the prompt.
- * @prop {object} [jsonSchema] JSON schema to use for the structured generation. Usually requires a special instruction.
- * @param {GenerateRawParams} params Parameters for generating a message
- * @returns {Promise<string>} Generated message
+ * @prop {JsonSchema} [jsonSchema] JSON schema to use for the structured generation. Usually requires a special instruction.
  */
-export async function generateRaw({ prompt = '', api = null, instructOverride = false, quietToLoud = false, systemPrompt = '', responseLength = null, trimNames = true, prefill = '', jsonSchema = null } = {}) {
-    if (arguments.length > 0 && typeof arguments[0] !== 'object') {
-        console.trace('generateRaw called with positional arguments. Please use an object instead.');
-        [prompt, api, instructOverride, quietToLoud, systemPrompt, responseLength, trimNames, prefill, jsonSchema] = arguments;
-    }
 
+/**
+ * Generates a raw data object using the provided prompt.
+ * This used to be part of `generateRaw`, but separating it out allows extensions to access other data such as reasoning message.
+ * @param {GenerateRawParams} params Parameters for generating a message
+ * @returns {Promise<object | string>} Raw API response data, or a JSON string extracted from the response when `jsonSchema` is provided.
+ */
+export async function generateRawData({ prompt = '', api = null, instructOverride = false, quietToLoud = false, systemPrompt = '', responseLength = null, prefill = '', jsonSchema = null } = {}) {
     if (!api) {
         api = main_api;
     }
@@ -4918,7 +5062,10 @@ export async function generateRaw({ prompt = '', api = null, instructOverride = 
 
     // Allow extensions to stop generation before it happens
     const eventAbortController = new AbortController();
-    const abortHook = () => eventAbortController.abort(new Error('Cancelled by extension'));
+    const abortHook = () => {
+        abortController.abort(new Error('Cancelled by stop event'));
+        eventAbortController.abort(new Error('Cancelled by extension'));
+    };
     eventSource.on(event_types.GENERATION_STOPPED, abortHook);
 
     try {
@@ -5004,25 +5151,10 @@ export async function generateRaw({ prompt = '', api = null, instructOverride = 
         }
 
         if (jsonSchema) {
-            return extractJsonFromData(data, { mainApi: api });
+            return extractJsonFromData(data, { mainApi: api, returnInvalidJson: jsonSchema.returnInvalid });
         }
 
-        // format result, exclude user prompt bias
-        const message = cleanUpMessage({
-            getMessage: extractMessageFromData(data),
-            isImpersonate: false,
-            isContinue: false,
-            displayIncompleteSentences: true,
-            includeUserPromptBias: false,
-            trimNames: trimNames,
-            trimWrongNames: trimNames,
-        });
-
-        if (!message) {
-            throw new Error('No message generated');
-        }
-
-        return message;
+        return data;
     } finally {
         eventSource.removeListener(event_types.GENERATION_STOPPED, abortHook);
         if (responseLengthCustomized && TempResponseLength.isCustomized()) {
@@ -5030,6 +5162,43 @@ export async function generateRaw({ prompt = '', api = null, instructOverride = 
             TempResponseLength.removeEventHook(api, eventHook);
         }
     }
+}
+
+/**
+ * Generates a message using the provided prompt.
+ * If the prompt is an array of chat-style messages and not using chat completion, it will be converted to a text prompt.
+ * @param {GenerateRawParams} params Parameters for generating a message
+ * @returns {Promise<string>} Generated output: a cleaned-up message string when `jsonSchema` is not provided, or an extracted JSON string conforming to `jsonSchema` when it is.
+ */
+export async function generateRaw({ prompt = '', api = null, instructOverride = false, quietToLoud = false, systemPrompt = '', responseLength = null, trimNames = true, prefill = '', jsonSchema = null } = {}) {
+    if (arguments.length > 0 && typeof arguments[0] !== 'object') {
+        console.trace('generateRaw called with positional arguments. Please use an object instead.');
+        [prompt, api, instructOverride, quietToLoud, systemPrompt, responseLength, trimNames, prefill, jsonSchema] = arguments;
+    }
+
+    const data = await generateRawData({ prompt, api, instructOverride, quietToLoud, systemPrompt, responseLength, prefill, jsonSchema });
+
+    // JSON string (matching the provided schema) will already be extracted.
+    if (jsonSchema) {
+        return data;
+    }
+
+    // format result, exclude user prompt bias
+    const message = cleanUpMessage({
+        getMessage: extractMessageFromData(data, api),
+        isImpersonate: false,
+        isContinue: false,
+        displayIncompleteSentences: true,
+        includeUserPromptBias: false,
+        trimNames: trimNames,
+        trimWrongNames: trimNames,
+    });
+
+    if (!message) {
+        throw new Error('No message generated');
+    }
+
+    return message;
 }
 
 class TempResponseLength {
@@ -5145,6 +5314,7 @@ function removeLastMessage() {
  * @property {object} value JSON schema value.
  * @property {string} [description] Description of the schema.
  * @property {boolean} [strict] If true, the schema will be used in strict mode, meaning that only the fields defined in the schema will be allowed.
+ * @property {boolean} [returnInvalid] If true, a string that can't be parsed as a JSON will be returned as is, instead of an empty object.
  *
  * @typedef {object} GenerateOptions
  * @property {boolean} [automatic_trigger] If the generation was triggered automatically (e.g. group auto mode).
@@ -5192,7 +5362,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
     const isInstruct = power_user.instruct.enabled && main_api !== 'openai';
     const isImpersonate = type == 'impersonate';
 
-    if (!(dryRun || type == 'regenerate' || type == 'swipe' || type == 'quiet')) {
+    if (!(dryRun || depth || type == 'regenerate' || type == 'swipe' || type == 'quiet')) {
         const interruptedByCommand = await processCommands(String($('#send_textarea').val()));
 
         if (interruptedByCommand) {
@@ -5237,13 +5407,13 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
         // Hide swipes if not in a dry run.
         hideSwipeButtons();
         // If generated any message, set the flag to indicate it can't be recreated again.
-        chat_metadata['tainted'] = true;
+        chat_metadata.tainted = true;
     }
 
     if (selected_group && !is_group_generating) {
         if (!dryRun) {
             // Returns the promise that generateGroupWrapper returns; resolves when generation is done
-            return generateGroupWrapper(false, type, { quiet_prompt, force_chid, signal: abortController.signal, quietImage });
+            return generateGroupWrapper(false, type, { quiet_prompt, force_chid, signal: abortController.signal, quietImage, jsonSchema });
         }
 
         const characterIndexMap = new Map(characters.map((char, index) => [char.avatar, index]));
@@ -5286,17 +5456,19 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
         return Promise.resolve();
     }
 
+    const lastMessage = chat[chat.length - 1];
+
     let textareaText;
-    if (type !== 'regenerate' && type !== 'swipe' && type !== 'quiet' && !isImpersonate && !dryRun) {
+    if (type !== 'regenerate' && type !== 'swipe' && type !== 'quiet' && !isImpersonate && !dryRun && !depth) {
         is_send_press = true;
         textareaText = String($('#send_textarea').val());
         $('#send_textarea').val('')[0].dispatchEvent(new Event('input', { bubbles: true }));
     } else {
         textareaText = '';
-        if (chat.length && chat[chat.length - 1]['is_user']) {
+        if (chat.length && lastMessage.is_user) {
             //do nothing? why does this check exist?
-        }
-        else if (type !== 'quiet' && type !== 'swipe' && !isImpersonate && !dryRun && chat.length) {
+        } else if (type !== 'quiet' && type !== 'swipe' && !isImpersonate && !dryRun && !depth && chat.length) {
+            deleteItemizedPromptForMessage(chat.length - 1);
             chat.length = chat.length - 1;
             await removeLastMessage();
             await eventSource.emit(event_types.MESSAGE_DELETED, chat.length);
@@ -5307,13 +5479,13 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
 
     // Rewrite the generation timer to account for the time passed for all the continuations.
     if (isContinue && chat.length) {
-        const prevFinished = chat[chat.length - 1]['gen_finished'];
-        const prevStarted = chat[chat.length - 1]['gen_started'];
+        const prevFinished = lastMessage.gen_finished;
+        const prevStarted = lastMessage.gen_started;
 
         if (prevFinished && prevStarted) {
             const timePassed = Number(prevFinished) - Number(prevStarted);
             generation_started = new Date(Date.now() - timePassed);
-            chat[chat.length - 1]['gen_started'] = generation_started;
+            lastMessage.gen_started = generation_started;
         }
     }
 
@@ -5336,16 +5508,14 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
         'continue',
     ];
     //for normal messages sent from user..
-    if ((textareaText != '' || (hasPendingFileAttachment() && !noAttachTypes.includes(type))) && !automatic_trigger && type !== 'quiet' && !dryRun) {
+    if ((textareaText != '' || (hasPendingFileAttachment() && !noAttachTypes.includes(type))) && !automatic_trigger && type !== 'quiet' && !dryRun && !depth) {
         // If user message contains no text other than bias - send as a system message
         if (messageBias && !removeMacros(textareaText)) {
             sendSystemMessage(system_message_types.GENERIC, ' ', { bias: messageBias });
-        }
-        else {
+        } else {
             await sendMessageAsUser(textareaText, messageBias, null, false, name1, user_avatar, { skipStorageCheck: true });
         }
-    }
-    else if (textareaText == '' && !automatic_trigger && !dryRun && type === undefined && main_api == 'openai' && oai_settings.send_if_empty.trim().length > 0) {
+    } else if (textareaText == '' && !automatic_trigger && !dryRun && [undefined, 'normal'].includes(type) && main_api == 'openai' && oai_settings.send_if_empty.trim().length > 0 && !depth) {
         // Use send_if_empty if set and the user message is empty. Only when sending messages normally
         await sendMessageAsUser(oai_settings.send_if_empty.trim(), messageBias, null, false, name1, user_avatar, { skipStorageCheck: true });
     }
@@ -5426,17 +5596,23 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
     for (let i = coreChat.length - 1; i >= 0; i--) {
         const depth = coreChat.length - i - (isContinue ? 2 : 1);
         const isPrefix = isContinue && i === coreChat.length - 1;
+
+        // In group chats, only include reasoning from the currently generating character
+        const isOtherGroupMember = selected_group && coreChat[i].name !== name2;
+
         coreChat[i] = copyMessageForPrompt(coreChat[i], {
-            mes: promptReasoning.addToMessage(
-                coreChat[i].mes,
-                getRegexedString(
-                    String(coreChat[i].extra?.reasoning ?? ''),
-                    regex_placement.REASONING,
-                    { isPrompt: true, depth: depth },
+            mes: isOtherGroupMember
+                ? coreChat[i].mes
+                : promptReasoning.addToMessage(
+                    coreChat[i].mes,
+                    getRegexedString(
+                        String(coreChat[i].extra?.reasoning ?? ''),
+                        regex_placement.REASONING,
+                        { isPrompt: true, depth: depth },
+                    ),
+                    isPrefix,
+                    coreChat[i].extra?.reasoning_duration,
                 ),
-                isPrefix,
-                coreChat[i].extra?.reasoning_duration,
-            ),
         });
         if (promptReasoning.isLimitReached()) {
             break;
@@ -5444,7 +5620,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
     }
 
     // Determine token limit
-    let this_max_context = getMaxContextSize();
+    let this_max_context = getMaxPromptTokens();
 
     if (!dryRun) {
         console.debug('Running extension interceptors');
@@ -5464,8 +5640,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
     if (main_api == 'koboldhorde' && (horde_settings.auto_adjust_context_length || horde_settings.auto_adjust_response_length)) {
         try {
             adjustedParams = await adjustHordeGenerationParams(max_context, amount_gen);
-        }
-        catch {
+        } catch {
             unblockGeneration(type);
             return Promise.resolve();
         }
@@ -5643,8 +5818,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
             // When continuing generation of previous output, last user message precedes the message to continue
             if (isContinue) {
                 coreChat.splice(coreChat.length - 1, 0, { mes: jailbreak, is_user: true });
-            }
-            else {
+            } else {
                 // This operation will result in the injectedIndices indexes being off by one
                 coreChat.push({ mes: jailbreak, is_user: true });
                 // Add +1 to the elements to correct for the new PHI/Jailbreak message.
@@ -5675,7 +5849,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
             chat2[i] = formatMessageHistoryItem(coreChat[j], isInstruct, force_output_sequence.FIRST);
         }
 
-        if (lastUserMessageIndex >= 0 && j === lastUserMessageIndex && isInstruct) {
+        if (lastUserMessageIndex >= 0 && j === lastUserMessageIndex && isInstruct && !isImpersonate) {
             // Reformat with the last input sequence (if any)
             chat2[i] = formatMessageHistoryItem(coreChat[j], isInstruct, force_output_sequence.LAST);
         }
@@ -5919,7 +6093,6 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
 
         // Add quiet generation prompt at depth 0
         if (quiet_prompt && quiet_prompt.length) {
-
             // here name1 is forced for all quiet prompts..why?
             const name = name1;
             //checks if we are in instruct, if so, formats the chat as such, otherwise just adds the quiet prompt
@@ -5995,7 +6168,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
         let thisPromptContextSize = await getTokenCountAsync(prompt, power_user.token_padding);
 
         if (thisPromptContextSize > this_max_context) {        //if the prepared prompt is larger than the max context size...
-            if (count_exm_add > 0) {                            // ..and we have example mesages..
+            if (count_exm_add > 0) {                            // ..and we have example messages..
                 count_exm_add--;                            // remove the example messages...
                 await checkPromptSize();                            // and try agin...
             } else if (mesSend.length > 0) {                    // if the chat history is longer than 0
@@ -6237,7 +6410,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
             chatInjects: injectedIndices?.map(index => arrMes[arrMes.length - index - 1])?.join('') || '',
             summarizeString: (extension_prompts['1_memory']?.value || ''),
             authorsNoteString: (extension_prompts['2_floating_prompt']?.value || ''),
-            smartContextString: (extension_prompts['chromadb']?.value || ''),
+            smartContextString: (extension_prompts.chromadb?.value || ''),
             chatVectorsString: (extension_prompts['3_vectors']?.value || ''),
             dataBankVectorsString: (extension_prompts['4_vectors_data_bank']?.value || ''),
             worldInfoString: worldInfoString,
@@ -6268,8 +6441,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
 
         if (itemizedIndex !== -1) {
             itemizedPrompts[itemizedIndex] = additionalPromptStuff;
-        }
-        else {
+        } else {
             itemizedPrompts.push(additionalPromptStuff);
         }
 
@@ -6283,7 +6455,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
                 streamingProcessor.firstMessageText = '';
             }
 
-            streamingProcessor.generator = await sendStreamingRequest(type, generate_data);
+            streamingProcessor.generator = await sendStreamingRequest(type, generate_data, { jsonSchema });
 
             hideSwipeButtons();
             let getMessage = await streamingProcessor.generate();
@@ -6305,7 +6477,12 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
                 const hasToolCalls = ToolManager.hasToolCalls(streamingProcessor.toolCalls);
                 const shouldDeleteMessage = type !== 'swipe' && ['', '...'].includes(lastMessage?.mes) && !lastMessage?.extra?.reasoning && ['', '...'].includes(streamingProcessor?.result);
                 hasToolCalls && shouldDeleteMessage && await deleteLastMessage();
-                const invocationResult = await ToolManager.invokeFunctionTools(streamingProcessor.toolCalls);
+                if (hasToolCalls && !shouldDeleteMessage) {
+                    await streamingProcessor.finalizeIntermediaryMessage(streamingProcessor.messageId, getMessage, { unlockUI: false });
+                }
+                const invocationResult = await ToolManager.invokeFunctionTools(streamingProcessor.toolCalls, {
+                    reasoningText: streamingProcessor.reasoningHandler.reasoning,
+                });
                 const shouldStopGeneration = (!invocationResult.invocations.length && shouldDeleteMessage) || invocationResult.stealthCalls.length;
                 if (hasToolCalls) {
                     if (shouldStopGeneration) {
@@ -6367,7 +6544,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
 
         if (jsonSchema) {
             unblockGeneration(type);
-            return extractJsonFromData(data);
+            return extractJsonFromData(data, { returnInvalidJson: jsonSchema.returnInvalid ?? false });
         }
 
         //const getData = await response.json();
@@ -6411,17 +6588,14 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
         if (isImpersonate) {
             $('#send_textarea').val(getMessage)[0].dispatchEvent(new Event('input', { bubbles: true }));
             await eventSource.emit(event_types.IMPERSONATE_READY, getMessage);
-        }
-        else if (type == 'quiet') {
+        } else if (type == 'quiet') {
             unblockGeneration(type);
             return getMessage;
-        }
-        else {
+        } else {
             // Without streaming we'll be having a full message on continuation. Treat it as a last chunk.
             if (originalType !== 'continue') {
                 ({ type, getMessage } = await saveReply({ type, getMessage, title, swipes, reasoning, imageUrls, reasoningSignature }));
-            }
-            else {
+            } else {
                 ({ type, getMessage } = await saveReply({ type: 'appendFinal', getMessage, title, swipes, reasoning, imageUrls, reasoningSignature }));
             }
 
@@ -6433,7 +6607,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
             const hasToolCalls = ToolManager.hasToolCalls(data);
             const shouldDeleteMessage = type !== 'swipe' && ['', '...'].includes(getMessage) && !reasoning;
             hasToolCalls && shouldDeleteMessage && await deleteLastMessage();
-            const invocationResult = await ToolManager.invokeFunctionTools(data);
+            const invocationResult = await ToolManager.invokeFunctionTools(data, { reasoningText: reasoning });
             const shouldStopGeneration = (!invocationResult.invocations.length && shouldDeleteMessage) || invocationResult.stealthCalls.length;
             if (hasToolCalls) {
                 if (shouldStopGeneration) {
@@ -6457,7 +6631,7 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
         const isAborted = abortController && abortController.signal.aborted;
         if (!isAborted && power_user.auto_swipe && generatedTextFiltered(getMessage)) {
             is_send_press = false;
-            return swipe_right();
+            return await swipe(null, SWIPE_DIRECTION.RIGHT, { source: SWIPE_SOURCE.AUTO_SWIPE, repeated: true, forceMesId: chat.length - 1 });
         }
 
         console.debug('/api/chats/save called by /Generate');
@@ -6589,7 +6763,6 @@ function unblockGeneration(type) {
 
     is_send_press = false;
     activateSendButtons();
-    showSwipeButtons();
     setGenerationProgress(0);
     flushEphemeralStoppingStrings();
     flushWIInjections();
@@ -6725,7 +6898,7 @@ export function getBiasStrings(textareaText, type) {
 function formatMessageHistoryItem(chatItem, isInstruct, forceOutputSequence) {
     const isNarratorType = chatItem?.extra?.type === system_message_types.NARRATOR;
     const characterName = chatItem?.name ? chatItem.name : name2;
-    const itemName = chatItem.is_user ? chatItem['name'] : characterName;
+    const itemName = chatItem.is_user ? chatItem.name : characterName;
     const shouldPrependName = !isNarratorType;
 
     // If this symbol flag is set, completely ignore the message.
@@ -6802,7 +6975,7 @@ export async function sendMessageAsUser(messageText, messageBias, insertAt = nul
     await populateFileAttachment(message);
     statMesProcess(message, 'user', characters, this_chid, '');
 
-    chat_metadata['tainted'] = true;
+    chat_metadata.tainted = true;
 
     if (typeof insertAt === 'number' && insertAt >= 0 && insertAt <= chat.length) {
         chat.splice(insertAt, 0, message);
@@ -6812,32 +6985,26 @@ export async function sendMessageAsUser(messageText, messageBias, insertAt = nul
         await eventSource.emit(event_types.USER_MESSAGE_RENDERED, insertAt);
     } else {
         chat.push(message);
+        await saveChatConditional();
         const chat_id = (chat.length - 1);
         await eventSource.emit(event_types.MESSAGE_SENT, chat_id);
         addOneMessage(message);
         await eventSource.emit(event_types.USER_MESSAGE_RENDERED, chat_id);
-        await saveChatConditional();
     }
 
     return message;
 }
 
 /**
- * Gets the maximum usable context size for the current API.
- * @param {number|null} overrideResponseLength Optional override for the response length.
- * @returns {number} Maximum usable context size.
+ * Gets the maximum context token limit (the full context window size before subtracting response length).
+ * @returns {number} The maximum context token limit for the current API.
  */
-export function getMaxContextSize(overrideResponseLength = null) {
-    if (typeof overrideResponseLength !== 'number' || overrideResponseLength <= 0 || isNaN(overrideResponseLength)) {
-        overrideResponseLength = null;
-    }
-
-    let this_max_context = 1487;
+export function getMaxContextTokens() {
     if (main_api == 'kobold' || main_api == 'koboldhorde' || main_api == 'textgenerationwebui') {
-        this_max_context = (max_context - (overrideResponseLength || amount_gen));
+        return max_context;
     }
     if (main_api == 'novel') {
-        this_max_context = Number(max_context);
+        let this_max_context = Number(max_context);
         if (nai_settings.model_novel.includes('clio')) {
             this_max_context = Math.min(max_context, 8192);
         }
@@ -6857,13 +7024,39 @@ export function getMaxContextSize(overrideResponseLength = null) {
             // Added special tokens and whatnot
             this_max_context -= 10;
         }
-
-        this_max_context = this_max_context - (overrideResponseLength || amount_gen);
+        return this_max_context;
     }
     if (main_api == 'openai') {
-        this_max_context = oai_settings.openai_max_context - (overrideResponseLength || oai_settings.openai_max_tokens);
+        return oai_settings.openai_max_context;
     }
-    return this_max_context;
+    return 1487;
+}
+
+/**
+ * Gets the maximum response token limit (the max generation/reply length).
+ * @returns {number} The maximum response token limit for the current API.
+ */
+export function getMaxResponseTokens() {
+    if (main_api == 'kobold' || main_api == 'koboldhorde' || main_api == 'textgenerationwebui' || main_api == 'novel') {
+        return amount_gen;
+    }
+    if (main_api == 'openai') {
+        return oai_settings.openai_max_tokens;
+    }
+    return 0;
+}
+
+/**
+ * Gets the maximum usable prompt size for the current API.
+ * @param {number|null} overrideResponseLength Optional override for the response length.
+ * @returns {number} Maximum usable prompt size.
+ */
+export function getMaxPromptTokens(overrideResponseLength = null) {
+    if (typeof overrideResponseLength !== 'number' || overrideResponseLength <= 0 || isNaN(overrideResponseLength)) {
+        overrideResponseLength = null;
+    }
+
+    return getMaxContextTokens() - (overrideResponseLength || getMaxResponseTokens());
 }
 
 function parseTokenCounts(counts, thisPromptBits) {
@@ -6899,41 +7092,65 @@ function addChatsPreamble(mesSendString) {
 function addChatsSeparator(mesSendString) {
     if (power_user.context.chat_start) {
         return substituteParams(power_user.context.chat_start + '\n') + mesSendString;
-    }
-
-    else {
+    } else {
         return mesSendString;
     }
 }
 
-export async function duplicateCharacter() {
-    if (this_chid === undefined || !characters[this_chid]) {
-        toastr.warning(t`You must first select a character to duplicate!`);
-        return '';
+/**
+ * Duplicates a character.
+ * @param {object} [options={}] - Options
+ * @param {string} [options.avatar] - Avatar key of the character to duplicate. Uses current character if not provided.
+ * @param {boolean} [options.silent=false] - Whether to skip the confirmation popup
+ * @returns {Promise<string>} The avatar key of the duplicated character, or empty string if cancelled/failed
+ */
+export async function duplicateCharacter({ avatar = null, silent = false } = {}) {
+    // Determine the character to duplicate
+    let targetAvatar;
+    if (avatar) {
+        const character = characters.find(c => c.avatar === avatar);
+        if (!character) {
+            toastr.warning(t`Character not found: ${avatar}`);
+            return '';
+        }
+        targetAvatar = avatar;
+    } else {
+        if (this_chid === undefined || !characters[this_chid]) {
+            toastr.warning(t`You must first select a character to duplicate!`);
+            return '';
+        }
+        targetAvatar = characters[this_chid].avatar;
     }
 
-    const confirmMessage = $(await renderTemplateAsync('duplicateConfirm'));
-    const confirm = await callGenericPopup(confirmMessage, POPUP_TYPE.CONFIRM);
+    // Show confirmation unless silent
+    if (!silent) {
+        const confirmMessage = $(await renderTemplateAsync('duplicateConfirm'));
+        const confirm = await callGenericPopup(confirmMessage, POPUP_TYPE.CONFIRM);
 
-    if (!confirm) {
-        console.log('User cancelled duplication');
-        return '';
+        if (!confirm) {
+            console.log('User cancelled duplication');
+            return '';
+        }
     }
 
-    const body = { avatar_url: characters[this_chid].avatar };
+    const body = { avatar_url: targetAvatar };
     const response = await fetch('/api/characters/duplicate', {
         method: 'POST',
         headers: getRequestHeaders(),
         body: JSON.stringify(body),
     });
-    if (response.ok) {
-        toastr.success(t`Character Duplicated`);
-        const data = await response.json();
-        await eventSource.emit(event_types.CHARACTER_DUPLICATED, { oldAvatar: body.avatar_url, newAvatar: data.path });
-        await getCharacters();
+
+    if (!response.ok) {
+        toastr.error(t`Failed to duplicate character`);
+        return '';
     }
 
-    return '';
+    toastr.success(t`Character Duplicated`);
+    const data = await response.json();
+    await eventSource.emit(event_types.CHARACTER_DUPLICATED, { oldAvatar: targetAvatar, newAvatar: data.path });
+    await getCharacters();
+
+    return data.path;
 }
 
 function setInContextMessages(msgInContextCount, type) {
@@ -6948,12 +7165,12 @@ function setInContextMessages(msgInContextCount, type) {
 
     if (lastMessageBlock.length === 0) {
         const firstMessageId = getFirstDisplayedMessageId();
-        chatElement.find(`.mes[mesid="${firstMessageId}"`).addClass('lastInContext');
+        chatElement.find(`.mes[mesid="${firstMessageId}"]`).addClass('lastInContext');
     }
 
     // Update last id to chat. No metadata save on purpose, gets hopefully saved via another call
     const lastMessageId = Math.max(0, chat.length - msgInContextCount);
-    chat_metadata['lastInContextMessageId'] = lastMessageId;
+    chat_metadata.lastInContextMessageId = lastMessageId;
 }
 
 /**
@@ -7142,11 +7359,11 @@ export function extractMessageFromData(data, activeApi = null) {
             case 'koboldhorde':
                 return data.text;
             case 'textgenerationwebui':
-                return data.choices?.[0]?.text ?? data.choices?.[0]?.message?.content ?? data.content ?? data.response ?? '';
+                return data.choices?.[0]?.text ?? data.choices?.[0]?.message?.content ?? data.content ?? data.response ?? data[0]?.content ?? '';
             case 'novel':
                 return data.output;
             case 'openai':
-                return data?.content?.find(p => p.type === 'text')?.text ?? data?.choices?.[0]?.message?.content ?? data?.choices?.[0]?.text ?? data?.text ?? data?.message?.content?.[0]?.text ?? data?.message?.tool_plan ?? '';
+                return data?.content?.filter(p => p.type === 'text')?.map(p => p.text)?.join('\n\n') ?? data?.choices?.[0]?.message?.content ?? data?.choices?.[0]?.text ?? data?.text ?? data?.message?.content?.[0]?.text ?? data?.message?.tool_plan ?? '';
             default:
                 return '';
         }
@@ -7159,9 +7376,13 @@ export function extractMessageFromData(data, activeApi = null) {
 /**
  * Extracts JSON from the response data.
  * @param {object} data Response data
+ * @param {object} [options] Extraction options
+ * @param {string} [options.mainApi] Main API to use
+ * @param {string} [options.chatCompletionSource] Chat completion source
+ * @param {boolean} [options.returnInvalidJson=false] Whether to return the raw JSON string even if it fails to parse
  * @returns {string} Extracted JSON string from the response data
  */
-export function extractJsonFromData(data, { mainApi = null, chatCompletionSource = null } = {}) {
+export function extractJsonFromData(data, { mainApi = null, chatCompletionSource = null, returnInvalidJson = false } = {}) {
     mainApi = mainApi ?? main_api;
     chatCompletionSource = chatCompletionSource ?? oai_settings.chat_completion_source;
 
@@ -7184,6 +7405,9 @@ export function extractJsonFromData(data, { mainApi = null, chatCompletionSource
                     break;
                 case chat_completion_sources.PERPLEXITY:
                     result = tryParse(removeReasoningFromString(text));
+                    if (!result && returnInvalidJson) {
+                        return text;
+                    }
                     break;
                 case chat_completion_sources.VERTEXAI:
                 case chat_completion_sources.MAKERSUITE:
@@ -7204,6 +7428,9 @@ export function extractJsonFromData(data, { mainApi = null, chatCompletionSource
                 case chat_completion_sources.ZAI:
                 default:
                     result = tryParse(text);
+                    if (!result && returnInvalidJson) {
+                        return text;
+                    }
                     break;
             }
         } break;
@@ -7229,6 +7456,22 @@ function extractMultiSwipes(data, type) {
         return swipes;
     }
 
+    if (main_api === 'textgenerationwebui' && textgen_settings.type === textgen_types.LLAMACPP) {
+        if (!Array.isArray(data)) {
+            return swipes;
+        }
+
+        const multiSwipeCount = data.length - 1;
+        if (multiSwipeCount <= 0) {
+            return swipes;
+        }
+
+        for (let i = 1; i < data.length; i++) {
+            const text = data?.[i]?.content ?? '';
+            swipes.push(text);
+        }
+    }
+
     if (main_api === 'openai' || (main_api === 'textgenerationwebui' && [textgen_types.MANCER, textgen_types.VLLM, textgen_types.APHRODITE, textgen_types.TABBY, textgen_types.INFERMATICAI].includes(textgen_settings.type))) {
         if (!Array.isArray(data.choices)) {
             return swipes;
@@ -7242,18 +7485,18 @@ function extractMultiSwipes(data, type) {
 
         for (let i = 1; i < data.choices.length; i++) {
             const text = data?.choices[i]?.message?.content ?? data?.choices[i]?.text ?? '';
-            const cleanedText = cleanUpMessage({
-                getMessage: text,
-                isImpersonate: false,
-                isContinue: false,
-                displayIncompleteSentences: false,
-            });
-
-            swipes.push(cleanedText);
+            swipes.push(text);
         }
     }
 
-    return swipes;
+    const cleanedSwipes = swipes.map(text => cleanUpMessage({
+        getMessage: text,
+        isImpersonate: false,
+        isContinue: false,
+        displayIncompleteSentences: false,
+    }));
+
+    return cleanedSwipes;
 }
 
 /**
@@ -7294,7 +7537,7 @@ export function cleanUpMessage({ getMessage, isImpersonate, isContinue, displayI
     // Allow for caching of stopping strings. getStoppingStrings is an expensive function, especially with macros
     // enabled, so for streaming, we call it once and then pass it into each cleanUpMessage call.
     if (!stoppingStrings) {
-        stoppingStrings = getStoppingStrings(isImpersonate, isContinue);
+        stoppingStrings = getStoppingStrings(isImpersonate, isContinue, main_api);
     }
 
     for (const stoppingString of stoppingStrings) {
@@ -7477,18 +7720,20 @@ export async function saveReply({ type, getMessage, fromStreaming = false, title
         [type, getMessage, fromStreaming, title, swipes, reasoning, imageUrls, reasoningSignature] = arguments;
     }
 
-    if (type != 'append' && type != 'continue' && type != 'appendFinal' && chat.length && (chat[chat.length - 1]['swipe_id'] === undefined ||
-        chat[chat.length - 1]['is_user'])) {
+    const lastMessage = chat[chat.length - 1];
+
+    if (type != 'append' && type != 'continue' && type != 'appendFinal' && chat.length && (lastMessage.swipe_id === undefined ||
+        lastMessage.is_user)) {
         type = 'normal';
     }
 
-    if (chat.length && (!chat[chat.length - 1]['extra'] || typeof chat[chat.length - 1]['extra'] !== 'object')) {
-        chat[chat.length - 1]['extra'] = {};
+    if (chat.length && (!lastMessage.extra || typeof lastMessage.extra !== 'object')) {
+        lastMessage.extra = {};
     }
 
     // Coerce null/undefined to empty string
-    if (chat.length && !chat[chat.length - 1]['extra']['reasoning']) {
-        chat[chat.length - 1]['extra']['reasoning'] = '';
+    if (chat.length && !lastMessage.extra.reasoning) {
+        lastMessage.extra.reasoning = '';
     }
 
     if (!reasoning) {
@@ -7498,99 +7743,99 @@ export async function saveReply({ type, getMessage, fromStreaming = false, title
     let oldMessage = '';
     const generationFinished = new Date();
     if (type === 'swipe') {
-        oldMessage = chat[chat.length - 1]['mes'];
-        chat[chat.length - 1]['swipes'].length++;
-        if (chat[chat.length - 1]['swipe_id'] === chat[chat.length - 1]['swipes'].length - 1) {
-            chat[chat.length - 1]['title'] = title;
-            chat[chat.length - 1]['mes'] = getMessage;
-            chat[chat.length - 1]['gen_started'] = generation_started;
-            chat[chat.length - 1]['gen_finished'] = generationFinished;
-            chat[chat.length - 1]['send_date'] = getMessageTimeStamp();
-            chat[chat.length - 1]['extra']['api'] = getGeneratingApi();
-            chat[chat.length - 1]['extra']['model'] = getGeneratingModel();
-            chat[chat.length - 1]['extra']['reasoning'] = reasoning;
-            chat[chat.length - 1]['extra']['reasoning_duration'] = null;
-            chat[chat.length - 1]['extra']['reasoning_signature'] = reasoningSignature;
-            await processImageAttachment(chat[chat.length - 1], { imageUrls });
+        oldMessage = lastMessage.mes;
+        lastMessage.swipes.length++;
+        if (lastMessage.swipe_id === lastMessage.swipes.length - 1) {
+            lastMessage.title = title;
+            lastMessage.mes = getMessage;
+            lastMessage.gen_started = generation_started;
+            lastMessage.gen_finished = generationFinished;
+            lastMessage.send_date = getMessageTimeStamp();
+            lastMessage.extra.api = getGeneratingApi();
+            lastMessage.extra.model = getGeneratingModel();
+            lastMessage.extra.reasoning = reasoning;
+            lastMessage.extra.reasoning_duration = null;
+            lastMessage.extra.reasoning_signature = reasoningSignature;
+            await processImageAttachment(lastMessage, { imageUrls });
             if (power_user.message_token_count_enabled) {
-                const tokenCountText = (reasoning || '') + chat[chat.length - 1]['mes'];
-                chat[chat.length - 1]['extra']['token_count'] = await getTokenCountAsync(tokenCountText, 0);
+                const tokenCountText = (reasoning || '') + lastMessage.mes;
+                lastMessage.extra.token_count = await getTokenCountAsync(tokenCountText, 0);
             }
             const chat_id = (chat.length - 1);
             !fromStreaming && await eventSource.emit(event_types.MESSAGE_RECEIVED, chat_id, type);
             addOneMessage(chat[chat_id], { type: 'swipe' });
             !fromStreaming && await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, chat_id, type);
         } else {
-            chat[chat.length - 1]['mes'] = getMessage;
+            lastMessage.mes = getMessage;
         }
     } else if (type === 'append' || type === 'continue') {
         console.debug('Trying to append.');
-        oldMessage = chat[chat.length - 1]['mes'];
-        chat[chat.length - 1]['title'] = title;
-        chat[chat.length - 1]['mes'] += getMessage;
-        chat[chat.length - 1]['gen_started'] = generation_started;
-        chat[chat.length - 1]['gen_finished'] = generationFinished;
-        chat[chat.length - 1]['send_date'] = getMessageTimeStamp();
-        chat[chat.length - 1]['extra']['api'] = getGeneratingApi();
-        chat[chat.length - 1]['extra']['model'] = getGeneratingModel();
-        chat[chat.length - 1]['extra']['reasoning'] = reasoning;
-        chat[chat.length - 1]['extra']['reasoning_duration'] = null;
-        chat[chat.length - 1]['extra']['reasoning_signature'] = reasoningSignature;
-        await processImageAttachment(chat[chat.length - 1], { imageUrls });
+        oldMessage = lastMessage.mes;
+        lastMessage.title = title;
+        lastMessage.mes += getMessage;
+        lastMessage.gen_started = generation_started;
+        lastMessage.gen_finished = generationFinished;
+        lastMessage.send_date = getMessageTimeStamp();
+        lastMessage.extra.api = getGeneratingApi();
+        lastMessage.extra.model = getGeneratingModel();
+        lastMessage.extra.reasoning = reasoning;
+        lastMessage.extra.reasoning_duration = null;
+        lastMessage.extra.reasoning_signature = reasoningSignature;
+        await processImageAttachment(lastMessage, { imageUrls });
         if (power_user.message_token_count_enabled) {
-            const tokenCountText = (reasoning || '') + chat[chat.length - 1]['mes'];
-            chat[chat.length - 1]['extra']['token_count'] = await getTokenCountAsync(tokenCountText, 0);
+            const tokenCountText = (reasoning || '') + lastMessage.mes;
+            lastMessage.extra.token_count = await getTokenCountAsync(tokenCountText, 0);
         }
         const chat_id = (chat.length - 1);
         !fromStreaming && await eventSource.emit(event_types.MESSAGE_RECEIVED, chat_id, type);
         addOneMessage(chat[chat_id], { type: 'swipe' });
         !fromStreaming && await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, chat_id, type);
     } else if (type === 'appendFinal') {
-        oldMessage = chat[chat.length - 1]['mes'];
+        oldMessage = lastMessage.mes;
         console.debug('Trying to appendFinal.');
-        chat[chat.length - 1]['title'] = title;
-        chat[chat.length - 1]['mes'] = getMessage;
-        chat[chat.length - 1]['gen_started'] = generation_started;
-        chat[chat.length - 1]['gen_finished'] = generationFinished;
-        chat[chat.length - 1]['send_date'] = getMessageTimeStamp();
-        chat[chat.length - 1]['extra']['api'] = getGeneratingApi();
-        chat[chat.length - 1]['extra']['model'] = getGeneratingModel();
-        chat[chat.length - 1]['extra']['reasoning'] += reasoning;
-        chat[chat.length - 1]['extra']['reasoning_signature'] = reasoningSignature;
-        await processImageAttachment(chat[chat.length - 1], { imageUrls });
+        lastMessage.title = title;
+        lastMessage.mes = getMessage;
+        lastMessage.gen_started = generation_started;
+        lastMessage.gen_finished = generationFinished;
+        lastMessage.send_date = getMessageTimeStamp();
+        lastMessage.extra.api = getGeneratingApi();
+        lastMessage.extra.model = getGeneratingModel();
+        lastMessage.extra.reasoning += reasoning;
+        lastMessage.extra.reasoning_signature = reasoningSignature;
+        await processImageAttachment(lastMessage, { imageUrls });
         // We don't know if the reasoning duration extended, so we don't update it here on purpose.
         if (power_user.message_token_count_enabled) {
-            const tokenCountText = (reasoning || '') + chat[chat.length - 1]['mes'];
-            chat[chat.length - 1]['extra']['token_count'] = await getTokenCountAsync(tokenCountText, 0);
+            const tokenCountText = (reasoning || '') + lastMessage.mes;
+            lastMessage.extra.token_count = await getTokenCountAsync(tokenCountText, 0);
         }
         const chat_id = (chat.length - 1);
         !fromStreaming && await eventSource.emit(event_types.MESSAGE_RECEIVED, chat_id, type);
         addOneMessage(chat[chat_id], { type: 'swipe' });
         !fromStreaming && await eventSource.emit(event_types.CHARACTER_MESSAGE_RENDERED, chat_id, type);
-
     } else {
         console.debug('entering chat update routine for non-swipe post');
-        chat[chat.length] = {};
-        chat[chat.length - 1]['extra'] = {};
-        chat[chat.length - 1]['name'] = name2;
-        chat[chat.length - 1]['is_user'] = false;
-        chat[chat.length - 1]['send_date'] = getMessageTimeStamp();
-        chat[chat.length - 1]['extra']['api'] = getGeneratingApi();
-        chat[chat.length - 1]['extra']['model'] = getGeneratingModel();
-        chat[chat.length - 1]['extra']['reasoning'] = reasoning;
-        chat[chat.length - 1]['extra']['reasoning_duration'] = null;
-        chat[chat.length - 1]['extra']['reasoning_signature'] = reasoningSignature;
+        const newMessage = {};
+        chat.push(newMessage);
+        newMessage.extra = {};
+        newMessage.name = name2;
+        newMessage.is_user = false;
+        newMessage.send_date = getMessageTimeStamp();
+        newMessage.extra.api = getGeneratingApi();
+        newMessage.extra.model = getGeneratingModel();
+        newMessage.extra.reasoning = reasoning;
+        newMessage.extra.reasoning_duration = null;
+        newMessage.extra.reasoning_signature = reasoningSignature;
         if (power_user.trim_spaces) {
             getMessage = getMessage.trim();
         }
-        chat[chat.length - 1]['mes'] = getMessage;
-        chat[chat.length - 1]['title'] = title;
-        chat[chat.length - 1]['gen_started'] = generation_started;
-        chat[chat.length - 1]['gen_finished'] = generationFinished;
+        newMessage.mes = getMessage;
+        newMessage.title = title;
+        newMessage.gen_started = generation_started;
+        newMessage.gen_finished = generationFinished;
 
         if (power_user.message_token_count_enabled) {
-            const tokenCountText = (reasoning || '') + chat[chat.length - 1]['mes'];
-            chat[chat.length - 1]['extra']['token_count'] = await getTokenCountAsync(tokenCountText, 0);
+            const tokenCountText = (reasoning || '') + newMessage.mes;
+            newMessage.extra.token_count = await getTokenCountAsync(tokenCountText, 0);
         }
 
         if (selected_group) {
@@ -7599,12 +7844,12 @@ export async function saveReply({ type, getMessage, fromStreaming = false, title
             if (characters[this_chid].avatar != 'none') {
                 avatarImg = getThumbnailUrl('avatar', characters[this_chid].avatar);
             }
-            chat[chat.length - 1]['force_avatar'] = avatarImg;
-            chat[chat.length - 1]['original_avatar'] = characters[this_chid].avatar;
-            chat[chat.length - 1]['extra']['gen_id'] = group_generation_id;
+            newMessage.force_avatar = avatarImg;
+            newMessage.original_avatar = characters[this_chid].avatar;
+            newMessage.extra.gen_id = group_generation_id;
         }
 
-        await processImageAttachment(chat[chat.length - 1], { imageUrls });
+        await processImageAttachment(newMessage, { imageUrls });
         const chat_id = (chat.length - 1);
 
         !fromStreaming && await eventSource.emit(event_types.MESSAGE_RECEIVED, chat_id, type);
@@ -7613,27 +7858,27 @@ export async function saveReply({ type, getMessage, fromStreaming = false, title
     }
 
     const item = chat[chat.length - 1];
-    if (item['swipe_info'] === undefined) {
-        item['swipe_info'] = [];
+    if (item.swipe_info === undefined) {
+        item.swipe_info = [];
     }
-    if (item['swipe_id'] !== undefined) {
-        const swipeId = item['swipe_id'];
-        item['swipes'][swipeId] = item['mes'];
-        item['swipe_info'][swipeId] = {
-            send_date: item['send_date'],
-            gen_started: item['gen_started'],
-            gen_finished: item['gen_finished'],
-            extra: structuredClone(item['extra']),
+    if (item.swipe_id !== undefined) {
+        const swipeId = item.swipe_id;
+        item.swipes[swipeId] = item.mes;
+        item.swipe_info[swipeId] = {
+            send_date: item.send_date,
+            gen_started: item.gen_started,
+            gen_finished: item.gen_finished,
+            extra: structuredClone(item.extra),
         };
     } else {
-        item['swipe_id'] = 0;
-        item['swipes'] = [];
-        item['swipes'][0] = chat[chat.length - 1]['mes'];
-        item['swipe_info'][0] = {
-            send_date: chat[chat.length - 1]['send_date'],
-            gen_started: chat[chat.length - 1]['gen_started'],
-            gen_finished: chat[chat.length - 1]['gen_finished'],
-            extra: structuredClone(chat[chat.length - 1]['extra']),
+        item.swipe_id = 0;
+        item.swipes = [];
+        item.swipes[0] = item.mes;
+        item.swipe_info[0] = {
+            send_date: item.send_date,
+            gen_started: item.gen_started,
+            gen_finished: item.gen_finished,
+            extra: structuredClone(item.extra),
         };
     }
 
@@ -7654,7 +7899,7 @@ export async function saveReply({ type, getMessage, fromStreaming = false, title
         item.swipe_info.push(...swipeInfoArray);
     }
 
-    statMesProcess(chat[chat.length - 1], type, characters, this_chid, oldMessage);
+    statMesProcess(item, type, characters, this_chid, oldMessage);
     return { type, getMessage };
 }
 
@@ -7757,7 +8002,10 @@ export function syncMesToSwipe(messageId = null) {
         return false;
     }
 
-    targetMessage.swipes[targetMessage.swipe_id] = targetMessage.mes;
+    // Only sync swipes if the chat is not pristine, so that macros in the greeting can resolve again on swipe
+    if (chat_metadata.tainted || chat.length > 1) {
+        targetMessage.swipes[targetMessage.swipe_id] = targetMessage.mes;
+    }
 
     targetSwipeInfo.send_date = targetMessage.send_date;
     targetSwipeInfo.gen_started = targetMessage.gen_started;
@@ -7774,20 +8022,24 @@ export function syncMesToSwipe(messageId = null) {
  * If the swipe data is invalid in some way, this function will exit out without doing anything.
  * @param {number?} [messageId=null] - The ID of the message to sync with the swipe data. If no ID is given, the last message is used.
  * @param {number?} [swipeId=null] - The ID of the swipe to sync. If no ID is given, the current swipe ID in the message object is used.
+ * @param {ChatMessage?} [targetMessage=null] - The message object to sync instead of resolving one from `chat`.
  * @returns {boolean} Whether the swipe data was successfully synced to the message
  */
-export function syncSwipeToMes(messageId = null, swipeId = null) {
-    if (!chat.length) {
+export function syncSwipeToMes(messageId = null, swipeId = null, targetMessage = null) {
+    if (!targetMessage && !chat.length) {
         return false;
     }
 
-    const targetMessageId = messageId ?? chat.length - 1;
-    if (targetMessageId >= chat.length || targetMessageId < 0) {
-        console.warn(`[syncSwipeToMes] Invalid message ID: ${messageId}`);
-        return false;
+    if (!targetMessage) {
+        const targetMessageId = messageId ?? chat.length - 1;
+        if (targetMessageId >= chat.length || targetMessageId < 0) {
+            console.warn(`[syncSwipeToMes] Invalid message ID: ${messageId}`);
+            return false;
+        }
+
+        targetMessage = chat[targetMessageId];
     }
 
-    const targetMessage = chat[targetMessageId];
     if (!targetMessage) {
         return false;
     }
@@ -7897,6 +8149,7 @@ export function getGeneratingModel(mes) {
 export function activateSendButtons() {
     is_send_press = false;
     hideStopButton();
+    showSwipeButtons();
     delete document.body.dataset.generating;
 }
 
@@ -7905,6 +8158,7 @@ export function activateSendButtons() {
  */
 export function deactivateSendButtons() {
     showStopButton();
+    hideSwipeButtons();
     document.body.dataset.generating = 'true';
 }
 
@@ -8110,16 +8364,13 @@ export async function renameCharacter(name = null, { silent = false, renameChats
                 } else {
                     toastr.success(t`Character renamed!`, t`Rename Character`);
                 }
-            }
-            else {
+            } else {
                 throw new Error('Newly renamed character was lost?');
             }
-        }
-        else {
+        } else {
             throw new Error('Could not rename the character');
         }
-    }
-    catch (error) {
+    } catch (error) {
         // Reloading to prevent data corruption
         if (!silent) await Popup.show.text(t`Rename Character`, t`Something went wrong. The page will be reloaded.`);
         else toastr.error(t`Something went wrong. The page will be reloaded.`, t`Rename Character`);
@@ -8164,7 +8415,7 @@ async function renamePastChats(oldAvatar, newAvatar, newName) {
 
                 await eventSource.emit(event_types.CHARACTER_RENAMED_IN_PAST_CHAT, currentChat, oldAvatar, newAvatar);
 
-                const saveChatResponse = await fetch('/api/chats/save', {
+                const saveChatRequest = await compressRequest({
                     method: 'POST',
                     headers: getRequestHeaders(),
                     body: JSON.stringify({
@@ -8175,6 +8426,7 @@ async function renamePastChats(oldAvatar, newAvatar, newName) {
                     }),
                     cache: 'no-cache',
                 });
+                const saveChatResponse = await fetch('/api/chats/save', saveChatRequest);
 
                 if (!saveChatResponse.ok) {
                     throw new Error('Could not save chat');
@@ -8460,7 +8712,7 @@ async function savePagedChat({ fileName, header, messages, force = false }) {
  * @param {{fileName: string, metadata: object, mesId?: number}} options
  * @returns {Promise<void>}
  */
-async function saveChatCopyFromPagedChat({ fileName, metadata, mesId }) {
+async function saveChatCopyFromPagedChat({ fileName, metadata, mesId, chatData = undefined }) {
     const character = characters[this_chid];
     const sourceFile = character.chat;
     const session = chatHydration;
@@ -8471,7 +8723,9 @@ async function saveChatCopyFromPagedChat({ fileName, metadata, mesId }) {
         create_date: chat_create_date,
         chat_metadata: metadata,
     };
-    if (session?.hydrated) {
+    // A snapshot carries the selected swipe in its last message (a branch from another swipe).
+    const snapshotLast = Array.isArray(chatData) && chatData.length > 0 ? chatData[chatData.length - 1] : null;
+    if (session?.hydrated && !snapshotLast) {
         // The whole chat is here with real indices: commit it, then copy on the server.
         const messages = chat.slice();
         const count = (mesId !== undefined && mesId >= 0 && mesId < messages.length) ? Number(mesId) + 1 : messages.length;
@@ -8495,6 +8749,12 @@ async function saveChatCopyFromPagedChat({ fileName, metadata, mesId }) {
 
     await savePagedChat({ fileName: sourceFile, header: sourceHeader, messages: chat.slice() });
 
+    if (session?.hydrated && snapshotLast) {
+        // The snapshot already holds the whole history up to the branch point.
+        await saveChatCopy({ character, fileName, messages: [header, ...chatData] });
+        return;
+    }
+
     const sourceResponse = await fetch('/api/chats/get', {
         method: 'POST',
         cache: 'no-cache',
@@ -8511,6 +8771,21 @@ async function saveChatCopyFromPagedChat({ fileName, metadata, mesId }) {
         ? getFullGroupMessageIndex(mesId, chatPagingState.messageOffset, fullMessages, chat)
         : fullMessages.length - 1;
 
+    const copiedMessages = fullMessages.slice(0, lastIndex + 1);
+    if (snapshotLast && copiedMessages.length > 0) {
+        copiedMessages[copiedMessages.length - 1] = snapshotLast;
+    }
+    await saveChatCopy({ character, fileName, messages: [header, ...copiedMessages] });
+}
+
+/**
+ * Writes a copy of the open chat (a branch or a checkpoint) to another file.
+ * @param {object} options
+ * @param {object} options.character Character the chat belongs to
+ * @param {string} options.fileName Target chat file name
+ * @param {object[]} options.messages Header and messages to write
+ */
+async function saveChatCopy({ character, fileName, messages }) {
     const result = await fetch('/api/chats/save', {
         method: 'POST',
         cache: 'no-cache',
@@ -8518,7 +8793,7 @@ async function saveChatCopyFromPagedChat({ fileName, metadata, mesId }) {
         body: JSON.stringify({
             ch_name: character.name,
             file_name: fileName,
-            chat: [header, ...fullMessages.slice(0, lastIndex + 1)],
+            chat: messages,
             avatar_url: character.avatar,
             // A copy of the stored chat, so it may replace a longer checkpoint.
             allow_shrink: true,
@@ -8543,10 +8818,16 @@ async function saveChatCopyFromPagedChat({ fileName, metadata, mesId }) {
  * @param {object} [options.withMetadata] Additional metadata to save with the chat
  * @param {number} [options.mesId] The message ID to save the chat up to
  * @param {boolean} [options.force] Force the saving despite the integrity check result
+ * @param {ChatMessage[]} [options.chatData] Chat snapshot to save instead of the current in-memory chat
  *
  * @returns {Promise<void>}
  */
-export async function saveChat({ chatName, withMetadata, mesId, force = false } = {}) {
+export async function saveChat({ chatName, withMetadata, mesId, force = false, chatData = undefined } = {}) {
+    if (selected_group) {
+        toastr.error(t`Operation was aborted to prevent data corruption.`, t`saveChat called for a group chat`);
+        throw new Error('saveChat called for a group chat');
+    }
+
     if (arguments.length > 0 && typeof arguments[0] !== 'object') {
         console.trace('saveChat called with positional arguments. Please use an object instead.');
         [chatName, withMetadata, mesId, force] = arguments;
@@ -8573,17 +8854,13 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false } 
         return;
     }
 
-    characters[this_chid]['date_last_chat'] = Date.now();
-    chat.forEach(function (item, i) {
-        if (item['is_group']) {
-            toastr.error(t`Trying to save group chat with regular saveChat function. Aborting to prevent corruption.`);
-            throw new Error('Group chat saved from saveChat');
-        }
-    });
+    characters[this_chid].date_last_chat = Date.now();
 
-    const trimmedChat = (mesId !== undefined && mesId >= 0 && mesId < chat.length)
-        ? chat.slice(0, Number(mesId) + 1)
-        : chat.slice();
+    const trimmedChat = Array.isArray(chatData)
+        ? chatData
+        : (mesId !== undefined && mesId >= 0 && mesId < chat.length)
+            ? chat.slice(0, Number(mesId) + 1)
+            : chat.slice();
 
     const header = {
         user_name: name1,
@@ -8596,7 +8873,7 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false } 
         // Branches and checkpoints go to a new file: the loaded page is only the
         // tail of the chat, so copy them from the full saved chat instead.
         try {
-            await saveChatCopyFromPagedChat({ fileName, metadata, mesId });
+            await saveChatCopyFromPagedChat({ fileName, metadata, mesId, chatData });
             return;
         } catch (error) {
             console.error(error);
@@ -8622,7 +8899,7 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false } 
     ];
 
     try {
-        const result = await fetch('/api/chats/save', {
+        const saveChatRequest = await compressRequest({
             method: 'POST',
             cache: 'no-cache',
             headers: getRequestHeaders(),
@@ -8635,6 +8912,7 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false } 
                 allow_shrink: canShrinkSavedChat(),
             }),
         });
+        const result = await fetch('/api/chats/save', saveChatRequest);
 
         if (result.ok) {
             return;
@@ -8670,7 +8948,7 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false } 
             return;
         }
 
-        await saveChat({ chatName, withMetadata, mesId, force: true });
+        await saveChat({ chatName, withMetadata, mesId, force: true, chatData });
     } catch (error) {
         console.error(error);
         toastr.error(t`Check the server connection and reload the page to prevent data loss.`, t`Chat could not be saved`);
@@ -8711,29 +8989,26 @@ async function read_avatar_load(input) {
         }
 
         await createOrEditCharacter();
-        await delay(DEFAULT_SAVE_EDIT_TIMEOUT);
 
         const formData = new FormData(/** @type {HTMLFormElement} */($('#form_create').get(0)));
-        await fetch(getThumbnailUrl('avatar', formData.get('avatar_url').toString()), {
-            method: 'GET',
-            cache: 'reload',
-        });
+        const avatarKey = formData.get('avatar_url').toString();
 
-        const messages = $('.mes').toArray();
-        for (const el of messages) {
-            const $el = $(el);
-            const nameMatch = $el.attr('ch_name') == formData.get('ch_name');
-            if ($el.attr('is_system') == 'true' && !nameMatch) continue;
-            if ($el.attr('is_user') == 'true') continue;
+        // Bust cache for the avatar thumbnail and character image
+        const thumbnailUrl = getThumbnailUrl('avatar', avatarKey);
+        await fetch(thumbnailUrl, { method: 'GET', cache: 'reload' });
+        await fetch(`/characters/${avatarKey}`, { method: 'GET', cache: 'reload' });
 
-            if (nameMatch) {
-                const previewSrc = $('#avatar_load_preview').attr('src');
-                const avatar = $el.find('.avatar img');
-                avatar.attr('src', default_avatar);
-                await delay(1);
-                avatar.attr('src', previewSrc);
+        // Refresh all visible avatar images that use this thumbnail URL
+        // This handles messages, character list, and any other place using the thumbnail
+        const avatarImages = document.querySelectorAll(`img[src^="${thumbnailUrl}"]`);
+        for (const img of avatarImages) {
+            if (img instanceof HTMLImageElement) {
+                const originalSrc = img.src;
+                img.src = '';
+                img.src = originalSrc;
             }
         }
+        console.debug(`Refreshed ${avatarImages.length} avatar images for ${avatarKey}`);
 
         console.log('Avatar refreshed');
     }
@@ -8784,8 +9059,7 @@ export function buildAvatarList(block, entities, { templateId = 'inline_avatar_t
             avatarTemplate.append(grpTemplate.children());
             avatarTemplate.attr({ 'data-grid': id, 'data-chid': null });
             avatarTemplate.attr('title', `[Group] ${entity.item.name}`);
-        }
-        else if (entity.type === 'persona') {
+        } else if (entity.type === 'persona') {
             avatarTemplate.attr({ 'data-pid': id, 'data-chid': null });
             avatarTemplate.find('img').attr('src', getThumbnailUrl('persona', entity.item.avatar));
             avatarTemplate.attr('title', `[Persona] ${entity.item.name}\nFile: ${entity.item.avatar}`);
@@ -8812,7 +9086,7 @@ export async function unshallowCharacter(characterId) {
         return;
     }
 
-    /** @type {import('./scripts/char-data.js').v1CharData} */
+    /** @type {Character} */
     const character = characters[characterId];
     if (!character) {
         console.debug('Character not found:', characterId);
@@ -9072,9 +9346,9 @@ function getFirstMessage() {
             message.mes = swipes[0];
         }
 
-        message['swipe_id'] = 0;
-        message['swipes'] = swipes;
-        message['swipe_info'] = swipes.map(_ => ({
+        message.swipe_id = 0;
+        message.swipes = swipes;
+        message.swipe_info = swipes.map(_ => ({
             send_date: message.send_date,
             gen_started: void 0,
             gen_finished: void 0,
@@ -9087,9 +9361,8 @@ function getFirstMessage() {
 
 export async function openCharacterChat(file_name) {
     await waitUntilCondition(() => !isChatSaving, debounce_timeout.extended, 10);
-    await clearChat();
-    characters[this_chid]['chat'] = file_name;
-    chat.length = 0;
+    await clearChat({ clearData: true });
+    characters[this_chid].chat = file_name;
     chat_metadata = {};
     await getChat();
     $('#selected_chat_pole').val(file_name);
@@ -9098,8 +9371,8 @@ export async function openCharacterChat(file_name) {
 
 ////////// OPTIMZED MAIN API CHANGE FUNCTION ////////////
 
-export function changeMainAPI() {
-    const selectedVal = $('#main_api').val();
+export function changeMainAPI(api = null) {
+    const selectedVal = api ?? $('#main_api').val();
     //console.log(selectedVal);
     const apiElements = {
         'koboldhorde': {
@@ -9309,6 +9582,7 @@ export async function getSettings() {
 
         accountStorage.init(settings?.accountStorage);
         await setUserControls(data.enable_accounts);
+        setRequestCompressionConfig(data.request_compression);
 
         // Allow subscribers to mutate settings
         await eventSource.emit(event_types.SETTINGS_LOADED_BEFORE, settings);
@@ -9388,18 +9662,31 @@ export async function getSettings() {
 
         selected_button = settings.selected_button;
 
+        // TODO: Move me into firstLoadInit when experimental toggle is removed
+        // power_user.experimental_macro_engine
+        initMacros();
+
         if (data.enable_extensions) {
             const enableAutoUpdate = Boolean(data.enable_extensions_auto_update);
             const isVersionChanged = settings.currentVersion !== currentVersion;
             startupLap('settings-apply');
             await loadExtensionSettings(settings, isVersionChanged, enableAutoUpdate);
             await eventSource.emit(event_types.EXTENSION_SETTINGS_LOADED);
+        } else {
+            Object.assign(extension_settings, (settings.extension_settings ?? {}));
+            $('#third_party_extension_button').addClass('disabled');
+            $('#extensions_details').addClass('disabled');
+            $('#extensions_connect').addClass('disabled');
+            $('#extensions_notify_updates').attr('disabled', 'disabled');
+            $('#extensions_autoconnect').attr('disabled', 'disabled');
+            $('#extensions_url').attr('disabled', 'disabled');
+            $('#extensions_api_key').attr('disabled', 'disabled');
         }
 
         firstRun = !!settings.firstRun;
 
         if (firstRun) {
-            hideLoader();
+            await hideLoader();
             await doOnboarding(user_avatar);
             firstRun = false;
         }
@@ -9476,12 +9763,13 @@ export async function saveSettings(loopCounter = 0) {
         settingsSaveRequestsInFlight++;
         try {
             await settingsSaveQueue.enqueue(async () => {
-                const response = await fetch('/api/settings/save', {
+                const saveSettingsRequest = await compressRequest({
                     method: 'POST',
                     headers: getRequestHeaders(),
                     body: serializedPayload,
                     cache: 'no-cache',
                 });
+                const response = await fetch('/api/settings/save', saveSettingsRequest);
                 await requireSettingsSaveSuccess(response);
                 settingsSaveTracker.commit(serializedPayload);
             });
@@ -9526,8 +9814,11 @@ function updateMessage(div) {
     const mesElement = div.closest('.mes');
     const mes = chat[mesElement.attr('mesid')];
 
+    // editing old messages
+    mes.extra ??= {};
+
     let regexPlacement;
-    if (mes.is_user) {
+    if (mes?.is_user) {
         regexPlacement = regex_placement.USER_INPUT;
     } else if (mes.extra?.type === 'narrator') {
         regexPlacement = regex_placement.SLASH_COMMAND;
@@ -9555,28 +9846,24 @@ function updateMessage(div) {
     if (bias) {
         text = removeMacros(text);
     }
-    mes['mes'] = text;
-    if (mes['swipe_id'] !== undefined) {
-        mes['swipes'][mes['swipe_id']] = text;
+    mes.mes = text;
+    if (mes.swipe_id !== undefined) {
+        ensureSwipes(mes);
+        mes.swipes[mes.swipe_id] = text;
     }
 
-    // editing old messages
-    if (!mes.extra) {
-        mes.extra = {};
-    }
-
-    if (mes.is_system || mes.is_user || mes.extra.type === system_message_types.NARRATOR) {
+    if (mes?.is_system || mes?.is_user || mes.extra?.type === system_message_types.NARRATOR) {
         mes.extra.bias = bias ?? null;
     } else {
         mes.extra.bias = null;
     }
 
-    chat_metadata['tainted'] = true;
+    chat_metadata.tainted = true;
 
     return { mesBlock, text, mes, bias };
 }
 
-function openMessageDelete(fromSlashCommand) {
+function openMessageDelete(fromSlashCommand, deleteToolCalls = true) {
     closeMessageEditor();
     hideSwipeButtons();
     if (fromSlashCommand || (!is_send_press) || (selected_group && !is_group_generating)) {
@@ -9595,6 +9882,7 @@ function openMessageDelete(fromSlashCommand) {
             is_group_generating: ${is_group_generating}`);
     }
     this_del_mes = -1;
+    deleteToolCallsInDeleteMode = deleteToolCalls;
     is_delete_mode = true;
 }
 
@@ -9634,11 +9922,10 @@ export async function messageEdit(editMessageId) {
     }
 
     this_edit_mes_id = editMessageId;
-    swipeState = SWIPE_STATE.EDITING;
     this_edit_mes_chname = editMessage.name || (editMessage.is_user ? name1 : name2);
+    swipeState = SWIPE_STATE.EDITING;
 
-    const hideCounters = editMessageId < chat.length - 1;
-    hideSwipeButtons({ hideCounters });
+    refreshSwipeButtons();
 
     const chatScrollPosition = chatElement.scrollTop();
     const messageBlock = messageElement.find('.mes_block');
@@ -9657,6 +9944,7 @@ export async function messageEdit(editMessageId) {
     const editTextArea = document.createElement('textarea');
     editTextArea.id = 'curEditTextarea';
     editTextArea.className = 'edit_textarea mdHotkeys';
+    editTextArea.dataset.macros = '';
     messageText.append(editTextArea);
 
     const text = trimSpaces(editMessage.mes || '');
@@ -9687,13 +9975,13 @@ export async function messageEdit(editMessageId) {
  * @param {number} [messageId=this_edit_mes_id]
  */
 async function messageEditCancel(messageId = this_edit_mes_id) {
-    let text = chat[messageId]['mes'];
+    let text = chat[messageId].mes;
     let thisMesDiv;
     // If this is the button then select it's parent. Otherwise, select by messageId.
     if (this?.classList?.contains('mes_edit_cancel')) {
         thisMesDiv = $(this).closest('.mes');
     } else {
-        thisMesDiv = chatElement.children().filter(`[mesid="${messageId}"]`);
+        thisMesDiv = chatElement.children('.mes').filter(`[mesid="${messageId}"]`);
     }
 
     const thisMesBlock = thisMesDiv.find('.mes_block');
@@ -9722,8 +10010,7 @@ async function messageEditCancel(messageId = this_edit_mes_id) {
     if (messageId == this_edit_mes_id) {
         this_edit_mes_id = undefined;
         swipeState = SWIPE_STATE.NONE;
-    }
-    else {
+    } else {
         console.warn(`The message editor was closed on message #${messageId} while #${this_edit_mes_id} is being edited.`);
     }
 
@@ -9757,8 +10044,7 @@ async function messageEditMove(sourceId, targetId) {
 
     if (sourceId <= targetId) {
         sourceMessageDiv.insertAfter(targetMessageDiv);
-    }
-    else {
+    } else {
         sourceMessageDiv.insertBefore(targetMessageDiv);
     }
 
@@ -9774,16 +10060,15 @@ async function messageEditMove(sourceId, targetId) {
         this_edit_mes_id = targetId;
     }
 
+    swapItemizedPrompts(sourceId, targetId);
     updateViewMessageIds();
+    refreshSwipeButtons();
     await saveChatConditional();
     return true;
 }
 
 async function messageEditDone(div) {
     let { mesBlock, text, mes, bias } = updateMessage(div);
-    if (this_edit_mes_id == 0) {
-        text = substituteParams(text);
-    }
 
     await eventSource.emit(event_types.MESSAGE_EDITED, this_edit_mes_id);
     text = chat[this_edit_mes_id]?.mes ?? text;
@@ -9831,7 +10116,7 @@ async function messageEditDone(div) {
 export async function getChatsFromFiles(data, isGroupChat) {
     const context = getContext();
     let chat_dict = {};
-    let chat_list = Object.values(data).sort((a, b) => a['file_name'].localeCompare(b['file_name'])).reverse();
+    let chat_list = Object.values(data).sort((a, b) => a.file_name.localeCompare(b.file_name)).reverse();
 
     let chat_promise = chat_list.map(({ file_name }) => {
         return new Promise(async (res, rej) => {
@@ -9863,7 +10148,6 @@ export async function getChatsFromFiles(data, isGroupChat) {
                     currentChat.shift();
                 }
                 chat_dict[file_name] = currentChat;
-
             } catch (error) {
                 console.error(error);
             }
@@ -9908,7 +10192,7 @@ export async function getPastCharacterChats(characterId = null) {
     }
 
     const chats = Object.values(data);
-    return chats.sort((a, b) => a['file_name'].localeCompare(b['file_name'])).reverse();
+    return chats.sort((a, b) => a.file_name.localeCompare(b.file_name)).reverse();
 }
 
 /**
@@ -9920,9 +10204,9 @@ export function getCurrentChatDetails() {
     }
 
     const group = selected_group ? groups.find(x => x.id === selected_group) : null;
-    const currentChat = selected_group ? group?.chat_id : characters[this_chid]['chat'];
+    const currentChat = selected_group ? group?.chat_id : characters[this_chid].chat;
     const displayName = selected_group ? group?.name : characters[this_chid].name;
-    const avatarImg = selected_group ? group?.avatar_url : getThumbnailUrl('avatar', characters[this_chid]['avatar']);
+    const avatarImg = selected_group ? group?.avatar_url : getThumbnailUrl('avatar', characters[this_chid].avatar);
     return { sessionName: currentChat, group: group, characterName: displayName, avatarImgURL: avatarImg };
 }
 
@@ -9949,7 +10233,7 @@ export async function displayPastChats(hightlightNames = []) {
     });
 
     // Define the search input listener
-    $('#select_chat_search').on('input', function () {
+    $('#select_chat_search').off('input').on('input', function () {
         const searchQuery = $(this).val();
         debouncedDisplay(searchQuery);
     });
@@ -9965,8 +10249,6 @@ export async function displayPastChats(hightlightNames = []) {
 
 async function displayChats(searchQuery, currentChat, displayName, avatarImg, selected_group, highlightNames) {
     try {
-        const trimExtension = (fileName) => String(fileName).replace('.jsonl', '');
-
         const response = await fetch('/api/chats/search', {
             method: 'POST',
             headers: getRequestHeaders(),
@@ -9987,7 +10269,7 @@ async function displayChats(searchQuery, currentChat, displayName, avatarImg, se
         filteredData.sort((a, b) => sortMoments(timestampToMoment(a.last_mes), timestampToMoment(b.last_mes)));
 
         for (const chat of filteredData) {
-            const isSelected = trimExtension(currentChat) === trimExtension(chat.file_name);
+            const isSelected = currentChat === chat.file_name;
             const template = $('#past_chat_template .select_chat_block_wrapper').clone();
             template.find('.select_chat_block').attr('file_name', chat.file_name);
             template.find('.avatar img').attr('src', avatarImg);
@@ -10193,7 +10475,7 @@ export function select_selected_character(chid, { switchMenu = true } = {}) {
     $('#talkativeness_slider').val(characters[chid].talkativeness || talkativeness_default);
     $('#mes_example_textarea').val(characters[chid].mes_example);
     $('#selected_chat_pole').val(characters[chid].chat);
-    $('#create_date_pole').val(characters[chid].create_date);
+    $('#create_date_pole').val(timestampToMoment(characters[chid].create_date).toISOString());
     $('#avatar_url_pole').val(characters[chid].avatar);
     $('#chat_import_avatar_url').val(characters[chid].avatar);
     $('#chat_import_character_name').val(characters[chid].name);
@@ -10386,9 +10668,9 @@ export async function setCharacterSettingsOverrides() {
         return;
     }
 
-    const scenarioOverrideValue = chat_metadata['scenario'] || '';
-    const exampleMessagesValue = chat_metadata['mes_example'] || '';
-    const systemPromptValue = chat_metadata['system_prompt'] || '';
+    const scenarioOverrideValue = chat_metadata.scenario || '';
+    const exampleMessagesValue = chat_metadata.mes_example || '';
+    const systemPromptValue = chat_metadata.system_prompt || '';
     const isGroup = !!selected_group;
 
     const $template = $(await renderTemplateAsync('scenarioOverride'));
@@ -10435,10 +10717,10 @@ export async function setCharacterSettingsOverrides() {
         allowVerticalScrolling: true,
     });
 
-    chat_metadata['scenario'] = pendingChanges.scenario;
-    chat_metadata['mes_example'] = pendingChanges.examples;
-    chat_metadata['system_prompt'] = pendingChanges.system_prompt;
-    saveMetadataDebounced();
+    chat_metadata.scenario = pendingChanges.scenario;
+    chat_metadata.mes_example = pendingChanges.examples;
+    chat_metadata.system_prompt = pendingChanges.system_prompt;
+    await saveMetadata();
 }
 
 /**
@@ -10520,7 +10802,22 @@ export async function updateSwipeCounter(mesId, { message = undefined, messageEl
 
     const swipeCounterText = formatSwipeCounter((message?.swipe_id + 1), message?.swipes?.length);
     const swipeCounter = messageElement.find('.swipes-counter');
-    swipeCounter.text(swipeCounterText).prop('hidden', false);
+    const swipePickerButton = messageElement.find('.mes_swipe_picker');
+    const canOpenSwipePicker = canOpenSwipePickerForMessage(mesId);
+    const canJumpToSwipe = canJumpToSwipeForMessage(mesId);
+
+    swipeCounter
+        .text(swipeCounterText)
+        .prop('hidden', false)
+        .toggleClass('swipe-picker-enabled', canOpenSwipePicker)
+        .toggleClass(INTERACTABLE_CONTROL_CLASS, canOpenSwipePicker)
+        .attr('role', canOpenSwipePicker ? 'button' : null)
+        .attr('title', canJumpToSwipe ? t`Click to jump to a swipe` : canOpenSwipePicker ? t`Click to view swipe history` : null);
+    swipePickerButton.toggle(canOpenSwipePicker);
+
+    if (!canOpenSwipePicker) {
+        swipeCounter.removeAttr('tabindex');
+    }
 }
 
 /**
@@ -10571,9 +10868,12 @@ export function isMessageSwipeable(messageId, message = undefined) {
             !message.is_user
         )
     ) {
+        // The message is swipeable.
         return true;
+    } else {
+        // The message is not swipeable.
+        return false;
     }
-    return false;
 }
 
 /**
@@ -10642,6 +10942,8 @@ export function refreshSwipeButtons(updateCounters = false, fade = true) {
             const isLastSwipe = (message?.swipes?.length ?? 1) - 1 <= (message?.swipe_id ?? 0);
             const hasSwipes = (message?.swipes?.length > 1);
             const overswipe = getOverswipeBehavior(messageId, message);
+            const swipePickerButton = $(div).find('.mes_swipe_picker');
+            const canOpenSwipePicker = canOpenSwipePickerForMessage(messageId);
 
             // Chevrons should always be shown on pristine greetings.
             const pristineGreeting = overswipe == OVERSWIPE_BEHAVIOR.PRISTINE_GREETING;
@@ -10654,6 +10956,7 @@ export function refreshSwipeButtons(updateCounters = false, fade = true) {
             div.classList.toggle('last_swipe', isOverswipeable);
             // If there's only one swipe, the left arrow should not be shown.
             div.classList.toggle('swipes_visible', hasSwipes || pristineGreeting);
+            swipePickerButton.toggle(canOpenSwipePicker);
 
             if (updateCounters) {
                 updateSwipeCounter(messageId, { message, messageElement: $(div) });
@@ -10661,6 +10964,7 @@ export function refreshSwipeButtons(updateCounters = false, fade = true) {
         } else {
             // Hide all messages that are not swipeable.
             div.classList.remove('swipes_visible', 'last_swipe');
+            $(div).find('.mes_swipe_picker').toggle(canOpenSwipePickerForMessage(messageId));
         }
     });
 }
@@ -10695,9 +10999,12 @@ export function hideSwipeButtons({ hideCounters = false } = {}) {
  * @returns {Promise<number>|undefined} - The ID of the new swipe after deletion.
  */
 export async function deleteSwipe(swipeId = null, messageId = chat.length - 1) {
-    if (swipeId && (isNaN(swipeId) || swipeId < 0)) {
-        toastr.warning(t`Invalid swipe ID: ${swipeId + 1}`);
-        return;
+    if (swipeId != null) {
+        swipeId = Number(swipeId);
+        if (!Number.isInteger(swipeId) || swipeId < 0) {
+            toastr.warning(t`Invalid swipe ID.`);
+            return;
+        }
     }
 
     const message = chat[messageId];
@@ -10711,7 +11018,8 @@ export async function deleteSwipe(swipeId = null, messageId = chat.length - 1) {
         return;
     }
 
-    swipeId = swipeId ?? message.swipe_id;
+    swipeId = Number(swipeId ?? message.swipe_id);
+    const currentSwipeId = clamp(Number(message.swipe_id ?? 0), 0, message.swipes.length - 1);
 
     if (swipeId < 0 || swipeId >= message.swipes.length) {
         toastr.warning(t`Invalid swipe ID: ${swipeId + 1}`);
@@ -10724,17 +11032,35 @@ export async function deleteSwipe(swipeId = null, messageId = chat.length - 1) {
         message.swipe_info.splice(swipeId, 1);
     }
 
-    // Select the next swipe, or the one before if it was the last one
-    const newSwipeId = Math.min(swipeId, message.swipes.length - 1);
+    let newSwipeId;
+    if (swipeId < currentSwipeId) {
+        newSwipeId = currentSwipeId - 1;
+    } else if (swipeId > currentSwipeId) {
+        newSwipeId = currentSwipeId;
+    } else {
+        // Select the next swipe, or the one before if it was the last one.
+        newSwipeId = Math.min(swipeId, message.swipes.length - 1);
+    }
 
-    chat_metadata['tainted'] = true;
+    chat_metadata.tainted = true;
 
     messageId = Number(messageId);
     swipeId = Number(swipeId);
+    message.swipe_id = newSwipeId;
     await eventSource.emit(event_types.MESSAGE_SWIPE_DELETED, { messageId, swipeId, newSwipeId });
-    let direction = (swipeId <= newSwipeId) ? SWIPE_DIRECTION.RIGHT : SWIPE_DIRECTION.LEFT;
-    //Animate swipe and swap dispayed message.
-    await swipe(null, direction, { source: SWIPE_SOURCE.DELETE, repeated: false, forceMesId: messageId, forceSwipeId: newSwipeId });
+
+    if (swipeId === currentSwipeId) {
+        const direction = (swipeId <= newSwipeId) ? SWIPE_DIRECTION.RIGHT : SWIPE_DIRECTION.LEFT;
+        // Animate swipe and swap displayed message when the currently visible swipe was deleted.
+        await swipe(null, direction, { source: SWIPE_SOURCE.DELETE, repeated: false, forceMesId: messageId, forceSwipeId: newSwipeId });
+    } else {
+        await updateSwipeCounter(messageId);
+        if (messageId !== chat.length - 1) {
+            await updateSwipeCounter(chat.length - 1);
+        }
+        refreshSwipeButtons();
+        saveChatDebounced();
+    }
 
     await saveChatConditional();
 
@@ -10742,12 +11068,7 @@ export async function deleteSwipe(swipeId = null, messageId = chat.length - 1) {
 }
 
 export async function saveMetadata() {
-    if (selected_group) {
-        await editGroup(selected_group, true, false);
-    }
-    else {
-        await saveChatConditional();
-    }
+    return await saveChatConditional();
 }
 
 export async function saveChatConditional() {
@@ -10765,8 +11086,7 @@ export async function saveChatConditional() {
 
         if (selected_group) {
             await saveGroupChat(selected_group, true);
-        }
-        else {
+        } else {
             await saveChat();
         }
 
@@ -10831,7 +11151,7 @@ export function updateEditArrowClasses() {
         return;
     }
 
-    const message = chatElement.find(`.mes[mesid="${this_edit_mes_id}"]`);
+    const message = chatElement.children('.mes').filter(`.mes[mesid="${this_edit_mes_id}"]`);
 
     const downButton = message.find('.mes_edit_down');
     const upButton = message.find('.mes_edit_up');
@@ -10872,8 +11192,7 @@ export function closeMessageEditor(what = 'all') {
 export function setGenerationProgress(progress) {
     if (!progress) {
         $('#send_textarea').css({ 'background': '', 'transition': '' });
-    }
-    else {
+    } else {
         $('#send_textarea').css({
             'background': `linear-gradient(90deg, #008000d6 ${progress}%, transparent ${progress}%)`,
             'transition': '0.25s ease-in-out',
@@ -11089,6 +11408,11 @@ function addAlternateGreeting(template, greeting, index, getArray, popup) {
  * @param {Event} [e] Event that triggered the function call.
  */
 export async function createOrEditCharacter(e) {
+    if (!settingsReady) {
+        console.warn('Settings not ready, aborting character creation/editing.');
+        return;
+    }
+
     $('#rm_info_avatar').html('');
     const formData = new FormData(/** @type {HTMLFormElement} */($('#form_create').get(0)));
     formData.set('fav', String(fav_ch_checked));
@@ -11198,7 +11522,6 @@ export async function createOrEditCharacter(e) {
             select_rm_info('char_create', avatarId, oldSelectedChar);
 
             crop_data = undefined;
-
         } catch (error) {
             console.error('Error creating character', error);
             toastr.error(t`Failed to create character`);
@@ -11246,7 +11569,7 @@ export async function createOrEditCharacter(e) {
                 !isNewChat &&
                 message.mes &&
                 !selected_group &&
-                !chat_metadata['tainted'] &&
+                !chat_metadata.tainted &&
                 (chat.length === 0 || (chat.length === 1 && !chat[0].is_user && !chat[0].is_system));
 
             if (shouldRegenerateMessage) {
@@ -11263,23 +11586,6 @@ export async function createOrEditCharacter(e) {
             toastr.error(t`Something went wrong while saving the character, or the image file provided was in an invalid format. Double check that the image is not a webp.`);
         }
     }
-}
-
-/**
- * Visually updates all chat messages including and after index by removing them, then adding them.
- * @param {ChatMessage[]} chat All messages in chat before index will remain unchanged.
- * @param {Number} index The last unchanged messageId.
- */
-export async function redisplayChat(chat, index) {
-    // Remove messages after index.
-    chatElement.children(`.mes[mesid="${index}"]`).nextAll('.mes').addBack().remove();
-
-    // Skip to index, then add extra messages.
-    for (let i = index; i <= chat.length - 1; i++) {
-        // addOneMessage will update last_mes.
-        addOneMessage(chat[i], { scroll: false, showSwipes: false, forceId: i });
-    }
-    refreshSwipeButtons();
 }
 
 /**
@@ -11300,7 +11606,7 @@ function formatSwipeCounter(current, total) {
  * @param {SwipeEvent} event Event.
  * @param {SWIPE_DIRECTION} direction The direction to swipe.
  * @param {object} params Additional parameters.
- * @param {import('./scripts/constants.js').SWIPE_SOURCE} [params.source]  The source of the swipe event. null, 'keyboard', 'auto_swipe', 'back' or 'delete'.
+ * @param {import('./scripts/constants.js').SWIPE_SOURCE} [params.source]  The source of the swipe event.
  * @param {boolean} [params.repeated] Is the swipe event repeated.
  * @param {ChatMessage} [params.message=chat[chat.length - 1]] The chat message to swipe.
  * @param {number} [params.forceMesId] The message id to swipe.
@@ -11326,7 +11632,7 @@ export async function swipe(event, direction, { source, repeated, message = chat
 
     const mesId = Number(forceMesId ?? event?.currentTarget?.closest('.mes')?.getAttribute('mesid') ?? messageIndex ?? chat.length - 1);
 
-    if (source === SWIPE_SOURCE.DELETE || source === SWIPE_SOURCE.BACK || source === SWIPE_SOURCE.AUTO_SWIPE) {
+    if ([SWIPE_SOURCE.DELETE, SWIPE_SOURCE.BACK, SWIPE_SOURCE.AUTO_SWIPE, SWIPE_SOURCE.SLASH_COMMAND, SWIPE_SOURCE.SWIPE_PICKER].includes(source)) {
         console.info(`The ${direction} swipe source on message #${mesId} is ${source}, Most checks have been bypassed. `);
     } else {
         //Only show an error if swipes are not hidden and a message is generating.
@@ -11359,7 +11665,7 @@ export async function swipe(event, direction, { source, repeated, message = chat
         console.error(`Message #${mesId}'s DOM element is not valid.`);
         return;
     }
-    const originalSwipeId = Number(chat[mesId]?.['swipe_id'] ?? 0);
+    const originalSwipeId = Number(chat[mesId]?.swipe_id ?? 0);
     let newSwipeId = Number(forceSwipeId ?? originalSwipeId);
 
     /**
@@ -11400,13 +11706,12 @@ export async function swipe(event, direction, { source, repeated, message = chat
                 document.body.dataset.swiping = 'true';
                 await generation;
             }
-        }
-        catch (error) {
+        } catch (error) {
             console.warn(`Swipe failed, Swiping back. ${error}`);
         }
 
         //Clamp Id between swipes.
-        let clampedId = clamp(chat[mesId]['swipe_id'], 0, Math.max(0, chat[mesId]['swipes'].length - 1));
+        let clampedId = clamp(chat[mesId].swipe_id, 0, Math.max(0, chat[mesId].swipes.length - 1));
 
         await updateSwipeCounter(mesId);
         //Fallback.
@@ -11436,9 +11741,8 @@ export async function swipe(event, direction, { source, repeated, message = chat
 
                 //Update the chat.
                 await loadFromSwipeId(mesId, chat[mesId].swipe_id);
-                await redisplayChat(chat, mesId);
-            }
-            else {
+                await redisplayChat({ startIndex: mesId });
+            } else {
                 await Popup.show.confirm(
                     t`ERROR: <code>syncSwipeToMes</code> has failed to revert the failed ${direction} swipe on message #${mesId}.`,
                     t`<p>After you click OK, the chat will be reloaded to prevent data corruption.</p>`,
@@ -11498,7 +11802,7 @@ export async function swipe(event, direction, { source, repeated, message = chat
      */
     async function loadFromSwipeId(mesId, newSwipeId) {
         //Update the swipe_id.
-        chat[mesId]['swipe_id'] = newSwipeId;
+        chat[mesId].swipe_id = newSwipeId;
 
         clearMessageData(chat[mesId]);
 
@@ -11570,7 +11874,8 @@ export async function swipe(event, direction, { source, repeated, message = chat
                     return true;
                 };
                 //Wait for the animation's end. https://developer.mozilla.org/en-US/docs/Web/API/Animation/finished
-                const animation = swipedElementsDiv[0]?.getAnimations().filter((a) => a['animationName'] == 'slide')[0];
+                const animations = swipedElementsDiv[0]?.getAnimations() ?? [];
+                const animation = animations.filter((a) => a instanceof globalThis.CSSAnimation && a.animationName == 'slide')[0];
                 try {
                     await Promise.race([animation?.finished, createTimeout(duration * 2, `The ${duration}ms swipe animation has not ended after ${duration * 2}ms. It has been skipped.`)].filter(Boolean));
                 } catch (error) {
@@ -11610,7 +11915,6 @@ export async function swipe(event, direction, { source, repeated, message = chat
             duration: 0, //used to be 100 //Disabled on Cohee's request. https://github.com/SillyTavern/SillyTavern/pull/4610/files#r2408731744
             queue: false,
             progress: function (animation, progress, remainingMs) {
-
                 if (is_animation_scroll) chatElement.scrollTop(getMessageBottomHeight(thisMesDiv));
             },
             complete: function () {
@@ -11627,7 +11931,6 @@ export async function swipe(event, direction, { source, repeated, message = chat
      * @param {boolean} [skipSwipeOut=false]
      */
     async function animateSwipe(run_generate = false, skipSwipeOut = false) {
-
         if (!skipSwipeOut) {
             //Swipe out.
             await animateSwipeTransition(mesId, { xEnd: `${swipeRange}px`, duration: swipeDuration });
@@ -11658,7 +11961,7 @@ export async function swipe(event, direction, { source, repeated, message = chat
 
                 const tokenCountText = (chat[mesId]?.extra?.reasoning || '') + chat[mesId].mes;
                 const tokenCount = await getTokenCountAsync(tokenCountText, 0);
-                chat[mesId]['extra']['token_count'] = tokenCount;
+                chat[mesId].extra.token_count = tokenCount;
                 thisMesDiv.find('.tokenCounterDisplay').text(`${tokenCount}t`);
             }
         }
@@ -11667,7 +11970,9 @@ export async function swipe(event, direction, { source, repeated, message = chat
         thisMesDiv.css('height', thisMesDivHeight);
         expandNewMessage(thisMesDiv);
 
-        appendMediaToMessage(chat[mesId], thisMesDiv);
+        if (run_generate) {
+            appendMediaToMessage(chat[mesId], thisMesDiv);
+        }
 
         await eventSource.emit(event_types.MESSAGE_SWIPED, (mesId));
 
@@ -11693,24 +11998,23 @@ export async function swipe(event, direction, { source, repeated, message = chat
 
     //If the swipe is not being deleted.
     if (source != SWIPE_SOURCE.DELETE && source != SWIPE_SOURCE.BACK) {
-
         // Make sure ad-hoc changes to extras are saved before swiping away
         syncMesToSwipe(mesId);
 
-        if (chat[mesId]['swipe_id'] === undefined) {              // if there is no swipe-message in the last spot of the chat array
-            chat[mesId]['swipe_id'] = 0;                        // set it to id 0
-            chat[mesId]['swipes'] = [];                         // empty the array
-            chat[mesId]['swipe_info'] = [];
-            chat[mesId]['swipes'][0] = chat[mesId]['mes'];  //assign swipe array with last chat[mesId] from chat
-            chat[mesId]['swipe_info'][0] = {
-                'send_date': chat[mesId]['send_date'],
-                'gen_started': chat[mesId]['gen_started'],
-                'gen_finished': chat[mesId]['gen_finished'],
-                'extra': structuredClone(chat[mesId]['extra']),
+        if (chat[mesId].swipe_id === undefined) {              // if there is no swipe-message in the last spot of the chat array
+            chat[mesId].swipe_id = 0;                        // set it to id 0
+            chat[mesId].swipes = [];                         // empty the array
+            chat[mesId].swipe_info = [];
+            chat[mesId].swipes[0] = chat[mesId].mes;  //assign swipe array with last chat[mesId] from chat
+            chat[mesId].swipe_info[0] = {
+                'send_date': chat[mesId].send_date,
+                'gen_started': chat[mesId].gen_started,
+                'gen_finished': chat[mesId].gen_finished,
+                'extra': structuredClone(chat[mesId].extra),
             };
         }
         // If the user is holding down the key and we're at the last or first swipe, don't do anything.
-        let isLastSwipe = (direction === SWIPE_DIRECTION.RIGHT) ? (chat[mesId].swipe_id === Math.max(0, chat[mesId]['swipes'].length - 1)) : chat[mesId].swipe_id === 0;
+        let isLastSwipe = (direction === SWIPE_DIRECTION.RIGHT) ? (chat[mesId].swipe_id === Math.max(0, chat[mesId].swipes.length - 1)) : chat[mesId].swipe_id === 0;
         if (source === SWIPE_SOURCE.KEYBOARD && repeated && isLastSwipe) {
             await endSwipe();
             return;
@@ -11726,58 +12030,55 @@ export async function swipe(event, direction, { source, repeated, message = chat
         if (forceSwipeId == null) newSwipeId--;
         //Loop to last swipe if negative.
         if (newSwipeId < 0) {
-            newSwipeId = Math.max(0, chat[mesId]['swipes'].length - 1);
+            newSwipeId = Math.max(0, chat[mesId].swipes.length - 1);
         }
         //Limit swipe_id to swipes.
-        if (newSwipeId > chat[mesId]['swipes'].length - 1) {
-            toastr.warning(`The swipe_id for message #${mesId} was ${newSwipeId}. It has been reset to ${chat[mesId]['swipes'].length - 1}.`);
-            chat[mesId]['swipe_id'] = chat[mesId]['swipes'].length - 1;
+        if (newSwipeId > chat[mesId].swipes.length - 1) {
+            toastr.warning(`The swipe_id for message #${mesId} was ${newSwipeId}. It has been reset to ${chat[mesId].swipes.length - 1}.`);
+            chat[mesId].swipe_id = chat[mesId].swipes.length - 1;
             await endSwipe();
             return;
         }
         await standardSwipe(newSwipeId);
         return;
-    }
-    //If swiping right.
-    else if (direction === SWIPE_DIRECTION.RIGHT) {
+    } else if (direction === SWIPE_DIRECTION.RIGHT) {
+        //If swiping right.
         // make new slot in array
         if (forceSwipeId == null) newSwipeId++;
 
         //Minimum of zero.
         if (newSwipeId < 0) {
             toastr.warning(`The swipe_id for message #${mesId} was ${newSwipeId}. It has been reset to zero.`);
-            chat[mesId]['swipe_id'] = 0;
+            chat[mesId].swipe_id = 0;
             await endSwipe();
             return;
         }
 
         //If overswiping.
-        if (newSwipeId >= chat[mesId]['swipes'].length) {
-            newSwipeId = chat[mesId]['swipes'].length;
+        if (newSwipeId >= chat[mesId].swipes.length) {
+            newSwipeId = chat[mesId].swipes.length;
 
             //Update the swipe_id.
-            chat[mesId]['swipe_id'] = newSwipeId;
+            chat[mesId].swipe_id = newSwipeId;
 
             const overswipe = getOverswipeBehavior(mesId);
 
             //Cancel the generation.
             if (overswipe == OVERSWIPE_BEHAVIOR.NONE) {
                 //Cancel swipe.
-                chat[mesId]['swipe_id'] = originalSwipeId;
+                chat[mesId].swipe_id = originalSwipeId;
                 await endSwipe();
                 return;
-            }
-            //Regenerate the message
-            else if (overswipe == OVERSWIPE_BEHAVIOR.REGENERATE) {
+            } else if (overswipe == OVERSWIPE_BEHAVIOR.REGENERATE) {
+                //Regenerate the message
                 clearMessageData(chat[mesId]);
                 let run_generate = true;
                 //Generate.
                 await animateSwipe(run_generate);
                 await endSwipe();
                 return;
-            }
-            // Loop to the first swipe.
-            else if (overswipe == OVERSWIPE_BEHAVIOR.LOOP || overswipe == OVERSWIPE_BEHAVIOR.PRISTINE_GREETING) {
+            } else if (overswipe == OVERSWIPE_BEHAVIOR.LOOP || overswipe == OVERSWIPE_BEHAVIOR.PRISTINE_GREETING) {
+                // Loop to the first swipe.
                 newSwipeId = 0;
             }
         }
@@ -11792,7 +12093,7 @@ export async function swipe(event, direction, { source, repeated, message = chat
  * Handles the swipe to the left event.
  * @param {SwipeEvent} [event] Event.
  * @param {object} params Additional parameters.
- * @param {import('./scripts/constants.js').SWIPE_SOURCE} [params.source]  The source of the swipe event. null, 'keyboard', 'auto_swipe', 'back' or 'delete'.
+ * @param {import('./scripts/constants.js').SWIPE_SOURCE} [params.source]  The source of the swipe event.
  * @param {boolean} [params.repeated] Is the swipe event repeated.
  * @param {object} [params.message] The chat message to swipe.
  */
@@ -11805,7 +12106,7 @@ export async function swipe_left(event, { source, repeated, message } = {}) {
  * Handles the swipe to the right event.
  * @param {SwipeEvent} [event] Event.
  * @param {object} params Additional parameters.
- * @param {import('./scripts/constants.js').SWIPE_SOURCE} [params.source] The source of the swipe event. null, 'keyboard', 'auto_swipe', 'back' or 'delete'.
+ * @param {import('./scripts/constants.js').SWIPE_SOURCE} [params.source] The source of the swipe event.
  * @param {boolean} [params.repeated] Is the swipe event repeated.
  * @param {object} [params.message] The chat message to swipe.
  */
@@ -12026,8 +12327,7 @@ export async function doNewChat({ deleteCurrentChat = false } = {}) {
 
     //Fix it; New chat doesn't create while open create character menu
     await waitUntilCondition(() => !isChatSaving, debounce_timeout.extended, 10);
-    await clearChat();
-    chat.length = 0;
+    await clearChat({ clearData: true });
 
     chat_file_for_del = getCurrentChatDetails()?.sessionName;
 
@@ -12039,8 +12339,7 @@ export async function doNewChat({ deleteCurrentChat = false } = {}) {
     if (selected_group) {
         await createNewGroupChat(selected_group);
         if (deleteCurrentChat) await deleteGroupChat(selected_group, chat_file_for_del, { jumpToNewChat: false }); // don't jump, new chat was already created and jumped to above
-    }
-    else {
+    } else {
         //RossAscends: added character name to new chat filenames and replaced Date.now() with humanizedDateTime;
         chat_metadata = {};
         characters[this_chid].chat = `${name2} - ${humanizedDateTime()}`;
@@ -12050,7 +12349,6 @@ export async function doNewChat({ deleteCurrentChat = false } = {}) {
         await createOrEditCharacter(new CustomEvent('newChat'));
         if (deleteCurrentChat) await delChat(chat_file_for_del + '.jsonl');
     }
-
 }
 
 /**
@@ -12062,7 +12360,7 @@ export async function doNewChat({ deleteCurrentChat = false } = {}) {
  * @param {string} param.newFileName New name for the chat (no JSONL extension)
  * @param {boolean} [param.loader=true] Whether to show loader during the operation
  */
-export async function renameGroupOrCharacterChat({ characterId, groupId, oldFileName, newFileName, loader }) {
+export async function renameGroupOrCharacterChat({ characterId, groupId, oldFileName, newFileName, loader: showLoader }) {
     const currentChatId = getCurrentChatId();
     const body = {
         is_group: !!groupId,
@@ -12080,9 +12378,14 @@ export async function renameGroupOrCharacterChat({ characterId, groupId, oldFile
         return;
     }
 
-    try {
-        loader && showLoader();
+    const loaderHandle = showLoader ? loader.show({
+        slug: 'chat-rename',
+        title: t`Rename Chat`,
+        message: t`Renaming chat…`,
+        toastMode: loader.ToastMode.STATIC,
+    }) : null;
 
+    try {
         const response = await fetch('/api/chats/rename', {
             method: 'POST',
             body: JSON.stringify(body),
@@ -12105,8 +12408,7 @@ export async function renameGroupOrCharacterChat({ characterId, groupId, oldFile
 
         if (groupId) {
             await renameGroupChat(groupId, oldFileName, newFileName);
-        }
-        else if (characterId !== undefined && String(characterId) === String(this_chid) && characters[characterId]?.chat === oldFileName) {
+        } else if (characterId !== undefined && String(characterId) === String(this_chid) && characters[characterId]?.chat === oldFileName) {
             characters[characterId].chat = newFileName;
             invalidateCurrentChatContext();
             $('#selected_chat_pole').val(characters[characterId].chat);
@@ -12116,12 +12418,14 @@ export async function renameGroupOrCharacterChat({ characterId, groupId, oldFile
         if (currentChatId) {
             await reloadCurrentChat();
         }
+
+        const eventData = { avatarId: body.avatar_url, groupId, oldFileName: body.original_file, newFileName: body.renamed_file };
+        await eventSource.emit(event_types.CHAT_RENAMED, eventData);
     } catch {
-        loader && hideLoader();
         await delay(500);
         await callGenericPopup('An error has occurred. Chat was not renamed.', POPUP_TYPE.TEXT);
     } finally {
-        loader && hideLoader();
+        await loaderHandle?.hide();
     }
 }
 
@@ -12148,8 +12452,7 @@ export async function renameChat(oldFileName, newName) {
 export async function closeCurrentChat() {
     if (is_send_press == false) {
         await waitUntilCondition(() => !isChatSaving, debounce_timeout.extended, 10);
-        await clearChat();
-        chat.length = 0;
+        await clearChat({ clearData: true });
         resetSelectedGroup();
         setCharacterId(undefined);
         setCharacterName('');
@@ -12226,7 +12529,7 @@ export async function handleDeleteCharacter(this_chid, delete_chats) {
  * @param {string|string[]} characterKey - The key (avatar) of the character to be deleted
  * @param {Object} [options] - Optional parameters for the deletion
  * @param {boolean} [options.deleteChats=true] - Whether to delete associated chats or not
- * @return {Promise<void>} - A promise that resolves when the character is successfully deleted
+ * @return {Promise<boolean>} - A promise that resolves when the character is successfully deleted
  */
 export async function deleteCharacter(characterKey, { deleteChats = true } = {}) {
     if (!Array.isArray(characterKey)) {
@@ -12240,14 +12543,16 @@ export async function deleteCharacter(characterKey, { deleteChats = true } = {})
             t`Deleting this character will close the chat and you will lose any unsaved messages. Do you want to proceed?`,
         );
         if (!confirmClose) {
-            return;
+            return false;
         }
     }
 
     const closeChatResult = await closeCurrentChat();
     if (!closeChatResult) {
-        return;
+        return false;
     }
+
+    let deleted = false;
 
     for (const key of characterKey) {
         const character = characters.find(x => x.avatar == key);
@@ -12287,9 +12592,11 @@ export async function deleteCharacter(characterKey, { deleteChats = true } = {})
         }
 
         await eventSource.emit(event_types.CHARACTER_DELETED, { id: chid, character: character });
+        deleted = true;
     }
 
     await removeCharacterFromUI();
+    return deleted;
 }
 
 /**
@@ -12681,6 +12988,7 @@ jQuery(async function () {
         });
         $(this).addClass('selected'); //sets the bg of the mes selected for deletion
         var i = Number($(this).attr('mesid')); //checks the message ID in the chat
+        i = getMessageDeletionStartId(i, deleteToolCallsInDeleteMode);
         this_del_mes = i;
         //as long as the current message ID is less than the total chat length
         while (i < chat.length) {
@@ -12702,39 +13010,51 @@ jQuery(async function () {
     async function handleDeleteChat(chatFile, group, fromSlashCommand = false) {
         // Close past chat popup.
         $('#select_chat_cross').trigger('click');
-        showLoader();
-        if (group) {
-            await deleteGroupChat(group, chatFile);
-        } else {
-            await delChat(chatFile);
+
+        const loaderHandle = loader.show({
+            slug: 'chat-delete',
+            title: t`Delete Chat`,
+            message: t`Deleting chat…`,
+            toastMode: loader.ToastMode.STATIC,
+        });
+
+        try {
+            if (group) {
+                await deleteGroupChat(group, chatFile);
+            } else {
+                await delChat(`${chatFile}.jsonl`);
+            }
+        } catch (error) {
+            loaderHandle.hide();
+            throw error;
         }
 
         if (fromSlashCommand) {  // When called from `/delchat` command, don't re-open the history view.
             $('#options').hide();  // Hide option popup menu.
-            hideLoader();
+            await loaderHandle.hide();
         } else {  // Open the history view again after 2 seconds (delay to avoid edge cases for deleting last chat).
-            setTimeout(function () {
+            setTimeout(async function () {
                 $('#option_select_chat').trigger('click');
                 $('#options').hide();  // Hide option popup menu.
-                hideLoader();
+                await loaderHandle.hide();
             }, 2000);
         }
     }
 
     $(document).on('click', '.PastChat_cross', async function (e, { fromSlashCommand = false } = {}) {
         e.stopPropagation();
-        chat_file_for_del = $(this).attr('file_name');
-        console.debug('detected cross click for' + chat_file_for_del);
+        const deleteFileName = $(this).attr('file_name');
+        console.debug('detected cross click for' + deleteFileName);
 
         // Skip confirmation if called from a slash command.
         if (fromSlashCommand) {
-            await handleDeleteChat(chat_file_for_del, selected_group, true);
+            await handleDeleteChat(deleteFileName, selected_group, true);
             return;
         }
 
         const result = await callGenericPopup('<h3>' + t`Delete the Chat File?` + '</h3>', POPUP_TYPE.CONFIRM);
         if (result === POPUP_RESULT.AFFIRMATIVE) {
-            await handleDeleteChat(chat_file_for_del, selected_group, false);
+            await handleDeleteChat(deleteFileName, selected_group, false);
         }
     });
 
@@ -12768,8 +13088,7 @@ jQuery(async function () {
         $('#character_popup').css('display', 'none');
     });
 
-    $('#dialogue_popup_ok').on('click', async function (_e, customData) {
-        const fromSlashCommand = customData?.fromSlashCommand || false;
+    $('#dialogue_popup_ok').on('click', async function (_e) {
         dialogueCloseStop = false;
         $('#shadow_popup').transition({
             opacity: 0,
@@ -12783,16 +13102,11 @@ jQuery(async function () {
             $('#dialogue_popup').removeClass('wide_dialogue_popup');
         }, animation_duration);
 
-        if (popup_type == 'del_chat') {
-            await handleDeleteChat(chat_file_for_del, selected_group, fromSlashCommand);
-        }
-
         if (dialogueResolve) {
             if (popup_type == 'input') {
                 dialogueResolve($('#dialogue_popup_input').val());
                 $('#dialogue_popup_input').val('');
-            }
-            else {
+            } else {
                 dialogueResolve(true);
             }
 
@@ -12899,8 +13213,7 @@ jQuery(async function () {
 
     $(document).on('click', '.renameChatButton', async function (e) {
         e.stopPropagation();
-        const oldFileNameFull = $(this).closest('.select_chat_block_wrapper').find('.select_chat_block_filename').text();
-        const oldFileName = oldFileNameFull.replace('.jsonl', '');
+        const oldFileName = $(this).closest('.select_chat_block_wrapper').find('.select_chat_block_filename').text();
 
         const popupText = await renderTemplateAsync('chatRename');
         const newName = await callGenericPopup(popupText, POPUP_TYPE.INPUT, oldFileName);
@@ -12921,10 +13234,9 @@ jQuery(async function () {
         e.stopPropagation();
         const format = $(this).data('format') || 'txt';
         await saveChatConditional();
-        const filenamefull = $(this).closest('.select_chat_block_wrapper').find('.select_chat_block_filename').text();
-        console.log(`exporting ${filenamefull} in ${format} format`);
+        const filename = $(this).closest('.select_chat_block_wrapper').find('.select_chat_block_filename').text();
+        console.log(`exporting ${filename} in ${format} format`);
 
-        const filename = filenamefull.replace('.jsonl', '');
         const body = {
             is_group: !!selected_group,
             avatar_url: characters[this_chid]?.avatar,
@@ -13001,6 +13313,7 @@ jQuery(async function () {
     ///////////// OPTIMIZED LISTENERS FOR LEFT SIDE OPTIONS POPUP MENU //////////////////////
     $('#options [id]').on('click', async function (event, customData) {
         const fromSlashCommand = customData?.fromSlashCommand || false;
+        const deleteToolCalls = customData?.deleteToolCalls ?? true;
         var id = $(this).attr('id');
 
         // Check whether a custom prompt was provided via custom data (for example through a slash command)
@@ -13029,9 +13342,7 @@ jQuery(async function () {
                     });
                 }
             }
-        }
-
-        else if (id == 'option_start_new_chat') {
+        } else if (id == 'option_start_new_chat') {
             if ((selected_group || this_chid !== undefined) && !is_send_press) {
                 let deleteCurrentChat = false;
                 const result = await Popup.show.confirm(t`Start new chat?`, await renderTemplateAsync('newChatConfirm'), {
@@ -13047,56 +13358,50 @@ jQuery(async function () {
                 const alreadyInTempChat = this_chid === undefined && name2 === neutralCharacterName;
                 await newAssistantChat({ temporary: alreadyInTempChat });
             }
-        }
-
-        else if (id == 'option_regenerate') {
-            closeMessageEditor();
+        } else if (id == 'option_regenerate') {
+            //Attempting to regenerate a user message will instead generate a new message.
+            if (chat.length && chat.length - 1 === this_edit_mes_id && chat[this_edit_mes_id]?.is_user == false) {
+                toastr.warning(t`Finish the edit before starting a generation.`, t`You cannot regenerate the message you are editing.`);
+                return;
+            }
             if (is_send_press == false) {
                 //hideSwipeButtons();
 
                 if (selected_group) {
                     regenerateGroup();
-                }
-                else {
+                } else {
                     is_send_press = true;
                     Generate('regenerate', buildOrFillAdditionalArgs());
                 }
             }
-        }
-
-        else if (id == 'option_impersonate') {
+        } else if (id == 'option_impersonate') {
             if (is_send_press == false || fromSlashCommand) {
                 is_send_press = true;
                 Generate('impersonate', buildOrFillAdditionalArgs());
             }
-        }
-
-        else if (id == 'option_continue') {
-            if (this_edit_mes_id >= 0) return; // don't proceed if editing a message
+        } else if (id == 'option_continue') {
+            if (swipeState == SWIPE_STATE.EDITING) {
+                toastr.warning(t`Confirm the edit to start a generation.`, t`You cannot send a message during a swipe-edit.`);
+                return;
+            }
+            if (chat.length && chat.length - 1 === this_edit_mes_id) {
+                toastr.warning(t`Finish the edit before starting a generation.`, t`You cannot continue the message you are editing.`);
+                return;
+            }
 
             if (is_send_press == false || fromSlashCommand) {
                 is_send_press = true;
                 Generate('continue', buildOrFillAdditionalArgs());
             }
-        }
-
-        else if (id == 'option_delete_mes') {
-            setTimeout(() => openMessageDelete(fromSlashCommand), animation_duration);
-        }
-
-        else if (id == 'option_close_chat') {
+        } else if (id == 'option_delete_mes') {
+            setTimeout(() => openMessageDelete(fromSlashCommand, deleteToolCalls), animation_duration);
+        } else if (id == 'option_close_chat') {
             await closeCurrentChat();
-        }
-
-        else if (id == 'option_chat_transfer') {
+        } else if (id == 'option_chat_transfer') {
             void openChatTransferPanel();
-        }
-
-        else if (id == 'option_announcements') {
+        } else if (id == 'option_announcements') {
             void openAnnouncements();
-        }
-
-        else if (id === 'option_settings') {
+        } else if (id === 'option_settings') {
             //var checkBox = document.getElementById("waifuMode");
             var topBar = document.getElementById('top-bar');
             var topSettingsHolder = document.getElementById('top-settings-holder');
@@ -13109,9 +13414,7 @@ jQuery(async function () {
 
                 divchat.style.borderRadius = '';
                 divchat.style.backgroundColor = '';
-
             } else {
-
                 divchat.style.borderRadius = '10px'; // Adjust the value to control the roundness of the corners
                 divchat.style.backgroundColor = ''; // Set the background color to your preference
 
@@ -13157,10 +13460,13 @@ jQuery(async function () {
         });
 
         if (this_del_mes >= 0) {
+            for (let i = (chat.length - 1); i >= this_del_mes; i--) {
+                deleteItemizedPromptForMessage(i);
+            }
             chatElement.find(`.mes[mesid="${this_del_mes}"]`).nextAll('div').remove();
             chatElement.find(`.mes[mesid="${this_del_mes}"]`).remove();
             chat.length = this_del_mes;
-            chat_metadata['tainted'] = true;
+            chat_metadata.tainted = true;
             await saveChatConditional();
             chatElement.scrollTop(chatElement[0].scrollHeight);
             await eventSource.emit(event_types.MESSAGE_DELETED, chat.length);
@@ -13247,7 +13553,7 @@ jQuery(async function () {
         if (this_chid !== undefined || selected_group || name2 === neutralCharacterName) {
             try {
                 const messageId = $(this).closest('.mes').attr('mesid');
-                const text = chat[messageId]['mes'];
+                const text = chat[messageId].mes;
                 await copyText(text);
                 toastr.info('Copied!', '', { timeOut: 2000 });
             } catch (err) {
@@ -13274,8 +13580,8 @@ jQuery(async function () {
                 let mes_edited = chatElement.find(`[mesid="${this_edit_mes_id}"]`).find('.mes_edit_done');
                 if (Number(edit_mes_id) == chat.length - 1) { //if the generating swipe (...)
                     let run_edit = true;
-                    if (chat[edit_mes_id]['swipe_id'] !== undefined) {
-                        if (chat[edit_mes_id]['swipes'].length === chat[edit_mes_id]['swipe_id']) {
+                    if (chat[edit_mes_id].swipe_id !== undefined) {
+                        if (chat[edit_mes_id].swipes.length === chat[edit_mes_id].swipe_id) {
                             run_edit = false;
                         }
                     }
@@ -13396,14 +13702,16 @@ jQuery(async function () {
         const oldScroll = chatElement[0].scrollTop;
         const clone = structuredClone(chat[this_edit_mes_id]);
         clone.send_date = Date.now();
-        clone.mes = $(this).closest('.mes').find('.edit_textarea').val().toString();
+        const this_edit_mes_element = $(this).closest('.mes');
+        clone.mes = this_edit_mes_element.find('.edit_textarea').val().toString();
 
         if (power_user.trim_spaces) {
             clone.mes = clone.mes.trim();
         }
 
         chat.splice(Number(this_edit_mes_id) + 1, 0, clone);
-        addOneMessage(clone, { insertAfter: this_edit_mes_id });
+        const newMessageElement = updateMessageElement(clone);
+        this_edit_mes_element.after(newMessageElement);
 
         updateViewMessageIds();
         await saveChatConditional();
@@ -13414,9 +13722,9 @@ jQuery(async function () {
     $(document).on('click', '.mes_edit_delete', async function (event, customData) {
         const fromSlashCommand = customData?.fromSlashCommand || false;
         const message = chat[this_edit_mes_id];
-        const selectedSwipe = message['swipe_id'] ?? undefined;
-        const swipesArray = Array.isArray(message['swipes']) ? message['swipes'] : [];
-        const canDeleteSwipe = !fromSlashCommand && !message.is_user && swipesArray.length > 1 && this_edit_mes_id === chat.length - 1 && selectedSwipe !== undefined;
+        const selectedSwipe = message.swipe_id ?? undefined;
+        const swipesArray = Array.isArray(message.swipes) ? message.swipes : [];
+        const canDeleteSwipe = power_user.confirm_message_delete && !fromSlashCommand && !message.is_user && swipesArray.length > 1 && this_edit_mes_id === chat.length - 1 && selectedSwipe !== undefined;
         await deleteMessage(Number(this_edit_mes_id), canDeleteSwipe ? selectedSwipe : undefined, power_user.confirm_message_delete && fromSlashCommand !== true);
     });
 
@@ -13803,7 +14111,9 @@ jQuery(async function () {
             }
             if (this_edit_mes_id === undefined && $('#mes_stop').is(':visible')) {
                 $('#mes_stop').trigger('click');
-                if (chat.length && Array.isArray(chat[chat.length - 1].swipes) && chat[chat.length - 1].swipe_id == chat[chat.length - 1].swipes.length) {
+                if (chat.length === 0) return;
+                const lastMessage = chat[chat.length - 1];
+                if (Array.isArray(lastMessage.swipes) && lastMessage.swipe_id == lastMessage.swipes.length) {
                     $('.last_mes .swipe_left').trigger('click');
                 }
             }
@@ -13862,7 +14172,7 @@ jQuery(async function () {
                     });
 
                 // Remember the chat currently selected, so we can reload it after the replacement
-                const currentChatFile = characters[this_chid]['chat'];
+                const currentChatFile = characters[this_chid].chat;
                 async function postReplace() {
                     await openCharacterChat(currentChatFile);
                 }
@@ -14045,7 +14355,9 @@ jQuery(async function () {
         $('#avatar-and-name-block').slideToggle();
     });
 
-    $(document).on('mouseup touchend', '#show_more_messages', async function () {
+    $(document).on('click', '#show_more_messages', async function (event) {
+        event.stopPropagation();
+        event.preventDefault();
         await showMoreMessages();
     });
 

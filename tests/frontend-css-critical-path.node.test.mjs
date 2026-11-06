@@ -18,6 +18,7 @@ const criticalStylesheets = [
     'css/secrets.css',
     'css/backgrounds.css',
     'css/chat-backups.css',
+    'css/streaming-display.css',
 ];
 
 test('loads core UI and preloader styles directly from the document head', () => {

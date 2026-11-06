@@ -38,6 +38,12 @@ browserLaunch:
   avoidLocalhost: false
 # Server port
 port: 8000
+# Interval in seconds to write a heartbeat file. Set to 0 to disable.
+# This is used primarily for Docker healthchecks.
+heartbeatInterval: 0
+# Enable HTTP/HTTPS keep-alive globally.
+# Disabling restores old Node 18 behavior, can help if ECONNRESET and other network errors occur.
+enableKeepAlive: false
 # -- SSL options --
 ssl:
   # Enable SSL/TLS encryption
@@ -68,6 +74,25 @@ basicAuthUser:
   password: "password"
 # Enables CORS proxy middleware
 enableCorsProxy: false
+# CORS settings (applied to all routes)
+cors:
+  # Enable or disable CORS middleware
+  enabled: true
+  # Allowed origins. Use "null" to match the default browser file origin.
+  # You can set "*" to allow any origin, or a list of allowed origins.
+  origin:
+    - "null"
+  # Allowed methods
+  methods:
+    - "OPTIONS"
+  # Allowed request headers (optional)
+  allowedHeaders: []
+  # Exposed response headers (optional)
+  exposedHeaders: []
+  # Allow credentials (cookies, authorization headers)
+  credentials: false
+  # Preflight cache max age in seconds (optional)
+  maxAge: null
 # -- REQUEST PROXY CONFIGURATION --
 requestProxy:
   # If a proxy is enabled, all outgoing HTTP/HTTPS requests will be routed through it.
@@ -101,22 +126,29 @@ perUserBasicAuth: false
 
 # -- SSO LOGIN CONFIGURATION --
 sso:
-# Enable's authlia based auto login. Only enable this if you
-# have setup and installed Authelia as a middle-ware on your
-# reverse proxy
-# https://www.authelia.com/
-# This will use auto login to an account with the same username
-# as that used for authlia. (Ensure the username in authlia
-# is an exact match in lowercase with that in sillytavern)
-autheliaAuth: false
-# Enable's authentik based auto login. Only enable this if you
+  # Enable's authlia based auto login. Only enable this if you
+  # have setup and installed Authelia as a middle-ware on your
+  # reverse proxy
+  # https://www.authelia.com/
+  # This will use auto login to an account with the same username
+  # as that used for authlia. (Ensure the username in authlia
+  # is an exact match in lowercase with that in sillytavern)
+  autheliaAuth: false
+  # Enable's authentik based auto login. Only enable this if you
   # have setup and installed Authentik as a middle-ware on your
   # reverse proxy.
   # https://goauthentik.io/
   # This will use auto login to an account with the same username
   # as that used for authentik. (Ensure the username in authentik
   # is an exact match in lowercase with that in sillytavern).
-authentikAuth: false
+  authentikAuth: false
+  # List of trusted proxy IPs for SSO authentication.
+  # Supports wildcards or CIDR notation for subnets.
+  # Example: ['127.0.0.1', '192.168.1.1']
+  # Set to ['*'] to trust all proxies (NOT RECOMMENDED unless you have other security measures in place)
+  trustedProxies:
+    - ::1
+    - 127.0.0.1
 
 # Host whitelist configuration. Recommended if you're using a listen mode
 hostWhitelist:
@@ -130,6 +162,26 @@ hostWhitelist:
   # - example.com
   # - .trycloudflare.com
   hosts: []
+
+# Perform whitelist checks against server-side HTTP requests that resolve to private IP addresses.
+# This is an additional layer of security to prevent Server-Side Request Forgery (SSRF) attacks.
+# Recommended when listen mode is enabled, or if your server is accessible by untrusted users.
+privateAddressWhitelist:
+  # Enable private address whitelist to block requests to private IP ranges.
+  enabled: false
+  # If true, requests to hosts that cannot be resolved will be allowed instead of blocked.
+  allowUnresolvedHosts: false
+  # Log blocked and allowed requests to the console.
+  log:
+    # Log blocked requests to the console with a warning message
+    blockedRequests: true
+    # Log allowed requests to the console with an info message
+    allowedRequests: false
+  # List of allowed private IP ranges (in CIDR notation or wildcard format).
+  # Allows loopback IP ranges by default, but you can customize this list to fit your needs.
+  allowedRanges:
+    - '127.0.0.0/8'      # Loopback (IPv4)
+    - '::1/128'          # Loopback (IPv6)
 
 # User session timeout *in seconds* (defaults to 24 hours).
 ## Set to a positive number to expire session after a certain time of inactivity
@@ -165,9 +217,19 @@ rateLimiting:
   # Use Express's trusted client IP. Forwarding headers are accepted only from
   # the reverse proxies configured by the application.
   preferRealIpHeader: true
+  # Set the maximum number of allowed failed basic authentication attempts before rate limiting is applied. Set to 0 to disable rate limiting for basic auth.
+  basicAuthMaxAttempts: 5
+  # Set the maximum number of allowed failed account login attempts before rate limiting is applied. Set to 0 to disable rate limiting for account logins.
+  accountsLoginMaxAttempts: 5
+  # Set the maximum number of allowed failed account recovery attempts before rate limiting is applied. Set to 0 to disable rate limiting for account recovery.
+  accountsRecoverMaxAttempts: 5
+  # Set the maximum number of allowed failed account reset attempts before rate limiting is applied. Set to 0 to disable rate limiting for account resets.
+  accountsResetMaxAttempts: 5
 
 ## BACKUP CONFIGURATION
 backups:
+  # Allow users to create a full backup archive of their data
+  allowFullDataBackup: true
   # Common settings for all backup types
   common:
     # Number of backups to keep for each chat and settings file
@@ -257,6 +319,16 @@ performance:
     maxEntries: 300
     maxVariantsPerUser: 8
     maxBytes: 52428800
+  # Configures gzip compression for client requests with large payloads (e.g. settings or chat saves).
+  requestCompression:
+    # Enable request compression.
+    enabled: false
+    # Minimum payload size to trigger compression. Set to 0 to compress all requests regardless of size.
+    minPayloadSize: '256kb'
+    # Hard upper payload size limit for compression. Set to 0 to allow compression of any size.
+    maxPayloadSize: '8mb'
+    # Timeout for request compression in milliseconds.
+    timeout: 4000
 
 # CACHE BUSTER CONFIGURATION
 # IMPORTANT: Requires localhost or a domain with HTTPS, otherwise will not work!
@@ -277,7 +349,6 @@ whitelistImportDomains:
   - cdn.discordapp.com
   - files.catbox.moe
   - raw.githubusercontent.com
-  - char-archive.evulid.cc
 # API request overrides (for KoboldAI and Text Completion APIs)
 ## Note: host includes the port number if it's not the default (80 or 443)
 ## Format is an array of objects:
@@ -305,6 +376,13 @@ extensions:
     embedding: Cohee/jina-embeddings-v2-base-en
     speechToText: Xenova/whisper-small
     textToSpeech: Xenova/speecht5_tts
+
+# Git backend for plugin/extension repository operations.
+# - Use "auto" to prefer system git, falling back to the integrated backend
+# - Use "system" to force system backend
+# - Use "builtin" to force integrated backend
+git:
+  backend: auto
 
 # Additional model tokenizers can be downloaded on demand.
 # Disabling will fallback to another locally available tokenizer.
@@ -342,14 +420,14 @@ ollama:
 # -- ANTHROPIC CLAUDE API CONFIGURATION --
 claude:
   # Enables caching of the system prompt (if supported).
-  # https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
+  # https://platform.claude.com/docs/en/build-with-claude/prompt-caching
   # -- IMPORTANT! --
   # Use only when the prompt before the chat history is static and doesn't change between requests
   # (e.g {{random}} macro or lorebooks not as in-chat injections).
   # Otherwise, you'll just waste money on cache misses.
   enableSystemPromptCache: false
   # Enables caching of the message history at depth (if supported).
-  # https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
+  # https://platform.claude.com/docs/en/build-with-claude/prompt-caching
   # -- IMPORTANT! --
   # Use with caution. Behavior may be unpredictable and no guarantees can or will be made.
   # Set to an integer to specify the desired depth. 0 (which does NOT include the prefill)
@@ -360,11 +438,17 @@ claude:
   ## 5m: base price x 1.25
   ## 1h: base price x 2
   extendedTTL: false
+  # Enables adaptive thinking for supported models (Opus 4.6+).
+  # Disable to enforce legacy thinking mode (with thinking budget).
+  # https://platform.claude.com/docs/en/build-with-claude/adaptive-thinking
+  enableAdaptiveThinking: false
 # -- GOOGLE GEMINI API CONFIGURATION --
 gemini:
   # API endpoint version ("v1beta" or "v1alpha")
   apiVersion: 'v1beta'
-# Enables caching of the system prompt (if supported). Only for OpenRouter.
+  # Adds thought signatures to requests (if available). Only for Gemini 3 and above.
+  thoughtSignatures: true
+  # Enables caching of the system prompt (if supported). Only for OpenRouter.
   # -- IMPORTANT! --
   # Use only when the prompt before the chat history is static and doesn't change between requests
   # (e.g {{random}} macro or lorebooks not as in-chat injections).

@@ -13,8 +13,8 @@ import { Jimp, JimpMime } from '../jimp.js';
 import storage from 'node-persist';
 
 import { AVATAR_WIDTH, AVATAR_HEIGHT, DEFAULT_AVATAR_PATH } from '../constants.js';
-import { default as validateAvatarUrlMiddleware, getFileNameValidationFunction } from '../middleware/validateFileName.js';
-import { deepMerge, humanizedISO8601DateTime, tryParse, MemoryLimitedMap, getConfigValue, mutateJsonString, clientRelativePath, getUniqueName, sanitizeSafeCharacterReplacements } from '../util.js';
+import { default as validateAvatarUrlMiddleware, getFileNameValidationFunction, forbiddenRegExp } from '../middleware/validateFileName.js';
+import { deepMerge, humanizedDateTime, humanizedISO8601DateTime, tryParse, MemoryLimitedMap, getConfigValue, mutateJsonString, clientRelativePath, getUniqueName, sanitizeSafeCharacterReplacements, getArrayBufferSlice } from '../util.js';
 import { TavernCardValidator } from '../validator/TavernCardValidator.js';
 import { CharacterCardPngError, parse, read, write } from '../character-card-parser.js';
 import { readWorldInfoFile } from './worldinfo.js';
@@ -577,9 +577,8 @@ async function tryReadImage(imgPath, crop) {
     try {
         const rawImg = await Jimp.read(imgPath);
         return await applyAvatarCropResize(rawImg, crop);
-    }
-    // If it's an unsupported type of image (APNG) - just read the file as buffer
-    catch (error) {
+    } catch (error) {
+        // If it's an unsupported type of image (APNG) - just read the file as buffer
         console.error(`Failed to read image: ${imgPath}`, error);
         return imageBuffer;
     }
@@ -671,6 +670,7 @@ const toShallow = (character) => {
             tags: _.get(character, 'data.tags', []),
             extensions: {
                 fav: _.get(character, 'data.extensions.fav', false),
+                world: _.get(character, 'data.extensions.world', ''),
             },
         },
     };
@@ -703,17 +703,16 @@ const processCharacter = async (item, directories, { shallow, cacheObserver = nu
         }
         character['json_data'] = imgData;
         const charStat = fs.statSync(path.join(directories.characters, item));
-        character['date_added'] = charStat.ctimeMs;
-        character['create_date'] = jsonObject['create_date'] || humanizedISO8601DateTime(charStat.ctimeMs);
+        character.date_added = charStat.ctimeMs;
+        character.create_date = jsonObject.create_date || new Date(Math.round(charStat.ctimeMs)).toISOString();
         const chatsDirectory = path.join(directories.chats, item.replace('.png', ''));
 
         const { chatSize, dateLastChat } = calculateChatSize(chatsDirectory);
-        character['chat_size'] = chatSize;
-        character['date_last_chat'] = dateLastChat;
-        character['data_size'] = calculateDataSize(jsonObject?.data);
+        character.chat_size = chatSize;
+        character.date_last_chat = dateLastChat;
+        character.data_size = calculateDataSize(jsonObject?.data);
         return shallow ? toShallow(character) : character;
-    }
-    catch (err) {
+    } catch (err) {
         console.error(`Could not process character: ${item}`);
 
         if (err instanceof SyntaxError) {
@@ -742,7 +741,7 @@ function getCharaCardV2(jsonObject, directories, hoistDate = true) {
         jsonObject = convertToV2(jsonObject, directories);
 
         if (hoistDate && !jsonObject.create_date) {
-            jsonObject.create_date = humanizedISO8601DateTime();
+            jsonObject.create_date = new Date().toISOString();
         }
     } else {
         jsonObject = readFromV2(jsonObject);
@@ -776,7 +775,7 @@ function convertToV2(char, directories) {
         depth_prompt_role: char.depth_prompt_role,
     }, directories);
 
-    result.chat = char.chat ?? humanizedISO8601DateTime();
+    result.chat = char.chat ?? `${char.name} - ${humanizedDateTime()}`;
     result.create_date = char.create_date;
 
     return result;
@@ -793,7 +792,7 @@ function unsetPrivateFields(char) {
 
 function readFromV2(char) {
     if (_.isUndefined(char.data)) {
-        console.warn(`Char ${char['name']} has Spec v2 data missing`);
+        console.warn(`Char ${char.name} has Spec v2 data missing`);
         return char;
     }
 
@@ -831,17 +830,17 @@ function readFromV2(char) {
                 //console.warn(`Spec v2 extension data missing for field: ${charField}, using default value: ${defaultValue}`);
                 char[charField] = defaultValue;
             } else {
-                console.warn(`Char ${char['name']} has Spec v2 data missing for unknown field: ${charField}`);
+                console.warn(`Char ${char.name} has Spec v2 data missing for unknown field: ${charField}`);
                 return;
             }
         }
         if (!_.isUndefined(char[charField]) && !_.isUndefined(v2Value) && String(char[charField]) !== String(v2Value)) {
-            console.warn(`Char ${char['name']} has Spec v2 data mismatch with Spec v1 for field: ${charField}`, char[charField], v2Value);
+            console.warn(`Char ${char.name} has Spec v2 data mismatch with Spec v1 for field: ${charField}`, char[charField], v2Value);
         }
         char[charField] = v2Value;
     });
 
-    char['chat'] = char['chat'] ?? humanizedISO8601DateTime();
+    char.chat = char.chat ?? `${char.name} - ${humanizedDateTime()}`;
 
     return char;
 }
@@ -877,7 +876,7 @@ function charaFormatData(data, directories) {
     // Old ST extension fields (for backward compatibility, will be deprecated)
     _.set(char, 'creatorcomment', data.creator_notes || '');
     _.set(char, 'avatar', 'none');
-    _.set(char, 'chat', data.ch_name + ' - ' + humanizedISO8601DateTime());
+    _.set(char, 'chat', data.ch_name + ' - ' + humanizedDateTime());
     _.set(char, 'talkativeness', data.talkativeness || 0.5);
     _.set(char, 'fav', data.fav == 'true');
     _.set(char, 'tags', typeof data.tags == 'string' ? (data.tags.split(',').map(x => x.trim()).filter(x => x)) : data.tags || []);
@@ -914,12 +913,6 @@ function charaFormatData(data, directories) {
     _.set(char, 'data.extensions.depth_prompt.prompt', data.depth_prompt_prompt ?? '');
     _.set(char, 'data.extensions.depth_prompt.depth', depth_value);
     _.set(char, 'data.extensions.depth_prompt.role', role_value);
-    //_.set(char, 'data.extensions.create_date', humanizedISO8601DateTime());
-    //_.set(char, 'data.extensions.avatar', 'none');
-    //_.set(char, 'data.extensions.chat', data.ch_name + ' - ' + humanizedISO8601DateTime());
-
-    // V3 fields
-    _.set(char, 'data.group_only_greetings', data.group_only_greetings ?? []);
 
     if (data.world) {
         try {
@@ -934,7 +927,6 @@ function charaFormatData(data, directories) {
             if (file && file.entries) {
                 _.set(char, 'data.character_book', convertWorldInfoToCharacterBook(data.world, file.entries));
             }
-
         } catch {
             console.warn(`Failed to read world info file: ${data.world}. Character book will not be available.`);
         }
@@ -1046,8 +1038,8 @@ async function importFromYaml(uploadPath, context, preservedFileName) {
         'name': yamlData.name,
         'description': yamlData.context ?? '',
         'first_mes': yamlData.greeting ?? '',
-        'create_date': humanizedISO8601DateTime(),
-        'chat': `${yamlData.name} - ${humanizedISO8601DateTime()}`,
+        'create_date': new Date().toISOString(),
+        'chat': `${yamlData.name} - ${humanizedDateTime()}`,
         'personality': '',
         'creatorcomment': '',
         'avatar': 'none',
@@ -1073,7 +1065,7 @@ async function importFromYaml(uploadPath, context, preservedFileName) {
 async function importFromCharX(uploadPath, { request }, preservedFileName) {
     const fileBuffer = fs.readFileSync(uploadPath);
     // Create a properly-sized ArrayBuffer (Node's buffer pool can cause oversized .buffer)
-    const data = fileBuffer.buffer.slice(fileBuffer.byteOffset, fileBuffer.byteOffset + fileBuffer.byteLength);
+    const data = getArrayBufferSlice(fileBuffer);
 
     const parser = new CharXParser(data, getCharacterArchiveLimits());
     let parsed;
@@ -1088,9 +1080,13 @@ async function importFromCharX(uploadPath, { request }, preservedFileName) {
     const { card, avatar, auxiliaryAssets, extractedBuffers } = parsed;
 
     // Apply standard character transformations
+    if (card.data?.name) {
+        card.data.name = sanitize(card.data.name);
+    }
+    card.name = sanitize(card.data?.name || card.name);
     let processedCard = readFromV2(card);
     unsetPrivateFields(processedCard);
-    processedCard['create_date'] = humanizedISO8601DateTime();
+    processedCard.create_date = new Date().toISOString();
     processedCard.name = sanitize(String(processedCard.name || ''));
     if (!processedCard.name) {
         throw CharacterImportError.invalid('CharX character card is missing a valid name.');
@@ -1138,8 +1134,7 @@ async function importFromCharX(uploadPath, { request }, preservedFileName) {
 }
 
 async function importFromByaf(uploadPath, { request }, preservedFileName) {
-    const fileBuffer = await fsPromises.readFile(uploadPath);
-    const data = fileBuffer.buffer.slice(fileBuffer.byteOffset, fileBuffer.byteOffset + fileBuffer.byteLength);
+    const data = getArrayBufferSlice(await fsPromises.readFile(uploadPath));
     console.info('Importing from BYAF');
 
     let byafData;
@@ -1248,8 +1243,12 @@ async function importFromJson(uploadPath, { request }, preservedFileName) {
         console.info(`Importing from ${jsonData.spec} json`);
         importRisuSprites(request.user.directories, jsonData);
         unsetPrivateFields(jsonData);
+        if (jsonData.data?.name) {
+            jsonData.data.name = sanitize(jsonData.data.name);
+        }
+        jsonData.name = sanitize(jsonData.data?.name || jsonData.name);
         jsonData = readFromV2(jsonData);
-        jsonData['create_date'] = humanizedISO8601DateTime();
+        jsonData.create_date = new Date().toISOString();
         const pngName = preservedFileName || getPngName(characterName, request.user.directories);
         const char = JSON.stringify(jsonData);
         const result = await writeCharacterData(DEFAULT_AVATAR_PATH, char, pngName, request);
@@ -1272,10 +1271,10 @@ async function importFromJson(uploadPath, { request }, preservedFileName) {
             'personality': jsonData.personality ?? '',
             'first_mes': jsonData.first_mes ?? '',
             'avatar': 'none',
-            'chat': jsonData.name + ' - ' + humanizedISO8601DateTime(),
+            'chat': jsonData.name + ' - ' + humanizedDateTime(),
             'mes_example': jsonData.mes_example ?? '',
             'scenario': jsonData.scenario ?? '',
-            'create_date': humanizedISO8601DateTime(),
+            'create_date': new Date().toISOString(),
             'talkativeness': jsonData.talkativeness ?? 0.5,
             'creator': jsonData.creator ?? '',
             'tags': jsonData.tags ?? '',
@@ -1302,10 +1301,10 @@ async function importFromJson(uploadPath, { request }, preservedFileName) {
             'personality': '',
             'first_mes': jsonData.char_greeting ?? '',
             'avatar': 'none',
-            'chat': jsonData.name + ' - ' + humanizedISO8601DateTime(),
+            'chat': jsonData.name + ' - ' + humanizedDateTime(),
             'mes_example': jsonData.example_dialogue ?? '',
             'scenario': jsonData.world_scenario ?? '',
-            'create_date': humanizedISO8601DateTime(),
+            'create_date': new Date().toISOString(),
             'talkativeness': jsonData.talkativeness ?? 0.5,
             'creator': jsonData.creator ?? '',
             'tags': jsonData.tags ?? '',
@@ -1336,6 +1335,9 @@ async function importFromPng(uploadPath, { request }, preservedFileName) {
         throw CharacterImportError.invalid('PNG character metadata root must be an object.');
     }
 
+    if (jsonData.data?.name) {
+        jsonData.data.name = sanitize(jsonData.data.name);
+    }
     jsonData.name = sanitize(String(jsonData.data?.name || jsonData.name || ''));
     if (!jsonData.name) {
         throw CharacterImportError.invalid('PNG character metadata is missing a valid name.');
@@ -1347,7 +1349,7 @@ async function importFromPng(uploadPath, { request }, preservedFileName) {
         importRisuSprites(request.user.directories, jsonData);
         unsetPrivateFields(jsonData);
         jsonData = readFromV2(jsonData);
-        jsonData['create_date'] = humanizedISO8601DateTime();
+        jsonData.create_date = new Date().toISOString();
         const char = JSON.stringify(jsonData);
         const result = await writeCharacterData(uploadPath, char, pngName, request);
         assertCharacterImportSaved(result, 'PNG');
@@ -1366,10 +1368,10 @@ async function importFromPng(uploadPath, { request }, preservedFileName) {
             'personality': jsonData.personality ?? '',
             'first_mes': jsonData.first_mes ?? '',
             'avatar': 'none',
-            'chat': jsonData.name + ' - ' + humanizedISO8601DateTime(),
+            'chat': jsonData.name + ' - ' + humanizedDateTime(),
             'mes_example': jsonData.mes_example ?? '',
             'scenario': jsonData.scenario ?? '',
-            'create_date': humanizedISO8601DateTime(),
+            'create_date': new Date().toISOString(),
             'talkativeness': jsonData.talkativeness ?? 0.5,
             'creator': jsonData.creator ?? '',
             'tags': jsonData.tags ?? '',
@@ -1457,7 +1459,9 @@ router.post('/rename', validateAvatarUrlMiddleware, async function (request, res
 
         // Rename chats folder
         if (fs.existsSync(oldChatsPath) && !fs.existsSync(newChatsPath)) {
-            fs.cpSync(oldChatsPath, newChatsPath, { recursive: true });
+            // Supplying a filter avoids a Node.js Windows copyDir crash while preserving all entries.
+            // https://github.com/nodejs/node/issues/63970
+            fs.cpSync(oldChatsPath, newChatsPath, { recursive: true, filter: () => true });
             fs.rmSync(oldChatsPath, { recursive: true, force: true });
         }
 
@@ -1467,8 +1471,7 @@ router.post('/rename', validateAvatarUrlMiddleware, async function (request, res
 
         // Return new avatar name to ST
         return response.send({ avatar: newAvatarName });
-    }
-    catch (err) {
+    } catch (err) {
         console.error(err);
         return response.sendStatus(500);
     }
@@ -1608,45 +1611,181 @@ router.post('/edit-attribute', validateAvatarUrlMiddleware, async function (requ
 });
 
 /**
+ * Sentinel value that signals a field should be completely removed (unset)
+ * from the character card rather than being set to any value. Use this in
+ * the merge payload wherever a key should be deleted.
+ *
+ * Both the server and the frontend share this constant so that callers can
+ * explicitly opt into deletion without overloading `null`.
+ * @type {string}
+ */
+const UNSET_SENTINEL = '__@@UNSET@@__';
+
+/** Maximum number of characters processed in parallel during bulk merge */
+const BULK_MERGE_CONCURRENCY = 10;
+
+/**
+ * Recursively walks `source` and removes any key from `target` whose
+ * corresponding value in `source` equals the {@link UNSET_SENTINEL}.
+ * Called after {@link deepMerge} so that the sentinel gets replaced by
+ * an actual key deletion.
+ * @param {object} target The merged character object to clean up
+ * @param {object} source The original update payload (pre-merge clone)
+ */
+function processUnsetSentinels(target, source) {
+    for (const key of Object.keys(source)) {
+        if (source[key] === UNSET_SENTINEL) {
+            _.unset(target, key);
+        } else if (_.isPlainObject(source[key]) && _.isPlainObject(target[key])) {
+            processUnsetSentinels(target[key], source[key]);
+        }
+    }
+}
+
+/**
+ * Reads a character card, applies a merge update (with sentinel-based
+ * unsetting), validates the result, and writes it back.
+ * @param {string} avatarPath Full path to the character PNG
+ * @param {string} avatar     Avatar filename (e.g. "char.png")
+ * @param {object} updateData The merge payload to apply
+ * @param {import("express").Request} request Express request object
+ * @param {((data: any) => boolean) | null} [shouldSkip] Optional function to determine if a character should be skipped based on its original data (used for bulk merge filtering)
+ * @returns {Promise<{ok: boolean, error?: string, skipped?: boolean}>} Result of the merge operation, including any validation error
+ */
+async function mergeCharacterUpdate(avatarPath, avatar, updateData, request, shouldSkip = null) {
+    const pngStringData = await readCharacterData(avatarPath);
+    if (!pngStringData) {
+        return { ok: false, error: 'Invalid character file' };
+    }
+
+    let character = JSON.parse(pngStringData);
+
+    if (typeof shouldSkip === 'function' && shouldSkip(character)) {
+        return { ok: false, skipped: true };
+    }
+
+    const update = _.cloneDeep(updateData);
+    _.unset(update, 'json_data');
+    _.unset(character, 'json_data');
+
+    character = deepMerge(character, update);
+    processUnsetSentinels(character, update);
+
+    const validator = new TavernCardValidator(character);
+    //Accept either V1 or V2.
+    if (!validator.validate()) {
+        return { ok: false, error: validator.lastValidationError ?? 'Validation failed' };
+    }
+
+    const targetImg = avatar.replace('.png', '');
+    await writeCharacterData(avatarPath, JSON.stringify(character), targetImg, request);
+    return { ok: true };
+}
+
+/**
  * Handle a POST request to edit character properties.
  *
- * Merges the request body with the selected character and
- * validates the result against TavernCard V2 specification.
+ * Operates in two modes depending on the request body:
  *
- * @param {Object} request - The HTTP request object.
- * @param {Object} response - The HTTP response object.
+ * **Single mode** (default behavior) — when `avatar` (string) is present:
+ *   Merges the request body with the selected character and validates the
+ *   result against TavernCard V2 specification.
  *
+ * **Bulk mode** — when `avatars` (array) is present:
+ *   Applies the same merge to multiple characters in parallel. Supports:
+ *   - An explicit list of avatars, or all characters when the array is empty
+ *   - An optional server-side `filter` so only characters where a given
+ *     JSON path exists and is non-null are updated
+ *
+ * In both modes, any value equal to the sentinel `__@@UNSET@@__` will cause
+ * that key to be **deleted** from the character card instead of being set.
+ *
+ * @param {import("express").Request} request - The HTTP request object
+ * @param {import("express").Response} response - The HTTP response object
  * @returns {void}
- * */
+ */
 router.post('/merge-attributes', getFileNameValidationFunction('avatar'), async function (request, response) {
     try {
+        // ── Bulk mode: avatars array is present ──────────────────
+        if (Array.isArray(request.body.avatars)) {
+            const { avatars, data, filter } = request.body;
+
+            if (!_.isPlainObject(data)) {
+                return response.status(400).send({ message: 'No valid update data provided.' });
+            }
+
+            // Determine which avatar files to process
+            let targetAvatars;
+            if (avatars.length > 0) {
+                for (const avatar of avatars) {
+                    if (typeof avatar !== 'string' || forbiddenRegExp.test(avatar) || path.extname(avatar).toLowerCase() !== '.png') {
+                        return response.status(400).send({ message: `Invalid avatar filename: ${avatar}` });
+                    }
+                }
+                targetAvatars = avatars;
+            } else {
+                // Empty array → scan all characters in the directory
+                const files = fs.readdirSync(request.user.directories.characters);
+                targetAvatars = files.filter(file => path.extname(file).toLowerCase() === '.png');
+            }
+
+            const updated = [];
+            const skipped = [];
+            const failed = [];
+
+            /**
+             * Process a single character in bulk: read, filter, merge, validate, write.
+             * @param {string} avatar Avatar filename
+             */
+            const processOne = async (avatar) => {
+                const avatarPath = path.join(request.user.directories.characters, avatar);
+
+                try {
+                    /** @type {(character: object) => boolean} */
+                    let shouldSkip = () => false;
+
+                    // Apply optional server-side filter before updating the card
+                    if (filter && typeof filter.path === 'string') {
+                        shouldSkip = (character) => {
+                            const value = _.get(character, filter.path);
+                            return value === undefined;
+                        };
+                    }
+
+                    const result = await mergeCharacterUpdate(avatarPath, avatar, data, request, shouldSkip);
+                    if (result.ok) {
+                        updated.push(avatar);
+                    } else if (result.skipped) {
+                        skipped.push(avatar);
+                    } else {
+                        console.warn(`Bulk merge failed for ${avatar}:`, result.error);
+                        failed.push(avatar);
+                    }
+                } catch (error) {
+                    console.error(`Bulk merge failed for ${avatar}:`, error);
+                    failed.push(avatar);
+                }
+            };
+
+            // Process in parallel with a concurrency limit
+            for (let i = 0; i < targetAvatars.length; i += BULK_MERGE_CONCURRENCY) {
+                const batch = targetAvatars.slice(i, i + BULK_MERGE_CONCURRENCY);
+                await Promise.allSettled(batch.map(processOne));
+            }
+
+            return response.send({ updated, skipped, failed });
+        }
+
+        // ── Single mode (default behavior) ───────────────────────
         const update = request.body;
         const avatarPath = path.join(request.user.directories.characters, update.avatar);
 
-        const pngStringData = await readCharacterData(avatarPath);
-
-        if (!pngStringData) {
-            console.error('Error: invalid character file.');
-            return response.status(400).send('Error: invalid character file.');
-        }
-
-        let character = JSON.parse(pngStringData);
-
-        _.unset(update, 'json_data');
-        _.unset(character, 'json_data');
-
-        character = deepMerge(character, update);
-
-        const validator = new TavernCardValidator(character);
-        const targetImg = (update.avatar).replace('.png', '');
-
-        //Accept either V1 or V2.
-        if (validator.validate()) {
-            await writeCharacterData(avatarPath, JSON.stringify(character), targetImg, request);
+        const result = await mergeCharacterUpdate(avatarPath, update.avatar, update, request);
+        if (result.ok) {
             response.sendStatus(200);
         } else {
-            console.warn(validator.lastValidationError);
-            response.status(400).send({ message: `Validation failed for ${character.name}`, error: validator.lastValidationError });
+            console.warn(result.error);
+            response.status(400).send({ message: `Validation failed for ${update.avatar}`, error: result.error });
         }
     } catch (exception) {
         response.status(500).send({ message: 'Unexpected error while saving character.', error: exception.toString() });
@@ -1810,13 +1949,8 @@ router.post('/chats', validateAvatarUrlMiddleware, async function (request, resp
  */
 function getPngName(file, directories) {
     file = sanitize(String(file || ''), { replacement: sanitizeSafeCharacterReplacements }) || 'Character';
-    let i = 1;
-    const baseName = file;
-    while (fs.existsSync(path.join(directories.characters, `${file}.png`))) {
-        file = baseName + i;
-        i++;
-    }
-    return file;
+    return getUniqueName(file, (name) => fs.existsSync(path.join(directories.characters, `${name}.png`)),
+        { nameBuilder: (base, i) => i === 0 ? base : `${base}${i}`, startIndex: 0, maxTries: 10000 }) ?? file;
 }
 
 /**
@@ -1963,8 +2097,7 @@ router.post('/duplicate', validateAvatarUrlMiddleware, async function (request, 
         invalidateCharacterListCache(request.user.profile.handle);
         console.info(`${filename} was copied to ${newFilename}`);
         response.send({ path: path.parse(newFilename).base });
-    }
-    catch (error) {
+    } catch (error) {
         console.error(error);
         return response.send({ error: true });
     }
@@ -2000,8 +2133,7 @@ router.post('/export', validateAvatarUrlMiddleware, async function (request, res
                     const jsonObject = getCharaCardV2(JSON.parse(json), request.user.directories);
                     unsetPrivateFields(jsonObject);
                     return response.type('json').send(JSON.stringify(jsonObject, null, 4));
-                }
-                catch {
+                } catch {
                     return response.sendStatus(400);
                 }
             }

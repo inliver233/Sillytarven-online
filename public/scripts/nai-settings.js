@@ -180,8 +180,7 @@ export function loadNovelPreset(preset) {
         $('#amount_gen').val(preset.max_length).trigger('input');
         $('#max_context_unlocked').prop('checked', needsUnlock).trigger('change');
         $('#max_context').val(preset.max_context).trigger('input');
-    }
-    else {
+    } else {
         setGenerationParamsFromPreset(preset);
     }
 
@@ -206,7 +205,7 @@ export function loadNovelPreset(preset) {
     nai_settings.logit_bias = preset.logit_bias || [];
     nai_settings.preamble = preset.preamble || default_preamble;
     nai_settings.min_p = preset.min_p || 0;
-    nai_settings.math1_temp = preset.math1_temp || 1;
+    nai_settings.math1_temp = preset.math1_temp ?? 1;
     nai_settings.math1_quad = preset.math1_quad || 0;
     nai_settings.math1_quad_entropy_scale = preset.math1_quad_entropy_scale || 0;
     nai_settings.extensions = preset.extensions || {};
@@ -260,7 +259,7 @@ export function loadNovelSettings(data, settings) {
     nai_settings.order = settings.order || default_order;
     nai_settings.logit_bias = settings.logit_bias || [];
     nai_settings.min_p = settings.min_p || 0;
-    nai_settings.math1_temp = settings.math1_temp || 1;
+    nai_settings.math1_temp = settings.math1_temp ?? 1;
     nai_settings.math1_quad = settings.math1_quad || 0;
     nai_settings.math1_quad_entropy_scale = settings.math1_quad_entropy_scale || 0;
     nai_settings.extensions = settings.extensions || {};
@@ -459,10 +458,8 @@ function getBadWordIds(banned_tokens, tokenizerType) {
         if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
             const tokens = getTextTokens(tokenizerType, trimmed.slice(1, -1));
             result.push(tokens);
-        }
-
-        // Raw token ids, JSON serialized
-        else if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+        } else if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+            // Raw token ids, JSON serialized
             try {
                 const tokens = JSON.parse(trimmed);
 
@@ -474,10 +471,8 @@ function getBadWordIds(banned_tokens, tokenizerType) {
             } catch (err) {
                 console.log(`Failed to parse bad word token list: ${trimmed}`, err);
             }
-        }
-
-        // Apply permutations
-        else {
+        } else {
+            // Apply permutations
             const permutations = getBadWordPermutations(trimmed).map(t => getTextTokens(tokenizerType, t));
             result.push(...permutations);
         }
@@ -738,8 +733,7 @@ function tryParseStreamingError(response, decoded) {
             toastr.error(data.message || data.error?.message || response.statusText, 'NovelAI API');
             throw new Error(data);
         }
-    }
-    catch {
+    } catch {
         // No JSON. Do nothing.
     }
 }

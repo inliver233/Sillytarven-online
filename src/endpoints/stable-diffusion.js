@@ -5,12 +5,13 @@ import express from 'express';
 import fetch from 'node-fetch';
 import sanitize from 'sanitize-filename';
 import { sync as writeFileAtomicSync } from 'write-file-atomic';
-import FormData from 'form-data';
 import urlJoin from 'url-join';
 import _ from 'lodash';
+import mime from 'mime-types';
 
 import { delay, getBasicAuthHeader, isValidUrl, tryParse } from '../util.js';
 import { readSecret, SECRET_KEYS } from './secrets.js';
+import { getFileNameValidationFunction } from '../middleware/validateFileName.js';
 import { AIMLAPI_HEADERS } from '../constants.js';
 
 /**
@@ -156,7 +157,6 @@ router.post('/samplers', async (request, response) => {
         const data = await result.json();
         const names = data.map(x => x.name);
         return response.send(names);
-
     } catch (error) {
         console.error(error);
         return response.sendStatus(500);
@@ -228,7 +228,7 @@ router.post('/get-model', async (request, response) => {
         });
         /** @type {any} */
         const data = await result.json();
-        return response.send(data['sd_model_checkpoint']);
+        return response.send(data.sd_model_checkpoint);
     } catch (error) {
         console.error(error);
         return response.sendStatus(500);
@@ -277,8 +277,8 @@ router.post('/set-model', async (request, response) => {
             /** @type {any} */
             const progressState = await getProgress();
 
-            const progress = progressState['progress'];
-            const jobCount = progressState['state']['job_count'];
+            const progress = progressState.progress;
+            const jobCount = progressState.state.job_count;
             if (progress === 0.0 && jobCount === 0) {
                 break;
             }
@@ -531,6 +531,34 @@ comfy.post('/delete-workflow', async (request, response) => {
     }
 });
 
+comfy.post('/rename-workflow', getFileNameValidationFunction('old_name'), getFileNameValidationFunction('new_name'), async (request, response) => {
+    try {
+        const oldName = sanitize(String(request.body.old_name));
+        const newName = sanitize(String(request.body.new_name));
+
+        if (path.extname(oldName).toLowerCase() !== '.json' || path.extname(newName).toLowerCase() !== '.json') {
+            return response.status(400).send('Only JSON workflow files are allowed');
+        }
+
+        const oldPath = path.join(request.user.directories.comfyWorkflows, oldName);
+        const newPath = path.join(request.user.directories.comfyWorkflows, newName);
+
+        if (!fs.existsSync(oldPath)) {
+            return response.status(404).send('Workflow not found');
+        }
+
+        if (fs.existsSync(newPath)) {
+            return response.status(409).send('A workflow with that name already exists');
+        }
+
+        fs.renameSync(oldPath, newPath);
+        return response.sendStatus(204);
+    } catch (error) {
+        console.error('ComfyUI workflow rename failed', error);
+        return response.sendStatus(500);
+    }
+});
+
 comfy.post('/generate', async (request, response) => {
     try {
         let item;
@@ -558,7 +586,7 @@ comfy.post('/generate', async (request, response) => {
         /** @type {any} */
         const data = await promptResult.json();
         const id = data.prompt_id;
-        const historyUrl = new URL(urlJoin(request.body.url, '/history'));
+        const historyUrl = new URL(urlJoin(request.body.url, `/history/${id}`));
         while (true) {
             const result = await fetch(historyUrl);
             if (!result.ok) {
@@ -583,7 +611,8 @@ comfy.post('/generate', async (request, response) => {
         }
         const outputs = Object.keys(item.outputs).map(it => item.outputs[it]);
         console.debug('ComfyUI outputs:', outputs);
-        const imgInfo = outputs.map(it => it.images).flat()[0] ?? outputs.map(it => it.gifs).flat()[0];
+        const imgInfo = outputs.map(it => it.images).filter(Array.isArray).flat()[0]
+            ?? outputs.map(it => it.gifs).filter(Array.isArray).flat()[0];
         if (!imgInfo) {
             throw new Error('ComfyUI did not return any recognizable outputs.');
         }
@@ -800,6 +829,91 @@ together.post('/generate', async (request, response) => {
     }
 });
 
+const sdcpp = express.Router();
+
+sdcpp.post('/ping', async (request, response) => {
+    try {
+        const url = new URL(urlJoin(request.body.url, '/v1/images/generations'));
+
+        const result = await fetch(url, { method: 'OPTIONS' });
+        if (!result.ok) {
+            throw new Error('stable-diffusion.cpp server returned an error.');
+        }
+
+        return response.sendStatus(200);
+    } catch (error) {
+        console.error(error);
+        return response.sendStatus(500);
+    }
+});
+
+sdcpp.post('/models', async (request, response) => {
+    try {
+        const url = new URL(urlJoin(request.body.url, '/v1/models'));
+
+        const result = await fetch(url);
+        if (!result.ok) {
+            throw new Error('stable-diffusion.cpp server returned an error.');
+        }
+
+        const data = await result.json();
+        return response.send(data);
+    } catch (error) {
+        console.error(error);
+        return response.sendStatus(500);
+    }
+});
+
+sdcpp.post('/generate', async (request, response) => {
+    try {
+        const url = new URL(urlJoin(request.body.url, '/sdapi/v1/txt2img'));
+
+        const payload = {
+            model: request.body.model,
+            prompt: request.body.prompt,
+            negative_prompt: request.body.negative_prompt,
+            width: request.body.width,
+            height: request.body.height,
+            steps: request.body.steps,
+            cfg_scale: request.body.cfg_scale,
+            seed: request.body.seed,
+            batch_size: request.body.batch_size,
+            sampler_name: request.body.sampler_name,
+            scheduler: request.body.scheduler,
+            // sd.cpp produces blank images when clip_skip is 1, which is the
+            // default (no skipping). Only send clip_skip when it's > 1.
+            clip_skip: request.body.clip_skip > 1 ? request.body.clip_skip : undefined,
+        };
+
+        for (const [key, value] of Object.entries(payload)) {
+            if (value === undefined || value === null || value === '') {
+                delete payload[key];
+            }
+        }
+
+        console.debug('stable-diffusion.cpp request:', payload);
+
+        const result = await fetch(url, {
+            method: 'POST',
+            body: JSON.stringify(payload),
+            headers: {
+                'Content-Type': 'application/json',
+            },
+        });
+
+        if (!result.ok) {
+            const text = await result.text();
+            throw new Error('stable-diffusion.cpp server returned an error.', { cause: text });
+        }
+
+        const data = await result.json();
+        return response.send(data);
+    } catch (error) {
+        console.error(error);
+        return response.sendStatus(500);
+    }
+});
+
 const drawthings = express.Router();
 
 drawthings.post('/ping', async (request, response) => {
@@ -834,7 +948,7 @@ drawthings.post('/get-model', async (request, response) => {
         /** @type {any} */
         const data = await result.json();
 
-        return response.send(data['model']);
+        return response.send(data.model);
     } catch (error) {
         console.error(error);
         return response.sendStatus(500);
@@ -853,7 +967,7 @@ drawthings.post('/get-upscaler', async (request, response) => {
         /** @type {any} */
         const data = await result.json();
 
-        return response.send(data['upscaler']);
+        return response.send(data.upscaler);
     } catch (error) {
         console.error(error);
         return response.sendStatus(500);
@@ -898,7 +1012,7 @@ const pollinations = express.Router();
 
 pollinations.post('/models', async (_request, response) => {
     try {
-        const modelsUrl = new URL('https://image.pollinations.ai/models');
+        const modelsUrl = new URL('https://gen.pollinations.ai/image/models');
         const result = await fetch(modelsUrl);
 
         if (!result.ok) {
@@ -913,7 +1027,7 @@ pollinations.post('/models', async (_request, response) => {
             throw new Error('Pollinations request failed.');
         }
 
-        const models = data.map(x => ({ value: x, text: x }));
+        const models = data.map(x => ({ value: x.name, text: x.name }));
         return response.send(models);
     } catch (error) {
         console.error(error);
@@ -923,17 +1037,19 @@ pollinations.post('/models', async (_request, response) => {
 
 pollinations.post('/generate', async (request, response) => {
     try {
-        const promptUrl = new URL(`https://image.pollinations.ai/prompt/${encodeURIComponent(request.body.prompt)}`);
+        const key = readSecret(request.user.directories, SECRET_KEYS.POLLINATIONS);
+        if (!key) {
+            console.warn('Pollinations API key not found.');
+            return response.sendStatus(400);
+        }
+
+        const promptUrl = new URL(`https://gen.pollinations.ai/image/${encodeURIComponent(request.body.prompt)}`);
         const params = new URLSearchParams({
             model: String(request.body.model),
             negative_prompt: String(request.body.negative_prompt),
             seed: String(request.body.seed >= 0 ? request.body.seed : Math.floor(Math.random() * 10_000_000)),
             width: String(request.body.width ?? 1024),
             height: String(request.body.height ?? 1024),
-            nologo: String(true),
-            nofeed: String(true),
-            private: String(true),
-            referrer: 'sillytavern',
         });
         if (request.body.enhance) {
             params.set('enhance', String(true));
@@ -942,7 +1058,12 @@ pollinations.post('/generate', async (request, response) => {
 
         console.info('Pollinations request URL:', promptUrl.toString());
 
-        const result = await fetch(promptUrl);
+        const result = await fetch(promptUrl, {
+            method: 'GET',
+            headers: {
+                'Authorization': `Bearer ${key}`,
+            },
+        });
 
         if (!result.ok) {
             const text = await result.text();
@@ -950,10 +1071,9 @@ pollinations.post('/generate', async (request, response) => {
             throw new Error('Pollinations request failed.');
         }
 
+        const format = result.headers.get('Content-Type')?.toString() || 'image/jpeg';
         const buffer = await result.arrayBuffer();
-        const base64 = Buffer.from(buffer).toString('base64');
-
-        return response.send({ image: base64 });
+        return response.send({ image: Buffer.from(buffer).toString('base64'), format: mime.extension(format) || 'jpg' });
     } catch (error) {
         console.error(error);
         return response.sendStatus(500);
@@ -1214,8 +1334,7 @@ chutes.post('/models', async (request, response) => {
         const chutesData = /** @type {{items: Array<{name: string}>}} */ (data);
         const models = chutesData.items.map(x => ({ value: x.name, text: x.name })).sort((a, b) => a?.text?.localeCompare(b?.text));
         return response.send(models);
-    }
-    catch (error) {
+    } catch (error) {
         console.error(error);
         return response.sendStatus(500);
     }
@@ -1261,8 +1380,7 @@ chutes.post('/generate', async (request, response) => {
         const base64 = Buffer.from(buffer).toString('base64');
 
         return response.send({ image: base64 });
-    }
-    catch (error) {
+    } catch (error) {
         console.error(error);
         return response.sendStatus(500);
     }
@@ -1303,8 +1421,7 @@ nanogpt.post('/models', async (request, response) => {
 
         const models = Object.values(imageModels).map(x => ({ value: x.model, text: x.name }));
         return response.send(models);
-    }
-    catch (error) {
+    } catch (error) {
         console.error(error);
         return response.sendStatus(500);
     }
@@ -1345,8 +1462,7 @@ nanogpt.post('/generate', async (request, response) => {
         }
 
         return response.send({ image });
-    }
-    catch (error) {
+    } catch (error) {
         console.error(error);
         return response.sendStatus(500);
     }
@@ -1413,7 +1529,7 @@ bfl.post('/generate', async (request, response) => {
 
         console.debug('BFL request:', requestBody);
 
-        const result = await fetch(`https://api.bfl.ml/v1/${request.body.model}`, {
+        const result = await fetch(`https://api.bfl.ai/v1/${request.body.model}`, {
             method: 'POST',
             body: JSON.stringify(requestBody),
             headers: {
@@ -1430,12 +1546,18 @@ bfl.post('/generate', async (request, response) => {
         /** @type {any} */
         const taskData = await result.json();
         const { id } = taskData;
+        const pollingUrl = taskData.polling_url ?? `https://api.bfl.ai/v1/get_result?id=${id}`;
 
         const MAX_ATTEMPTS = 100;
         for (let i = 0; i < MAX_ATTEMPTS; i++) {
             await delay(2500);
 
-            const statusResult = await fetch(`https://api.bfl.ml/v1/get_result?id=${id}`);
+            // The bfl.ai API requires authentication on the polling request as well
+            const statusResult = await fetch(pollingUrl, {
+                headers: {
+                    'x-key': key,
+                },
+            });
 
             if (!statusResult.ok) {
                 const text = await statusResult.text();
@@ -1625,6 +1747,8 @@ xai.post('/generate', async (request, response) => {
         const requestBody = {
             prompt: request.body.prompt,
             model: request.body.model,
+            aspect_ratio: request.body.aspect_ratio,
+            resolution: request.body.resolution,
             response_format: 'b64_json',
         };
 
@@ -1648,13 +1772,19 @@ xai.post('/generate', async (request, response) => {
         /** @type {any} */
         const data = await result.json();
 
-        const image = data?.data?.[0]?.b64_json;
-        if (!image) {
+        // Can either be a base64 buffer (always JPEG) or a data URL (with MIME type)
+        const encodedImage = String(data?.data?.[0]?.b64_json || '');
+        if (!encodedImage) {
             console.warn('xAI returned invalid data.');
             return response.sendStatus(500);
         }
 
-        return response.send({ image });
+        const dataUrlMatch = encodedImage.match(/^data:(.+);base64,(.+)$/);
+        const mimeType = dataUrlMatch?.[1] || 'image/jpeg';
+        const format = mime.extension(mimeType) || 'jpg';
+        const image = dataUrlMatch?.[2] || encodedImage;
+
+        return response.send({ image, format });
     } catch (error) {
         console.error('Error communicating with xAI', error);
         return response.sendStatus(500);
@@ -1758,6 +1888,7 @@ zai.post('/generate', async (request, response) => {
 
         console.debug('Z.AI image request:', request.body);
 
+        // Always use Common API for image generation (Coding API has stricter rate limits)
         const generateResponse = await fetch('https://api.z.ai/api/paas/v4/images/generations', {
             method: 'POST',
             headers: {
@@ -1782,23 +1913,283 @@ zai.post('/generate', async (request, response) => {
         const data = await generateResponse.json();
         console.debug('Z.AI image response:', data);
 
-        const url = data?.data?.[0]?.url;
-        if (!url || !isValidUrl(url) || !new URL(url).hostname.endsWith('.z.ai')) {
+        const urlString = String(data?.data?.[0]?.url ?? '');
+        if (!urlString || !isValidUrl(urlString)) {
             console.warn('Z.AI returned an invalid image URL.');
             return response.sendStatus(500);
         }
 
-        const imageResponse = await fetch(url);
-        if (!imageResponse.ok) {
-            console.warn('Z.AI image fetch returned an error.');
+        const url = new URL(urlString);
+        if (!url.hostname.endsWith('.z.ai') && !url.hostname.endsWith('.ufileos.com')) {
+            console.warn('Z.AI returned a URL with an unrecognized hostname.');
             return response.sendStatus(500);
         }
 
-        const buffer = await imageResponse.arrayBuffer();
-        const image = Buffer.from(buffer).toString('base64');
-        const format = path.extname(url).substring(1).toLowerCase() || 'png';
+        for (let attempt = 0; attempt < 5; attempt++) {
+            const imageResponse = await fetch(url);
+            if (!imageResponse.ok) {
+                // Sometimes the URL is valid but the image isn't immediately available
+                if (imageResponse.status === 404) {
+                    console.info('Z.AI image not found yet, retrying...', { attempt: attempt + 1 });
+                    await delay(1000);
+                    continue;
+                }
 
-        return response.send({ image, format });
+                console.warn('Z.AI image fetch returned an error. Status:', imageResponse.status, imageResponse.statusText);
+                return response.sendStatus(500);
+            }
+
+            const buffer = await imageResponse.arrayBuffer();
+            const image = Buffer.from(buffer).toString('base64');
+            const format = path.extname(url.pathname).substring(1).toLowerCase() || 'png';
+
+            return response.send({ image, format });
+        }
+
+        console.warn('Z.AI image was not available after multiple attempts.');
+        return response.sendStatus(500);
+    } catch (error) {
+        console.error(error);
+        return response.sendStatus(500);
+    }
+});
+
+zai.post('/generate-video', async (request, response) => {
+    try {
+        const controller = new AbortController();
+        request.socket.removeAllListeners('close');
+        request.socket.on('close', function () {
+            controller.abort();
+        });
+
+        const key = readSecret(request.user.directories, SECRET_KEYS.ZAI);
+
+        if (!key) {
+            console.warn('Z.AI key not found.');
+            return response.sendStatus(400);
+        }
+
+        console.debug('Z.AI video request:', request.body);
+
+        const generateResponse = await fetch('https://api.z.ai/api/paas/v4/videos/generations', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${key}`,
+            },
+            body: JSON.stringify({
+                prompt: request.body.prompt,
+                model: request.body.model,
+                quality: request.body.quality,
+                size: request.body.size,
+                aspect_ratio: request.body.aspect_ratio,
+            }),
+            signal: controller.signal,
+        });
+
+        if (!generateResponse.ok) {
+            const text = await generateResponse.text();
+            console.warn('Z.AI returned an error.', text);
+            return response.sendStatus(500);
+        }
+
+        /** @type {any} */
+        const data = await generateResponse.json();
+        console.debug('Z.AI video response:', data);
+
+        // Poll for video generation completion
+        for (let attempt = 0; attempt < 30; attempt++) {
+            if (controller.signal.aborted) {
+                console.info('Z.AI video generation aborted by client');
+                return response.status(500).send('Video generation aborted by client');
+            }
+
+            await delay(5000 + attempt * 1000);
+            console.debug(`Polling Z.AI video job ${data.id}, attempt ${attempt + 1}`);
+
+            const pollResponse = await fetch(`https://api.z.ai/api/paas/v4/async-result/${data.id}`, {
+                method: 'GET',
+                headers: {
+                    'Authorization': `Bearer ${key}`,
+                },
+            });
+
+            if (!pollResponse.ok) {
+                const text = await pollResponse.text();
+                console.warn('Z.AI video job polling failed', pollResponse.statusText, text);
+                return response.status(500).send(text);
+            }
+
+            /** @type {any} */
+            const pollResult = await pollResponse.json();
+            console.debug(`Z.AI video job status: ${pollResult.task_status}`);
+
+            if (pollResult.task_status === 'FAIL') {
+                console.warn('Z.AI video generation failed', pollResult);
+                return response.status(500).send('Video generation failed');
+            }
+
+            if (pollResult.task_status === 'SUCCESS') {
+                console.debug('Z.AI video generation succeeded', pollResult);
+                const url = pollResult?.video_result?.[0]?.url;
+
+                if (!url || !isValidUrl(url)) {
+                    console.warn('Z.AI returned an invalid video URL.');
+                    return response.sendStatus(500);
+                }
+
+                const contentResponse = await fetch(url);
+                if (!contentResponse.ok) {
+                    const text = await contentResponse.text();
+                    console.warn('Z.AI video content fetch failed', contentResponse.statusText, text);
+                    return response.status(500).send(text);
+                }
+
+                const contentBuffer = await contentResponse.arrayBuffer();
+                return response.send({ format: 'mp4', video: Buffer.from(contentBuffer).toString('base64') });
+            }
+        }
+        console.warn('Z.AI video was not available after multiple attempts.');
+        return response.sendStatus(500);
+    } catch (error) {
+        console.error(error);
+        return response.sendStatus(500);
+    }
+});
+
+const workersai = express.Router();
+
+workersai.post('/models', async (request, response) => {
+    try {
+        const key = readSecret(request.user.directories, SECRET_KEYS.WORKERS_AI);
+
+        if (!key) {
+            console.warn('Cloudflare Workers AI API key not found.');
+            return response.sendStatus(400);
+        }
+
+        const accountId = String(request.body.account_id || '').trim();
+        if (!accountId) {
+            console.warn('Cloudflare Workers AI Account ID not found.');
+            return response.sendStatus(400);
+        }
+
+        const apiUrl = new URL(`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/ai/models/search`);
+        apiUrl.searchParams.set('task', 'Text-to-Image');
+        apiUrl.searchParams.set('per_page', '1000');
+        const result = await fetch(apiUrl, {
+            method: 'GET',
+            headers: {
+                'Authorization': `Bearer ${key}`,
+            },
+        });
+
+        if (!result.ok) {
+            console.warn('Cloudflare Workers AI returned an error.', result.statusText);
+            return response.sendStatus(500);
+        }
+
+        /** @type {any} */
+        const data = await result.json();
+
+        if (!data.success || !Array.isArray(data.result)) {
+            console.warn('Cloudflare Workers AI returned invalid data.');
+            return response.sendStatus(500);
+        }
+
+        const models = data.result.map(x => ({ value: x.name, text: x.name }));
+        return response.send(models);
+    } catch (error) {
+        console.error(error);
+        return response.sendStatus(500);
+    }
+});
+
+workersai.post('/generate', async (request, response) => {
+    try {
+        const key = readSecret(request.user.directories, SECRET_KEYS.WORKERS_AI);
+
+        if (!key) {
+            console.warn('Cloudflare Workers AI API key not found.');
+            return response.sendStatus(400);
+        }
+
+        const accountId = String(request.body.account_id || '').trim();
+        if (!accountId) {
+            console.warn('Cloudflare Workers AI Account ID not found.');
+            return response.sendStatus(400);
+        }
+
+        const model = String(request.body.model || '').trim();
+        if (!model) {
+            console.warn('Cloudflare Workers AI model not specified.');
+            return response.sendStatus(400);
+        }
+
+        const apiUrl = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/ai/run/${model}`;
+
+        const body = {
+            prompt: request.body.prompt,
+            negative_prompt: request.body.negative_prompt || undefined,
+            width: request.body.width ? Number(request.body.width) : undefined,
+            height: request.body.height ? Number(request.body.height) : undefined,
+            num_steps: request.body.steps ? Number(request.body.steps) : undefined,
+            guidance: request.body.scale ? Number(request.body.scale) : undefined,
+            seed: request.body.seed >= 0 ? Number(request.body.seed) : undefined,
+        };
+
+        // Remove undefined values
+        for (const prop of Object.keys(body)) {
+            if (body[prop] === undefined) {
+                delete body[prop];
+            }
+        }
+
+        console.debug('Cloudflare Workers AI request:', model, body);
+
+        /** @type {import('node-fetch').RequestInit} */
+        const apiRequest = {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${key}`,
+            },
+        };
+
+        if (/flux-2/.test(model)) {
+            const formData = new FormData();
+            for (const [key, value] of Object.entries(body)) {
+                formData.append(key, String(value));
+            }
+            apiRequest.body = formData;
+        } else {
+            apiRequest.headers = { ...apiRequest.headers, 'Content-Type': 'application/json' };
+            apiRequest.body = JSON.stringify(body);
+        }
+
+        const result = await fetch(apiUrl, apiRequest);
+        if (!result.ok) {
+            const text = await result.text();
+            console.warn('Cloudflare Workers AI returned an error.', result.status, result.statusText, text);
+            return response.status(500).send(text);
+        }
+
+        const contentType = result.headers.get('content-type') || '';
+
+        // Partner models return JSON with base64 image
+        if (contentType.includes('application/json')) {
+            /** @type {any} */
+            const data = await result.json();
+            const image = data?.result?.image || data?.image;
+            if (!image) {
+                console.warn('Cloudflare Workers AI returned JSON without image data.');
+                return response.sendStatus(500);
+            }
+            return response.send({ format: 'png', image: image });
+        }
+
+        // Non-partner models return raw binary image data
+        const buffer = await result.arrayBuffer();
+        return response.send({ format: 'png', image: Buffer.from(buffer).toString('base64') });
     } catch (error) {
         console.error(error);
         return response.sendStatus(500);
@@ -1808,6 +2199,7 @@ zai.post('/generate', async (request, response) => {
 router.use('/comfy', comfy);
 router.use('/comfyrunpod', comfyRunPod);
 router.use('/together', together);
+router.use('/sdcpp', sdcpp);
 router.use('/drawthings', drawthings);
 router.use('/pollinations', pollinations);
 router.use('/stability', stability);
@@ -1820,3 +2212,4 @@ router.use('/falai', falai);
 router.use('/xai', xai);
 router.use('/aimlapi', aimlapi);
 router.use('/zai', zai);
+router.use('/workersai', workersai);

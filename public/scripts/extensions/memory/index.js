@@ -13,7 +13,7 @@ import {
     saveSettingsDebounced,
     substituteParamsExtended,
     generateRaw,
-    getMaxContextSize,
+    getMaxPromptTokens,
     setExtensionPrompt,
     streamingProcessor,
     animation_easing,
@@ -71,7 +71,7 @@ async function getSourceContextSize() {
         return 1024 - 64;
     }
 
-    return getMaxContextSize(overrideLength);
+    return getMaxPromptTokens(overrideLength);
 }
 
 const formatMemoryValue = function (value) {
@@ -349,6 +349,11 @@ function onMaxMessagesPerRequestInput() {
     saveSettingsDebounced();
 }
 
+/**
+ * Get the latest memory summary from the chat.
+ * @param {ChatMessage[]} chat Chat messages
+ * @returns {string} Latest memory summary or empty string
+ */
 function getLatestMemoryFromChat(chat) {
     if (!Array.isArray(chat) || !chat.length) {
         return '';
@@ -365,6 +370,11 @@ function getLatestMemoryFromChat(chat) {
     return '';
 }
 
+/**
+ * Get the index of the latest memory summary from the chat.
+ * @param {ChatMessage[]} chat Chat messages
+ * @returns {number} Index of the latest memory summary or -1 if not found
+ */
 function getIndexOfLatestChatSummary(chat) {
     if (!Array.isArray(chat) || !chat.length) {
         return -1;
@@ -427,9 +437,13 @@ async function onChatEvent() {
 
     const context = getContext();
     const chat = context.chat;
+    // Chat can't be empty.
+    if (chat.length === 0) return;
+
+    const lastMessage = chat[chat.length - 1];
 
     // No new messages - do nothing
-    if (chat.length === 0 || (lastMessageId === chat.length && getStringHash(chat[chat.length - 1].mes) === lastMessageHash)) {
+    if ((lastMessageId === chat.length && getStringHash(lastMessage.mes) === lastMessageHash)) {
         return;
     }
 
@@ -441,18 +455,18 @@ async function onChatEvent() {
 
     // Message has been edited / regenerated - delete the saved memory
     if (chat.length
-        && chat[chat.length - 1].extra
-        && chat[chat.length - 1].extra.memory
+        && lastMessage.extra
+        && lastMessage.extra.memory
         && lastMessageId === chat.length
-        && getStringHash(chat[chat.length - 1].mes) !== lastMessageHash) {
-        delete chat[chat.length - 1].extra.memory;
+        && getStringHash(lastMessage.mes) !== lastMessageHash) {
+        delete lastMessage.extra.memory;
     }
 
     summarizeChat(context)
         .catch(console.error)
         .finally(() => {
             lastMessageId = context.chat?.length ?? null;
-            lastMessageHash = getStringHash((context.chat.length && context.chat[context.chat.length - 1]['mes']) ?? '');
+            lastMessageHash = getStringHash((context.chat.length && context.chat[context.chat.length - 1].mes) ?? '');
         });
 }
 
@@ -867,11 +881,9 @@ async function summarizeChatExtras(context) {
         }
 
         setMemoryContext(summary, true);
-    }
-    catch (error) {
+    } catch (error) {
         console.log(error);
-    }
-    finally {
+    } finally {
         inApiCall = false;
     }
 }
@@ -1051,7 +1063,7 @@ function setupListeners() {
     });
 }
 
-jQuery(async function () {
+export async function init() {
     async function addExtensionControls() {
         const settingsHtml = await renderExtensionTemplateAsync('memory', 'settings', { defaultSettings });
         $('#summarize_container').append(settingsHtml);
@@ -1095,16 +1107,25 @@ jQuery(async function () {
         returns: ARGUMENT_TYPE.STRING,
     }));
 
+    const summaryMacroHandler = () => {
+        // Checking content of the UI summary box first
+        const uiSummary = $('#memory_contents').val().toString();
+        if (uiSummary.trim().length > 0) {
+            return uiSummary;
+        }
+        // Fallback to scanning the chat for the latest summary if the UI summary box is empty
+        return getLatestMemoryFromChat(getContext().chat);
+    };
     if (power_user.experimental_macro_engine) {
         macros.register('summary', {
             category: MacroCategory.CHAT,
             description: 'Returns the latest memory/summary from the current chat.',
-            handler: () => getLatestMemoryFromChat(getContext().chat),
+            handler: () => summaryMacroHandler(),
         });
     } else {
         // TODO: Remove this when the experimental macro engine is replacing the old macro engine
         MacrosParser.registerMacro('summary',
-            () => getLatestMemoryFromChat(getContext().chat),
+            () => summaryMacroHandler(),
             'Returns the latest memory/summary from the current chat.');
     }
-});
+}

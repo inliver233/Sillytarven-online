@@ -54,7 +54,30 @@ export const CONTENT_TYPES = {
     QUICK_REPLIES: 'quick_replies',
     SYSPROMPT: 'sysprompt',
     REASONING: 'reasoning',
+    ERROR_PAGE: 'error_page',
+    STYLESHEET: 'stylesheet',
 };
+
+/**
+ * @enum {string}
+ */
+export const CONTENT_SCOPE = {
+    USER: 'user',
+    GLOBAL: 'global',
+};
+
+/**
+ * Gets the scope of a content type.
+ * @param {CONTENT_TYPES} type Content type
+ * @returns {CONTENT_SCOPE} Resolved content scope
+ */
+function getScopeByType(type) {
+    const globalTypes = [
+        CONTENT_TYPES.ERROR_PAGE,
+        CONTENT_TYPES.STYLESHEET,
+    ];
+    return globalTypes.includes(type) ? CONTENT_SCOPE.GLOBAL : CONTENT_SCOPE.USER;
+}
 
 /**
  * Gets the default presets from the content directory.
@@ -63,13 +86,13 @@ export const CONTENT_TYPES = {
  */
 export function getDefaultPresets(directories) {
     try {
-        const contentIndex = getContentIndex();
+        const contentIndex = getContentIndex(CONTENT_SCOPE.USER);
         const presets = [];
 
         for (const contentItem of contentIndex) {
             if (contentItem.type.endsWith('_preset') || ['instruct', 'context', 'sysprompt', 'reasoning'].includes(contentItem.type)) {
                 contentItem.name = path.parse(contentItem.filename).name;
-                contentItem.folder = getTargetByType(contentItem.type, directories);
+                contentItem.folder = getUserTargetByType(contentItem.type, directories);
                 presets.push(contentItem);
             }
         }
@@ -196,32 +219,27 @@ function linkSharedBackground(contentPath, targetPath, dataRoot) {
 }
 
 /**
- * Seeds content for a user.
+ * Seeds content from a content index into a target location.
  * @param {ContentItem[]} contentIndex Content index
- * @param {import('../users.js').UserDirectoryList} directories User directories
- * @param {string[]} forceCategories List of categories to force check (even if content check is skipped)
- * @returns {Promise<boolean>} Whether any content was added
+ * @param {string} contentLogPath Path to the content log file
+ * @param {(type: string) => string | null} resolveTarget Function to resolve the target directory for a content type
+ * @param {string[]} [forceCategories] List of categories to force check (even if content check is skipped)
+ * @param {string|null} [dataRoot] Folder that holds the user folders; built-in backgrounds are hard-linked from there
+ * @returns {boolean} Whether any content was added
  */
-async function seedContentForUser(contentIndex, directories, forceCategories) {
+function seedContent(contentIndex, contentLogPath, resolveTarget, forceCategories, dataRoot = null) {
     let anyContentAdded = false;
-
-    if (!fs.existsSync(directories.root)) {
-        fs.mkdirSync(directories.root, { recursive: true });
-    }
-
-    const contentLogPath = path.join(directories.root, 'content.log');
     const contentLog = getContentLog(contentLogPath);
     const initialContentLogLength = contentLog.length;
 
     for (const contentItem of contentIndex) {
         if (RETIRED_CONTENT_VERSIONS[contentItem.filename]) {
-            const target = getTargetByType(contentItem.type, directories);
+            const target = resolveTarget(contentItem.type);
             if (target && upgradeRetiredContent(contentItem, path.join(target, path.parse(contentItem.filename).base))) {
                 anyContentAdded = true;
             }
         }
 
-        // If the content item is already in the log, skip it
         if (contentLog.includes(contentItem.filename) && !forceCategories?.includes(contentItem.type)) {
             continue;
         }
@@ -238,7 +256,7 @@ async function seedContentForUser(contentIndex, directories, forceCategories) {
             continue;
         }
 
-        const contentTarget = getTargetByType(contentItem.type, directories);
+        const contentTarget = resolveTarget(contentItem.type);
 
         if (!contentTarget) {
             console.warn(`Content file ${contentItem.filename} has unknown type ${contentItem.type}`);
@@ -254,7 +272,8 @@ async function seedContentForUser(contentIndex, directories, forceCategories) {
             continue;
         }
 
-        if (contentItem.type === CONTENT_TYPES.BACKGROUND && linkSharedBackground(contentPath, targetPath, path.dirname(directories.root))) {
+        fs.mkdirSync(contentTarget, { recursive: true });
+        if (contentItem.type === CONTENT_TYPES.BACKGROUND && dataRoot && linkSharedBackground(contentPath, targetPath, dataRoot)) {
             console.info(`Content file ${contentItem.filename} linked to ${contentTarget}`);
         } else {
             // fs.cpSync({recursive:true}) hard-crashes with non-ASCII paths on some Windows setups
@@ -272,6 +291,35 @@ async function seedContentForUser(contentIndex, directories, forceCategories) {
 }
 
 /**
+ * Seeds content for a user.
+ * @param {ContentItem[]} contentIndex Content index
+ * @param {import('../users.js').UserDirectoryList} directories User directories
+ * @param {string[]} forceCategories List of categories to force check (even if content check is skipped)
+ * @returns {Promise<boolean>} Whether any content was added
+ */
+async function seedContentForUser(contentIndex, directories, forceCategories) {
+    if (!fs.existsSync(directories.root)) {
+        fs.mkdirSync(directories.root, { recursive: true });
+    }
+
+    const contentLogPath = path.join(directories.root, 'content.log');
+    return seedContent(contentIndex, contentLogPath, (type) => getUserTargetByType(type, directories), forceCategories, path.dirname(directories.root));
+}
+
+/**
+ * Seeds global content that is not user-specific, such as error pages.
+ * @param {ContentItem[]} contentIndex Content index
+ * @returns {Promise<boolean>} Whether any content was added
+ */
+async function seedGlobalContent(contentIndex) {
+    if (!globalThis.DATA_ROOT || contentIndex.length === 0) {
+        return false;
+    }
+    const contentLogPath = path.join(globalThis.DATA_ROOT, 'content.log');
+    return seedContent(contentIndex, contentLogPath, getGlobalTargetByType);
+}
+
+/**
  * Checks for new content and seeds it for all users.
  * @param {import('../users.js').UserDirectoryList[]} directoriesList List of user directories
  * @param {string[]} forceCategories List of categories to force check (even if content check is skipped)
@@ -284,9 +332,19 @@ export async function checkForNewContent(directoriesList, forceCategories = []) 
             return;
         }
 
-        const contentIndex = getContentIndex();
+        const userContentIndex = getContentIndex(CONTENT_SCOPE.USER);
+        const globalContentIndex = getContentIndex(CONTENT_SCOPE.GLOBAL);
         let anyContentAdded = false;
         const totalUsers = directoriesList.length;
+
+        // Global content (error pages, stylesheets) must not keep users from getting theirs.
+        try {
+            if (await seedGlobalContent(globalContentIndex)) {
+                anyContentAdded = true;
+            }
+        } catch (error) {
+            console.error('Global content check failed', error);
+        }
 
         if (totalUsers > 20) {
             console.log(`正在检查 ${totalUsers} 个用户的新内容...`);
@@ -302,7 +360,7 @@ export async function checkForNewContent(directoriesList, forceCategories = []) 
             // 并发处理当前批次
             const results = await Promise.all(batch.map(async (directories) => {
                 try {
-                    return await seedContentForUser(contentIndex, directories, forceCategories);
+                    return await seedContentForUser(userContentIndex, directories, forceCategories);
                 } catch (err) {
                     console.error('Error seeding content for user:', err);
                     return false;
@@ -336,9 +394,10 @@ export async function checkForNewContent(directoriesList, forceCategories = []) 
 
 /**
  * Gets combined content index from the content and scaffold directories.
+ * @param {CONTENT_SCOPE} scope Scope of content to get
  * @returns {ContentItem[]} Array of content index
  */
-function getContentIndex() {
+function getContentIndex(scope = CONTENT_SCOPE.USER) {
     const result = [];
 
     if (fs.existsSync(scaffoldIndexPath)) {
@@ -347,6 +406,7 @@ function getContentIndex() {
         if (Array.isArray(scaffoldIndex)) {
             scaffoldIndex.forEach((item) => {
                 item.folder = scaffoldDirectory;
+                item.scope = getScopeByType(item.type);
             });
             result.push(...scaffoldIndex);
         }
@@ -358,22 +418,24 @@ function getContentIndex() {
         if (Array.isArray(contentIndex)) {
             contentIndex.forEach((item) => {
                 item.folder = contentDirectory;
+                item.scope = getScopeByType(item.type);
             });
             result.push(...contentIndex);
         }
     }
 
-    return result;
+    return result.filter((item) => item.scope === scope);
 }
 
 /**
  * Gets content by type and format.
  * @param {string} type Type of content
  * @param {'json'|'string'|'raw'} format Format of content
+ * @param {CONTENT_SCOPE} scope Scope of content to get
  * @returns {string[]|Buffer[]} Array of content
  */
-export function getContentOfType(type, format) {
-    const contentIndex = getContentIndex();
+export function getContentOfType(type, format, scope = CONTENT_SCOPE.USER) {
+    const contentIndex = getContentIndex(scope);
     const indexItems = contentIndex.filter((item) => item.type === type && item.folder);
     const files = [];
     for (const item of indexItems) {
@@ -407,7 +469,7 @@ export function getContentOfType(type, format) {
  * @param {import('../users.js').UserDirectoryList} directories User directories
  * @returns {string | null} Target directory
  */
-function getTargetByType(type, directories) {
+export function getUserTargetByType(type, directories) {
     switch (type) {
         case CONTENT_TYPES.SETTINGS:
             return directories.root;
@@ -445,6 +507,22 @@ function getTargetByType(type, directories) {
             return directories.sysprompt;
         case CONTENT_TYPES.REASONING:
             return directories.reasoning;
+        default:
+            return null;
+    }
+}
+
+/**
+ * Gets the target directory for global content types.
+ * @param {CONTENT_TYPES} type Content type
+ * @returns {string | null} Target directory
+ */
+export function getGlobalTargetByType(type) {
+    switch (type) {
+        case CONTENT_TYPES.ERROR_PAGE:
+            return path.join(globalThis.DATA_ROOT, '_errors');
+        case CONTENT_TYPES.STYLESHEET:
+            return path.join(globalThis.DATA_ROOT, '_css');
         default:
             return null;
     }
@@ -624,11 +702,6 @@ async function downloadPygmalionCharacter(id) {
  */
 function parseChubUrl(str) {
     const splitStr = str.split('/');
-    const length = splitStr.length;
-
-    if (length < 2) {
-        return null;
-    }
 
     let domainIndex = -1;
 
@@ -638,20 +711,25 @@ function parseChubUrl(str) {
         }
     });
 
-    const lastTwo = domainIndex !== -1 ? splitStr.slice(domainIndex + 1) : splitStr;
+    const cleanUrl = domainIndex !== -1 ? splitStr.slice(domainIndex + 1) : splitStr;
+    const length = cleanUrl.length;
 
-    const firstPart = lastTwo[0].toLowerCase();
+    if (length < 2) {
+        return null;
+    }
+
+    const firstPart = cleanUrl[0].toLowerCase();
 
     if (firstPart === 'characters' || firstPart === 'lorebooks') {
         const type = firstPart === 'characters' ? 'character' : 'lorebook';
-        const id = type === 'character' ? lastTwo.slice(1).join('/') : lastTwo.join('/');
+        const id = type === 'character' ? cleanUrl.slice(1).join('/') : cleanUrl.join('/');
         return {
             id: id,
             type: type,
         };
     } else if (length === 2) {
         return {
-            id: lastTwo.join('/'),
+            id: cleanUrl.join('/'),
             type: 'character',
         };
     }
@@ -722,11 +800,24 @@ async function downloadAICCCharacter(id) {
  * @returns {string | null} AICC path
  */
 function parseAICC(url) {
-    const pattern = /^https?:\/\/aicharactercards\.com\/character-cards\/([^/]+)\/([^/]+)\/?$|([^/]+)\/([^/]+)$/;
-    const match = url.match(pattern);
-    if (match) {
-        // Match group 1 & 2 for full URL, 3 & 4 for relative path
-        return match[1] && match[2] ? `${match[1]}/${match[2]}` : `${match[3]}/${match[4]}`;
+    try {
+        if (isValidUrl(url)) {
+            const urlObj = new URL(url);
+            // Split the path and remove empty strings caused by trailing slashes
+            const parts = urlObj.pathname.split('/').filter(Boolean);
+            if (parts.length >= 2) {
+                // Always grab the last two segments (author/character)
+                return `${parts[parts.length - 2]}/${parts[parts.length - 1]}`;
+            }
+        } else {
+            // Fallback for relative paths or raw "author/character" strings
+            const parts = url.split('/').filter(Boolean);
+            if (parts.length >= 2) {
+                return `${parts[parts.length - 2]}/${parts[parts.length - 1]}`;
+            }
+        }
+    } catch (e) {
+        console.error('Error parsing AICC URL:', e);
     }
     return null;
 }
@@ -1079,12 +1170,10 @@ router.post('/importURL', async (request, response) => {
             if (chubParsed?.type === 'character') {
                 console.info('Downloading chub character:', chubParsed.id);
                 result = await downloadChubCharacter(chubParsed.id);
-            }
-            else if (chubParsed?.type === 'lorebook') {
+            } else if (chubParsed?.type === 'lorebook') {
                 console.info('Downloading chub lorebook:', chubParsed.id);
                 result = await downloadChubLorebook(chubParsed.id);
-            }
-            else {
+            } else {
                 return response.sendStatus(404);
             }
         } else if (isRisu) {
@@ -1158,12 +1247,10 @@ router.post('/importUUID', async (request, response) => {
             if (uuidType === 'character') {
                 console.info('Downloading chub character:', uuid);
                 result = await downloadChubCharacter(uuid);
-            }
-            else if (uuidType === 'lorebook') {
+            } else if (uuidType === 'lorebook') {
                 console.info('Downloading chub lorebook:', uuid);
                 result = await downloadChubLorebook(uuid);
-            }
-            else {
+            } else {
                 return response.sendStatus(404);
             }
         }

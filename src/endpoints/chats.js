@@ -105,6 +105,23 @@ async function ensureChatStorageCapacity(request, response, additionalBytes) {
  */
 
 /**
+ * Builds a stable filename key for a chat's backups.
+ * Non-ASCII characters are replaced with underscores, so names such as CJK ones
+ * would all collapse to the same key and share one backup quota. A short hash of
+ * the raw name keeps those keys distinct while ASCII names stay unchanged.
+ * @param {string} name The name of the chat.
+ * @returns {string} Sanitized filename key for the backup files.
+ */
+export function getBackupKey(name) {
+    const sanitized = sanitize(name).replace(/[^a-z0-9]/gi, '_').toLowerCase();
+    if (/[^\x20-\x7E]/.test(name)) {
+        const hash = crypto.createHash('sha256').update(name).digest('hex').slice(0, 8);
+        return `${sanitized}_${hash}`;
+    }
+    return sanitized;
+}
+
+/**
  * Saves a chat to the backups directory.
  * @param {string} directory The user's backups directory.
  * @param {string} name The name of the chat.
@@ -115,7 +132,7 @@ function backupChatStrict(directory, name, chat) {
         return;
     }
 
-    const safeName = sanitize(name).replace(/[^a-z0-9]/gi, '_').toLowerCase();
+    const safeName = getBackupKey(name);
     const backupFile = path.join(directory, `${CHAT_BACKUPS_PREFIX}${safeName}_${generateTimestamp()}.jsonl`);
     writeFileAtomicSync(backupFile, chat, 'utf-8');
     removeOldBackups(directory, `${CHAT_BACKUPS_PREFIX}${safeName}_`);
@@ -215,9 +232,9 @@ function setCachedChatInfo(filePath, stats, data, hasMetadata) {
 function importOobaChat(userName, characterName, jsonData) {
     /** @type {object[]} */
     const chat = [{
-        user_name: userName,
-        character_name: characterName,
-        create_date: humanizedISO8601DateTime(),
+        chat_metadata: {},
+        user_name: 'unused',
+        character_name: 'unused',
     }];
 
     for (const arr of jsonData.data_visible) {
@@ -225,8 +242,9 @@ function importOobaChat(userName, characterName, jsonData) {
             const userMessage = {
                 name: userName,
                 is_user: true,
-                send_date: humanizedISO8601DateTime(),
+                send_date: new Date().toISOString(),
                 mes: arr[0],
+                extra: {},
             };
             chat.push(userMessage);
         }
@@ -234,8 +252,9 @@ function importOobaChat(userName, characterName, jsonData) {
             const charMessage = {
                 name: characterName,
                 is_user: false,
-                send_date: humanizedISO8601DateTime(),
+                send_date: new Date().toISOString(),
                 mes: arr[1],
+                extra: {},
             };
             chat.push(charMessage);
         }
@@ -254,9 +273,9 @@ function importOobaChat(userName, characterName, jsonData) {
 function importAgnaiChat(userName, characterName, jsonData) {
     /** @type {object[]} */
     const chat = [{
-        user_name: userName,
-        character_name: characterName,
-        create_date: humanizedISO8601DateTime(),
+        chat_metadata: {},
+        user_name: 'unused',
+        character_name: 'unused',
     }];
 
     for (const message of jsonData.messages) {
@@ -264,8 +283,9 @@ function importAgnaiChat(userName, characterName, jsonData) {
         chat.push({
             name: isUser ? userName : characterName,
             is_user: isUser,
-            send_date: humanizedISO8601DateTime(),
+            send_date: new Date().toISOString(),
             mes: message.msg,
+            extra: {},
         });
     }
 
@@ -287,16 +307,17 @@ function importCAIChat(userName, characterName, jsonData) {
      */
     function convert(history) {
         const starter = {
-            user_name: userName,
-            character_name: characterName,
-            create_date: humanizedISO8601DateTime(),
+            chat_metadata: {},
+            user_name: 'unused',
+            character_name: 'unused',
         };
 
         const historyData = history.msgs.map((msg) => ({
             name: msg.src.is_human ? userName : characterName,
             is_user: msg.src.is_human,
-            send_date: humanizedISO8601DateTime(),
+            send_date: new Date().toISOString(),
             mes: msg.text,
+            extra: {},
         }));
 
         return [starter, ...historyData];
@@ -321,17 +342,21 @@ function importKoboldLiteChat(_userName, _characterName, data) {
     function processKoboldMessage(msg) {
         const isUser = msg.includes(inputToken);
         return {
-            name: isUser ? header.user_name : header.character_name,
+            name: isUser ? userName : characterName,
             is_user: isUser,
             mes: msg.replaceAll(inputToken, '').replaceAll(outputToken, '').trim(),
-            send_date: Date.now(),
+            send_date: new Date().toISOString(),
+            extra: {},
         };
     }
 
     // Create the header
+    const userName = String(data.savedsettings.chatname);
+    const characterName = String(data.savedsettings.chatopponent).split('||$||')[0];
     const header = {
-        user_name: String(data.savedsettings.chatname),
-        character_name: String(data.savedsettings.chatopponent).split('||$||')[0],
+        chat_metadata: {},
+        user_name: 'unused',
+        character_name: 'unused',
     };
     // Format messages
     const formattedMessages = data.actions.map(processKoboldMessage);
@@ -385,9 +410,9 @@ function flattenChubChat(userName, characterName, lines) {
 function importRisuChat(userName, characterName, jsonData) {
     /** @type {object[]} */
     const chat = [{
-        user_name: userName,
-        character_name: characterName,
-        create_date: humanizedISO8601DateTime(),
+        chat_metadata: {},
+        user_name: 'unused',
+        character_name: 'unused',
     }];
 
     for (const message of jsonData.data.message) {
@@ -395,8 +420,9 @@ function importRisuChat(userName, characterName, jsonData) {
         chat.push({
             name: message.name ?? (isUser ? userName : characterName),
             is_user: isUser,
-            send_date: Number(message.time ?? Date.now()),
+            send_date: new Date(Number(message.time ?? Date.now())).toISOString(),
             mes: message.data ?? '',
+            extra: {},
         });
     }
 
@@ -1173,9 +1199,10 @@ async function readChatHeader(filePath) {
         console.warn('Failed to read chat metadata sidecar:', error);
     }
 
+    // Strip a UTF-8 BOM an external editor may have added.
     const firstLine = await readFirstLine(filePath);
-    const jsonData = tryParse(firstLine);
-    return jsonData && _.isObject(jsonData) ? jsonData : null;
+    const jsonData = tryParse(String(firstLine ?? '').replace(/^\uFEFF/, ''));
+    return jsonData && _.isObject(jsonData) && !Array.isArray(jsonData) ? jsonData : null;
 }
 
 function writeChatHeader(filePath, header) {
@@ -1455,9 +1482,17 @@ async function checkChatIntegrity(filePath, integritySlug) {
     }
 
     const header = await readChatHeader(filePath);
+
+    // A non-empty legacy chat file whose first line is not a chat header may be corrupted or truncated.
+    // Fail the check so the client asks for an explicit overwrite confirmation instead of silently losing data.
+    if (!header && !isChunkedChat(filePath) && fs.statSync(filePath).size > 0) {
+        console.warn(`File "${filePath}" is not empty, but its first line could not be parsed as a chat header. Overwriting it requires an explicit confirmation.`);
+        return false;
+    }
+
     const chatIntegrity = header?.chat_metadata?.integrity;
 
-    // If the chat has no integrity metadata, assume it's intact
+    // If the chat has no integrity metadata, assume it's intact (legacy chats created before integrity checks existed)
     if (!chatIntegrity) {
         return true;
     }
@@ -1526,108 +1561,123 @@ async function rejectChatWipe(request, response, filePath, nextMessageCount, isG
  * @returns {Promise<ChatInfo>}
  */
 export async function getChatInfo(pathToFile, additionalData = {}, isGroup = false, withMetadata = false, cacheObserver = null) {
-    return new Promise(async (res) => {
-        const parsedPath = path.parse(pathToFile);
-        let stats = await fs.promises.stat(pathToFile);
-        const chunked = isChunkedChat(pathToFile);
-        if (chunked) {
-            const indexPath = getChatIndexPath(pathToFile);
-            if (fs.existsSync(indexPath)) {
-                try {
-                    stats = await fs.promises.stat(indexPath);
-                } catch (error) {
-                    console.warn('Failed to read chat index stats for cache:', error);
+    return new Promise(async (res, rej) => {
+        // A chat that is deleted while a scan (recent chats, search) is running is not an error: skip it.
+        // Anything else rejects, instead of leaving the promise unsettled and the rejection unhandled.
+        try {
+            const parsedPath = path.parse(pathToFile);
+            let stats = await fs.promises.stat(pathToFile);
+            const chunked = isChunkedChat(pathToFile);
+            if (chunked) {
+                const indexPath = getChatIndexPath(pathToFile);
+                if (fs.existsSync(indexPath)) {
+                    try {
+                        stats = await fs.promises.stat(indexPath);
+                    } catch (error) {
+                        console.warn('Failed to read chat index stats for cache:', error);
+                    }
                 }
             }
-        }
-        const cached = getCachedChatInfo(pathToFile, stats, withMetadata);
-        if (cached) {
-            cacheObserver?.('hit');
-            res({ ...cached, ...additionalData });
-            return;
-        }
-        cacheObserver?.('miss');
-        let fileSizeInKB = `${(stats.size / 1024).toFixed(2)}kb`;
-
-        const chatData = {
-            file_id: parsedPath.name,
-            file_name: parsedPath.base,
-            file_size: fileSizeInKB,
-            chat_items: 0,
-            mes: '[The chat is empty]',
-            last_mes: stats.mtimeMs,
-            ...additionalData,
-        };
-
-        if (stats.size === 0 && !isGroup && !chunked) {
-            console.warn(`Found an empty chat file: ${pathToFile}`);
-            res({});
-            return;
-        }
-
-        if (stats.size === 0 && isGroup && !chunked) {
-            res(chatData);
-            return;
-        }
-
-        let chatMetadata = null;
-        const groupHeaderInfo = isGroup && chunked ? await readGroupChatHeaderInfo(pathToFile) : null;
-        const header = /** @type {any} */ (groupHeaderInfo?.header ?? await readChatHeader(pathToFile));
-        if (header && _.isObject(header.chat_metadata)) {
-            chatMetadata = header.chat_metadata;
-            if (withMetadata) {
-                chatData.chat_metadata = header.chat_metadata;
+            const cached = getCachedChatInfo(pathToFile, stats, withMetadata);
+            if (cached) {
+                cacheObserver?.('hit');
+                res({ ...cached, ...additionalData });
+                return;
             }
-        }
+            cacheObserver?.('miss');
+            let fileSizeInKB = `${(stats.size / 1024).toFixed(2)}kb`;
 
-        const summary = getChatSummaryFromMetadata(chatMetadata);
-        let messageCount = summary.messageCount;
-        let lastMessage = summary.lastMessage;
-        let lastMesDate = summary.lastMes;
-        let chunkedIndex = null;
+            const chatData = {
+                file_id: parsedPath.name,
+                file_name: parsedPath.base,
+                file_size: fileSizeInKB,
+                chat_items: 0,
+                mes: '[The chat is empty]',
+                last_mes: stats.mtimeMs,
+                ...additionalData,
+            };
 
-        if (chunked) {
-            chunkedIndex = await ensureChatIndex(pathToFile);
-            if (chunkedIndex) {
-                const totalBytes = Number(chunkedIndex.total_bytes);
-                if (Number.isFinite(totalBytes)) {
-                    fileSizeInKB = `${(totalBytes / 1024).toFixed(2)}kb`;
-                }
-                const indexCount = Number(chunkedIndex.message_count);
-                if (Number.isFinite(indexCount)) {
-                    messageCount = Math.max(0, indexCount - Number(groupHeaderInfo?.embeddedHeaderCount || 0));
-                }
-                if (chunkedIndex.last_message) {
-                    lastMessage = chunkedIndex.last_message;
-                }
-                lastMesDate = parseSendDate(chunkedIndex.last_mes, lastMesDate);
-            }
-        }
-
-        if (messageCount === null) {
-            const lineCount = await countJsonlLines(pathToFile);
-            messageCount = isGroup ? lineCount : Math.max(lineCount - 1, 0);
-        }
-
-        if (!lastMessage || lastMesDate === null) {
-            const lastLine = await readLastLine(pathToFile);
-            const jsonData = tryParse(lastLine);
-            if (jsonData && (jsonData.name || jsonData.character_name || jsonData.chat_metadata)) {
-                lastMessage = jsonData['mes'] || '[The message is empty]';
-                lastMesDate = parseSendDate(jsonData['send_date'], stats.mtimeMs);
-            } else {
-                console.warn('Found an invalid or corrupted chat file:', pathToFile);
+            if (stats.size === 0 && !isGroup && !chunked) {
+                console.warn(`Found an empty chat file: ${pathToFile}`);
                 res({});
                 return;
             }
+
+            if (stats.size === 0 && isGroup && !chunked) {
+                res(chatData);
+                return;
+            }
+
+            let chatMetadata = null;
+            const groupHeaderInfo = isGroup && chunked ? await readGroupChatHeaderInfo(pathToFile) : null;
+            const header = /** @type {any} */ (groupHeaderInfo?.header ?? await readChatHeader(pathToFile));
+            if (header && _.isObject(header.chat_metadata)) {
+                chatMetadata = header.chat_metadata;
+                if (withMetadata) {
+                    chatData.chat_metadata = header.chat_metadata;
+                }
+            }
+
+            const summary = getChatSummaryFromMetadata(chatMetadata);
+            let messageCount = summary.messageCount;
+            let lastMessage = summary.lastMessage;
+            let lastMesDate = summary.lastMes;
+            let chunkedIndex = null;
+
+            if (chunked) {
+                chunkedIndex = await ensureChatIndex(pathToFile);
+                if (chunkedIndex) {
+                    const totalBytes = Number(chunkedIndex.total_bytes);
+                    if (Number.isFinite(totalBytes)) {
+                        fileSizeInKB = `${(totalBytes / 1024).toFixed(2)}kb`;
+                    }
+                    const indexCount = Number(chunkedIndex.message_count);
+                    if (Number.isFinite(indexCount)) {
+                        messageCount = Math.max(0, indexCount - Number(groupHeaderInfo?.embeddedHeaderCount || 0));
+                    }
+                    if (chunkedIndex.last_message) {
+                        lastMessage = chunkedIndex.last_message;
+                    }
+                    lastMesDate = parseSendDate(chunkedIndex.last_mes, lastMesDate);
+                }
+            }
+
+            if (messageCount === null) {
+                const lineCount = await countJsonlLines(pathToFile);
+                messageCount = isGroup ? lineCount : Math.max(lineCount - 1, 0);
+            }
+
+            if (!lastMessage || lastMesDate === null) {
+                const lastLine = await readLastLine(pathToFile);
+                const jsonData = tryParse(lastLine);
+                if (jsonData && (jsonData.name || jsonData.character_name || jsonData.chat_metadata)) {
+                    lastMessage = jsonData['mes'] || '[The message is empty]';
+                    lastMesDate = parseSendDate(jsonData['send_date'], stats.mtimeMs);
+                } else {
+                    // The last line is unparseable or lacks known fields (e.g. a truncated write or an external edit).
+                    // Show a degraded preview instead of hiding an otherwise intact chat from the lists.
+                    console.warn('Found an invalid or corrupted last line in a chat file:', pathToFile);
+                    lastMessage = '[The message is empty]';
+                    lastMesDate = stats.mtimeMs;
+                    // The unreadable trailing line is not a message that can be loaded.
+                    messageCount = Math.max(messageCount - 1, 0);
+                }
+            }
+
+            chatData.chat_items = messageCount;
+            chatData.mes = lastMessage || '[The message is empty]';
+            chatData.last_mes = Number.isFinite(lastMesDate) ? lastMesDate : stats.mtimeMs;
+
+            setCachedChatInfo(pathToFile, stats, chatData, withMetadata && Boolean(chatMetadata));
+            res(chatData);
+        } catch (error) {
+            if (error?.code === 'ENOENT') {
+                console.warn('Chat file was deleted while it was being scanned:', pathToFile);
+                res({});
+                return;
+            }
+            rej(error);
         }
-
-        chatData.chat_items = messageCount;
-        chatData.mes = lastMessage || '[The message is empty]';
-        chatData.last_mes = Number.isFinite(lastMesDate) ? lastMesDate : stats.mtimeMs;
-
-        setCachedChatInfo(pathToFile, stats, chatData, withMetadata && Boolean(chatMetadata));
-        res(chatData);
     });
 }
 
@@ -4120,6 +4170,26 @@ router.post('/import', validateAvatarUrlMiddleware, async function (request, res
     }
 });
 
+router.post('/group/info', async (request, response) => {
+    try {
+        if (!request.body || !request.body.id) {
+            return response.sendStatus(400);
+        }
+
+        const id = request.body.id;
+        const chatFilePath = path.join(request.user.directories.groupChats, sanitize(`${id}.jsonl`));
+        if (!isPathUnderParent(request.user.directories.groupChats, chatFilePath) || !fs.existsSync(chatFilePath)) {
+            return response.sendStatus(404);
+        }
+
+        const chatInfo = await getChatInfo(chatFilePath, {}, true);
+        return response.send(chatInfo);
+    } catch (error) {
+        console.error(error);
+        return response.sendStatus(500);
+    }
+});
+
 router.post('/group/get', async (request, response) => {
     if (!request.body || !request.body.id) {
         return response.sendStatus(400);
@@ -4553,15 +4623,25 @@ router.post('/search', validateAvatarUrlMiddleware, async function (request, res
 router.post('/recent', async function (request, response) {
     const performanceTimer = beginEndpointPerformance(request, 'chats-recent');
     try {
-        const max = parseInt(request.body.max ?? Number.MAX_SAFE_INTEGER);
+        /** @type {import('../../public/scripts/welcome-screen.js').PinnedChat[]} */
+        const pinnedChats = Array.isArray(request.body.pinned)
+            ? request.body.pinned.filter(p => p && typeof p.file_name === 'string').slice(0, 200)
+            : [];
+        // Pinned chats are listed first, on top of the requested number of recent chats.
+        const max = parseInt(request.body.max ?? Number.MAX_SAFE_INTEGER) + pinnedChats.length;
+        const pinnedVariant = pinnedChats.length
+            ? crypto.createHash('sha1').update(JSON.stringify(pinnedChats.map(p => [p.file_name, p.avatar ?? null, p.group ?? null]))).digest('base64url')
+            : '';
         const withMetadata = Boolean(request.body.metadata);
         const result = await performanceTimer.measureAsync('recent-cache', () => recentChatsCache.get({
             userKey: request.user.profile.handle,
             directories: request.user.directories,
             max,
             metadata: withMetadata,
+            variant: pinnedVariant,
             load: async () => {
-                /** @type {{pngFile?: string, groupId?: string, filePath: string, mtime: number}[]} */
+                /** @typedef {{pngFile?: string, groupId?: string, filePath: string, mtime: number}} ChatFile */
+                /** @type {ChatFile[]} */
                 const allChatFiles = [];
 
                 const getCharacterChatFiles = async () => {
@@ -4632,7 +4712,16 @@ router.post('/recent', async function (request, response) {
 
                 await performanceTimer.measureAsync('scan', () => Promise.allSettled([getCharacterChatFiles(), getGroupChatFiles(), getRootChatFiles()]));
 
-                const recentChats = allChatFiles.sort((a, b) => b.mtime - a.mtime).slice(0, max);
+                const isPinned = (/** @type {ChatFile} */ chatFile) => pinnedChats.some(p => p.file_name === path.basename(chatFile.filePath) && (p.avatar === chatFile.pngFile || p.group === chatFile.groupId));
+                const recentChats = allChatFiles.sort((a, b) => {
+                    const isAPinned = isPinned(a);
+                    const isBPinned = isPinned(b);
+
+                    if (isAPinned && !isBPinned) return -1;
+                    if (!isAPinned && isBPinned) return 1;
+
+                    return b.mtime - a.mtime;
+                }).slice(0, max);
                 performanceTimer.setCounter('candidates', allChatFiles.length);
                 performanceTimer.setCounter('top', recentChats.length);
                 const jsonFilesPromise = recentChats.map((file) => {

@@ -1,7 +1,7 @@
 import { Fuse } from '../lib.js';
 
-import { saveSettings, substituteParams, getRequestHeaders, chat_metadata, this_chid, characters, saveCharacterDebounced, menu_type, eventSource, event_types, getExtensionPromptByName, saveMetadata, getCurrentChatId, extension_prompt_roles, create_save, createOrEditCharacter, name1 } from '../script.js';
-import { download, debounce, initScrollHeight, resetScrollHeight, parseJsonFile, extractDataFromPng, getFileBuffer, getCharaFilename, getSortableDelay, escapeRegex, PAGINATION_TEMPLATE, navigation_option, waitUntilCondition, isTrueBoolean, setValueByPath, flashHighlight, select2ModifyOptions, getSelect2OptionId, dynamicSelect2DataViaAjax, highlightRegex, select2ChoiceClickSubscribe, isFalseBoolean, getSanitizedFilename, checkOverwriteExistingData, getStringHash, parseStringArray, cancelDebounce, findChar, onlyUnique, equalsIgnoreCaseAndAccents, uuidv4, normalizeArray, getUniqueName } from './utils.js';
+import { saveSettings, substituteParams, getRequestHeaders, chat_metadata, this_chid, characters, saveCharacterDebounced, menu_type, eventSource, event_types, getExtensionPromptByName, saveMetadata, getCurrentChatId, extension_prompt_roles, create_save, createOrEditCharacter, name1, getOneCharacter, select_selected_character } from '../script.js';
+import { download, debounce, initScrollHeight, resetScrollHeight, parseJsonFile, extractDataFromPng, getFileBuffer, getCharaFilename, getSortableDelay, escapeRegex, PAGINATION_TEMPLATE, navigation_option, waitUntilCondition, isTrueBoolean, setValueByPath, flashHighlight, select2ModifyOptions, getSelect2OptionId, dynamicSelect2DataViaAjax, highlightRegex, select2ChoiceClickSubscribe, isFalseBoolean, getSanitizedFilename, checkOverwriteExistingData, getStringHash, parseStringArray, cancelDebounce, findChar, onlyUnique, equalsIgnoreCaseAndAccents, uuidv4, normalizeArray, getUniqueName, logSlashCommandWarn, addLongPressEvent, escapeHtml, setInfoBlock, clearInfoBlock } from './utils.js';
 import { extension_settings, getContext } from './extensions.js';
 import { NOTE_MODULE_NAME, metadata_keys, shouldWIAddPrompt } from './authors-note.js';
 import { isMobile } from './RossAscends-mods.js';
@@ -351,8 +351,7 @@ class WorldInfoBuffer {
 
             if (keyWords.length > 1) {
                 return haystack.includes(transformedString);
-            }
-            else {
+            } else {
                 // Use custom boundaries to include punctuation and other non-alphanumeric characters
                 const regex = new RegExp(`(?:^|\\W)(${escapeRegex(transformedString)})(?:$|\\W)`);
                 if (regex.test(haystack)) {
@@ -675,7 +674,6 @@ class WorldInfoTimedEffects {
                 console.log('[WI] Timed effect "delay" applied to entry', entry);
             }
         }
-
     }
 
     /**
@@ -837,7 +835,7 @@ export function updateWorldInfoSettings(settings, activeWorldInfo) {
         world_info_use_group_scoring: (value) => world_info_use_group_scoring = Boolean(value),
         world_info_max_recursion_steps: (value) => world_info_max_recursion_steps = Number(value),
         // Unused
-        world_info: (_value) => {},
+        world_info: (_value) => { },
     };
 
     for (const [key, setter] of Object.entries(fields)) {
@@ -1059,9 +1057,10 @@ function registerWorldInfoSlashCommands() {
         return getContext().chat.filter(x => !x.is_system).map(x => x.mes);
     }
 
-    async function getEntriesFromFile(file) {
+    async function getEntriesFromFile(file, { args = {}, unnamed = null, callbackName = 'getEntriesFromFile' } = {}) {
         if (!file || !world_names.includes(file)) {
             toastr.warning(t`Valid World Info file name is required`);
+            logSlashCommandWarn(`${callbackName}: Valid World Info file name is required`, args, unnamed);
             return '';
         }
 
@@ -1069,6 +1068,7 @@ function registerWorldInfoSlashCommands() {
 
         if (!data || !('entries' in data)) {
             toastr.warning(t`World Info file has an invalid format`);
+            logSlashCommandWarn(`${callbackName}: World Info file has an invalid format`, args, unnamed);
             return '';
         }
 
@@ -1076,6 +1076,7 @@ function registerWorldInfoSlashCommands() {
 
         if (!entries || entries.length === 0) {
             toastr.warning(t`World Info file has no entries`);
+            logSlashCommandWarn(`${callbackName}: World Info file has no entries`, args, unnamed);
             return '';
         }
 
@@ -1119,6 +1120,7 @@ function registerWorldInfoSlashCommands() {
         const character = findChar({ name: characterIdentifier });
         if (!character) {
             toastr.error(t`Character not found.`);
+            logSlashCommandWarn('getCharBookCallback: Character not found', { type, name, create }, { characterIdentifier });
             return '';
         }
         const books = [];
@@ -1138,8 +1140,7 @@ function registerWorldInfoSlashCommands() {
             // Also assign the book now - additional if requested, otherwise as primary
             if (type === 'additional') {
                 await charUpdateAddAuxWorld(character.avatar, newName);
-            }
-            else {
+            } else {
                 await charUpdatePrimaryWorld(newName);
             }
             // Refresh UI, if needed
@@ -1160,6 +1161,7 @@ function registerWorldInfoSlashCommands() {
 
         if (!chatId) {
             toastr.warning(t`Open a chat to get a name of the chat-bound lorebook`);
+            logSlashCommandWarn('getChatBookCallback: Open a chat to get a name of the chat-bound lorebook', args);
             return '';
         }
 
@@ -1205,7 +1207,7 @@ function registerWorldInfoSlashCommands() {
         const file = args.file;
         const field = args.field || 'key';
 
-        const entries = await getEntriesFromFile(file);
+        const entries = await getEntriesFromFile(file, { args, unnamed: { value }, callbackName: 'findBookEntryCallback' });
 
         if (!entries) {
             return '';
@@ -1250,7 +1252,7 @@ function registerWorldInfoSlashCommands() {
         const field = args.field || 'content';
         const tags = getContext().tags;
 
-        const entries = await getEntriesFromFile(file);
+        const entries = await getEntriesFromFile(file, { args, unnamed: { uid }, callbackName: 'getEntryFieldCallback' });
 
         if (!entries) {
             return '';
@@ -1260,11 +1262,14 @@ function registerWorldInfoSlashCommands() {
 
         if (!entry) {
             toastr.warning('Valid UID is required');
+            logSlashCommandWarn('getEntryFieldCallback: Valid UID is required', args, { uid });
+            console.warn();
             return '';
         }
 
         if (!Object.hasOwn(newWorldInfoEntryDefinition, field)) {
             toastr.warning('Valid field name is required');
+            logSlashCommandWarn('getEntryFieldCallback: Valid field name is required', args, { uid });
             return '';
         }
 
@@ -1313,6 +1318,7 @@ function registerWorldInfoSlashCommands() {
 
         if (!data || !('entries' in data)) {
             toastr.warning('Valid World Info file name is required');
+            logSlashCommandWarn('createEntryCallback: Valid World Info file name is required', args);
             return '';
         }
 
@@ -1358,6 +1364,7 @@ function registerWorldInfoSlashCommands() {
 
         if (value === undefined) {
             toastr.warning('Value is required');
+            logSlashCommandWarn('setEntryFieldCallback: Value is required', args, { value });
             return '';
         }
 
@@ -1367,6 +1374,7 @@ function registerWorldInfoSlashCommands() {
 
         if (!data || !('entries' in data)) {
             toastr.warning('Valid World Info file name is required');
+            logSlashCommandWarn('setEntryFieldCallback: Valid World Info file name is required', args, { value });
             return '';
         }
 
@@ -1374,11 +1382,13 @@ function registerWorldInfoSlashCommands() {
 
         if (!entry) {
             toastr.warning('Valid UID is required');
+            logSlashCommandWarn('setEntryFieldCallback: Valid UID is required', args, { value });
             return '';
         }
 
         if (!Object.hasOwn(newWorldInfoEntryDefinition, field)) {
             toastr.warning('Valid field name is required');
+            logSlashCommandWarn('setEntryFieldCallback: Valid field name is required', args, { value });
             return '';
         }
 
@@ -1445,7 +1455,7 @@ function registerWorldInfoSlashCommands() {
         const uid = value;
         const effect = args.effect;
 
-        const entries = await getEntriesFromFile(file);
+        const entries = await getEntriesFromFile(file, { args, unnamed: { uid }, callbackName: 'getTimedEffectCallback' });
 
         if (!entries) {
             return '';
@@ -1456,6 +1466,7 @@ function registerWorldInfoSlashCommands() {
 
         if (!entry) {
             toastr.warning('Valid UID is required');
+            logSlashCommandWarn('getTimedEffectCallback: Valid UID is required', args, { uid });
             return '';
         }
 
@@ -1465,6 +1476,7 @@ function registerWorldInfoSlashCommands() {
 
         if (!timedEffects.isValidEffectType(effect)) {
             toastr.warning('Valid effect type is required');
+            logSlashCommandWarn('getTimedEffectCallback: Valid effect type is required', args, { uid });
             return '';
         }
 
@@ -1488,10 +1500,11 @@ function registerWorldInfoSlashCommands() {
 
         if (value === undefined) {
             toastr.warning('New state is required');
+            logSlashCommandWarn('setTimedEffectCallback: New state is required', args, { value });
             return '';
         }
 
-        const entries = await getEntriesFromFile(file);
+        const entries = await getEntriesFromFile(file, { args, unnamed: { value }, callbackName: 'setTimedEffectCallback' });
 
         if (!entries) {
             return '';
@@ -1502,6 +1515,7 @@ function registerWorldInfoSlashCommands() {
 
         if (!entry) {
             toastr.warning('Valid UID is required');
+            logSlashCommandWarn('setTimedEffectCallback: Valid UID is required', args, { value });
             return '';
         }
 
@@ -1511,11 +1525,13 @@ function registerWorldInfoSlashCommands() {
 
         if (!timedEffects.isValidEffectType(effect)) {
             toastr.warning('Valid effect type is required');
+            logSlashCommandWarn('setTimedEffectCallback: Valid effect type is required', args, { value });
             return '';
         }
 
         if (!entry[effect]) {
             toastr.warning('This entry does not have the selected effect. Configure it in the editor first.');
+            logSlashCommandWarn('setTimedEffectCallback: This entry does not have the selected effect', args, { value });
             return '';
         }
 
@@ -2151,8 +2167,7 @@ export function sortWorldInfoEntries(data, { customSort = null } = {}) {
             const bScore = worldInfoFilter.getScore(FILTER_TYPES.WORLD_INFO_SEARCH, b.uid);
             return aScore - bScore;
         };
-    }
-    else if (sortRule === 'custom') {
+    } else if (sortRule === 'custom') {
         // First by display index
         primarySort = (a, b) => {
             const aValue = a.displayIndex;
@@ -2480,45 +2495,125 @@ async function displayWorldEntries(name, data, navigation = navigation_option.no
 
     $('#world_apply_current_sorting').off('click').on('click', async () => {
         const entryCount = Object.keys(data.entries).length;
-        const moreThan100 = entryCount > 100;
 
-        let content = '<span>' + t`Apply your current sorting to the "Order" field. The Order values will go down from the chosen number.` + '</span>';
-        if (moreThan100) {
-            content += '<div class="m-t-1"><i class="fa-solid fa-triangle-exclamation" style="color: #FFD43B;"></i> ' + t`More than 100 entries in this world. If you don't choose a number higher than that, the lower entries will default to 0.<br />(Usual default: 100)<br />Minimum: ${entryCount}` + '</div>';
-        }
+        const contentEl = document.createElement('div');
 
-        const result = await Popup.show.input(t`Apply Current Sorting`, content, '100', { okButton: t`Apply`, cancelButton: 'Cancel' });
-        if (!result) return;
+        const heading = document.createElement('h3');
+        heading.textContent = t`Apply Current Sorting`;
+        contentEl.appendChild(heading);
 
-        const start = Number(result);
+        const description = document.createElement('span');
+        const descriptionText = document.createElement('p');
+        descriptionText.innerHTML = t`Assigns Order values to all entries based on their current sort position.`;
+        contentEl.appendChild(descriptionText);
+        const descriptionDetail = document.createElement('p');
+        descriptionDetail.innerHTML = t`Entries are ordered <b>descending</b> by default — the first entry in the list gets the highest value and will be inserted first into the prompt.`;
+        contentEl.appendChild(descriptionDetail);
+        const entryCountText = document.createElement('small');
+        entryCountText.textContent = t`(${entryCount} entries total)`;
+        contentEl.appendChild(entryCountText);
+        contentEl.appendChild(description);
+
+        const warningEl = document.createElement('div');
+        contentEl.appendChild(warningEl);
+
+        /** @type {(startInput: HTMLInputElement, stepInput: HTMLInputElement, ascendingInput: HTMLInputElement) => void} */
+        const updateWarning = (startInput, stepInput, ascendingInput) => {
+            const startVal = Number(startInput.value);
+            const stepVal = Number(stepInput.value);
+            const isAscending = ascendingInput.checked;
+            if (!isAscending && !isNaN(startVal) && !isNaN(stepVal) && startVal - (entryCount - 1) * stepVal < 0) {
+                setInfoBlock(warningEl, t`Some entries will be clamped to Order 0, causing collisions at the bottom. The last entry would reach ${startVal - (entryCount - 1) * stepVal} (${entryCount} entries, step ${stepVal}).`, 'warning');
+            } else {
+                clearInfoBlock(warningEl);
+            }
+        };
+
+        /** @type {import('./popup.js').CustomPopupInput[]} */
+        const customInputs = [
+            {
+                id: 'wi_sort_start',
+                label: t`Starting value`,
+                tooltip: t`The Order value assigned to the first entry. In descending mode, values count down from here; in ascending mode, values count up from here.` + ' ' + t`(${entryCount} entries total)`,
+                type: 'number',
+                defaultState: '100',
+                min: 0,
+                step: 1,
+                autoFocus: true,
+            },
+            {
+                id: 'wi_sort_step',
+                label: t`Step`,
+                tooltip: t`The gap between each Order value. For example, a step of 5 produces values like 100, 95, 90... (descending) or 0, 5, 10... (ascending).`,
+                type: 'number',
+                defaultState: '1',
+                min: 1,
+                step: 1,
+            },
+            {
+                id: 'wi_sort_ascending',
+                label: t`Ascending order`,
+                tooltip: t`When checked, Order values count upward from the starting value (first sorted entry gets the lowest Order). When unchecked, values count downward (first sorted entry gets the highest Order).`,
+                type: 'checkbox',
+                defaultState: false,
+            },
+        ];
+
+        const popup = new Popup(contentEl, POPUP_TYPE.TEXT, null, {
+            okButton: t`Apply`,
+            cancelButton: t`Cancel`,
+            customInputs,
+        });
+
+        const startInput = /** @type {HTMLInputElement} */ (popup.dlg.querySelector('#wi_sort_start'));
+        const stepInput = /** @type {HTMLInputElement} */ (popup.dlg.querySelector('#wi_sort_step'));
+        const ascendingInput = /** @type {HTMLInputElement} */ (popup.dlg.querySelector('#wi_sort_ascending'));
+        startInput.addEventListener('input', () => updateWarning(startInput, stepInput, ascendingInput));
+        stepInput.addEventListener('input', () => updateWarning(startInput, stepInput, ascendingInput));
+        ascendingInput.addEventListener('change', () => updateWarning(startInput, stepInput, ascendingInput));
+        updateWarning(startInput, stepInput, ascendingInput);
+
+        const result = await popup.show();
+        if (result !== POPUP_RESULT.AFFIRMATIVE) return;
+
+        const start = Number(popup.inputResults.get('wi_sort_start') ?? '100');
+        const step = Number(popup.inputResults.get('wi_sort_step') ?? '1');
+        const ascending = Boolean(popup.inputResults.get('wi_sort_ascending'));
+
         if (isNaN(start) || start < 0) {
-            toastr.error(t`Invalid number: ${result}`, t`Apply Current Sorting`);
+            toastr.error(t`Invalid starting value: ${start}`, t`Apply Current Sorting`);
             return;
         }
-        if (start < entryCount) {
-            toastr.warning(t`A number lower than the entry count has been chosen. All entries below that will default to 0.`, t`Apply Current Sorting`);
+        if (isNaN(step) || step < 1) {
+            toastr.error(t`Invalid step value: ${step}`, t`Apply Current Sorting`);
+            return;
+        }
+        if (!ascending && start < entryCount) {
+            toastr.warning(t`A starting value lower than the entry count has been chosen. All entries below that will default to 0.`, t`Apply Current Sorting`);
         }
 
         // We need to sort the entries here, as the data source isn't sorted
         const entries = Object.values(data.entries);
         sortWorldInfoEntries(entries);
 
-        let updated = 0, current = start;
-        for (const entry of entries) {
-            const newOrder = Math.max(current--, 0);
-            if (entry.order === newOrder) continue;
+        let updated = 0;
+        entries.forEach((entry, index) => {
+            const newOrder = ascending
+                ? start + index * step
+                : Math.max(start - index * step, 0);
+            if (entry.order === newOrder) return;
 
             entry.order = newOrder;
-            setWIOriginalDataValue(data, entry.order, 'order', entry.order);
+            setWIOriginalDataValue(data, entry.uid, 'order', entry.order);
             updated++;
-        }
+        });
 
         if (updated > 0) {
-            toastr.info(`Updated ${updated} Order values`, 'Apply Custom Sorting');
+            toastr.info(t`Updated ${updated} Order values`, t`Apply Current Sorting`);
             await saveWorldInfo(name, data, true);
             updateEditor(navigation_option.previous);
         } else {
-            toastr.info('All values up to date', 'Apply Custom Sorting');
+            toastr.info(t`All values up to date`, t`Apply Current Sorting`);
         }
     });
 
@@ -2531,7 +2626,12 @@ async function displayWorldEntries(name, data, navigation = navigation_option.no
     });
 
     $('#world_duplicate').off('click').on('click', async () => {
-        const tempName = getFreeWorldName();
+        // Find current name for the world selected
+        const selectedIndex = String($('#world_editor_select').find(':selected').val());
+        const worldName = world_names[selectedIndex] || null;
+
+        // Use the current name as default input, then ask user for the name
+        const tempName = getFreeWorldName(worldName);
         const finalName = await Popup.show.input('Create a new World Info?', 'Enter a name for the new file:', tempName);
 
         if (finalName) {
@@ -2839,6 +2939,7 @@ function enableKeysInputHelper({ template, entry, entryPropName, originalDataVal
     const isFancyInput = !isMobile() && !power_user.wi_key_input_plaintext;
     const input = isFancyInput ? template.find(`select[name="${entryPropName}"]`) : template.find(`textarea[name="${entryPropName}"]`);
     input.data('uid', entry.uid);
+    input[0].dataset.macros = ''; // active
     input.on('click', function (event) {
         event.stopPropagation();
     });
@@ -3271,7 +3372,7 @@ export async function getWorldEntry(name, data, entry) {
     const commentInput = headerTemplate.find('textarea[name="comment"]');
 
     //Update the commentInput's placeholder.
-    const keys = entry['key'].join(', ');
+    const keys = entry.key.join(', ');
     setCommentPlaceholder(keys, commentInput);
 
     commentInput.data('uid', entry.uid);
@@ -3574,6 +3675,7 @@ export async function getWorldEntry(name, data, entry) {
         const contentInput = editTemplate.find('textarea[name="content"]');
         contentInput.data('uid', entry.uid);
         contentInput.attr('id', contentInputId);
+        contentInput[0].dataset.macros = ''; // active
         contentInput.on('input', async function (_, { skipCount, noSave } = {}) {
             const uid = $(this).data('uid');
             const value = $(this).val();
@@ -3943,7 +4045,25 @@ export async function deleteWorldInfoEntry(data, uid, { silent = false } = {}) {
         return;
     }
 
-    const confirmation = silent || await Popup.show.confirm(t`Delete the entry with UID: ${uid}?`, t`This action is irreversible!`);
+    const entry = data.entries[uid];
+    if (!entry) {
+        return false;
+    }
+
+    let previewText = '';
+    if (entry.comment && entry.comment.trim()) {
+        previewText = entry.comment.trim();
+    } else if (entry.content) {
+        const lines = entry.content.split(/\r?\n/).filter(line => line.trim());
+        previewText = lines.slice(0, 2).join('\n');
+    }
+
+    const popupHeader = t`Delete world info entry with UID: ${uid}?`;
+    const popupText = previewText
+        ? `<strong>${t`Entry`}:</strong><br>${escapeHtml(previewText).replace(/\n/g, '<br>')}<br><br>${t`This action is irreversible!`}`
+        : t`This action is irreversible!`;
+
+    const confirmation = silent || await Popup.show.confirm(popupHeader, popupText);
     if (!confirmation) {
         return false;
     }
@@ -4083,19 +4203,12 @@ async function renameWorldInfo(name, data) {
     }
 
     const entryPreviouslySelected = selected_world_info.findIndex((e) => e === oldName);
+    const retargetPersonaLore = power_user.persona_description_lorebook === oldName;
 
     await saveWorldInfo(newName, data, true);
     await deleteWorldInfo(oldName);
 
-    const existingCharLores = world_info.charLore?.filter((e) => e.extraBooks.includes(oldName));
-    if (existingCharLores && existingCharLores.length > 0) {
-        existingCharLores.forEach((charLore) => {
-            const tempCharLore = charLore.extraBooks.filter((e) => e !== oldName);
-            tempCharLore.push(newName);
-            charLore.extraBooks = tempCharLore;
-        });
-        saveSettingsDebounced();
-    }
+    await updateWorldInfoLinks(oldName, newName, { retargetPersonaLore });
 
     if (entryPreviouslySelected !== -1) {
         const wiElement = getWIElement(newName);
@@ -4106,6 +4219,121 @@ async function renameWorldInfo(name, data) {
     const selectedIndex = world_names.indexOf(newName);
     if (selectedIndex !== -1) {
         $('#world_editor_select').val(selectedIndex).trigger('change');
+    }
+}
+
+/**
+ * Retargets all character lore links from an old world info name to a new one, with an optional confirmation for primary lorebook links
+ * @param {string} oldName Previous WI file name
+ * @param {string} newName New WI file name
+ * @param {{ retargetPersonaLore?: boolean }} [options] Additional relink options
+ * @returns {Promise<void>}
+ */
+async function updateWorldInfoLinks(oldName, newName, { retargetPersonaLore } = {}) {
+    const existingCharLores = world_info.charLore?.filter((e) => e.extraBooks.includes(oldName));
+    if (existingCharLores && existingCharLores.length > 0) {
+        existingCharLores.forEach((charLore) => {
+            const tempCharLore = charLore.extraBooks.filter((e) => e !== oldName);
+            tempCharLore.push(newName);
+            charLore.extraBooks = tempCharLore;
+        });
+        saveSettingsDebounced();
+    }
+
+    // Update link for active persona
+    if (retargetPersonaLore) {
+        power_user.persona_description_lorebook = newName;
+        const object = getOrCreatePersonaDescriptor();
+        object.lorebook = newName;
+        setPersonaDescription();
+        saveSettingsDebounced();
+    }
+
+    // Update links for other personas
+    Object.keys(power_user.personas).forEach((persona) => {
+        if (user_avatar === persona) {
+            return;
+        }
+        const descriptor = power_user.persona_descriptions[persona];
+        if (!descriptor) {
+            return;
+        }
+        if (descriptor.lorebook === oldName) {
+            descriptor.lorebook = newName;
+            saveSettingsDebounced();
+        }
+    });
+
+    // update the world info key to the new name if it's still set to the old one
+    if (chat_metadata[METADATA_KEY] === oldName) {
+        chat_metadata[METADATA_KEY] = newName;
+        await saveMetadata();
+    }
+
+    // find all characters using the old lorebook name as their primary world
+    const linkedChIDs = [];
+    characters.forEach((character, chid) => {
+        if (character.data?.extensions?.world === oldName) {
+            linkedChIDs.push(chid);
+        }
+    });
+
+    if (!linkedChIDs.length) {
+        return;
+    }
+
+    // Trigger the confirmation popup
+    const updatePastLinksConfirm = await Popup.show.confirm(
+        t`World/Lorebook renamed!`,
+        `<p>${t`Auxiliary Lorebook links have been updated. Would you like to update primary lorebook links for ${linkedChIDs.length} character(s) as well?`}</p>`,
+    ) == POPUP_RESULT.AFFIRMATIVE;
+
+    if (updatePastLinksConfirm) {
+        let activeCharacterUpdated = false;
+
+        for (const chid of linkedChIDs) {
+            const character = characters[chid];
+
+            try {
+                // /merge-attributes API call to update the file on the backend silently
+                const response = await fetch('/api/characters/merge-attributes', {
+                    method: 'POST',
+                    headers: getRequestHeaders(),
+                    body: JSON.stringify({
+                        avatar: character.avatar,
+                        data: {
+                            extensions: {
+                                world: newName,
+                            },
+                        },
+                    }),
+                });
+
+                if (!response.ok) {
+                    throw new Error(`Merge API returned ${response.status}`);
+                }
+
+                // used to update the data in the browser's memory
+                await getOneCharacter(character.avatar);
+
+                // Flag if the currently open character was affected
+                if (String(chid) === String(this_chid)) {
+                    activeCharacterUpdated = true;
+                }
+
+                toastr.success(`Successfully updated link for ${character.name}.`);
+            } catch (e) {
+                toastr.error(`Failed to update link for ${character.name}.`);
+                console.error(`Backend update for character ${character.name} failed:`, e);
+            }
+        }
+
+        // update the UI fields
+        // only required if the currently selected character was changed
+        if (activeCharacterUpdated) {
+            select_selected_character(this_chid, { switchMenu: false });
+            setWorldInfoButtonClass(this_chid, true);
+        }
     }
 }
 
@@ -4180,10 +4408,25 @@ export function getFreeWorldEntryUid(data) {
     return null;
 }
 
-export function getFreeWorldName() {
+
+/**
+ * Generates a free world name based on the given input name.
+ * If the input name is null, a default name is used.
+ * If the input name already exists, a numbered suffix is added.
+ *
+ * @param {string|null} worldName - The name to base the new world name on. If null, a default name is used.
+ * @param {Object} [options={}] - Optional parameters.
+ * @param {boolean} [options.stripIndex=true] - Whether to strip any numbered suffix from the input name before generating the new name.
+ * @return {string|undefined} The generated free world name, or undefined if no free name could be found after trying 100,000 times.
+ */
+export function getFreeWorldName(worldName = null, { stripIndex = true } = {}) {
+    worldName ??= t`New World`;
+    if (stripIndex) {
+        worldName = worldName.replace(/\s*\(\d+\)$/, '');
+    }
     const MAX_FREE_NAME = 100_000;
     for (let index = 1; index < MAX_FREE_NAME; index++) {
-        const newName = `New World (${index})`;
+        const newName = `${worldName} (${index})`;
         if (world_names.includes(newName)) {
             continue;
         }
@@ -4394,8 +4637,7 @@ export async function getSortedEntries() {
 
         // Need to deep clone the entries to avoid modifying the cached data
         return structuredClone(entries);
-    }
-    catch (e) {
+    } catch (e) {
         console.error(e);
         return [];
     }
@@ -4441,8 +4683,7 @@ function parseDecorators(content) {
                 if (isKnownDecorator(splited[i])) {
                     decorators.push(splited[i].startsWith('@@@') ? splited[i].substring(1) : splited[i]);
                     fallbacked = false;
-                }
-                else {
+                } else {
                     fallbacked = true;
                 }
             } else {
@@ -4454,7 +4695,6 @@ function parseDecorators(content) {
     }
 
     return [[], content];
-
 }
 
 /**
@@ -4751,12 +4991,19 @@ export async function checkWorldInfo(chat, maxContext, isDryRun, globalScanData 
         console.debug(`[WI] Search done. Found ${activatedNow.size} possible entries.`);
 
         // Sort the entries for the probability and the budget limit checks
-        const newEntries = [...activatedNow]
-            .sort((a, b) => {
-                const isASticky = timedEffects.isEffectActive('sticky', a) ? 1 : 0;
-                const isBSticky = timedEffects.isEffectActive('sticky', b) ? 1 : 0;
-                return isBSticky - isASticky || sortedEntries.indexOf(a) - sortedEntries.indexOf(b);
-            });
+        let newEntries;
+        if (activatedNow.size > 1) {
+            const sortedEntriesIndex = new Map(sortedEntries.map((entry, index) => [entry, index]));
+            newEntries = [...activatedNow]
+                .sort((a, b) => {
+                    const isASticky = timedEffects.isEffectActive('sticky', a) ? 1 : 0;
+                    const isBSticky = timedEffects.isEffectActive('sticky', b) ? 1 : 0;
+                    return isBSticky - isASticky
+                        || (sortedEntriesIndex.get(a) ?? -1) - (sortedEntriesIndex.get(b) ?? -1);
+                });
+        } else {
+            newEntries = [...activatedNow];
+        }
 
 
         let newContent = '';
@@ -5467,8 +5714,7 @@ export function checkEmbeddedWorld(chid) {
                     }
                 };
                 callGenericPopup(html, POPUP_TYPE.CONFIRM, '', { okButton: 'Yes' }).then(checkResult);
-            }
-            else {
+            } else {
                 toastr.info(
                     'To import and use it, select "Import Card Lore" in the "More..." dropdown menu on the character panel.',
                     `${characters[chid].name} has an embedded World/Lorebook`,
@@ -5699,13 +5945,13 @@ export function openWorldInfoEditor(worldName) {
 
 /**
  * Assigns a lorebook to the current chat.
- * @param {JQuery.ClickEvent<Document, undefined, any, any>} event Pointer event
+ * @param {Pick<JQuery.ClickEvent, 'shiftKey' | 'altKey'>} event Click event
  * @returns {Promise<void>}
  */
-export async function assignLorebookToChat(event) {
+export async function assignLorebookToChat({ shiftKey, altKey }) {
     const selectedName = chat_metadata[METADATA_KEY];
 
-    if (selectedName && event.altKey) {
+    if (selectedName && !shiftKey && !altKey) {
         openWorldInfoEditor(selectedName);
         return;
     }
@@ -6077,15 +6323,17 @@ export function initWorldInfo() {
 
         const worldName = characters[chid]?.data?.extensions?.world;
         const hasEmbed = checkEmbeddedWorld(chid);
-        if (worldName && world_names.includes(worldName) && !event.shiftKey) {
+        if (worldName && world_names.includes(worldName) && !event.shiftKey && !event.altKey) {
             openWorldInfoEditor(worldName);
-        } else if (hasEmbed && !event.shiftKey) {
+        } else if (hasEmbed && !event.shiftKey && !event.altKey) {
             await importEmbeddedWorldInfo();
             saveCharacterDebounced();
-        }
-        else {
+        } else {
             openSetWorldMenu();
         }
+    });
+    addLongPressEvent('#world_button', function () {
+        $(this).trigger($.Event('click', { shiftKey: true }));
     });
 
     const debouncedWorldInfoSearch = debounce((searchQuery) => {
@@ -6108,6 +6356,14 @@ export function initWorldInfo() {
     });
 
     $(document).on('click', '.chat_lorebook_button', assignLorebookToChat);
+    addLongPressEvent('.chat_lorebook_button', function () {
+        assignLorebookToChat({ shiftKey: true, altKey: false });
+    });
+
+    $('#group-chat-lorebook-dropdown').on('change', async function () {
+        $(this).prop('selectedIndex', 0);
+        await assignLorebookToChat({ shiftKey: true, altKey: false });
+    });
 
     // Not needed on mobile
     if (!isMobile()) {

@@ -37,6 +37,9 @@ const SOURCES = [
     'electronhub',
     'openrouter',
     'chutes',
+    'nanogpt',
+    'siliconflow',
+    'workers_ai',
 ];
 
 /**
@@ -82,6 +85,12 @@ async function getVector(source, sourceSettings, text, isQuery, directories) {
             return sourceSettings.embeddings[text];
         case 'chutes':
             return getOpenAIVector(text, source, directories, sourceSettings.model);
+        case 'nanogpt':
+            return getOpenAIVector(text, source, directories, sourceSettings.model);
+        case 'siliconflow':
+            return getOpenAIVector(text, source, directories, sourceSettings.model, sourceSettings.urlOverride);
+        case 'workers_ai':
+            return getOpenAIVector(text, source, directories, sourceSettings.model, sourceSettings.urlOverride);
     }
 
     throw new Error(`Unknown vector source ${source}`);
@@ -149,6 +158,15 @@ async function getBatchVector(source, sourceSettings, texts, isQuery, directorie
                 break;
             case 'chutes':
                 results.push(...await getOpenAIBatchVector(batch, source, directories, sourceSettings.model));
+                break;
+            case 'nanogpt':
+                results.push(...await getOpenAIBatchVector(batch, source, directories, sourceSettings.model));
+                break;
+            case 'siliconflow':
+                results.push(...await getOpenAIBatchVector(batch, source, directories, sourceSettings.model, sourceSettings.urlOverride));
+                break;
+            case 'workers_ai':
+                results.push(...await getOpenAIBatchVector(batch, source, directories, sourceSettings.model, sourceSettings.urlOverride));
                 break;
             default:
                 throw new Error(`Unknown vector source ${source}`);
@@ -238,6 +256,25 @@ function getSourceSettings(source, request) {
             return {
                 model: String(request.body.model || 'chutes-qwen-qwen3-embedding-8b'),
             };
+        case 'nanogpt':
+            return {
+                model: String(request.body.model || 'text-embedding-3-small'),
+            };
+        case 'siliconflow':
+            return {
+                model: String(request.body.model || 'Qwen/Qwen3-Embedding-0.6B'),
+                urlOverride: request.body.siliconflow_endpoint === 'cn'
+                    ? 'https://api.siliconflow.cn/v1' : null,
+            };
+        case 'workers_ai': {
+            const accountId = String(request.body.workers_ai_account_id || '').trim();
+            return {
+                model: String(request.body.model || '@cf/baai/bge-m3'),
+                urlOverride: accountId
+                    ? `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(accountId)}/ai/v1`
+                    : null,
+            };
+        }
         default:
             return {};
     }

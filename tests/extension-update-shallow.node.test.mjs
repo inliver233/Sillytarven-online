@@ -11,7 +11,12 @@ import express from 'express';
 // The fixtures are local repositories; production only accepts HTTP(S) extension URLs.
 process.env.SILLYTAVERN_EXTENSIONS_ALLOWLOCALREPOSITORIES = 'true';
 
-import { router } from '../src/endpoints/extensions.js';
+import { fileURLToPath } from 'node:url';
+import { setConfigFilePath } from '../src/util.js';
+
+// The extension routes read `extensions.enabled` on every request.
+setConfigFilePath(fileURLToPath(new URL('../default/config.yaml', import.meta.url)));
+const { router } = await import('../src/endpoints/extensions.js');
 
 function git(cwd, ...args) {
     return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();

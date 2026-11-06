@@ -12,10 +12,9 @@ import { Tokenizer } from '@agnai/web-tokenizers';
 import { SentencePieceProcessor } from '@agnai/sentencepiece-js';
 import tiktoken from 'tiktoken';
 
-import { convertClaudePrompt } from '../prompt-converters.js';
 import { TEXTGEN_TYPES } from '../constants.js';
 import { setAdditionalHeaders } from '../additional-headers.js';
-import { getConfigValue, isValidUrl } from '../util.js';
+import { getConfigValue, isValidUrl, trimV1 } from '../util.js';
 
 /**
  * @typedef { (req: import('express').Request, res: import('express').Response) => Promise<any> } TokenizationHandler
@@ -57,7 +56,7 @@ export const TEXT_COMPLETION_MODELS = [
     'code-search-ada-code-001',
 ];
 
-const CHARS_PER_TOKEN = 3.35;
+const BYTES_PER_TOKEN = 3.35;
 const IS_DOWNLOAD_ALLOWED = getConfigValue('enableDownloadableTokenizers', true, 'boolean');
 const gunzip = promisify(zlib.gunzip);
 
@@ -87,6 +86,16 @@ function warnTokenizerFailure(model, type, size = 0) {
         type,
         size,
     });
+}
+
+/**
+ * Guesstimates the token count for a string.
+ * @param {string} str String to tokenize.
+ * @returns {number} Token count.
+ */
+function guesstimate(str) {
+    const byteLength = Buffer.byteLength(str, 'utf8');
+    return Math.ceil(byteLength / BYTES_PER_TOKEN);
 }
 
 /**
@@ -444,7 +453,7 @@ async function countSentencepieceTokens(tokenizer, text) {
     if (!instance) {
         return {
             ids: [],
-            count: Math.ceil(text.length / CHARS_PER_TOKEN),
+            count: guesstimate(text),
         };
     }
 
@@ -594,7 +603,7 @@ export function getTokenizerModel(requestModel) {
         return 'o1';
     }
 
-    if (requestModel.includes('gpt-5') || requestModel.includes('o3') || requestModel.includes('o4-mini')) {
+    if (requestModel.includes('gpt-5') || requestModel.includes('gpt-6-astra') || requestModel.includes('o3') || requestModel.includes('o4-mini')) {
         return 'o1';
     }
 
@@ -696,15 +705,14 @@ export function getTiktokenTokenizer(model) {
  * @returns {number} Number of tokens
  */
 export function countWebTokenizerTokens(tokenizer, messages) {
-    // Should be fine if we use the old conversion method instead of the messages API one i think?
-    const convertedPrompt = convertClaudePrompt(normalizeTokenCountMessages(messages), false, '', false, false, '', false);
+    const jsonBody = normalizeTokenCountMessages(messages).flatMap(x => Object.values(x)).join('\n\n');
 
     // Fallback to strlen estimation
     if (!tokenizer) {
-        return Math.ceil(convertedPrompt.length / CHARS_PER_TOKEN);
+        return guesstimate(jsonBody);
     }
 
-    const count = tokenizer.encode(convertedPrompt).length;
+    const count = tokenizer.encode(jsonBody).length;
     return count;
 }
 
@@ -1181,7 +1189,7 @@ router.post('/openai/count', async function (req, res) {
     } catch {
         warnTokenizerFailure(model, 'openai-count', req.body.length);
         const jsonBody = normalizeTokenCountValue(req.body);
-        const num_tokens = Math.ceil(jsonBody.length / CHARS_PER_TOKEN);
+        const num_tokens = guesstimate(jsonBody);
         res.send({ 'token_count': num_tokens });
     }
 });
@@ -1212,8 +1220,8 @@ router.post('/remote/kobold/count', async function (request, response) {
 
         /** @type {any} */
         const data = await result.json();
-        const count = data['value'];
-        const ids = data['ids'] ?? [];
+        const count = data.value;
+        const ids = data.ids ?? [];
         return response.send({ count, ids });
     } catch (error) {
         console.error(error);
@@ -1227,8 +1235,7 @@ router.post('/remote/textgenerationwebui/encode', async function (request, respo
     }
     const text = String(request.body.text) || '';
     const baseUrl = String(request.body.url);
-    const vllmModel = String(request.body.vllm_model) || '';
-    const aphroditeModel = String(request.body.aphrodite_model) || '';
+    const model = String(request.body.model) || '';
 
     try {
         const args = {
@@ -1239,33 +1246,35 @@ router.post('/remote/textgenerationwebui/encode', async function (request, respo
         setAdditionalHeaders(request, args, baseUrl);
 
         // Convert to string + remove trailing slash + /v1 suffix
-        let url = String(baseUrl).replace(/\/$/, '').replace(/\/v1$/, '');
+        let url = trimV1(baseUrl);
 
         switch (request.body.api_type) {
             case TEXTGEN_TYPES.TABBY:
                 url += '/v1/token/encode';
-                args.body = JSON.stringify({ 'text': text });
+                args.body = JSON.stringify({ 'text': text, 'add_bos_token': false, 'encode_special_tokens': false });
                 break;
             case TEXTGEN_TYPES.KOBOLDCPP:
                 url += '/api/extra/tokencount';
-                args.body = JSON.stringify({ 'prompt': text });
+                args.body = JSON.stringify({ 'prompt': text, 'special': false });
                 break;
             case TEXTGEN_TYPES.LLAMACPP:
                 url += '/tokenize';
-                args.body = JSON.stringify({ 'content': text });
+                args.body = JSON.stringify({ 'model': model, 'content': text });
                 break;
             case TEXTGEN_TYPES.VLLM:
                 url += '/tokenize';
-                args.body = JSON.stringify({ 'model': vllmModel, 'prompt': text });
+                args.body = JSON.stringify({ 'model': model, 'prompt': text });
                 break;
             case TEXTGEN_TYPES.APHRODITE:
                 url += '/v1/tokenize';
-                args.body = JSON.stringify({ 'model': aphroditeModel, 'prompt': text });
+                args.body = JSON.stringify({ 'model': model, 'prompt': text });
                 break;
-            default:
+            case TEXTGEN_TYPES.OOBA:
                 url += '/v1/internal/encode';
                 args.body = JSON.stringify({ 'text': text });
                 break;
+            default:
+                return response.sendStatus(400);
         }
 
         const result = await fetch(url, args);

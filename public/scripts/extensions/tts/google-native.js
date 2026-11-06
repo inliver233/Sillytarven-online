@@ -12,7 +12,7 @@ export class GoogleNativeTtsProvider {
 
     defaultSettings = {
         voiceMap: {},
-        model: 'gemini-2.5-flash-preview-tts',
+        model: 'gemini-3.1-flash-tts-preview',
         apiType: 'makersuite',
     };
 
@@ -32,6 +32,7 @@ export class GoogleNativeTtsProvider {
                 <select id="google-tts-model">
                     <option value="gemini-2.5-flash-preview-tts">Gemini 2.5 Flash Preview TTS</option>
                     <option value="gemini-2.5-pro-preview-tts">Gemini 2.5 Pro Preview TTS</option>
+                    <option value="gemini-3.1-flash-tts-preview">Gemini 3.1 Flash TTS Preview</option>
                 </select>
             </div>
         </div>`;
@@ -124,7 +125,6 @@ export class GoogleNativeTtsProvider {
             console.info(`Google TTS: Loaded ${this.voices.length} voices`);
 
             return this.voices;
-
         } catch (error) {
             console.error('Failed to fetch Google TTS voices:', error);
             throw error;
@@ -151,7 +151,6 @@ export class GoogleNativeTtsProvider {
             this.audioElement.src = url;
             this.audioElement.play();
             this.audioElement.onended = () => URL.revokeObjectURL(url);
-
         } catch (error) {
             console.error('TTS Preview Error:', error);
             toastr.error(`Could not generate preview: ${error.message}`);

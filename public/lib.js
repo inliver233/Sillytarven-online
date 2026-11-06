@@ -23,6 +23,8 @@ import { toggle as slideToggle } from 'slidetoggle';
 import chalk from 'chalk';
 import yaml from 'yaml';
 import * as chevrotainModule from 'chevrotain';
+import { gzipSync, gzip } from 'fflate';
+import { sha256 } from 'js-sha256';
 
 // Keep the public binding local. Webpack 5.109 otherwise mistakes the imported
 // default for a direct re-export while emitting the ESM library.
@@ -108,6 +110,9 @@ export default {
     chalk,
     yaml,
     chevrotain,
+    gzipSync,
+    gzip,
+    sha256,
 };
 
 export {
@@ -133,4 +138,7 @@ export {
     chalk,
     yaml,
     chevrotain,
+    gzipSync,
+    gzip,
+    sha256,
 };

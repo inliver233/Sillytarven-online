@@ -140,7 +140,7 @@ router.post('/status', async function (req, res) {
     }
 
     try {
-        const response = await fetch(API_NOVELAI + '/user/subscription', {
+        const response = await fetch(IMAGE_NOVELAI + '/user/subscription', {
             method: 'GET',
             headers: {
                 'Content-Type': 'application/json',
@@ -154,8 +154,7 @@ router.post('/status', async function (req, res) {
         } else if (response.status == 401) {
             console.error('NovelAI Access Token is incorrect.');
             return res.send({ error: true });
-        }
-        else {
+        } else {
             console.warn('NovelAI returned an error:', response.statusText);
             return res.send({ error: true });
         }
@@ -271,7 +270,7 @@ router.post('/generate', async function (req, res) {
 
         if (req.body.streaming) {
             // Pipe remote SSE stream to Express response
-            forwardFetchResponse(response, res);
+            await forwardFetchResponse(response, res);
         } else {
             if (!response.ok) {
                 const text = await response.text();
@@ -281,8 +280,7 @@ router.post('/generate', async function (req, res) {
                 try {
                     const data = JSON.parse(text);
                     message = data.message;
-                }
-                catch {
+                } catch {
                     // ignore
                 }
 
@@ -476,8 +474,7 @@ router.post('/generate-voice', async (request, response) => {
         const buffer = Buffer.concat(chunks.map(chunk => new Uint8Array(chunk)));
         response.setHeader('Content-Type', 'audio/mpeg');
         return response.send(buffer);
-    }
-    catch (error) {
+    } catch (error) {
         console.error(error);
         return response.sendStatus(500);
     }

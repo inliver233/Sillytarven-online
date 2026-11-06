@@ -109,7 +109,7 @@ test('background routes validate bytes, normalize extensions, rename safely, and
             body: '{}',
         });
         assert.equal(allResponse.status, 200);
-        assert.deepEqual((await allResponse.json()).images, ['newname.png']);
+        assert.deepEqual((await allResponse.json()).images, [{ filename: 'newname.png', isAnimated: false }]);
     } finally {
         await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
         await fs.promises.rm(root, { recursive: true, force: true });

@@ -7,6 +7,15 @@
  */
 
 /** @typedef {import('./MacroRegistry.js').MacroHandler} MacroHandler */
+/** @typedef {import('./MacroRegistry.js').MacroDefinitionOptions} MacroDefinitionOptions */
+
+/**
+ * A dynamic macro value can be:
+ * - A string (direct value)
+ * - A MacroHandler function (resolved at runtime)
+ * - A MacroDefinitionOptions object (full macro definition with handler, args, etc.)
+ * @typedef {string | MacroHandler | MacroDefinitionOptions} DynamicMacroValue
+ */
 
 /**
  * @typedef {Object} MacroEnvNames
@@ -29,6 +38,8 @@
  * @property {string} [charDepthPrompt]
  * @property {string} [creatorNotes]
  * @property {string} [version]
+ * @property {string} [firstMessage]
+ * @property {string[]} [alternateGreetings]
  */
 
 /**
@@ -50,7 +61,7 @@
  * @property {MacroEnvCharacter} character
  * @property {MacroEnvSystem} system
  * @property {MacroEnvFunctions} functions
- * @property {Object<string, string|MacroHandler>} dynamicMacros
+ * @property {Object<string, DynamicMacroValue>} dynamicMacros
  * @property {Record<string, unknown>} extra
  */
 
