@@ -410,10 +410,13 @@ export class DataMaidService {
                     knownAvatars.add(file.name);
                 }
             }
-            const avatarThumbnails = await fs.promises.readdir(this.directories.thumbnailsAvatar, { withFileTypes: true });
-            for (const file of avatarThumbnails) {
-                if (file.isFile() && !knownAvatars.has(file.name)) {
-                    result.push(path.join(this.directories.thumbnailsAvatar, file.name));
+            for (const folder of [this.directories.thumbnailsAvatar, this.directories.thumbnailsCard]) {
+                if (!fs.existsSync(folder)) continue;
+                const avatarThumbnails = await fs.promises.readdir(folder, { withFileTypes: true });
+                for (const file of avatarThumbnails) {
+                    if (file.isFile() && !knownAvatars.has(file.name)) {
+                        result.push(path.join(folder, file.name));
+                    }
                 }
             }
         } catch (error) {

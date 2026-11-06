@@ -260,7 +260,8 @@ thumbnails:
   # JPG thumbnail quality (0-100)
   quality: 95
   # Maximum thumbnail dimensions per type [width, height]
-  dimensions: { 'bg': [160, 90], 'avatar': [96, 144], 'persona': [96, 144] }
+  # 'card' is the larger character picture on the welcome screen.
+  dimensions: { 'bg': [160, 90], 'avatar': [96, 144], 'persona': [96, 144], 'card': [360, 540] }
 
 # PERFORMANCE-RELATED CONFIGURATION
 performance:

@@ -34,7 +34,7 @@ export const METADATA_FILE = 'image-metadata.json';
  */
 
 /**
- * @typedef {'bg' | 'avatar' | 'persona'} ThumbnailType
+ * @typedef {'bg' | 'avatar' | 'persona' | 'card'} ThumbnailType
  */
 
 /** @type {Record<string, number[]>} */
@@ -42,6 +42,8 @@ export const thumbnailDimensions = {
     'bg': getConfigValue('thumbnails.dimensions.bg', [160, 90]),
     'avatar': getConfigValue('thumbnails.dimensions.avatar', [96, 144]),
     'persona': getConfigValue('thumbnails.dimensions.persona', [96, 144]),
+    // Character cards on the welcome screen: large enough for high-density screens.
+    'card': getConfigValue('thumbnails.dimensions.card', [360, 540]),
 };
 
 /**

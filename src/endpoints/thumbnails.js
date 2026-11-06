@@ -21,9 +21,11 @@ const thumbnailsEnabled = !!getConfigValue('thumbnails.enabled', true, 'boolean'
 const quality = Math.min(100, Math.max(1, parseInt(getConfigValue('thumbnails.quality', 95, 'number'))));
 const pngFormat = String(getConfigValue('thumbnails.format', 'jpg')).toLowerCase().trim() === 'png';
 const PRIVATE_CACHE_CONTROL = 'private, max-age=300, must-revalidate';
+// Card thumbnails are about 15 times the pixels of an avatar one: keep them light.
+const CARD_QUALITY = 85;
 
 /**
- * @typedef {'bg' | 'avatar' | 'persona'} ThumbnailType
+ * @typedef {'bg' | 'avatar' | 'persona' | 'card'} ThumbnailType
  */
 
 
@@ -45,6 +47,9 @@ function getThumbnailFolder(directories, type) {
             break;
         case 'persona':
             thumbnailFolder = directories.thumbnailsPersona;
+            break;
+        case 'card':
+            thumbnailFolder = directories.thumbnailsCard;
             break;
     }
 
@@ -70,6 +75,9 @@ function getOriginalFolder(directories, type) {
         case 'persona':
             originalFolder = directories.avatars;
             break;
+        case 'card':
+            originalFolder = directories.characters;
+            break;
     }
 
     return originalFolder;
@@ -89,6 +97,10 @@ export function invalidateThumbnail(directories, type, file) {
 
     if (fs.existsSync(pathToThumbnail)) {
         fs.unlinkSync(pathToThumbnail);
+    }
+    // The card-sized thumbnail is made from the same character image.
+    if (type === 'avatar') {
+        invalidateThumbnail(directories, 'card', file);
     }
 }
 
@@ -223,7 +235,7 @@ async function processSingleImage(file, originalFolder, thumbnailFolder, type) {
             const thumbHeight = Math.round(Math.sqrt(targetPixelArea / aspectRatio));
 
             thumbImage.resize({ w: thumbWidth, h: thumbHeight, mode: ResizeStrategy.BILINEAR });
-        } else if (type === 'avatar' || type === 'persona') {
+        } else if (type === 'avatar' || type === 'persona' || type === 'card') {
             // Crop and resize to fixed dimensions
             const [configWidth, configHeight] = dimensions[type];
             thumbImage.cover({ w: configWidth, h: configHeight });
@@ -231,8 +243,9 @@ async function processSingleImage(file, originalFolder, thumbnailFolder, type) {
 
         const buffer = pngFormat
             ? await thumbImage.getBuffer(JimpMime.png)
-            : await thumbImage.getBuffer(JimpMime.jpeg, { quality: quality, jpegColorSpace: 'ycbcr' });
+            : await thumbImage.getBuffer(JimpMime.jpeg, { quality: type === 'card' ? Math.min(quality, CARD_QUALITY) : quality, jpegColorSpace: 'ycbcr' });
 
+        fs.mkdirSync(thumbnailFolder, { recursive: true });
         writeFileAtomicSync(pathToCachedFile, buffer);
 
         return { success: true, aspectRatio, resolution: thumbnailResolution };
@@ -251,7 +264,7 @@ publicRouter.get('/', async function (request, response) {
     try {
         const { file: rawFile, type, animated } = request.query;
         if (typeof rawFile !== 'string' || typeof type !== 'string') return response.sendStatus(400);
-        if (!(type === 'bg' || type === 'avatar' || type === 'persona')) {
+        if (!(type === 'bg' || type === 'avatar' || type === 'persona' || type === 'card')) {
             return response.sendStatus(400);
         }
 

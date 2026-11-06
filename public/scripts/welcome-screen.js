@@ -329,8 +329,8 @@ function getWelcomeCharactersData(page = 1) {
         index: startIndex + idx,
         avatar: char.avatar,
         name: char.name,
-        // 使用原图而不是缩略图，确保清晰度
-        avatarUrl: char.avatar && char.avatar !== 'none' ? `/characters/${encodeURIComponent(char.avatar)}` : '/img/default-expressions/neutral.png',
+        // 卡片尺寸的缩略图（默认 360×540）：高清屏也清晰，原图动辄几 MB，国内加载很慢
+        avatarUrl: char.avatar && char.avatar !== 'none' ? getThumbnailUrl('card', char.avatar) : '/img/default-expressions/neutral.png',
     }));
 
     return {
