@@ -704,6 +704,23 @@ export function isChatLoadFailed() {
 }
 
 /**
+ * Whether `chat` still lacks part of the open chat's stored history: while the chat loads or
+ * after it failed to load (nothing in `chat`), and while a paged chat holds only its latest page
+ * and the rest of the history is on its way. Extensions are not given the chat id meanwhile
+ * (st-context.js): one that notices a new chat id by polling, instead of waiting for
+ * CHAT_CHANGED, would otherwise take the missing messages for deleted ones.
+ * Once loading the history has given up, the chat stays paged, as before, and counts as complete.
+ * @returns {boolean}
+ */
+export function isChatHistoryIncomplete() {
+    if (chatLoadState.status === 'loading' || isChatLoadFailed()) {
+        return true;
+    }
+    const session = chatHydration;
+    return Boolean(session && !session.hydrated && !session.failed && chatPagingState.active && chatPagingState.hasMore);
+}
+
+/**
  * Refuses to save a chat that failed to load, telling the user why.
  * @returns {boolean} Whether saving is blocked
  */

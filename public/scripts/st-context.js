@@ -19,6 +19,7 @@ import {
     getCurrentChatId,
     getRequestHeaders,
     getThumbnailUrl,
+    isChatHistoryIncomplete,
     main_api,
     max_context,
     menu_type,
@@ -103,6 +104,22 @@ import { updateReasoningUI, parseReasoningFromString, getReasoningTemplateByName
 import { IGNORE_SYMBOL } from './constants.js';
 import { macros } from './macros/macro-system.js';
 
+/**
+ * Id of the open chat, once its whole history is in `chat`. While a chat is being opened
+ * (a paged chat first gets only its latest messages) there is no id yet, as before any chat
+ * is opened: an extension that polls for a new chat id would otherwise read the partial
+ * `chat` as messages having been deleted. CHAT_CHANGED is emitted after this point.
+ * @returns {string|undefined}
+ */
+function getLoadedChatId() {
+    if (isChatHistoryIncomplete()) {
+        return undefined;
+    }
+    return selected_group
+        ? groups.find(x => x.id == selected_group)?.chat_id
+        : (characters[this_chid]?.chat);
+}
+
 export function getContext() {
     return {
         accountStorage,
@@ -113,9 +130,7 @@ export function getContext() {
         name2,
         characterId: this_chid,
         groupId: selected_group,
-        chatId: selected_group
-            ? groups.find(x => x.id == selected_group)?.chat_id
-            : (characters[this_chid]?.chat),
+        chatId: getLoadedChatId(),
         getCurrentChatId,
         getRequestHeaders,
         reloadCurrentChat,
