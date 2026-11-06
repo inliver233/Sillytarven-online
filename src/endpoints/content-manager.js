@@ -139,6 +139,7 @@ export const RETIRED_CONTENT_VERSIONS = Object.freeze({
         { size: 31624, sha256: '5618a4ef74effb6fdaceb5074db8c74c7eedd89b64de42d2eafdf0c57ed61d74' },
         { size: 31624, sha256: 'd0475e82fda065a7e0b5166134369afe0a80263a06b2a5ebc67b37f7c54cf075' },
         { size: 31630, sha256: '13541ceb34ca1778e2625044d9d069148e78116df087199bc6d3af44650859a4' },
+        { size: 31771, sha256: '88df5137448e0df7278c16fa4408c8f62297fc77ddf586e2a6e9f0a90c24a918' },
     ],
 });
 

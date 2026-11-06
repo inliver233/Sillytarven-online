@@ -43,3 +43,14 @@ test('the shipped version of an upgraded file is never listed as retired', () =>
         versions.forEach(version => assert.match(version.sha256, /^[0-9a-f]{64}$/));
     }
 });
+
+test('picking the built-in inliver theme looks the same as a new account', () => {
+    const theme = JSON.parse(fs.readFileSync(path.join(contentDirectory, 'themes/inliver.json'), 'utf8'));
+    const defaults = JSON.parse(fs.readFileSync(path.join(contentDirectory, 'settings.json'), 'utf8')).power_user;
+    assert.equal(defaults.theme, 'inliver');
+    for (const [key, value] of Object.entries(theme)) {
+        if (key !== 'name' && key !== 'custom_css' && defaults[key] !== undefined && defaults[key] !== null) {
+            assert.deepEqual(value, defaults[key], key);
+        }
+    }
+});
