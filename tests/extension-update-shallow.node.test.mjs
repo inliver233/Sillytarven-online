@@ -8,6 +8,9 @@ import test from 'node:test';
 
 import express from 'express';
 
+// The fixtures are local repositories; production only accepts HTTP(S) extension URLs.
+process.env.SILLYTAVERN_EXTENSIONS_ALLOWLOCALREPOSITORIES = 'true';
+
 import { router } from '../src/endpoints/extensions.js';
 
 function git(cwd, ...args) {

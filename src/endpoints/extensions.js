@@ -9,12 +9,45 @@ import { CheckRepoActions, default as simpleGit } from 'simple-git';
 import { PUBLIC_DIRECTORIES } from '../constants.js';
 import { getExtensionModuleGraph } from '../extension-module-graph.js';
 import { KeyedMutex } from '../keyed-mutex.js';
+import { getConfigValue } from '../util.js';
 
 /**
  * @type {Partial<import('simple-git').SimpleGitOptions>}
  */
-const OPTIONS = Object.freeze({ timeout: { block: 5 * 60 * 1000 } });
-const INSTALL_GIT_OPTIONS = Object.freeze({ config: ['http.followRedirects=false'] });
+/**
+ * Extensions are fetched over HTTP(S) only. Other transports would let a user clone what the server
+ * itself can reach: local repositories (file://, plain paths: other users' data, the server's own
+ * checkout) or SSH hosts with the server's keys. Also applies to redirects and to updates of
+ * extensions installed before this check.
+ */
+const HTTP_ONLY_GIT_CONFIG = Object.freeze(['protocol.allow=never', 'protocol.https.allow=always', 'protocol.http.allow=always']);
+const GIT_TIMEOUT = Object.freeze({ block: 5 * 60 * 1000 });
+
+/**
+ * Local repositories are only for tests and single-user setups (`extensions.allowLocalRepositories`).
+ * @returns {boolean}
+ */
+function allowLocalRepositories() {
+    return !!getConfigValue('extensions.allowLocalRepositories', false, 'boolean');
+}
+
+/** @returns {string[]} Git config that limits transports to HTTP(S) */
+function getGitProtocolConfig() {
+    return allowLocalRepositories() ? [] : [...HTTP_ONLY_GIT_CONFIG];
+}
+
+// simple-git refuses protocol.* settings unless told they are intended: here they only restrict.
+const PROTOCOL_OVERRIDE = Object.freeze({ allowUnsafeProtocolOverride: true });
+
+/** @returns {import('simple-git').SimpleGitOptions} Options for git work in an extension folder */
+function getGitOptions() {
+    return { timeout: GIT_TIMEOUT, config: getGitProtocolConfig(), unsafe: PROTOCOL_OVERRIDE };
+}
+
+/** @returns {Partial<import('simple-git').SimpleGitOptions>} Options for cloning a new extension */
+function getInstallGitOptions() {
+    return { config: ['http.followRedirects=false', ...getGitProtocolConfig()], unsafe: PROTOCOL_OVERRIDE };
+}
 const activeExtensionInstalls = new Set();
 /** Serializes git work on one extension folder (checks, updates, branch changes, compaction, deletion). */
 const extensionGitMutex = new KeyedMutex();
@@ -56,7 +89,7 @@ function scheduleCompaction(extensionPath) {
     compactionQueue.runExclusive('compaction', () => extensionGitMutex.runExclusive(key, async () => {
         scheduledCompactions.delete(key);
         if (!fs.existsSync(path.join(key, '.git'))) return;
-        const git = simpleGit({ baseDir: key, ...OPTIONS });
+        const git = simpleGit({ baseDir: key, ...getGitOptions() });
         const tags = (await git.raw(['tag', '--list'])).split('\n').filter(Boolean);
         for (let i = 0; i < tags.length; i += 100) {
             await git.raw(['tag', '--delete', ...tags.slice(i, i + 100)]);
@@ -114,6 +147,18 @@ export function normalizeExtensionCloneUrl(value) {
     }
 }
 
+/**
+ * @param {string} url Repository URL
+ * @returns {boolean} Whether it is an http:// or https:// URL
+ */
+function isHttpUrl(url) {
+    try {
+        return ['http:', 'https:'].includes(new URL(url).protocol);
+    } catch {
+        return false;
+    }
+}
+
 function getExtensionDirectoryName(url) {
     let repositoryPath = url;
     try {
@@ -156,7 +201,7 @@ async function getManifest(extensionPath) {
  * @returns {Promise<{isUpToDate: boolean, remoteUrl: string, hadOldHistory: boolean}>} - Returns the extension information as an object
  */
 async function checkIfRepoIsUpToDate(extensionPath) {
-    const git = simpleGit({ baseDir: extensionPath, ...OPTIONS });
+    const git = simpleGit({ baseDir: extensionPath, ...getGitOptions() });
     const hadOldHistory = await hasOldHistory(git);
     await fetchBranchTips(git);
     const currentBranch = await git.branch();
@@ -202,7 +247,7 @@ router.post('/install', async (request, response) => {
     let stagingPath = null;
     let installKey = null;
     try {
-        const git = simpleGit(INSTALL_GIT_OPTIONS);
+        const git = simpleGit(getInstallGitOptions());
 
         // make sure the third-party directory exists
         if (!fs.existsSync(path.join(request.user.directories.extensions))) {
@@ -222,6 +267,9 @@ router.post('/install', async (request, response) => {
 
         const basePath = global ? PUBLIC_DIRECTORIES.globalExtensions : request.user.directories.extensions;
         const cloneUrl = normalizeExtensionCloneUrl(url);
+        if (!isHttpUrl(cloneUrl) && !allowLocalRepositories()) {
+            return response.status(400).send('Bad Request: Only HTTP and HTTPS URLs are supported for extensions.');
+        }
         const extensionName = getExtensionDirectoryName(cloneUrl);
         const extensionPath = path.join(basePath, extensionName);
 
@@ -305,7 +353,7 @@ router.post('/update', async (request, response) => {
         }
 
         const result = await withExtensionGit(extensionPath, async () => {
-            const git = simpleGit({ baseDir: extensionPath, ...OPTIONS });
+            const git = simpleGit({ baseDir: extensionPath, ...getGitOptions() });
             const isRepo = await git.checkIsRepo(CheckRepoActions.IS_REPO_ROOT);
             if (!isRepo) {
                 throw new Error(`Directory is not a Git repository at ${extensionPath}`);
@@ -355,7 +403,7 @@ router.post('/branches', async (request, response) => {
         }
 
         const result = await withExtensionGit(extensionPath, async () => {
-            const git = simpleGit({ baseDir: extensionPath, ...OPTIONS });
+            const git = simpleGit({ baseDir: extensionPath, ...getGitOptions() });
             // Fetch the tip of every branch (switching only needs the tips, not the full history)
             await git.remote(['set-branches', 'origin', '*']);
             await fetchBranchTips(git);
@@ -395,7 +443,7 @@ router.post('/switch', async (request, response) => {
         }
 
         const missingBranch = await withExtensionGit(extensionPath, async () => {
-            const git = simpleGit({ baseDir: extensionPath, ...OPTIONS });
+            const git = simpleGit({ baseDir: extensionPath, ...getGitOptions() });
             const branches = await git.branchLocal();
 
             if (String(branch).startsWith('origin/')) {
@@ -509,7 +557,7 @@ router.post('/version', async (request, response) => {
         }
 
         const result = await withExtensionGit(extensionPath, async () => {
-            const git = simpleGit({ baseDir: extensionPath, ...OPTIONS });
+            const git = simpleGit({ baseDir: extensionPath, ...getGitOptions() });
             let currentCommitHash;
             try {
                 const isRepo = await git.checkIsRepo(CheckRepoActions.IS_REPO_ROOT);

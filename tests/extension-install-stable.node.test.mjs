@@ -7,6 +7,9 @@ import test from 'node:test';
 
 import express from 'express';
 
+// The fixtures are local repositories; production only accepts HTTP(S) extension URLs.
+process.env.SILLYTAVERN_EXTENSIONS_ALLOWLOCALREPOSITORIES = 'true';
+
 import { normalizeExtensionCloneUrl, router } from '../src/endpoints/extensions.js';
 
 function createRepository(directory, manifest) {
