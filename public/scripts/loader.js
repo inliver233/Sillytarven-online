@@ -17,10 +17,14 @@ export function updateLoaderProgress(percentage, statusText) {
     // 仅在传入有效数字时更新进度，避免 undefined/NaN 破坏百分比与宽度显示
     if (typeof percentage === 'number' && !Number.isNaN(percentage)) {
         const clamped = Math.min(100, Math.max(0, percentage));
+        // index.html 里的进度推进器：阶段之间也往前走，只进不退
+        const creep = globalThis.stLoaderProgress;
+        const shown = creep ? Math.max(clamped, creep.shown()) : clamped;
+        creep?.set(clamped);
         const bar = document.getElementById('st-loader-progress-bar');
         const text = document.getElementById('st-loader-progress-text');
-        if (bar) bar.style.width = `${clamped}%`;
-        if (text) text.textContent = `${clamped}%`;
+        if (bar) bar.style.width = `${shown}%`;
+        if (text) text.textContent = `${Math.floor(shown)}%`;
     }
 
     if (statusText) {
