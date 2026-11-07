@@ -13,6 +13,7 @@ import {
 
 import { humanizedDateTime, favsToHotswap, getMessageTimeStamp, dragElement, isMobile, initRossMods } from './scripts/RossAscends-mods.js';
 import { openAnnouncements } from './scripts/announcements.js';
+import { openLeaderboard } from './scripts/leaderboard.js';
 import { openChatTransferPanel } from './scripts/chat-transfer.js';
 import { userStatsHandler, statMesProcess, initStats } from './scripts/stats.js';
 import {
@@ -13401,6 +13402,8 @@ jQuery(async function () {
             void openChatTransferPanel();
         } else if (id == 'option_announcements') {
             void openAnnouncements();
+        } else if (id == 'option_leaderboard') {
+            void openLeaderboard();
         } else if (id === 'option_settings') {
             //var checkBox = document.getElementById("waifuMode");
             var topBar = document.getElementById('top-bar');

@@ -85,6 +85,7 @@ import { UPLOADS_DIRECTORY } from './constants.js';
 import systemMonitor from './system-monitor.js';
 import scheduledTasksManager from './scheduled-tasks.js';
 import { startGitSync } from './git-sync/router.js';
+import { leaderboard, leaderboardPeerHandler } from './leaderboard-service.js';
 
 // Routers
 import { router as usersPublicRouter } from './endpoints/users-public.js';
@@ -588,6 +589,9 @@ app.get('/api/invitation-codes/status', (req, res) => {
 const emailStatusModule = await import('./endpoints/email-status.js');
 app.use('/api/email', emailStatusModule.router);
 
+// Leaderboard numbers for the other site (signed with the shared secret, no login)
+app.get('/api/leaderboard/peer', leaderboardPeerHandler);
+
 // Public login page announcements (no auth)
 app.get('/api/announcements/login/current', async (req, res) => {
     try {
@@ -663,6 +667,8 @@ const SHUTDOWN_TIMEOUT_MS = 10 * 1000;
 async function preSetupTasks() {
     // Only the server samples load and keeps the monitor files; scripts importing the same modules do not.
     systemMonitor.start();
+    // Leaderboard counting, saving and the exchange with the other site.
+    leaderboard.start();
     // Scheduled git backups of users who turned them on.
     startGitSync();
 

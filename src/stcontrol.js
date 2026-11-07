@@ -1142,6 +1142,8 @@ export async function noteStcontrolPageHeartbeat(request) {
 
 const STCONTROL_READ_ONLY_POST_PATHS = new Set([
     '/api/settings/get',
+    // Leaderboard settings live in the site's leaderboard file, not in the user's data.
+    '/api/leaderboard/me',
 ]);
 
 function isStcontrolWriteRequest(request) {

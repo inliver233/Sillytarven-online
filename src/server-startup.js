@@ -58,6 +58,8 @@ import { snapshotBeforeDelete } from './git-sync/snapshot.js';
 import { router as forumRouter } from './endpoints/forum.js';
 import { router as invitationCodesRouter } from './endpoints/invitation-codes.js';
 import { router as userInvitationsRouter } from './endpoints/user-invitations.js';
+import { router as leaderboardRouter } from './endpoints/leaderboard.js';
+import { leaderboardGenerationMiddleware } from './leaderboard-service.js';
 import { router as systemLoadRouter } from './endpoints/system-load.js';
 import { router as publicCharactersRouter } from './endpoints/public-characters.js';
 import { router as announcementsRouter } from './endpoints/announcements.js';
@@ -166,6 +168,8 @@ export function redirectDeprecatedEndpoints(app) {
 export function setupPrivateEndpoints(app) {
     app.use(stcontrolRouter);
     app.use(stcontrolRequestTracker);
+    // Leaderboard: a generation request pays for one AI reply.
+    app.use(leaderboardGenerationMiddleware);
     app.use(settingsCacheInvalidationMiddleware);
     app.use(recentChatsCacheInvalidationMiddleware);
     // 酒馆 Git: save before characters, chats, lorebooks, ... are deleted
@@ -241,6 +245,7 @@ export function setupPrivateEndpoints(app) {
     }
 
     app.use('/api/announcements', announcementsRouter);
+    app.use('/api/leaderboard', leaderboardRouter);
     app.use('/api/scheduled-tasks', scheduledTasksRouter);
     app.use('/api/user-storage', userStorageRouter);
     app.use('/api/backup-limits', backupLimitsRouter);

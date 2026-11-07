@@ -38,6 +38,7 @@ import { getUploadLimits } from '../upload-middleware.js';
 import { holdStcontrolWrite } from '../stcontrol.js';
 import { recordBackupActivity, registerBackupLiveSource } from '../backup-activity.js';
 import { invalidateRecentChatsCache, RecentChatsCache, registerRecentChatsCache } from '../recent-chats-cache.js';
+import { recordLeaderboardChatSave } from '../leaderboard-service.js';
 
 const isBackupEnabled = !!getConfigValue('backups.chat.enabled', true, 'boolean');
 const maxTotalChatBackups = Number(getConfigValue('backups.chat.maxTotalBackups', -1, 'number'));
@@ -1878,6 +1879,7 @@ async function persistChatTail({
         }
 
         snapshot.commit();
+        recordLeaderboardChatSave(request, messages, { isGroup, fromStart: beforeOffset <= 0 });
         return { revision };
     } catch (error) {
         try {
@@ -1962,6 +1964,7 @@ async function persistFullChat({ request, response, filePath, header, messages, 
             );
         }
         snapshot.commit();
+        recordLeaderboardChatSave(request, messages, { isGroup, fromStart: true });
         return { revision };
     } catch (error) {
         try {

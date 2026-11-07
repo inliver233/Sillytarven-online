@@ -628,3 +628,15 @@ gitSync:
     # Sites sharing the server, id: label. Discord accounts may restore from any of them.
     sites: {}
     label: 酒馆云
+# 排行榜: anonymous rankings (AI replies, characters, online time, ...) shared by the sites.
+# Everybody takes part under an anonymous name unless they choose a nickname or opt out.
+leaderboard:
+  enabled: false
+  # The badge this site's users get: legacy (老站) or modern (新站).
+  site: legacy
+  # The same long random text on all sites (at least 16 characters). People with the same
+  # Discord account on two sites are merged by a hash keyed with it. Empty: this site alone.
+  secret: ''
+  # The other sites, fetched every syncIntervalMs: - url: https://other.example
+  peers: []
+  syncIntervalMs: 3000
