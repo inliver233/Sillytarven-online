@@ -6,7 +6,8 @@
  * while the modules are still downloading, and hands each response to the app
  * when the app asks for exactly the same thing.
  *
- * Only reads whose request is always the same are on the list: a response is
+ * Only reads that every start makes, always the same, are on the list (not the
+ * passkey list, asked for only until the user was offered a passkey): a response is
  * used once, for the same method, URL and body; anything else, or a prefetch
  * that failed, goes to the network as before. The CSRF token is written into
  * the page, so asking for it costs nothing.
@@ -35,7 +36,6 @@ export const STARTUP_REQUESTS = Object.freeze([
     ['POST', '/api/image-metadata/all', '{"prefix":"backgrounds/"}'],
     ['GET', '/api/input-drafts?key=none', null],
     ['GET', '/api/announcements/current', null],
-    ['GET', '/api/passkeys/list', null],
 ]);
 
 /** Stands in for the user's CSRF token in the cached page; replaced per request. */
