@@ -11,7 +11,7 @@ import { addLocaleData, getCurrentLocale, t } from './i18n.js';
 import { debounce_timeout } from './constants.js';
 import { accountStorage } from './util/AccountStorage.js';
 import { preloadExtensionResources } from './util/extension-resource-preload.js';
-import { getExtensionModuleUrl } from './util/module-url.js';
+import { getExtensionModuleUrl, getVersionedAssetUrl } from './util/module-url.js';
 import { getExtensionActivationPlan } from './util/extension-eligibility.js';
 import { SimpleMutex } from './util/SimpleMutex.js';
 import { power_user } from './power-user.js';
@@ -801,8 +801,11 @@ function addExtensionStyle(name, manifest) {
     return new Promise((resolve, reject) => {
         // Built-in extension styles carry the page's asset version, like the page's own
         // stylesheets, so a deploy is not hidden behind the CDN/browser cache next to new scripts.
+        // A popular third-party extension on the CDN mirror gets its style from there too.
         const version = name.startsWith('third-party') ? null : import.meta.url.match(/\/v\/([0-9a-f]{6,64})\//)?.[1];
-        const url = `/scripts/extensions/${name}/${manifest.css}${version ? `?v=${version}` : ''}`;
+        const url = name.startsWith('third-party')
+            ? getVersionedAssetUrl(`/scripts/extensions/${name}/${manifest.css}`)
+            : `/scripts/extensions/${name}/${manifest.css}${version ? `?v=${version}` : ''}`;
         const id = sanitizeSelector(`${name}-css`);
 
         if ($(`link[id="${id}"]`).length === 0) {

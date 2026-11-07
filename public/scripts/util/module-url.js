@@ -28,21 +28,24 @@ const VERSION_PREFIX = VERSION_PATH
  * @returns {string} Module URL
  */
 export function getExtensionModuleUrl(name, file) {
-    const thirdParty = /^third-party\/([^/]+)$/.exec(name)?.[1];
-    const mirror = thirdParty ? THIRD_PARTY_MIRRORS[thirdParty] : null;
-    return mirror ? `${mirror}/scripts/extensions/${name}/${file}` : getVersionedAssetUrl(`/scripts/extensions/${name}/${file}`);
+    return getVersionedAssetUrl(`/scripts/extensions/${name}/${file}`);
 }
 
 /**
- * URL of a built-in file under /scripts/ (template, manifest, locale) under the page's
+ * URL of a built-in file under /scripts/ (template, manifest, locale, style) under the page's
  * asset version. The plain URL may be served from a CDN cache filled before a deploy:
  * an old extension manifest next to new scripts left built-in extensions inactive.
- * Third-party extensions are not part of the asset version and keep their plain URLs.
+ * Third-party extensions are not part of the asset version: a popular one on the CDN mirror
+ * gets its mirror URL (its files at its commit), any other keeps the plain URL.
  * @param {string} url File URL, with or without the leading slash
  * @returns {string} Versioned URL, or the given URL when it is not a built-in file
  */
 export function getVersionedAssetUrl(url) {
     const path = url.startsWith('/') ? url : `/${url}`;
-    const builtIn = path.startsWith('/scripts/') && !path.startsWith('/scripts/extensions/third-party/');
-    return VERSION_PREFIX && builtIn ? VERSION_PREFIX + path : url;
+    const thirdParty = /^\/scripts\/extensions\/third-party\/([^/]+)\//.exec(path)?.[1];
+    if (thirdParty) {
+        const mirror = THIRD_PARTY_MIRRORS[thirdParty];
+        return mirror ? mirror + path : url;
+    }
+    return VERSION_PREFIX && path.startsWith('/scripts/') ? VERSION_PREFIX + path : url;
 }
