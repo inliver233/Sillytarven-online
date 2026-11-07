@@ -24,7 +24,7 @@ export function updateLoaderProgress(percentage, statusText) {
         } else {
             const bar = document.getElementById('st-loader-progress-bar');
             const text = document.getElementById('st-loader-progress-text');
-            if (bar) bar.style.width = `${clamped}%`;
+            if (bar) bar.style.transform = `translateX(${clamped - 100}%)`;
             if (text) text.textContent = `${clamped}%`;
         }
     }
