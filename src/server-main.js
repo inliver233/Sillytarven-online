@@ -471,7 +471,7 @@ function addUserCdnExtensions(page, request) {
     if (!extensionCdn.enabled || !request.user?.directories?.extensions) return page;
     const extensions = extensionCdn.getUserExtensions(request.user.directories.extensions);
     if (!extensions.length) return page;
-    return page.replace('"thirdParty":[]', `"thirdParty":${JSON.stringify(extensions).replace(/</g, '\\u003c')}`);
+    return page.replace('"thirdParty":[]', () => `"thirdParty":${JSON.stringify(extensions).replace(/</g, '\\u003c')}`);
 }
 
 /**

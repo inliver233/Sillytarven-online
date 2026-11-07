@@ -118,8 +118,10 @@ test('a mirrored extension resolves its relative imports to the app, to itself a
         document: { createElement: () => ({}), currentScript: { after: element => { inserted = element; } } },
         addEventListener: () => {},
         location: { origin: 'https://site.example', reload: () => {} },
+        Worker: function Worker(url, options) { this.url = String(url); this.options = options; },
     };
     context.window = context;
+    const NativeWorker = context.Worker;
     vm.runInNewContext(script, context);
     const imports = JSON.parse(inserted.textContent).imports;
     const base = `https://s1.example.cn/v/e/${sha}`;
@@ -131,4 +133,14 @@ test('a mirrored extension resolves its relative imports to the app, to itself a
     assert.equal(imports[`${base}/scripts/extensions/third-party/Helper/`], `${base}/scripts/extensions/third-party/Helper/`);
     assert.equal(imports[`${base}/scripts/extensions/third-party/`], '/scripts/extensions/third-party/');
     assert.deepEqual(JSON.parse(JSON.stringify(context.__stAssetCdn)), { thirdParty: { Helper: base } }, 'the extension loader uses the same URL');
+
+    // Workers cannot come from another origin: one made from a mirrored module is created from this server.
+    const fromExtension = new context.Worker(`${base}/scripts/extensions/third-party/Helper/assets/runtime.worker.js`, { type: 'module' });
+    assert.equal(fromExtension.url, 'https://site.example/scripts/extensions/third-party/Helper/assets/runtime.worker.js');
+    assert.deepEqual(fromExtension.options, { type: 'module' });
+    assert.ok(fromExtension instanceof NativeWorker && fromExtension instanceof context.Worker);
+    assert.equal(new context.Worker({ href: 'https://s1.example.cn/v/abc123def456/scripts/extensions/tts/kokoro-worker.js' }).url,
+        'https://site.example/v/abc123def456/scripts/extensions/tts/kokoro-worker.js');
+    assert.equal(new context.Worker('blob:https://site.example/1234').url, 'blob:https://site.example/1234', 'other workers are left alone');
+    assert.equal(new context.Worker('/scripts/extensions/third-party/Other/w.js').url, '/scripts/extensions/third-party/Other/w.js');
 });

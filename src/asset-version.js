@@ -127,7 +127,8 @@ export function transformAppHtml(html, { version, cdn = null }) {
     const importMap = cdn
         ? getAssetCdnScript(imports, cdn)
         : `<script type="importmap">${JSON.stringify({ imports })}</script>`;
-    return styled.replace('</head>', `    ${importMap}\n</head>`);
+    // A function, so "$'" or "$&" in the script is not read as a replacement pattern.
+    return styled.replace('</head>', () => `    ${importMap}\n</head>`);
 }
 
 /**
@@ -198,6 +199,21 @@ function getAssetCdnScript(imports, cdn) {
                 });
             });
             window.__stAssetCdn = { thirdParty: thirdParty };
+            // A worker must come from the page's own origin. One created from a mirrored module
+            // ("new URL('./x.worker.js', import.meta.url)") gets the same file from this server.
+            var toLocal = function (url) {
+                var href = String(url && url.href ? url.href : url);
+                if (href.indexOf(o.cdn + '/') !== 0) return url;
+                var rest = href.slice(o.cdn.length), own = new RegExp('^/v/e/[0-9a-f]{40}(/.*)$').exec(rest);
+                return location.origin + (own ? own[1] : rest);
+            };
+            ['Worker', 'SharedWorker'].forEach(function (name) {
+                var Native = window[name];
+                if (typeof Native !== 'function') return;
+                var Local = function (url, options) { return new Native(toLocal(url), options); };
+                Local.prototype = Native.prototype;
+                window[name] = Local;
+            });
             var fail = function (reload) {
                 try { localStorage.setItem(KEY, String(Date.now())); } catch (e) { return; }
                 if (reload && !window.SillyTavern) location.reload();
