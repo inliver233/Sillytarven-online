@@ -8,6 +8,8 @@ import { Worker } from 'node:worker_threads';
 import {
     LIMITS,
     LeaderboardStore,
+    SCORE_PARTS,
+    compositeScore,
     cleanNickname,
     dayOf,
     discordIdOf,
@@ -249,6 +251,58 @@ test('ties share a rank; streak, active days, variety and rookies', () => {
     assert.deepEqual(board(store, 'chat', 'today').rows.map(row => row.value), [2]);
     set('b', today - 1, { ai: 6 });
     assert.deepEqual(board(store, 'chat', 'week').rows.map(row => [row.rank, row.value]), [[1, 8], [1, 8]]);
+});
+
+test('the overall score: log-normalized parts, weighted, out of 100', () => {
+    assert.equal(SCORE_PARTS.reduce((sum, part) => sum + part.weight, 0), 100);
+    const best = { chat: 1000, words: 200000, online: 600 * MINUTE, active: 7, talk: 900, variety: 20, streak: 30 };
+    assert.equal(compositeScore(best, best).score, 100, 'the best at everything');
+    assert.equal(compositeScore({}, best).score, 0);
+    // Diminishing returns: 10 → 100 replies is worth about as much as 100 → 1000.
+    const chatPoints = chat => compositeScore({ chat }, best).parts[0];
+    assert.ok(Math.abs((chatPoints(100) - chatPoints(10)) - (chatPoints(1000) - chatPoints(100))) < 0.3);
+    assert.ok(Math.abs(chatPoints(10) - 25 * Math.log(11) / Math.log(1001)) < 1e-9);
+    // The parts add up to the score.
+    const someone = { chat: 120, words: 30000, online: 90 * MINUTE, active: 3, talk: 100, variety: 4, streak: 2 };
+    const { score, parts } = compositeScore(someone, best);
+    assert.ok(Math.abs(parts.reduce((sum, part) => sum + part, 0) - score) < 1e-9);
+    assert.ok(score > 0 && score < 100);
+    // A part nobody has yet (online time before it was counted) is left out, weight and all.
+    const noOnline = compositeScore({ ...best, online: 0 }, { ...best, online: 0 });
+    assert.equal(noOnline.score, 100);
+    assert.equal(noOnline.parts[2], null);
+    // Above the best (someone off the board looking at their own score): capped.
+    assert.equal(compositeScore({ ...best, chat: 5000 }, best).score, 100);
+});
+
+test('the overall board ranks the all-rounder above the one-trick grinder', () => {
+    const { store } = makeStore();
+    const today = dayOf(NOON);
+    const set = (handle, values) => {
+        const account = store.ensureAccount({ handle });
+        const stats = store.dayStats(account, today);
+        Object.assign(stats, values);
+        store.touch(account, stats);
+    };
+    // Grinder: many replies, nothing else much. All-rounder: fewer replies, but long ones, time, many characters.
+    set('grinder', { ai: 400, chars: 4000, user: 400, online: 30 * MINUTE, cset: ['a'] });
+    set('rounded', { ai: 150, chars: 150000, user: 140, online: 300 * MINUTE, cset: ['a', 'b', 'c', 'd', 'e'] });
+    set('casual', { ai: 10, chars: 5000, user: 10, online: 20 * MINUTE, cset: ['a'] });
+    set('hidden', { ai: 900, chars: 300000, user: 900, online: 600 * MINUTE, cset: ['a', 'b', 'c', 'd', 'e', 'f'] });
+    store.setPrefs('hidden', { mode: 'none' });
+    const view = store.board({ metric: 'score', window: 'today', site: 'all', handle: 'rounded' });
+    const handles = view.rows.map(row => row.name);
+    assert.equal(view.rows.length, 3, 'people who left the board do not count, not even for the best values');
+    assert.equal(handles[0], view.me.name, 'the all-rounder leads');
+    assert.ok(view.rows[0].value > view.rows[1].value && view.rows[1].value > view.rows[2].value);
+    assert.equal(view.rows[0].parts.length, SCORE_PARTS.length);
+    assert.ok(Math.abs(view.rows[0].parts.reduce((sum, part) => sum + (part ?? 0), 0) - view.rows[0].value) < 1e-9);
+    // The one who left sees their own score against the same best values: capped at 100.
+    const hidden = store.board({ metric: 'score', window: 'today', site: 'all', handle: 'hidden' });
+    assert.equal(hidden.me.value, 100);
+    assert.equal(hidden.me.rank, 1);
+    // Only one site: the best values are that site's.
+    assert.deepEqual(store.board({ metric: 'score', window: 'today', site: 'modern', handle: 'rounded' }).rows, []);
 });
 
 test('two sites: the same Discord account is one person with both badges; changes travel in small steps', () => {

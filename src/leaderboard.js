@@ -26,7 +26,7 @@ import crypto from 'node:crypto';
 
 export const SITES = Object.freeze(['legacy', 'modern']);
 export const SITE_FILTERS = Object.freeze(['all', ...SITES]);
-export const METRICS = Object.freeze(['chat', 'words', 'online', 'talk', 'active', 'streak', 'night', 'variety', 'group', 'rookie']);
+export const METRICS = Object.freeze(['score', 'chat', 'words', 'online', 'talk', 'active', 'streak', 'night', 'variety', 'group', 'rookie']);
 export const WINDOWS = Object.freeze(['today', 'week', 'month', 'all']);
 export const MODES = Object.freeze(['anon', 'public', 'none']);
 
@@ -170,6 +170,49 @@ const defaultPrefs = () => ({ mode: 'anon', nickname: '', explicit: false, updat
 const tailOf = text => text.slice(-40);
 const clampChars = length => Math.min(length, MAX_REPLY_CHARS);
 const isActiveDay = stats => stats.ai + stats.user > 0;
+
+/**
+ * The overall board ("综合"): the boards it is made of, their weights (out of 100) and the
+ * amount counted as 1 (characters by the hundred, online time by the minute).
+ */
+export const SCORE_PARTS = Object.freeze([
+    Object.freeze({ metric: 'chat', weight: 25, unit: 1 }),
+    Object.freeze({ metric: 'words', weight: 20, unit: 100 }),
+    Object.freeze({ metric: 'online', weight: 15, unit: 60e3 }),
+    Object.freeze({ metric: 'active', weight: 15, unit: 1 }),
+    Object.freeze({ metric: 'talk', weight: 10, unit: 1 }),
+    Object.freeze({ metric: 'variety', weight: 10, unit: 1 }),
+    Object.freeze({ metric: 'streak', weight: 5, unit: 1 }),
+]);
+
+/**
+ * Overall score, 0–100: a weighted sum of log-normalized values.
+ *
+ *   part  = ln(1 + value / unit) / ln(1 + best / unit)        (0–1; the best one gets 1)
+ *   score = 100 × Σ weight × part / Σ weight
+ *
+ * The logarithm makes each part grow ever slower (10 → 100 adds about as much as 100 → 1000),
+ * so being active in every way beats grinding one number; dividing by the best value makes
+ * counts, characters and minutes comparable. Parts nobody has yet (best 0) are left out, and
+ * their weight with them.
+ * @param {Record<string, number>} values One person's values
+ * @param {Record<string, number>} best The best value of every part among the people shown
+ * @returns {{score: number, parts: (number|null)[]}} parts: points per SCORE_PARTS entry (null: left out)
+ */
+export function compositeScore(values, best) {
+    let total = 0;
+    let weights = 0;
+    const points = SCORE_PARTS.map(part => {
+        const top = best?.[part.metric] ?? 0;
+        if (!(top > 0)) return null;
+        weights += part.weight;
+        const share = Math.min(1, Math.log1p(Math.max(0, values?.[part.metric] ?? 0) / part.unit) / Math.log1p(top / part.unit));
+        total += part.weight * share;
+        return part.weight * share;
+    });
+    if (!weights) return { score: 0, parts: points.map(() => null) };
+    return { score: 100 * total / weights, parts: points.map(point => point === null ? null : 100 * point / weights) };
+}
 const nicknameKey = nickname => nickname.normalize('NFKC').toLowerCase().replace(/\s+/g, '');
 
 /** A day as an array, for the state file and the peers. */
@@ -801,54 +844,62 @@ export class LeaderboardStore {
     }
 
     /**
-     * @param {string} metric One of METRICS
+     * Everything one person did in a window, in one pass (over the given site, or both).
+     * @param {{parts: {site: string, days: Map<number, DayStats>}[], created: number}} person
+     * @param {[number, number]} range Days of the window
+     * @param {string} site 'all' or one site
+     * @param {number} now
+     * @returns {Record<string, number>} A value for every metric but 'score'
+     */
+    static values(person, [first, last], site, now) {
+        const values = { chat: 0, words: 0, online: 0, talk: 0, active: 0, streak: 0, night: 0, variety: 0, group: 0, rookie: 0 };
+        const parts = site === 'all' ? person.parts : person.parts.filter(part => part.site === site);
+        if (!parts.length) return values;
+        const activeDays = new Set();
+        const activeInRange = new Set();
+        const characters = new Set();
+        const onlinePerDay = new Map();
+        for (const part of parts) {
+            for (const [day, stats] of part.days) {
+                const active = isActiveDay(stats);
+                if (active) activeDays.add(day);
+                if (day < first || day > last) continue;
+                if (active) activeInRange.add(day);
+                values.chat += stats.ai;
+                values.words += stats.chars;
+                values.talk += stats.user;
+                values.night += stats.night;
+                values.group += stats.group;
+                for (const key of stats.cset) characters.add(key);
+                // Two sites open at once are still one person's time.
+                if (stats.online) onlinePerDay.set(day, (onlinePerDay.get(day) ?? 0) + stats.online);
+            }
+        }
+        let online = 0;
+        for (const value of onlinePerDay.values()) online += Math.min(ONLINE_DAY_CAP_MS, value);
+        values.online = Math.floor(online / 60e3) * 60e3;
+        values.active = activeInRange.size;
+        values.variety = characters.size;
+        // The current streak, whatever the window; today not done yet does not break it.
+        let day = activeDays.has(dayOf(now)) ? dayOf(now) : dayOf(now) - 1;
+        while (activeDays.has(day)) {
+            values.streak++;
+            day--;
+        }
+        values.rookie = person.created > now - ROOKIE_DAYS * DAY_MS ? values.chat : 0;
+        return values;
+    }
+
+    /**
+     * @param {string} metric One of METRICS but 'score'
      * @param {{parts: {site: string, days: Map<number, DayStats>}[], created: number}} person
      * @param {[number, number]} range Days of the window
      * @param {string} site 'all' or one site
      * @param {number} now
      * @returns {number}
      */
-    static value(metric, person, [first, last], site, now) {
-        const parts = site === 'all' ? person.parts : person.parts.filter(part => part.site === site);
-        if (!parts.length) return 0;
-        const inRange = day => day >= first && day <= last;
-        if (metric === 'streak') {
-            const active = new Set();
-            for (const part of parts) for (const [day, stats] of part.days) if (isActiveDay(stats)) active.add(day);
-            const today = dayOf(now);
-            // Today not done yet does not break the streak.
-            let day = active.has(today) ? today : today - 1;
-            let streak = 0;
-            while (active.has(day)) {
-                streak++;
-                day--;
-            }
-            return streak;
-        }
-        if (metric === 'active') {
-            const active = new Set();
-            for (const part of parts) for (const [day, stats] of part.days) if (inRange(day) && isActiveDay(stats)) active.add(day);
-            return active.size;
-        }
-        if (metric === 'variety') {
-            const characters = new Set();
-            for (const part of parts) for (const [day, stats] of part.days) if (inRange(day)) stats.cset.forEach(key => characters.add(key));
-            return characters.size;
-        }
-        if (metric === 'online') {
-            // Two sites open at once are still one person's time.
-            const perDay = new Map();
-            for (const part of parts) for (const [day, stats] of part.days) if (inRange(day) && stats.online) perDay.set(day, (perDay.get(day) ?? 0) + stats.online);
-            let total = 0;
-            for (const value of perDay.values()) total += Math.min(ONLINE_DAY_CAP_MS, value);
-            return Math.floor(total / 60e3) * 60e3;
-        }
-        if (metric === 'rookie' && !(person.created > now - ROOKIE_DAYS * DAY_MS)) return 0;
-        const field = { chat: 'ai', rookie: 'ai', words: 'chars', talk: 'user', night: 'night', group: 'group' }[metric];
-        if (!field) return 0;
-        let total = 0;
-        for (const part of parts) for (const [day, stats] of part.days) if (inRange(day)) total += stats[field];
-        return total;
+    static value(metric, person, range, site, now) {
+        return LeaderboardStore.values(person, range, site, now)[metric] ?? 0;
     }
 
     /**
@@ -864,17 +915,25 @@ export class LeaderboardStore {
         if (cached && (cached.version === this.boardVersion || now - cached.computedAt < this.recomputeMs)) return cached;
         const people = this.people();
         const range = windowDays(window, now);
+        /** @type {{person: any, value: number, values: Record<string, number>}[]} */
         const visible = [];
+        /** The best value of every part of the score among the people shown. */
+        const best = {};
         for (const person of people.values()) {
             if (person.prefs.mode === 'none') continue;
-            const value = LeaderboardStore.value(metric, person, range, site, now);
-            if (value > 0) visible.push({ person, value });
+            const values = LeaderboardStore.values(person, range, site, now);
+            visible.push({ person, value: values[metric] ?? 0, values });
+            for (const part of SCORE_PARTS) best[part.metric] = Math.max(best[part.metric] ?? 0, values[part.metric]);
         }
-        visible.sort((a, b) => b.value - a.value || (a.person.key < b.person.key ? -1 : 1));
+        if (metric === 'score') {
+            for (const entry of visible) entry.value = compositeScore(entry.values, best).score;
+        }
+        const shown = visible.filter(entry => entry.value > 0);
+        shown.sort((a, b) => b.value - a.value || (a.person.key < b.person.key ? -1 : 1));
         // Competition ranking: equal values share a rank.
         const ranks = [];
-        for (let i = 0; i < visible.length; i++) ranks.push(i > 0 && visible[i].value === visible[i - 1].value ? ranks[i - 1] : i + 1);
-        const ranking = { version: this.boardVersion, computedAt: now, people, range, visible, ranks };
+        for (let i = 0; i < shown.length; i++) ranks.push(i > 0 && shown[i].value === shown[i - 1].value ? ranks[i - 1] : i + 1);
+        const ranking = { version: this.boardVersion, computedAt: now, people, range, visible: shown, ranks, best };
         if (this.boardCache.size > 200) this.boardCache.clear();
         this.boardCache.set(cacheKey, ranking);
         return ranking;
@@ -897,18 +956,23 @@ export class LeaderboardStore {
         const ranking = this.ranking(metric, window, site);
         const account = this.accounts.get(handle);
         const myKey = account && !account.admin ? this.personKey(account) : null;
+        const isScore = metric === 'score';
         const rows = ranking.visible.slice(0, MAX_ROWS).map((entry, index) => ({
             rank: ranking.ranks[index],
             name: this.label(entry.person),
             anonymous: !(entry.person.prefs.mode === 'public' && entry.person.prefs.nickname),
             sites: [...entry.person.sites].sort(),
             value: entry.value,
+            ...(isScore ? { parts: compositeScore(entry.values, ranking.best).parts } : {}),
             me: entry.person.key === myKey,
         }));
         let me = null;
         const person = myKey ? ranking.people.get(myKey) : null;
         if (person) {
-            const value = LeaderboardStore.value(metric, person, ranking.range, site, now);
+            const values = LeaderboardStore.values(person, ranking.range, site, now);
+            // Someone off the board gets the score they would have, against the same best values.
+            const composite = isScore ? compositeScore(values, ranking.best) : null;
+            const value = composite ? composite.score : (values[metric] ?? 0);
             let ahead = 0;
             let next = null;
             for (const entry of ranking.visible) {
@@ -920,6 +984,7 @@ export class LeaderboardStore {
                 rank: value > 0 ? ahead + 1 : null,
                 value,
                 gap: next === null ? null : next - value,
+                ...(composite ? { parts: composite.parts } : {}),
                 name: this.label(person),
                 mode: person.prefs.mode,
                 explicit: person.prefs.explicit,
@@ -927,13 +992,15 @@ export class LeaderboardStore {
             };
         }
         return {
-            version: `${this.boardVersion}-${dayOf(now)}`,
+            version: `${ranking.version}-${dayOf(now)}`,
             site: this.site,
             rows,
             me,
             admin: !!account?.admin,
             participants: ranking.visible.length,
             peers: [...this.peers.values()].map(peer => ({ site: peer.site, syncedAt: peer.syncedAt, error: peer.error })),
+            // For the explanation of the overall board: the same numbers it is computed with.
+            scoreParts: SCORE_PARTS,
         };
     }
 

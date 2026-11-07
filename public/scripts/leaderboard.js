@@ -9,6 +9,7 @@ const ACTIVE_PING_MS = 60 * 1000;
 const VIEW_KEY = 'leaderboard_view';
 
 const METRICS = [
+    { id: 'score', label: '综合', icon: 'fa-trophy', unit: '分', hint: '综合得分 = Σ 权重 × ln(1+你的数值) ÷ ln(1+第一名的数值)，满分 100；点行看各项得分，点右上角 ⓘ 看权重' },
     { id: 'chat', label: '聊天', icon: 'fa-comments', unit: '条', hint: 'AI 回复条数：每次生成都算，重新生成、继续也算' },
     { id: 'words', label: '字数', icon: 'fa-feather', unit: '字', hint: 'AI 回复的字数，「继续」只算新写的部分' },
     { id: 'online', label: '时长', icon: 'fa-clock', unit: '', hint: '在用酒馆的时间：页面开着但没人动不算，每天最多 16 小时' },
@@ -19,6 +20,17 @@ const METRICS = [
     { id: 'variety', label: '博爱', icon: 'fa-heart', unit: '位', hint: '聊过的不同角色数：只统计个数，不记是谁' },
     { id: 'group', label: '群聊', icon: 'fa-users', unit: '条', hint: '群聊里的 AI 回复条数' },
     { id: 'rookie', label: '新星', icon: 'fa-star', unit: '条', hint: '注册 30 天内的新人，按 AI 回复条数排' },
+];
+/** 综合榜各项的叫法（服务器发来权重，说明里照着写） */
+const SCORE_LABELS = { chat: '聊天', words: '字数', online: '时长', active: '活跃天数', talk: '话痨', variety: '博爱', streak: '连续天数' };
+const DEFAULT_SCORE_PARTS = [
+    { metric: 'chat', weight: 25, unit: 1 },
+    { metric: 'words', weight: 20, unit: 100 },
+    { metric: 'online', weight: 15, unit: 60000 },
+    { metric: 'active', weight: 15, unit: 1 },
+    { metric: 'talk', weight: 10, unit: 1 },
+    { metric: 'variety', weight: 10, unit: 1 },
+    { metric: 'streak', weight: 5, unit: 1 },
 ];
 const WINDOWS = [
     { id: 'today', label: '今日' },
@@ -49,12 +61,14 @@ let started = false;
 let lastInputAt = 0;
 let lastPingAt = 0;
 /** @type {{metric: string, window: string, site: string}} */
-let view = { metric: 'chat', window: 'today', site: 'all' };
+let view = { metric: 'score', window: 'today', site: 'all' };
 /** @type {{root: HTMLElement, list: HTMLElement, me: HTMLElement, footer: HTMLElement, hint: HTMLElement, panel: HTMLElement} | null} */
 let popup = null;
 let pollTimer = null;
 let boardVersion = '';
 let lastBoard = null;
+/** 综合榜里点开看各项得分的行（按名字，刷新后保持展开） */
+const expandedRows = new Set();
 /** 上一次显示的数值，名字 → 数值，用来让涨了的行闪一下 */
 let lastValues = new Map();
 let requestSerial = 0;
@@ -92,6 +106,7 @@ function metricOf(id) {
  */
 export function formatLeaderboardValue(metricId, value) {
     const metric = metricOf(metricId);
+    if (metric.id === 'score') return `${Number(value).toFixed(1)} 分`;
     if (metric.id === 'online') {
         const minutes = Math.floor(value / 60000);
         const hours = Math.floor(minutes / 60);
@@ -102,6 +117,20 @@ export function formatLeaderboardValue(metricId, value) {
         return `${(value / 10000).toFixed(value >= 1e6 ? 0 : 1)} 万字`;
     }
     return `${Number(value).toLocaleString('zh-CN')} ${metric.unit}`.trim();
+}
+
+/**
+ * 综合得分的各项，例如「聊天 20.9 · 字数 20.0 · …」
+ * @param {(number|null)[]} parts 各项得分（null：这一期没人有这项数据，不计入）
+ * @param {{metric: string}[]} [scoreParts]
+ * @returns {string}
+ */
+export function formatScoreParts(parts, scoreParts = DEFAULT_SCORE_PARTS) {
+    return (parts ?? []).map((points, index) => {
+        const metric = scoreParts[index]?.metric;
+        const label = SCORE_LABELS[metric] ?? metricOf(metric).label;
+        return `${label} ${points === null || points === undefined ? '—' : Number(points).toFixed(1)}`;
+    }).join(' · ');
 }
 
 function siteBadges(sites) {
@@ -342,15 +371,28 @@ function render(board) {
         const before = lastValues.get(row.name);
         values.set(row.name, row.value);
         const bumped = lastValues.size > 0 && (before === undefined || row.value > before);
-        fragment.append(h('div', {
-            class: `leaderboard-row${row.rank <= 3 ? ` leaderboard-top leaderboard-top${row.rank}` : ''}${row.me ? ' leaderboard-row-me' : ''}${bumped ? ' leaderboard-bumped' : ''}`,
+        const breakdown = row.parts ? formatScoreParts(row.parts, board.scoreParts) : '';
+        const expanded = !!breakdown && expandedRows.has(row.name);
+        const element = h('div', {
+            class: `leaderboard-row${row.rank <= 3 ? ` leaderboard-top leaderboard-top${row.rank}` : ''}${row.me ? ' leaderboard-row-me' : ''}${bumped ? ' leaderboard-bumped' : ''}${breakdown ? ' leaderboard-row-expandable' : ''}${expanded ? ' expanded' : ''}`,
+            title: breakdown || null,
         },
         rankCell(row.rank),
         h('span', { class: 'leaderboard-name' },
             h('span', { class: `leaderboard-name-text${row.anonymous ? ' leaderboard-anonymous' : ''}`, text: row.name, title: row.anonymous ? '匿名代号' : '' }),
             row.me ? h('span', { class: 'leaderboard-you', text: '我' }) : null,
             ...siteBadges(row.sites)),
-        h('span', { class: 'leaderboard-value', text: formatLeaderboardValue(view.metric, row.value) })));
+        h('span', { class: 'leaderboard-value', text: formatLeaderboardValue(view.metric, row.value) }),
+        breakdown ? h('span', { class: 'leaderboard-row-parts', text: breakdown }) : null);
+        if (breakdown) {
+            // 手机上没有悬停提示：点一下展开各项得分
+            element.addEventListener('click', () => {
+                if (expandedRows.has(row.name)) expandedRows.delete(row.name);
+                else expandedRows.add(row.name);
+                element.classList.toggle('expanded', expandedRows.has(row.name));
+            });
+        }
+        fragment.append(element);
     }
     lastValues = values;
     popup.list.replaceChildren(fragment);
@@ -376,6 +418,7 @@ function renderMe(board) {
                 h('span', { class: me.mode === 'public' ? '' : 'leaderboard-anonymous', text: me.name }),
                 ...siteBadges(me.sites)),
             h('span', { class: 'leaderboard-me-value', text: formatLeaderboardValue(view.metric, me.value) })),
+        me.parts ? h('div', { class: 'leaderboard-me-parts', text: formatScoreParts(me.parts, board.scoreParts) }) : null,
         h('div', { class: 'leaderboard-me-side' },
             gap ? h('small', { class: 'leaderboard-gap', text: gap }) : null,
             h('button', {
@@ -411,8 +454,26 @@ function hidePanel() {
 function showRules() {
     if (!popup) return;
     const since = lastBoard?.countingSince ? new Date(lastBoard.countingSince).toLocaleDateString('zh-CN') : '';
+    const scoreParts = lastBoard?.scoreParts ?? DEFAULT_SCORE_PARTS;
+    const weights = scoreParts.map(part => `${SCORE_LABELS[part.metric] ?? metricOf(part.metric).label} ${part.weight}`).join(' · ');
+    const total = scoreParts.reduce((sum, part) => sum + part.weight, 0);
+    const units = scoreParts.filter(part => part.unit !== 1).map(part => part.metric === 'online'
+        ? `时长每 ${part.unit / 60000} 分钟算 1`
+        : part.metric === 'words' ? `字数每 ${part.unit} 字算 1` : `${SCORE_LABELS[part.metric] ?? part.metric}每 ${part.unit} 算 1`);
     popup.panel.replaceChildren(h('div', { class: 'leaderboard-card' },
         h('h3', { text: '怎么算的' }),
+        h('h4', { text: '综合榜' }),
+        h('div', { class: 'leaderboard-formula' },
+            h('div', { text: '单项分 = ln(1 + 你的数值) ÷ ln(1 + 本期第一名的数值)' }),
+            h('div', { text: '综合得分 = 100 × Σ(权重 × 单项分) ÷ Σ权重' })),
+        h('p', { text: `权重：${weights}（合计 ${total}）。单项分在 0 到 1 之间，每一项都是第一名就是满分 100。` }),
+        h('ul', {},
+            h('li', { text: '取对数是「边际递减」：从 10 条到 100 条，和从 100 条到 1000 条，加的分差不多。所以各方面都有，比只死刷一项划算。' }),
+            h('li', { text: '再除以第一名的对数，每一项都变成 0～1：条数、字数、分钟这些单位不一样的数，才能按权重加在一起。' }),
+            h('li', { text: `${units.length ? `${units.join('，')}；` : ''}连续天数不分时间范围，用的是当前的连续天数。` }),
+            h('li', { text: '「第一名」是同一时间范围、同一站点筛选下上榜的人。这一期还没人有数据的项不计入，它的权重也从分母里去掉。' }),
+            h('li', { text: '在综合榜点一下某一行，可以看到这个人每一项各得了多少分。' })),
+        h('h4', { text: '各榜' }),
         h('ul', {},
             h('li', { text: '两个站一起排：legacy 是老站，modern 是新站。两个站用同一个 Discord 账号的，算同一个人，名字后面两个标记都有。' }),
             h('li', { text: '聊天、字数：每次 AI 生成回复都算（重新生成、继续也算；继续只算新写的字）。导入、复制的旧聊天不算。' }),
