@@ -1,6 +1,7 @@
 // 排行榜：两个站一起排，默认匿名参加，打开时每 3 秒刷新
 import { getRequestHeaders } from '../script.js';
 import { eventSource, event_types } from './events.js';
+import { callGenericPopup, POPUP_TYPE } from './popup.js';
 import { accountStorage } from './util/AccountStorage.js';
 
 const POLL_MS = 3000;
@@ -23,15 +24,17 @@ const METRICS = [
 ];
 /** 综合榜各项的叫法（服务器发来权重，说明里照着写） */
 const SCORE_LABELS = { chat: '聊天', words: '字数', online: '时长', active: '活跃天数', talk: '话痨', variety: '博爱', streak: '连续天数' };
+const DIMENSION_LABELS = { output: '产出', time: '时间', habit: '坚持', breadth: '广度' };
 const DEFAULT_SCORE_PARTS = [
-    { metric: 'chat', weight: 25, unit: 1 },
-    { metric: 'words', weight: 20, unit: 100 },
-    { metric: 'online', weight: 15, unit: 60000 },
-    { metric: 'active', weight: 15, unit: 1 },
-    { metric: 'talk', weight: 10, unit: 1 },
-    { metric: 'variety', weight: 10, unit: 1 },
-    { metric: 'streak', weight: 5, unit: 1 },
+    { metric: 'chat', weight: 15, unit: 1, dimension: 'output' },
+    { metric: 'words', weight: 15, unit: 100, dimension: 'output' },
+    { metric: 'talk', weight: 10, unit: 1, dimension: 'output' },
+    { metric: 'online', weight: 20, unit: 60000, dimension: 'time' },
+    { metric: 'active', weight: 20, unit: 1, dimension: 'habit' },
+    { metric: 'streak', weight: 10, unit: 1, dimension: 'habit' },
+    { metric: 'variety', weight: 10, unit: 1, dimension: 'breadth' },
 ];
+const DEFAULT_DAILY_CAPS = { ai: 1000, chars: 1500000, user: 800 };
 const WINDOWS = [
     { id: 'today', label: '今日' },
     { id: 'week', label: '本周' },
@@ -381,7 +384,16 @@ function render(board) {
         h('span', { class: 'leaderboard-name' },
             h('span', { class: `leaderboard-name-text${row.anonymous ? ' leaderboard-anonymous' : ''}`, text: row.name, title: row.anonymous ? '匿名代号' : '' }),
             row.me ? h('span', { class: 'leaderboard-you', text: '我' }) : null,
-            ...siteBadges(row.sites)),
+            ...siteBadges(row.sites),
+            board.admin && row.id ? h('button', {
+                type: 'button',
+                class: 'leaderboard-remove',
+                title: '移出榜单（两个站都生效，可在 ⓘ 里恢复）',
+                onclick: event => {
+                    event.stopPropagation();
+                    void setRemoved(row.id, row.name, true);
+                },
+            }, h('i', { class: 'fa-solid fa-user-slash' })) : null),
         h('span', { class: 'leaderboard-value', text: formatLeaderboardValue(view.metric, row.value) }),
         breakdown ? h('span', { class: 'leaderboard-row-parts', text: breakdown }) : null);
         if (breakdown) {
@@ -407,9 +419,9 @@ function renderMe(board) {
         popup.me.replaceChildren(h('span', { class: 'leaderboard-me-note', text: board.admin ? '管理员不参与排行' : '' }));
         return;
     }
-    const status = me.mode === 'none'
-        ? '不上榜（只有你自己看得到）'
-        : me.rank ? `第 ${me.rank} 名` : '还没上榜';
+    const status = me.banned
+        ? '已被管理员移出榜单'
+        : me.mode === 'none' ? '不上榜（只有你自己看得到）' : me.rank ? `第 ${me.rank} 名` : '还没上榜';
     const gap = me.rank && me.gap ? `距上一名还差 ${formatLeaderboardValue(view.metric, me.gap)}` : (me.rank === 1 ? '目前第一' : '');
     popup.me.replaceChildren(
         h('div', { class: 'leaderboard-me-main' },
@@ -455,37 +467,77 @@ function showRules() {
     if (!popup) return;
     const since = lastBoard?.countingSince ? new Date(lastBoard.countingSince).toLocaleDateString('zh-CN') : '';
     const scoreParts = lastBoard?.scoreParts ?? DEFAULT_SCORE_PARTS;
-    const weights = scoreParts.map(part => `${SCORE_LABELS[part.metric] ?? metricOf(part.metric).label} ${part.weight}`).join(' · ');
+    const caps = lastBoard?.dailyCaps ?? DEFAULT_DAILY_CAPS;
     const total = scoreParts.reduce((sum, part) => sum + part.weight, 0);
+    const labelOf = metric => SCORE_LABELS[metric] ?? metricOf(metric).label;
+    /** @type {Map<string, {metric: string, weight: number}[]>} */
+    const dimensions = new Map();
+    for (const part of scoreParts) dimensions.set(part.dimension ?? '', [...(dimensions.get(part.dimension ?? '') ?? []), part]);
     const units = scoreParts.filter(part => part.unit !== 1).map(part => part.metric === 'online'
         ? `时长每 ${part.unit / 60000} 分钟算 1`
-        : part.metric === 'words' ? `字数每 ${part.unit} 字算 1` : `${SCORE_LABELS[part.metric] ?? part.metric}每 ${part.unit} 算 1`);
+        : part.metric === 'words' ? `字数每 ${part.unit} 字算 1` : `${labelOf(part.metric)}每 ${part.unit} 算 1`);
+    const removed = lastBoard?.admin ? (lastBoard.removed ?? []) : null;
     popup.panel.replaceChildren(h('div', { class: 'leaderboard-card' },
         h('h3', { text: '怎么算的' }),
         h('h4', { text: '综合榜' }),
         h('div', { class: 'leaderboard-formula' },
             h('div', { text: '单项分 = ln(1 + 你的数值) ÷ ln(1 + 本期第一名的数值)' }),
             h('div', { text: '综合得分 = 100 × Σ(权重 × 单项分) ÷ Σ权重' })),
-        h('p', { text: `权重：${weights}（合计 ${total}）。单项分在 0 到 1 之间，每一项都是第一名就是满分 100。` }),
+        h('p', { text: `单项分在 0 到 1 之间，每一项都是第一名就是满分 100。权重按维度分（合计 ${total}）：` }),
+        h('ul', { class: 'leaderboard-weights' },
+            ...[...dimensions].map(([dimension, parts]) => h('li', {},
+                h('b', { text: `${DIMENSION_LABELS[dimension] ?? '其他'} ${parts.reduce((sum, part) => sum + part.weight, 0)}` }),
+                h('span', { text: `：${parts.map(part => `${labelOf(part.metric)} ${part.weight}`).join(' · ')}` })))),
         h('ul', {},
             h('li', { text: '取对数是「边际递减」：从 10 条到 100 条，和从 100 条到 1000 条，加的分差不多。所以各方面都有，比只死刷一项划算。' }),
-            h('li', { text: '再除以第一名的对数，每一项都变成 0～1：条数、字数、分钟这些单位不一样的数，才能按权重加在一起。' }),
+            h('li', { text: '再除以第一名的对数，每一项都变成 0～1：条、字、分钟、天这些单位不一样的数，才能按权重加在一起。' }),
+            h('li', { text: '聊天、字数、话痨说的都是「聊了多少」，合起来只算一个维度，不重复计分；活跃天数、连续天数只能靠每天真的来，刷不出来，所以占得多。' }),
             h('li', { text: `${units.length ? `${units.join('，')}；` : ''}连续天数不分时间范围，用的是当前的连续天数。` }),
             h('li', { text: '「第一名」是同一时间范围、同一站点筛选下上榜的人。这一期还没人有数据的项不计入，它的权重也从分母里去掉。' }),
             h('li', { text: '在综合榜点一下某一行，可以看到这个人每一项各得了多少分。' })),
         h('h4', { text: '各榜' }),
         h('ul', {},
             h('li', { text: '两个站一起排：legacy 是老站，modern 是新站。两个站用同一个 Discord 账号的，算同一个人，名字后面两个标记都有。' }),
-            h('li', { text: '聊天、字数：每次 AI 生成回复都算（重新生成、继续也算；继续只算新写的字）。导入、复制的旧聊天不算。' }),
+            h('li', { text: '聊天、字数：每次 AI 生成回复都算（重新生成、继续也算；继续只算新写的字）。导入、复制的旧聊天不算，没有真的发生成请求的回复也不算。' }),
             h('li', { text: '话痨：你发出去、并且让 AI 回了的消息。' }),
-            h('li', { text: '时长：页面在用（有点击、输入、滚动）才计时，开着不动不算，每天最多 16 小时。' }),
+            h('li', { text: '时长：页面在用（有点击、输入、滚动）才计时，开着不动不算。' }),
+            h('li', { text: `每人每天最多计入：AI 回复 ${caps.ai} 条、你的消息 ${caps.user} 条、字数 ${caps.chars / 10000} 万、时长 16 小时。再怎么刷，一天也只能拿满这么多。` }),
             h('li', { text: '博爱只统计聊过多少个不同的角色，不记录是谁。' }),
             h('li', { text: '今日、本周、本月按北京时间算，每周从周一开始。' }),
             h('li', { text: since ? `${since} 之前的聊天按现有聊天记录补算（删掉的不算）；时长从这天开始算。` : '上线之前的聊天按现有聊天记录补算（删掉的不算）；时长从上线开始算。' }),
-            h('li', { text: '默认匿名：代号是固定的，别人没法从代号知道你是谁。管理员不参与排行。' })),
+            h('li', { text: '默认匿名：代号是固定的，别人没法从代号知道你是谁。管理员不参与排行，可以把刷榜的人移出榜单。' })),
+        removed ? h('h4', { text: '已移出榜单（只有管理员看得到）' }) : null,
+        removed ? (removed.length
+            ? h('div', { class: 'leaderboard-removed' }, ...removed.map(person => h('div', { class: 'leaderboard-removed-row' },
+                h('span', { text: person.name }),
+                ...siteBadges(person.sites),
+                h('button', { type: 'button', class: 'menu_button', text: '恢复', onclick: () => void setRemoved(person.id, person.name, false) }))))
+            : h('p', { class: 'leaderboard-note', text: '没有' })) : null,
         h('div', { class: 'leaderboard-card-actions' },
             h('button', { type: 'button', class: 'menu_button', text: '知道了', onclick: hidePanel }))));
     popup.panel.classList.remove('displayNone');
+}
+
+/**
+ * 管理员把某人移出榜单（或恢复），两个站都生效
+ * @param {string} id
+ * @param {string} name
+ * @param {boolean} banned
+ */
+async function setRemoved(id, name, banned) {
+    if (banned && !await callGenericPopup(`把「${name}」移出榜单？两个站的榜上都不再显示，本人会看到「已被管理员移出榜单」。之后可以在 ⓘ 里恢复。`, POPUP_TYPE.CONFIRM)) {
+        return;
+    }
+    try {
+        const response = await fetch('/api/leaderboard/admin/ban', { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify({ id, banned }) });
+        if (!response.ok) throw new Error(String(response.status));
+        toastr.success(banned ? `已把「${name}」移出榜单` : `已恢复「${name}」`);
+        if (!banned) hidePanel();
+        boardVersion = '';
+        await refresh();
+    } catch {
+        toastr.error('操作失败，请稍后再试');
+    }
 }
 
 async function openSettings() {

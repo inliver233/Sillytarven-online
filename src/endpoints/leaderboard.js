@@ -49,6 +49,15 @@ router.post('/me', (request, response) => {
     return response.send(leaderboard.store.prefsOf(handle));
 });
 
+/** An administrator takes someone off the board, or back (both sites). */
+router.post('/admin/ban', requireAdminMiddleware, (request, response) => {
+    const id = String(request.body?.id ?? '');
+    if (!leaderboard.store.setBan(id, request.body?.banned !== false)) return response.status(404).send({ error: 'unknown_person' });
+    leaderboard.dirty = true;
+    leaderboard.save();
+    return response.sendStatus(204);
+});
+
 router.get('/status', requireAdminMiddleware, (_request, response) => {
     return response.send(leaderboard.status());
 });

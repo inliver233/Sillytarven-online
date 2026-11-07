@@ -6,6 +6,7 @@ import test from 'node:test';
 import { Worker } from 'node:worker_threads';
 
 import {
+    DAILY_CAPS,
     LIMITS,
     LeaderboardStore,
     SCORE_PARTS,
@@ -210,7 +211,7 @@ test('everybody is anonymous by default; nicknames are unique and not official-l
     add('c', 7);
     let view = board(store, 'chat', 'today', 'all', 'a');
     assert.deepEqual(view.rows.map(row => row.value), [9, 7, 5]);
-    assert.ok(view.rows.every(row => row.anonymous && /·[0-9a-f]{3}$/.test(row.name)));
+    assert.ok(view.rows.every(row => row.anonymous && /·[0-9a-f]{4}$/.test(row.name)));
     assert.equal(view.me.rank, 3);
     assert.equal(view.me.gap, 2);
     assert.equal(view.me.explicit, false, 'not asked yet');
@@ -259,9 +260,14 @@ test('the overall score: log-normalized parts, weighted, out of 100', () => {
     assert.equal(compositeScore(best, best).score, 100, 'the best at everything');
     assert.equal(compositeScore({}, best).score, 0);
     // Diminishing returns: 10 → 100 replies is worth about as much as 100 → 1000.
-    const chatPoints = chat => compositeScore({ chat }, best).parts[0];
+    const at = metric => SCORE_PARTS.findIndex(part => part.metric === metric);
+    const chatPoints = chat => compositeScore({ chat }, best).parts[at('chat')];
     assert.ok(Math.abs((chatPoints(100) - chatPoints(10)) - (chatPoints(1000) - chatPoints(100))) < 0.3);
-    assert.ok(Math.abs(chatPoints(10) - 25 * Math.log(11) / Math.log(1001)) < 1e-9);
+    assert.ok(Math.abs(chatPoints(10) - SCORE_PARTS[at('chat')].weight * Math.log(11) / Math.log(1001)) < 1e-9);
+    // Weighted by dimension: how much someone chatted counts once (40), habits weigh 30.
+    const byDimension = {};
+    for (const part of SCORE_PARTS) byDimension[part.dimension] = (byDimension[part.dimension] ?? 0) + part.weight;
+    assert.deepEqual(byDimension, { output: 40, time: 20, habit: 30, breadth: 10 });
     // The parts add up to the score.
     const someone = { chat: 120, words: 30000, online: 90 * MINUTE, active: 3, talk: 100, variety: 4, streak: 2 };
     const { score, parts } = compositeScore(someone, best);
@@ -270,7 +276,7 @@ test('the overall score: log-normalized parts, weighted, out of 100', () => {
     // A part nobody has yet (online time before it was counted) is left out, weight and all.
     const noOnline = compositeScore({ ...best, online: 0 }, { ...best, online: 0 });
     assert.equal(noOnline.score, 100);
-    assert.equal(noOnline.parts[2], null);
+    assert.equal(noOnline.parts[at('online')], null);
     // Above the best (someone off the board looking at their own score): capped.
     assert.equal(compositeScore({ ...best, chat: 5000 }, best).score, 100);
 });
@@ -303,6 +309,81 @@ test('the overall board ranks the all-rounder above the one-trick grinder', () =
     assert.equal(hidden.me.rank, 1);
     // Only one site: the best values are that site's.
     assert.deepEqual(store.board({ metric: 'score', window: 'today', site: 'modern', handle: 'rounded' }).rows, []);
+});
+
+test('daily caps: whatever slips through gains at most a full day', () => {
+    const { store, clock } = makeStore();
+    const account = store.ensureAccount({ handle: 'a' });
+    const today = store.dayStats(account, dayOf(NOON));
+    today.ai = DAILY_CAPS.ai - 1;
+    today.chars = DAILY_CAPS.chars - 10;
+    today.user = DAILY_CAPS.user;
+    store.recordGeneration('a', NOON - 3000);
+    store.recordGeneration('a', NOON - 2000);
+    store.recordMessages('a', [ai(NOON - 10 * MINUTE, 'g'), user(NOON - 2500), ai(NOON - 2000, 'x'.repeat(500)), ai(NOON - 1000, 'y'.repeat(500))], { fromStart: true });
+    assert.equal(today.ai, DAILY_CAPS.ai, 'one more reply, then the cap');
+    assert.equal(today.chars, DAILY_CAPS.chars);
+    assert.equal(today.user, DAILY_CAPS.user);
+    // The next day starts over.
+    clock.now = NOON + 864e5;
+    store.recordGeneration('a', clock.now - 1000);
+    store.recordMessages('a', [ai(clock.now - 10 * MINUTE, 'g'), ai(clock.now - 500, 'z')], { fromStart: true });
+    assert.equal(store.accounts.get('a').days.get(dayOf(clock.now)).ai, 1);
+    // History added on top of the first live day stays within the caps too.
+    const { store: other } = makeStore();
+    const b = other.ensureAccount({ handle: 'b' });
+    Object.assign(other.dayStats(b, dayOf(NOON)), { ai: 900, chars: 1000, user: 700 });
+    other.applyBackfill('b', { [dayOf(NOON)]: [500, 2000000, 500, 0, 0, 0, ''] });
+    const merged = b.days.get(dayOf(NOON));
+    assert.deepEqual([merged.ai, merged.chars, merged.user], [DAILY_CAPS.ai, DAILY_CAPS.chars, DAILY_CAPS.user]);
+});
+
+test('administrators take someone off the board on both sites; the latest decision counts', () => {
+    const legacy = makeStore('legacy').store;
+    const modern = makeStore('modern').store;
+    legacy.ensureAccount({ handle: 'boss', admin: true });
+    legacy.ensureAccount({ handle: 'cheat', discord: '555555555555' });
+    legacy.ensureAccount({ handle: 'honest' });
+    modern.ensureAccount({ handle: 'cheat2', discord: '555555555555' });
+    modern.ensureAccount({ handle: 'viewer' });
+    for (const [store, handle, count] of [[legacy, 'cheat', 900], [legacy, 'honest', 50], [modern, 'cheat2', 900]]) {
+        const account = store.accounts.get(handle);
+        const stats = store.dayStats(account, dayOf(NOON));
+        stats.ai = count;
+        store.touch(account, stats);
+    }
+    const sync = () => {
+        modern.applyPeer('https://legacy', legacy.exportForPeer(modern.peers.get('https://legacy')?.version ?? -1, modern.peers.get('https://legacy')?.epoch ?? 'none'));
+        legacy.applyPeer('https://modern', modern.exportForPeer(legacy.peers.get('https://modern')?.version ?? -1, legacy.peers.get('https://modern')?.epoch ?? 'none'));
+    };
+    sync();
+    const adminView = legacy.board({ metric: 'chat', window: 'today', site: 'all', handle: 'boss' });
+    assert.ok(adminView.rows.every(row => typeof row.id === 'string'), 'administrators see whom to act on');
+    assert.ok(!('id' in legacy.board({ metric: 'chat', window: 'today', site: 'all', handle: 'honest' }).rows[0]), 'others do not');
+    const cheatId = adminView.rows.find(row => row.value === 1800).id;
+    assert.equal(legacy.setBan('nobody', true), false);
+    assert.ok(legacy.setBan(cheatId, true));
+    sync();
+    for (const [store, handle] of [[legacy, 'honest'], [modern, 'viewer']]) {
+        assert.deepEqual(store.board({ metric: 'chat', window: 'today', site: 'all', handle }).rows.map(row => row.value), [50]);
+        assert.deepEqual(store.board({ metric: 'score', window: 'today', site: 'all', handle }).rows.length, 1);
+    }
+    const self = modern.board({ metric: 'chat', window: 'today', site: 'all', handle: 'cheat2' });
+    assert.equal(self.me.banned, true, 'they see that they were taken off');
+    assert.deepEqual(legacy.board({ metric: 'chat', window: 'today', site: 'all', handle: 'boss' }).removed.map(person => person.id), [cheatId]);
+    // Changing their own settings does not bring them back; an administrator on the other site can.
+    modern.setPrefs('cheat2', { mode: 'public', nickname: '回来了' });
+    sync();
+    assert.equal(legacy.board({ metric: 'chat', window: 'today', site: 'all', handle: 'honest' }).rows.length, 1);
+    modern.accounts.get('viewer').admin = false;
+    assert.ok(modern.setBan(cheatId, false));
+    sync();
+    assert.equal(legacy.board({ metric: 'chat', window: 'today', site: 'all', handle: 'honest' }).rows.length, 2);
+    // Kept across a restart.
+    legacy.setBan(cheatId, true);
+    const { store: next } = makeStore('legacy');
+    next.importState(JSON.parse(JSON.stringify(legacy.exportState())));
+    assert.equal(next.latestBan(cheatId)?.banned, true);
 });
 
 test('two sites: the same Discord account is one person with both badges; changes travel in small steps', () => {

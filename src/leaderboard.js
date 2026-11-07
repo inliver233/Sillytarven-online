@@ -8,7 +8,7 @@ import crypto from 'node:crypto';
  * One person with an account on both sites (the same Discord account) is one entry: the sites
  * only ever exchange a keyed hash of the Discord id, never the id or the account name.
  *
- * Privacy: everybody takes part anonymously ("困倦的水獭·3f2", stable but not traceable to the
+ * Privacy: everybody takes part anonymously ("困倦的水獭·3f2a", stable but not traceable to the
  * account) until they choose otherwise; they can show a nickname or leave the board. The latest
  * choice made on either site counts. Accounts that left are still counted for their own rank,
  * which only they see. Administrators are not ranked.
@@ -21,7 +21,9 @@ import crypto from 'node:crypto';
  * - only messages sent in the last minutes count live (imported or copied chats do not);
  *   older history comes from a one-off scan of the chat files;
  * - online time comes from the page reporting that someone is using it (not from the heartbeat
- *   an idle open tab keeps sending), at most 16 hours a day.
+ *   an idle open tab keeps sending), at most 16 hours a day;
+ * - every count has a daily cap, so whatever slips through gains at most a full day;
+ * - administrators can take someone off the board (on both sites).
  */
 
 export const SITES = Object.freeze(['legacy', 'modern']);
@@ -49,6 +51,11 @@ const MAX_USER_PER_MINUTE = 10;
 const MAX_REPLY_CHARS = 20000;
 const MAX_CHARACTERS_PER_DAY = 300;
 const MAX_RECENT = 500;
+/**
+ * Counted per person, site and day at most, however it was made: a busy human stays well below
+ * (hundreds of replies a day); anything farmed gains at most this much a day.
+ */
+export const DAILY_CAPS = Object.freeze({ ai: 1000, chars: 1500000, user: 800 });
 /** Activity reports closer together than this count the time between them as online. */
 const ONLINE_GAP_MS = 10 * 60e3;
 const ONLINE_MIN_CREDIT_MS = 60e3;
@@ -172,17 +179,21 @@ const clampChars = length => Math.min(length, MAX_REPLY_CHARS);
 const isActiveDay = stats => stats.ai + stats.user > 0;
 
 /**
- * The overall board ("综合"): the boards it is made of, their weights (out of 100) and the
- * amount counted as 1 (characters by the hundred, online time by the minute).
+ * The overall board ("综合"): the boards it is made of, their weights (out of 100), the amount
+ * counted as 1 (characters by the hundred, online time by the minute) and what each measures.
+ *
+ * Weighted by dimension rather than board: replies, characters and the user's messages all
+ * measure how much someone chatted, so together they weigh 40, not three times as much. The
+ * habit boards (days active, streak) weigh more: they cannot be farmed, only lived.
  */
 export const SCORE_PARTS = Object.freeze([
-    Object.freeze({ metric: 'chat', weight: 25, unit: 1 }),
-    Object.freeze({ metric: 'words', weight: 20, unit: 100 }),
-    Object.freeze({ metric: 'online', weight: 15, unit: 60e3 }),
-    Object.freeze({ metric: 'active', weight: 15, unit: 1 }),
-    Object.freeze({ metric: 'talk', weight: 10, unit: 1 }),
-    Object.freeze({ metric: 'variety', weight: 10, unit: 1 }),
-    Object.freeze({ metric: 'streak', weight: 5, unit: 1 }),
+    Object.freeze({ metric: 'chat', weight: 15, unit: 1, dimension: 'output' }),
+    Object.freeze({ metric: 'words', weight: 15, unit: 100, dimension: 'output' }),
+    Object.freeze({ metric: 'talk', weight: 10, unit: 1, dimension: 'output' }),
+    Object.freeze({ metric: 'online', weight: 20, unit: 60e3, dimension: 'time' }),
+    Object.freeze({ metric: 'active', weight: 20, unit: 1, dimension: 'habit' }),
+    Object.freeze({ metric: 'streak', weight: 10, unit: 1, dimension: 'habit' }),
+    Object.freeze({ metric: 'variety', weight: 10, unit: 1, dimension: 'breadth' }),
 ]);
 
 /**
@@ -233,6 +244,18 @@ const cleanPrefs = prefs => {
     return { mode: mode === 'public' && !nickname ? 'anon' : mode, nickname, explicit: !!prefs?.explicit, updatedAt: Number(prefs?.updatedAt) || 0 };
 };
 
+/**
+ * @param {unknown} rows [key, banned (0/1), at][]
+ * @returns {Map<string, {banned: boolean, at: number}>}
+ */
+function parseBans(rows) {
+    const bans = new Map();
+    for (const row of Array.isArray(rows) ? rows : []) {
+        if (Array.isArray(row) && row[0]) bans.set(String(row[0]), { banned: !!row[1], at: Number(row[2]) || 0 });
+    }
+    return bans;
+}
+
 export class LeaderboardStore {
     /**
      * @param {{site: string, secret: string, now?: () => number, recomputeMs?: number}} options
@@ -262,6 +285,8 @@ export class LeaderboardStore {
         this.live = new Map();
         /** @type {Map<string, Peer>} */
         this.peers = new Map();
+        /** @type {Map<string, {banned: boolean, at: number}>} administrators' decisions made on this site, by person */
+        this.bans = new Map();
         /** @type {Map<string, any>} */
         this.boardCache = new Map();
         this.recomputeMs = recomputeMs;
@@ -290,7 +315,8 @@ export class LeaderboardStore {
         const digest = this.hash(`label:${personKey}`);
         const adjective = ADJECTIVES[parseInt(digest.slice(0, 2), 16) % ADJECTIVES.length];
         const animal = ANIMALS[parseInt(digest.slice(2, 4), 16) % ANIMALS.length];
-        return `${adjective}${animal}·${digest.slice(4, 7)}`;
+        // 32 × 32 × 65536 names: among a few thousand people two alike are unlikely.
+        return `${adjective}${animal}·${digest.slice(4, 8)}`;
     }
 
     /** @param {string} name Character name @returns {string} */
@@ -502,8 +528,9 @@ export class LeaderboardStore {
      */
     countUserMessage(account, state, ts, at) {
         if (!this.withinRate(state, 'user', at)) return false;
-        state.user.push(at);
         const stats = this.dayStats(account, dayOf(ts));
+        if (stats.user >= DAILY_CAPS.user) return false;
+        state.user.push(at);
         stats.user++;
         this.touch(account, stats);
         return true;
@@ -568,7 +595,8 @@ export class LeaderboardStore {
                 recent.set(key, { ts, len: text.length, tail: tailOf(text), counted: false, name });
                 continue;
             }
-            if (!this.withinRate(state, 'ai', at) || !this.takeCredit(state, ts)) {
+            const stats = this.dayStats(account, dayOf(ts));
+            if (stats.ai >= DAILY_CAPS.ai || !this.withinRate(state, 'ai', at) || !this.takeCredit(state, ts)) {
                 recent.set(key, { ts, len: text.length, tail: tailOf(text), counted: false, name });
                 continue;
             }
@@ -583,9 +611,8 @@ export class LeaderboardStore {
                     break;
                 }
             }
-            const stats = this.dayStats(account, dayOf(ts));
             stats.ai++;
-            stats.chars += Math.max(0, clampChars(text.length) - clampChars(base));
+            stats.chars = Math.min(DAILY_CAPS.chars, stats.chars + Math.max(0, clampChars(text.length) - clampChars(base)));
             if (hourOf(ts) < 5) stats.night++;
             if (isGroup) stats.group++;
             if (name && stats.cset.length < MAX_CHARACTERS_PER_DAY) {
@@ -610,7 +637,9 @@ export class LeaderboardStore {
         entry.tail = tailOf(text);
         if (add <= 0) return;
         const stats = this.dayStats(account, dayOf(entry.ts));
-        stats.chars += add;
+        const chars = Math.min(DAILY_CAPS.chars, stats.chars + add);
+        if (chars === stats.chars) return;
+        stats.chars = chars;
         this.touch(account, stats);
     }
 
@@ -655,6 +684,35 @@ export class LeaderboardStore {
     }
 
     /**
+     * An administrator takes someone off the board (or back). Applies on both sites; the latest
+     * decision made on either site counts.
+     * @param {string} key Person key (as the board gives it to administrators)
+     * @param {boolean} banned
+     * @returns {boolean} Whether there is such a person
+     */
+    setBan(key, banned) {
+        if (!this.people().has(key)) return false;
+        const latest = this.latestBan(key);
+        this.bans.set(key, { banned: !!banned, at: Math.max(this.now(), (latest?.at ?? 0) + 1) });
+        this.changed();
+        this.boardCache.clear();
+        return true;
+    }
+
+    /**
+     * @param {string} key Person key
+     * @returns {{banned: boolean, at: number}|null} The latest decision made about them on any site
+     */
+    latestBan(key) {
+        let latest = this.bans.get(key) ?? null;
+        for (const peer of this.peers.values()) {
+            const other = peer.bans?.get(key);
+            if (other && (!latest || other.at > latest.at)) latest = other;
+        }
+        return latest;
+    }
+
+    /**
      * Adds what the chat file scan found for one account (messages before live counting started).
      * @param {string} handle
      * @param {Record<string, (number|string)[]>} days day -> packed day without the day number
@@ -665,11 +723,12 @@ export class LeaderboardStore {
         for (const [day, row] of Object.entries(days ?? {})) {
             const found = unpackDay([Number(day), ...row]);
             const stats = this.dayStats(account, Number(day));
-            stats.ai += found.ai;
-            stats.chars += found.chars;
-            stats.user += found.user;
-            stats.night += found.night;
-            stats.group += found.group;
+            // The day live counting started has both parts: together they stay within the caps.
+            stats.ai = Math.min(DAILY_CAPS.ai, stats.ai + found.ai);
+            stats.chars = Math.min(DAILY_CAPS.chars, stats.chars + found.chars);
+            stats.user = Math.min(DAILY_CAPS.user, stats.user + found.user);
+            stats.night = Math.min(stats.ai, stats.night + found.night);
+            stats.group = Math.min(stats.ai, stats.group + found.group);
             for (const key of found.cset) {
                 if (stats.cset.length >= MAX_CHARACTERS_PER_DAY) break;
                 if (!stats.cset.includes(key)) stats.cset.push(key);
@@ -703,6 +762,7 @@ export class LeaderboardStore {
             countingSince: this.countingSince,
             backfilled: [...this.backfilled],
             backfillFinished: this.backfillFinished,
+            bans: [...this.bans].map(([key, ban]) => [key, ban.banned ? 1 : 0, ban.at]),
             accounts: [...this.accounts.values()].map(account => ({
                 h: account.handle,
                 c: account.created,
@@ -724,6 +784,7 @@ export class LeaderboardStore {
         this.countingSince = Number(state.countingSince) || this.countingSince;
         this.backfilled = new Set(Array.isArray(state.backfilled) ? state.backfilled : []);
         this.backfillFinished = !!state.backfillFinished;
+        this.bans = parseBans(state.bans);
         this.accounts.clear();
         for (const row of state.accounts ?? []) {
             if (!row?.h) continue;
@@ -774,7 +835,8 @@ export class LeaderboardStore {
             });
         }
         const removed = full ? [] : this.tombstones.filter(item => item.v > from).map(item => item.key);
-        return { site: this.site, epoch: this.epoch, version: this.version, full, accounts, removed };
+        const bans = [...this.bans].map(([key, ban]) => [key, ban.banned ? 1 : 0, ban.at]);
+        return { site: this.site, epoch: this.epoch, version: this.version, full, accounts, removed, bans };
     }
 
     /**
@@ -788,7 +850,7 @@ export class LeaderboardStore {
         let peer = this.peers.get(peerId);
         if (!peer || payload.full || peer.epoch !== payload.epoch) {
             if (!payload.full && peer) return false;
-            peer = { site: payload.site, epoch: payload.epoch, version: 0, accounts: new Map(), syncedAt: 0, error: '' };
+            peer = { site: payload.site, epoch: payload.epoch, version: 0, accounts: new Map(), bans: new Map(), syncedAt: 0, error: '' };
             this.peers.set(peerId, peer);
         }
         peer.site = payload.site;
@@ -804,6 +866,11 @@ export class LeaderboardStore {
             account.created = Number(row.c) || account.created;
             account.prefs = cleanPrefs(row.p);
             for (const packed of row.days ?? []) account.days.set(Number(packed[0]), unpackDay(packed));
+            changed = true;
+        }
+        const bans = parseBans(payload.bans);
+        if (JSON.stringify([...bans]) !== JSON.stringify([...(peer.bans ?? new Map())])) {
+            peer.bans = bans;
             changed = true;
         }
         peer.epoch = payload.epoch;
@@ -839,6 +906,7 @@ export class LeaderboardStore {
         for (const peer of this.peers.values()) {
             for (const account of peer.accounts.values()) add(account.key, peer.site, account.created, account.prefs, account.days);
         }
+        for (const person of people.values()) person.banned = !!this.latestBan(person.key)?.banned;
         this.peopleCache = { version: this.boardVersion, people };
         return people;
     }
@@ -920,7 +988,7 @@ export class LeaderboardStore {
         /** The best value of every part of the score among the people shown. */
         const best = {};
         for (const person of people.values()) {
-            if (person.prefs.mode === 'none') continue;
+            if (person.prefs.mode === 'none' || person.banned) continue;
             const values = LeaderboardStore.values(person, range, site, now);
             visible.push({ person, value: values[metric] ?? 0, values });
             for (const part of SCORE_PARTS) best[part.metric] = Math.max(best[part.metric] ?? 0, values[part.metric]);
@@ -957,7 +1025,9 @@ export class LeaderboardStore {
         const account = this.accounts.get(handle);
         const myKey = account && !account.admin ? this.personKey(account) : null;
         const isScore = metric === 'score';
+        const admin = !!account?.admin;
         const rows = ranking.visible.slice(0, MAX_ROWS).map((entry, index) => ({
+            ...(admin ? { id: entry.person.key } : {}),
             rank: ranking.ranks[index],
             name: this.label(entry.person),
             anonymous: !(entry.person.prefs.mode === 'public' && entry.person.prefs.nickname),
@@ -985,6 +1055,7 @@ export class LeaderboardStore {
                 value,
                 gap: next === null ? null : next - value,
                 ...(composite ? { parts: composite.parts } : {}),
+                banned: !!person.banned,
                 name: this.label(person),
                 mode: person.prefs.mode,
                 explicit: person.prefs.explicit,
@@ -996,11 +1067,16 @@ export class LeaderboardStore {
             site: this.site,
             rows,
             me,
-            admin: !!account?.admin,
+            admin,
+            ...(admin ? {
+                removed: [...ranking.people.values()].filter(other => other.banned)
+                    .map(other => ({ id: other.key, name: this.label(other), sites: [...other.sites].sort() })),
+            } : {}),
             participants: ranking.visible.length,
             peers: [...this.peers.values()].map(peer => ({ site: peer.site, syncedAt: peer.syncedAt, error: peer.error })),
-            // For the explanation of the overall board: the same numbers it is computed with.
+            // For the explanations: the same numbers the boards are computed with.
             scoreParts: SCORE_PARTS,
+            dailyCaps: DAILY_CAPS,
         };
     }
 

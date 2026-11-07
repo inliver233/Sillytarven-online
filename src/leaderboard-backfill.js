@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 import readline from 'node:readline';
 import { parentPort, workerData } from 'node:worker_threads';
 
-import { dayOf, hourOf, parseSendDate } from './leaderboard.js';
+import { DAILY_CAPS, dayOf, hourOf, parseSendDate } from './leaderboard.js';
 
 /**
  * Worker: counts the chat history of the given accounts once, for what happened before the
@@ -14,7 +14,8 @@ import { dayOf, hourOf, parseSendDate } from './leaderboard.js';
  *
  * The same rules as live counting where history allows: every swipe was a reply, a chat's
  * greeting is not, system notes are not, a message copied into another chat (branches,
- * checkpoints) counts once, and only messages sent while the account existed count.
+ * checkpoints) counts once, only messages sent while the account existed count, and no day
+ * counts more than the daily caps.
  */
 
 const DAY_MS = 864e5;
@@ -160,7 +161,9 @@ async function countUser(user) {
     }
     const result = {};
     for (const [day, stats] of days) {
-        result[day] = [stats.ai, stats.chars, stats.user, stats.night, stats.group, 0, [...stats.cset].join(',')];
+        const ai = Math.min(stats.ai, DAILY_CAPS.ai);
+        result[day] = [ai, Math.min(stats.chars, DAILY_CAPS.chars), Math.min(stats.user, DAILY_CAPS.user),
+            Math.min(stats.night, ai), Math.min(stats.group, ai), 0, [...stats.cset].join(',')];
     }
     return result;
 }

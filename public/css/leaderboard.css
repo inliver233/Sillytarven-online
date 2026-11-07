@@ -313,6 +313,47 @@
     opacity: 0.75;
 }
 
+.leaderboard-remove {
+    flex-shrink: 0;
+    margin-left: auto;
+    padding: 1px 6px;
+    font-size: 0.8em;
+    color: var(--SmartThemeBodyColor);
+    background: none;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    opacity: 0.45;
+    cursor: pointer;
+}
+
+.leaderboard-remove:hover {
+    opacity: 1;
+    color: #ff7b72;
+    border-color: currentColor;
+}
+
+.leaderboard-removed {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.leaderboard-removed-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.leaderboard-removed-row .menu_button {
+    margin-left: auto;
+    width: auto;
+    padding: 2px 12px;
+}
+
+.leaderboard-weights {
+    margin-bottom: 8px !important;
+}
+
 .leaderboard-empty {
     padding: 40px 10px;
     text-align: center;
@@ -557,15 +598,32 @@
         height: 92dvh;
     }
 
+    /* 手机上一行放不下：十一个榜排成两行六列，图标在上、字在下，全部一眼看得到 */
     .leaderboard-metrics {
-        flex-wrap: nowrap;
-        overflow-x: auto;
-        scrollbar-width: none;
-        padding-bottom: 6px;
+        display: grid;
+        grid-template-columns: repeat(6, minmax(0, 1fr));
+        gap: 4px;
+        padding: 8px 8px 2px;
     }
 
-    .leaderboard-metrics::-webkit-scrollbar {
-        display: none;
+    .leaderboard-chip {
+        flex-direction: column;
+        justify-content: center;
+        gap: 2px;
+        min-width: 0;
+        padding: 5px 0;
+        font-size: 0.78em;
+        border-radius: 8px;
+    }
+
+    .leaderboard-chip i {
+        font-size: 1.2em;
+    }
+
+    .leaderboard-chip span {
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
     }
 
     .leaderboard-gap {
