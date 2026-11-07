@@ -103,6 +103,20 @@ export function readGitHead(directory) {
 }
 
 /**
+ * Whether a checkout's `git status --porcelain` lets the CDN stand in for it: nothing changed, or
+ * only source maps deleted. A past cleanup removed dist/*.map from many users' copies; the browser
+ * asks for a map only with DevTools open, and the CDN serves the committed one.
+ * @param {unknown} status Output of `git status --porcelain`
+ * @returns {boolean}
+ */
+export function isCdnCleanStatus(status) {
+    return String(status).split('\n').filter(line => line.trim()).every(line => {
+        const match = /^(?: D|D ) (.+)$/.exec(line);
+        return Boolean(match) && match[1].replace(/^"|"$/g, '').endsWith('.map');
+    });
+}
+
+/**
  * Runs git with a timeout, without optional locks (no index refresh writes).
  * @param {string} directory Repository
  * @param {string[]} args Arguments
@@ -215,7 +229,7 @@ export class ExtensionCdn {
             let clean = false;
             try {
                 const status = await this.git(directory, ['status', '--porcelain', '--untracked-files=no']);
-                clean = String(status).trim() === '';
+                clean = isCdnCleanStatus(status);
             } catch {
                 clean = false;
             }

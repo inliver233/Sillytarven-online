@@ -6,7 +6,7 @@ import path from 'node:path';
 import test, { after } from 'node:test';
 import vm from 'node:vm';
 
-import { ExtensionCdn, createExtensionCdnMiddleware, normalizeRepository, parseAllowedExtensions, readGitHead } from '../src/extension-cdn.js';
+import { ExtensionCdn, createExtensionCdnMiddleware, isCdnCleanStatus, normalizeRepository, parseAllowedExtensions, readGitHead } from '../src/extension-cdn.js';
 import { transformAppHtml } from '../src/asset-version.js';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'st-extension-cdn-'));
@@ -66,6 +66,21 @@ test('only clean checkouts of the listed repositories use the CDN, and it serves
     cdn.getUserExtensions(edited.extensions);
     await cdn.settle();
     assert.deepEqual(cdn.getUserExtensions(edited.extensions), []);
+
+    // Source maps deleted from the copy (a past disk cleanup) still count as clean; anything else does not.
+    const mapless = makeUser('erin', 'Helper', 'https://github.com/author/Helper', { 'index.js': 'export const v = 1;\n', 'dist/index.js.map': '{}' });
+    fs.rmSync(path.join(mapless.directory, 'dist', 'index.js.map'));
+    const missingCode = makeUser('frank', 'Helper', 'https://github.com/author/Helper', { 'index.js': 'export const v = 1;\n', 'dist/index.js': '1' });
+    fs.rmSync(path.join(missingCode.directory, 'dist', 'index.js'));
+    cdn.getUserExtensions(mapless.extensions);
+    cdn.getUserExtensions(missingCode.extensions);
+    await cdn.settle();
+    assert.deepEqual(cdn.getUserExtensions(mapless.extensions), [{ name: 'Helper', sha: mapless.sha }]);
+    assert.deepEqual(cdn.getUserExtensions(missingCode.extensions), [], 'a deleted script keeps the user on this server');
+    assert.equal(isCdnCleanStatus(''), true);
+    assert.equal(isCdnCleanStatus(' D dist/a.js.map\nD  "dist/b c.css.map"\n'), true);
+    assert.equal(isCdnCleanStatus(' D dist/a.js.map\n M index.js\n'), false);
+    assert.equal(isCdnCleanStatus(' M dist/a.js.map\n'), false, 'a changed map is a change');
 
     const list = () => [official.extensions, fork.extensions];
     assert.equal(String(await cdn.readFile('Helper', official.sha, 'lib/data.mjs', list)), 'export default 2;\n');
