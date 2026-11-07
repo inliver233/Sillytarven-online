@@ -1,7 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import express from 'express';
-import { requireAdminMiddleware } from '../users.js';
+import storage from 'node-persist';
+import { requireAdminMiddleware, toKey } from '../users.js';
+import { calculateUserStorageBytes, getStorageConfig, getUserLimitMiB, toMiB } from '../storage-quota.js';
 
 const ANNOUNCEMENTS_DIR = path.join(process.cwd(), 'data', 'announcements');
 const ANNOUNCEMENTS_FILE = path.join(ANNOUNCEMENTS_DIR, 'announcements.json');
@@ -92,15 +94,58 @@ router.get('/', requireAdminMiddleware, async (request, response) => {
     }
 });
 
+// 公告可用的存储占位符：{{storage_used}} / {{storage_limit}} / {{storage_remaining}}（MB）、{{storage_percent}}。
+const STORAGE_PLACEHOLDER = /\{\{\s*storage_(?:used|limit|remaining|percent)\s*\}\}/;
+
+/**
+ * @param {{ title?: string, content?: string }} announcement
+ * @returns {boolean}
+ */
+function usesStoragePlaceholder(announcement) {
+    return STORAGE_PLACEHOLDER.test(`${announcement.title ?? ''}\n${announcement.content ?? ''}`);
+}
+
+/**
+ * 当前用户的存储数值，供公告占位符使用；未登录或没开存储限制时为 null。
+ * @param {import('express').Request} request
+ * @returns {Promise<Record<string, string>|null>}
+ */
+export async function getStorageVariables(request) {
+    const handle = request.user?.profile?.handle;
+    const config = getStorageConfig();
+    if (!handle || !request.user?.directories || !config.enabled) return null;
+    const user = await storage.getItem(toKey(handle));
+    if (!user) return null;
+    const limitMiB = getUserLimitMiB(user, config) ?? 0;
+    const usedMiB = toMiB(await calculateUserStorageBytes(request.user.directories));
+    return {
+        storage_used: String(Math.round(usedMiB)),
+        storage_limit: String(Math.round(limitMiB)),
+        storage_remaining: String(Math.max(0, Math.round(limitMiB - usedMiB))),
+        storage_percent: String(limitMiB > 0 ? Math.min(100, Math.round(usedMiB / limitMiB * 100)) : 0),
+    };
+}
+
 // 获取当前有效公告（用户）
 router.get('/current', async (request, response) => {
     try {
         const announcements = loadAnnouncements();
 
         // 筛选有效的公告（仅检查启用状态）
-        const validAnnouncements = announcements.filter(announcement => {
+        let validAnnouncements = announcements.filter(announcement => {
             return announcement.enabled;
         });
+
+        // 用了存储占位符的公告附上这个用户的数值；正文不变，页面显示时再填（看没看过按原文算）。
+        if (validAnnouncements.some(usesStoragePlaceholder)) {
+            const variables = await getStorageVariables(request).catch(error => {
+                console.warn('Could not compute storage for announcements:', error);
+                return null;
+            });
+            if (variables) {
+                validAnnouncements = validAnnouncements.map(announcement => usesStoragePlaceholder(announcement) ? { ...announcement, variables } : announcement);
+            }
+        }
 
         response.json(validAnnouncements);
     } catch (error) {

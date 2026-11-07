@@ -1,6 +1,7 @@
 // 公告弹窗功能
 import { renderAnnouncementMarkdownInto } from './announcement-markdown.js';
 import { parseSeen, SEEN_ANNOUNCEMENTS_KEY, serializeSeen, unseenAnnouncements } from './announcement-seen.js';
+import { fillAnnouncementVariables } from './announcement-variables.js';
 import { eventSource, event_types } from './events.js';
 import { accountStorage } from './util/AccountStorage.js';
 
@@ -96,7 +97,7 @@ function showAnnouncementsPopup(announcements) {
 
     // 渲染 Markdown 内容
     document.querySelectorAll('#announcementsPopup .announcement-content').forEach((element, index) => {
-        renderAnnouncementMarkdownInto(element, announcements[index]?.content);
+        renderAnnouncementMarkdownInto(element, fillAnnouncementVariables(announcements[index]?.content, announcements[index]?.variables));
         pinTrailingButtons(element);
         element.addEventListener('scroll', () => updateScrollFade(element), { passive: true });
     });
@@ -125,7 +126,7 @@ function createAnnouncementsPopupHtml(announcements) {
     const announcementsHtml = announcements.map((announcement) => `
         <div class="announcement-item">
             <button type="button" class="announcement-header" aria-expanded="true">
-                <span class="announcement-title">${escapeHtml(announcement.title)}</span>
+                <span class="announcement-title">${escapeHtml(fillAnnouncementVariables(announcement.title, announcement.variables))}</span>
                 <small class="announcement-time">${new Date(announcement.createdAt).toLocaleDateString('zh-CN')}</small>
                 <i class="fa-solid fa-chevron-down announcement-chevron" aria-hidden="true"></i>
             </button>
