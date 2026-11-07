@@ -296,6 +296,20 @@ performance:
   assetCdn:
     baseUrl: ''
     timeZones: []
+    # Popular third-party extensions also loaded from the CDN, at their commit. Only a git
+    # checkout of one of the listed repositories (mirror proxies are fine) with no changes to
+    # tracked files qualifies; anything else loads from this server as before.
+    extensions:
+      - name: JS-Slash-Runner
+        repos: [github.com/N0VI028/JS-Slash-Runner, gitlab.com/novi028/JS-Slash-Runner]
+      - name: ST-Prompt-Template
+        repos: [github.com/zonde306/ST-Prompt-Template, gitlab.com/zonde306/ST-Prompt-Template, codeberg.org/zonde306/ST-Prompt-Template]
+      - name: LittleWhiteBox
+        repos: [github.com/RT15548/LittleWhiteBox]
+      - name: ST-BaiBai-Book
+        repos: [github.com/baibai-git/ST-BaiBai-Book]
+      - name: ST-BaiBai-Tools
+        repos: [github.com/baibai-git/ST-BaiBai-Tools]
   versionMemo:
     enabled: true
     ttlMs: 30000

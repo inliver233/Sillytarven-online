@@ -161,7 +161,8 @@ export function normalizeAssetCdnBaseUrl(value) {
  */
 function getAssetCdnScript(imports, cdn) {
     const origin = new URL(cdn.baseUrl).origin;
-    const options = JSON.stringify({ imports, cdn: cdn.baseUrl, origin, zones: cdn.timeZones }).replace(/</g, '\\u003c');
+    // thirdParty is filled in per user when the page is sent (popular extensions, see extension-cdn.js).
+    const options = JSON.stringify({ imports, cdn: cdn.baseUrl, origin, zones: cdn.timeZones, thirdParty: [] }).replace(/</g, '\\u003c');
     return `<script>(function (o) {
         var KEY = 'st-asset-cdn-failed', use = false, map = document.createElement('script'), mapped = {};
         try {
@@ -178,6 +179,25 @@ function getAssetCdnScript(imports, cdn) {
             if (use) mapped[o.origin + key] = versioned ? o.cdn + o.imports[key] : location.origin + o.imports[key];
         });
         if (use) {
+            // Popular third-party extensions at their commit on the mirror. Inside one, a relative
+            // import ("../../../extensions.js") resolves under its mirror folder and is sent on to
+            // the app's own module, to another mirrored extension, or to this server.
+            var thirdParty = {}, prefix = '/scripts/extensions/third-party/';
+            (o.thirdParty || []).forEach(function (ext) { thirdParty[ext.name] = o.cdn + '/v/e/' + ext.sha; });
+            Object.keys(thirdParty).forEach(function (name) {
+                mapped[prefix + name + '/'] = thirdParty[name] + prefix + name + '/';
+                mapped[o.origin + prefix + name + '/'] = thirdParty[name] + prefix + name + '/';
+            });
+            Object.keys(thirdParty).forEach(function (name) {
+                var base = thirdParty[name];
+                Object.keys(o.imports).forEach(function (key) {
+                    if (key.charAt(0) === '/') mapped[base + key] = mapped[key];
+                });
+                Object.keys(thirdParty).forEach(function (other) {
+                    mapped[base + prefix + other + '/'] = mapped[prefix + other + '/'];
+                });
+            });
+            window.__stAssetCdn = { thirdParty: thirdParty };
             var fail = function (reload) {
                 try { localStorage.setItem(KEY, String(Date.now())); } catch (e) { return; }
                 if (reload && !window.SillyTavern) location.reload();

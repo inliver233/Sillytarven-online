@@ -45,6 +45,7 @@ import {
 } from './users.js';
 
 import getWebpackServeMiddleware from './middleware/webpack-serve.js';
+import { ExtensionCdn, createExtensionCdnMiddleware, parseAllowedExtensions } from './extension-cdn.js';
 import {
     computeAssetVersion,
     createVersionedAssetsMiddleware,
@@ -316,7 +317,7 @@ if (!cliArgs.disableCsrf) {
 app.get('/', cacheBuster.middleware, (request, response) => {
     setPrivateNoStoreHeaders(response);
     if (request.session && (request.session.userId || request.session.handle)) {
-        return sendAppPage(response);
+        return sendAppPage(request, response);
     }
     return response.sendFile('welcome.html', { root: path.join(serverDirectory, 'public') });
 });
@@ -333,7 +334,7 @@ app.get('/app', cacheBuster.middleware, (request, response) => {
     if (shouldRedirectToLogin(request)) {
         return response.redirect(302, '/login');
     }
-    return sendAppPage(response);
+    return sendAppPage(request, response);
 });
 
 // Callback endpoint for OAuth PKCE flows (e.g. OpenRouter)
@@ -401,6 +402,21 @@ const publicDirectory = path.join(serverDirectory, 'public');
 const versionedAssetsEnabled = getConfigValue('performance.versionedAssets', true, 'boolean');
 const assetVersioning = { version: null, checkedAt: 0, pageKey: null, page: null };
 const assetCdn = getAssetCdnConfig();
+// Popular third-party extensions through the same CDN (see extension-cdn.js).
+const extensionCdn = new ExtensionCdn(assetCdn ? parseAllowedExtensions(getConfigValue('performance.assetCdn.extensions', [])) : []);
+let extensionDirectories = [];
+async function refreshExtensionDirectories() {
+    try {
+        const users = await getUserDirectoriesList();
+        extensionDirectories = [...users.map(directories => directories.extensions), path.join(publicDirectory, 'scripts', 'extensions', 'third-party')];
+    } catch (error) {
+        console.warn('Could not list extension folders for the CDN:', error);
+    }
+}
+if (extensionCdn.enabled) {
+    void refreshExtensionDirectories();
+    setInterval(() => void refreshExtensionDirectories(), 5 * 60 * 1000).unref?.();
+}
 
 /** @returns {{baseUrl: string, timeZones: string[]}|null} CDN mirror of /v/ (for browsers in timeZones, or all when empty), if configured */
 function getAssetCdnConfig() {
@@ -446,11 +462,24 @@ function addControllerAddress(html, url) {
 }
 
 /**
+ * Lists the user's popular third-party extensions that the page loads from the CDN.
+ * @param {string} page App page
+ * @param {import('express').Request} request Request
+ * @returns {string} Page
+ */
+function addUserCdnExtensions(page, request) {
+    if (!extensionCdn.enabled || !request.user?.directories?.extensions) return page;
+    const extensions = extensionCdn.getUserExtensions(request.user.directories.extensions);
+    if (!extensions.length) return page;
+    return page.replace('"thirdParty":[]', `"thirdParty":${JSON.stringify(extensions).replace(/</g, '\\u003c')}`);
+}
+
+/**
  * Sends index.html, with the import map when versioned assets are enabled.
  * Anything unexpected falls back to the page as it is on disk.
  * @param {import('express').Response} response Response
  */
-function sendAppPage(response) {
+function sendAppPage(request, response) {
     const controllerUrl = getControllerAddress();
     if (versionedAssetsEnabled) {
         try {
@@ -467,7 +496,7 @@ function sendAppPage(response) {
                 }
             }
             if (assetVersioning.page) {
-                return response.type('html').send(assetVersioning.page);
+                return response.type('html').send(addUserCdnExtensions(assetVersioning.page, request));
             }
         } catch (error) {
             console.warn('Could not version the app assets; serving the page as is.', error);
@@ -483,6 +512,7 @@ function sendAppPage(response) {
     return response.sendFile('index.html', { root: publicDirectory });
 }
 
+app.use(createExtensionCdnMiddleware(extensionCdn, () => extensionDirectories));
 app.use(createVersionedAssetsMiddleware(getAssetVersion));
 app.use(webpackMiddleware);
 app.use(userCssMiddleware);
