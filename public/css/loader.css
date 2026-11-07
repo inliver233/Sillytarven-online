@@ -191,7 +191,8 @@
     background: linear-gradient(90deg, #3b82f6 0%, #06b6d4 100%);
     border-radius: 99px;
     box-shadow: 0 0 12px rgba(59, 130, 246, 0.6);
-    transition: width 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+    /* 宽度由 index.html 的推进器每 50ms 更新一次，这里只把相邻两步连起来 */
+    transition: width 0.15s linear;
     will-change: width;
     overflow: hidden;
 }

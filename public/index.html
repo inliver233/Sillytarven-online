@@ -114,38 +114,41 @@
     </div>
     <script>
         /* 载入进度在两个阶段之间也往前走：向下一个卡点渐近、到不了它；有文件陆续下载完时走得更快。
-           只进不退；loader.js 的 updateLoaderProgress 设置阶段，hideLoader 到 100 时停。 */
+           到了新阶段不直接跳，而是在半秒左右快速追上去。只进不退；loader.js 的 updateLoaderProgress
+           设置阶段，到 100 时走满后停。 */
         (function () {
             var bar = document.getElementById('st-loader-progress-bar');
             var text = document.getElementById('st-loader-progress-text');
             // 阶段起点 -> 这一阶段最多走到哪（下一个容易卡住的点之前）
             var CEILINGS = [[5, 34], [35, 79], [80, 94], [95, 99]];
-            var from = 5, to = 34, startedAt = Date.now(), loaded = 0, shown = 5, timer = 0;
+            var stage = 5, from = 5, to = 34, startedAt = Date.now(), loaded = 0, shown = 5, timer = 0;
             var ceilingFor = function (p) {
                 var ceiling = p;
                 for (var i = 0; i < CEILINGS.length; i++) if (p >= CEILINGS[i][0]) ceiling = CEILINGS[i][1];
                 return Math.max(ceiling, p);
             };
-            var render = function () {
+            var tick = function () {
                 // 时间和下载完的文件数一起推进：网快就走得快，卡住了也还会慢慢动
                 var progressTime = (Date.now() - startedAt) / 1000 + loaded * 0.03;
-                var p = from + (to - from) * (1 - Math.exp(-progressTime / 8));
-                if (p <= shown + 0.05) return;
-                shown = p;
-                if (bar) bar.style.width = shown.toFixed(1) + '%';
+                var target = Math.max(stage, from + (to - from) * (1 - Math.exp(-progressTime / 8)));
+                if (target <= shown) return;
+                // 差得多就快步追（每帧补上三成、至少 1.5%），差一点就直接到位
+                shown += Math.min(target - shown, Math.max((target - shown) * 0.3, 1.5));
+                if (bar) bar.style.width = shown.toFixed(2) + '%';
                 if (text) text.textContent = Math.floor(shown) + '%';
+                if (shown >= 100) clearInterval(timer);
             };
             try {
                 new PerformanceObserver(function (list) { loaded += list.getEntries().length; }).observe({ type: 'resource', buffered: true });
             } catch (e) { /* 只按时间推进 */ }
-            timer = setInterval(render, 250);
+            timer = setInterval(tick, 50);
             window.stLoaderProgress = {
                 /** @param {number} p 阶段进度 */
                 set: function (p) {
-                    if (p >= 100) { clearInterval(timer); shown = 100; return; }
-                    shown = Math.max(shown, p);
-                    from = shown;
-                    to = Math.max(ceilingFor(p), shown);
+                    if (p <= stage) return;
+                    stage = p;
+                    from = Math.max(shown, p);
+                    to = p >= 100 ? 100 : Math.max(ceilingFor(p), from);
                     startedAt = Date.now();
                     loaded = 0;
                 },
