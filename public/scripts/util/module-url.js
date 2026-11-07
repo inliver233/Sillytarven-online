@@ -32,6 +32,23 @@ export function getExtensionModuleUrl(name, file) {
 }
 
 /**
+ * URL of an extension's stylesheet, the same for the preload hint and the <link> that applies it.
+ * Built-in styles carry the page's asset version as a query (a path prefix would break the
+ * relative font and image URLs inside them); a third-party one may be on the CDN mirror.
+ * @param {string} name Extension name
+ * @param {string} file Stylesheet inside the extension folder
+ * @returns {string} Stylesheet URL
+ */
+export function getExtensionStyleUrl(name, file) {
+    const url = `/scripts/extensions/${name}/${file}`;
+    if (name.startsWith('third-party')) {
+        return getVersionedAssetUrl(url);
+    }
+    const version = /\/v\/([0-9a-f]{6,64})\//.exec(MODULE_URL.pathname)?.[1];
+    return version ? `${url}?v=${version}` : url;
+}
+
+/**
  * URL of a built-in file under /scripts/ (template, manifest, locale, style) under the page's
  * asset version. The plain URL may be served from a CDN cache filled before a deploy:
  * an old extension manifest next to new scripts left built-in extensions inactive.

@@ -7,7 +7,7 @@ import sanitize from 'sanitize-filename';
 import { CheckRepoActions, default as simpleGit } from 'simple-git';
 
 import { PUBLIC_DIRECTORIES } from '../constants.js';
-import { getExtensionModuleGraph } from '../extension-module-graph.js';
+import { getExtensionModuleGraph, getExtensionTemplates } from '../extension-module-graph.js';
 import { KeyedMutex } from '../keyed-mutex.js';
 import { color, getConfigValue } from '../util.js';
 
@@ -725,10 +725,13 @@ router.get('/discover', function (request, response) {
 router.post('/module-graph', async function (request, response) {
     try {
         const names = Array.isArray(request.body?.names) ? request.body.names : [];
-        const modules = await getExtensionModuleGraph(names, request.user.directories.extensions);
-        return response.send({ modules });
+        const [modules, templates] = await Promise.all([
+            getExtensionModuleGraph(names, request.user.directories.extensions),
+            getExtensionTemplates(names, request.user.directories.extensions),
+        ]);
+        return response.send({ modules, templates });
     } catch (error) {
         console.warn('Could not map extension modules:', error);
-        return response.send({ modules: {} });
+        return response.send({ modules: {}, templates: {} });
     }
 });

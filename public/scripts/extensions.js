@@ -11,7 +11,7 @@ import { addLocaleData, getCurrentLocale, t } from './i18n.js';
 import { debounce_timeout } from './constants.js';
 import { accountStorage } from './util/AccountStorage.js';
 import { preloadExtensionResources } from './util/extension-resource-preload.js';
-import { getExtensionModuleUrl, getVersionedAssetUrl } from './util/module-url.js';
+import { getExtensionModuleUrl, getExtensionStyleUrl } from './util/module-url.js';
 import { getExtensionActivationPlan } from './util/extension-eligibility.js';
 import { SimpleMutex } from './util/SimpleMutex.js';
 import { power_user } from './power-user.js';
@@ -563,7 +563,7 @@ async function getExtensionModuleGraph(names) {
             return null;
         }
         const data = await response.json();
-        return data?.modules && typeof data.modules === 'object' ? data.modules : null;
+        return data && typeof data === 'object' ? data : null;
     } catch {
         return null;
     }
@@ -802,10 +802,7 @@ function addExtensionStyle(name, manifest) {
         // Built-in extension styles carry the page's asset version, like the page's own
         // stylesheets, so a deploy is not hidden behind the CDN/browser cache next to new scripts.
         // A popular third-party extension on the CDN mirror gets its style from there too.
-        const version = name.startsWith('third-party') ? null : import.meta.url.match(/\/v\/([0-9a-f]{6,64})\//)?.[1];
-        const url = name.startsWith('third-party')
-            ? getVersionedAssetUrl(`/scripts/extensions/${name}/${manifest.css}`)
-            : `/scripts/extensions/${name}/${manifest.css}${version ? `?v=${version}` : ''}`;
+        const url = getExtensionStyleUrl(name, manifest.css);
         const id = sanitizeSelector(`${name}-css`);
 
         if ($(`link[id="${id}"]`).length === 0) {
@@ -1851,7 +1848,10 @@ export async function loadExtensionSettings(settings, versionChanged, enableAuto
             });
             // Activation does not wait for it: hints that arrive late still help the extensions after.
             const preloads = resourcePreloads;
-            void moduleGraphRequest?.then(moduleGraph => preloads.preloadModules(moduleGraph));
+            void moduleGraphRequest?.then(graph => {
+                preloads.preloadModules(graph?.modules);
+                preloads.prefetchTemplates(graph?.templates);
+            });
         } catch (error) {
             console.warn('Could not preload extension resources. Continuing with normal activation.', error);
         }

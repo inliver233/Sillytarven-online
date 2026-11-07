@@ -1,7 +1,8 @@
-import { getExtensionModuleUrl } from './module-url.js';
+import { getExtensionModuleUrl, getExtensionStyleUrl, getVersionedAssetUrl } from './module-url.js';
 
 const DEFAULT_MAX_PRELOADS = 64;
 const DEFAULT_MAX_MODULE_PRELOADS = 400;
+const MAX_TEMPLATE_PREFETCHES = 200;
 export const EXTENSION_RESOURCE_PRELOAD_MIGRATION_VERSION = 1;
 
 /**
@@ -129,7 +130,7 @@ export function preloadExtensionResources(manifests, {
                 // Module hints must use the URL activation will load (versioned or not).
                 const href = resource.rel === 'modulepreload'
                     ? getExtensionModuleUrl(name, resource.file)
-                    : `/scripts/extensions/${name}/${resource.file}`;
+                    : getExtensionStyleUrl(name, resource.file);
                 link.href = href;
                 documentRef.head.appendChild(link);
                 links.push(link);
@@ -187,5 +188,41 @@ export function preloadExtensionResources(manifests, {
         return added;
     };
 
-    return { count: links.length, dispose, preloadModules };
+    let templatePrefetches = 0;
+    /**
+     * Fetches the HTML templates of the extensions into the HTTP cache. Each extension renders
+     * its templates while it activates, one after another, so without this every template is
+     * a round trip of its own on the startup path. The versioned URLs are cached for a year.
+     * @param {Record<string, string[]>|null} templates Template files per extension, relative to its folder
+     * @param {typeof fetch} [fetchFn] fetch implementation
+     * @returns {number} Templates requested
+     */
+    const prefetchTemplates = (templates, fetchFn = globalThis.fetch) => {
+        if (isDisposed() || !templates || typeof templates !== 'object' || Array.isArray(templates) || typeof fetchFn !== 'function') {
+            return 0;
+        }
+        let added = 0;
+        for (const name of included) {
+            const files = templates[name];
+            if (!Array.isArray(files)) {
+                continue;
+            }
+            for (const file of files) {
+                if (templatePrefetches >= MAX_TEMPLATE_PREFETCHES) {
+                    return added;
+                }
+                if (typeof file !== 'string' || !file.endsWith('.html') || file.startsWith('/') || file.split('/').includes('..')) {
+                    continue;
+                }
+                const url = getVersionedAssetUrl(`/scripts/extensions/${name}/${file}`);
+                // Same URL and mode as the template loader, so it is answered from the cache.
+                Promise.resolve().then(() => fetchFn(url)).catch(() => {});
+                templatePrefetches++;
+                added++;
+            }
+        }
+        return added;
+    };
+
+    return { count: links.length, dispose, preloadModules, prefetchTemplates };
 }

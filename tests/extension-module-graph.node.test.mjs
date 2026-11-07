@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test, { after } from 'node:test';
 
-import { findRelativeImports, getExtensionModuleGraph } from '../src/extension-module-graph.js';
+import { findRelativeImports, getExtensionModuleGraph, getExtensionTemplates } from '../src/extension-module-graph.js';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'st-extension-graph-'));
 after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -36,4 +36,19 @@ test('third-party extensions resolve files like the static route: user folder fi
 
     const graph = await getExtensionModuleGraph(['third-party/demo', 'third-party/..', 'unknown-extension'], userExtensions);
     assert.deepEqual(graph, { 'third-party/demo': ['src/a.js', 'src/nested/b.js'] });
+});
+
+test('extension templates are listed for prefetching: nested, without dependencies or hidden folders', async () => {
+    const user = path.join(root, 'templates-user', 'extensions');
+    write(path.join(user, 'Helper', 'manifest.json'), '{"js":"index.js"}');
+    write(path.join(user, 'Helper', 'settings.html'), '<div></div>');
+    write(path.join(user, 'Helper', 'html', 'popup.html'), '<div></div>');
+    write(path.join(user, 'Helper', 'node_modules', 'pkg', 'readme.html'), '');
+    write(path.join(user, 'Helper', '.git', 'description.html'), '');
+    write(path.join(user, 'Helper', 'index.js'), '');
+    const templates = await getExtensionTemplates(['third-party/Helper', 'regex', 'third-party/..', 'missing'], user);
+    assert.deepEqual(templates['third-party/Helper'], ['html/popup.html', 'settings.html']);
+    assert.ok(templates.regex.includes('dropdown.html'), 'built-in extensions are listed from the app folder');
+    assert.equal(templates['third-party/..'], undefined);
+    assert.equal(templates.missing, undefined);
 });

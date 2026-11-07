@@ -178,3 +178,31 @@ test('imported modules are preloaded for eligible extensions only, once, in load
     assert.equal(documentRef.appended.every(link => link.removed), true);
     assert.equal(result.preloadModules({ early: ['src/late.js'] }), 0);
 });
+
+test('extension templates are fetched into the cache for included extensions only', () => {
+    const documentRef = createFakeDocument();
+    const manifests = {
+        first: { js: 'index.js', loading_order: 1 },
+        second: { js: 'index.js', loading_order: 2 },
+        disabled: { js: 'index.js', loading_order: 3 },
+    };
+    const preloads = preloadExtensionResources(manifests, { documentRef, eligibleExtensions: ['first', 'second'] });
+    const fetched = [];
+    const fetchFn = url => { fetched.push(url); return Promise.resolve(); };
+    const added = preloads.prefetchTemplates({
+        first: ['settings.html', 'html/popup.html', '../secret.html', '/abs.html', 'script.js'],
+        second: ['dropdown.html'],
+        disabled: ['settings.html'],
+    }, fetchFn);
+    return Promise.resolve().then(() => {
+        assert.equal(added, 3);
+        assert.deepEqual(fetched, [
+            '/scripts/extensions/first/settings.html',
+            '/scripts/extensions/first/html/popup.html',
+            '/scripts/extensions/second/dropdown.html',
+        ]);
+        assert.equal(preloads.prefetchTemplates(null, fetchFn), 0);
+        preloads.dispose();
+        assert.equal(preloads.prefetchTemplates({ first: ['other.html'] }, fetchFn), 0, 'nothing after activation is over');
+    });
+});

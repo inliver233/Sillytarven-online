@@ -174,3 +174,61 @@ export async function getExtensionModuleGraph(names, userExtensionsDirectory) {
     }));
     return Object.fromEntries(entries.filter(([, files]) => files.length > 0));
 }
+
+const MAX_TEMPLATES_PER_EXTENSION = 40;
+const MAX_TEMPLATE_DEPTH = 3;
+const SKIPPED_TEMPLATE_FOLDERS = new Set(['.git', 'node_modules', 'test', 'tests', 'docs', 'src']);
+const templateCache = new Map();
+
+/**
+ * @param {string} root Extension folder
+ * @returns {Promise<string[]>} HTML files in the folder, relative to it
+ */
+async function collectTemplates(root) {
+    const files = [];
+    const walk = async (directory, relative, depth) => {
+        let entries;
+        try {
+            entries = await fs.promises.readdir(directory, { withFileTypes: true });
+        } catch {
+            return;
+        }
+        entries.sort((a, b) => a.name.localeCompare(b.name));
+        for (const entry of entries) {
+            if (files.length >= MAX_TEMPLATES_PER_EXTENSION) return;
+            const child = relative ? `${relative}/${entry.name}` : entry.name;
+            if (entry.isFile() && entry.name.endsWith('.html')) {
+                files.push(child);
+            } else if (entry.isDirectory() && depth < MAX_TEMPLATE_DEPTH && !SKIPPED_TEMPLATE_FOLDERS.has(entry.name) && !entry.name.startsWith('.')) {
+                await walk(path.join(directory, entry.name), child, depth + 1);
+            }
+        }
+    };
+    await walk(root, '', 0);
+    return files;
+}
+
+/**
+ * HTML templates of the extensions, for the page to fetch while extensions start activating.
+ * @param {string[]} names Extension names
+ * @param {string} userExtensionsDirectory The user's extensions folder
+ * @returns {Promise<Record<string, string[]>>} Template files per extension, relative to its folder
+ */
+export async function getExtensionTemplates(names, userExtensionsDirectory) {
+    const now = Date.now();
+    const unique = [...new Set(names.filter(name => typeof name === 'string'))].slice(0, 300);
+    const entries = await Promise.all(unique.map(async name => {
+        const roots = getExtensionRoots(name, userExtensionsDirectory);
+        if (!roots) return [name, []];
+        const root = roots.find(candidate => fs.existsSync(candidate));
+        if (!root) return [name, []];
+        const cached = templateCache.get(root);
+        if (cached && now - cached.at < RESULT_TTL_MS) {
+            return [name, cached.files];
+        }
+        const files = await collectTemplates(root);
+        remember(templateCache, root, { at: now, files }, MAX_CACHED_RESULTS);
+        return [name, files];
+    }));
+    return Object.fromEntries(entries.filter(([, files]) => files.length > 0));
+}
