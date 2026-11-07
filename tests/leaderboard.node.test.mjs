@@ -15,6 +15,7 @@ import {
     dayOf,
     discordIdOf,
     hourOf,
+    maskHandle,
     parseSendDate,
     signPeerRequest,
     verifyPeerRequest,
@@ -80,6 +81,18 @@ test('nicknames lose markup and invisible characters and are kept short', () => 
     assert.equal(cleanNickname('  <b>小  明</b>  '), 'b小 明/b');
     assert.equal(cleanNickname('a‮b​c'), 'abc');
     assert.equal(Array.from(cleanNickname('一二三四五六七八九十一二三四五六七八')).length, LIMITS.NICKNAME_MAX);
+    assert.equal(LIMITS.NICKNAME_MAX, 12, 'fits on one line on a phone');
+    assert.equal(cleanNickname('ne***45'), 'ne45', 'cannot pass for a starred-out account name');
+});
+
+test('anonymous people are their account name with the middle starred out', () => {
+    assert.equal(maskHandle('neverzaxiu-27245'), 'ne***45');
+    assert.equal(maskHandle('akari258'), 'ak***58');
+    assert.equal(maskHandle('abcdef'), 'ab***ef');
+    assert.equal(maskHandle('abcde'), 'a***e');
+    assert.equal(maskHandle('ab'), 'a***');
+    assert.equal(maskHandle('小明同学你好'), '小明***你好');
+    assert.equal(maskHandle(''), '***');
 });
 
 test('an AI reply counts only against a generation request, once, and grows while streaming', () => {
@@ -200,32 +213,33 @@ test('online time: gaps up to 10 minutes count, longer ones count a minute, 16 h
 
 test('everybody is anonymous by default; nicknames are unique and not official-looking; leaving keeps a private rank', () => {
     const { store } = makeStore();
-    for (const handle of ['a', 'b', 'c']) store.ensureAccount({ handle });
+    for (const handle of ['alice-10001', 'bobby-20002', 'carol-30003']) store.ensureAccount({ handle });
     const add = (handle, count) => {
         const stats = store.dayStats(store.accounts.get(handle), dayOf(NOON));
         stats.ai += count;
         store.touch(store.accounts.get(handle), stats);
     };
-    add('a', 5);
-    add('b', 9);
-    add('c', 7);
-    let view = board(store, 'chat', 'today', 'all', 'a');
-    assert.deepEqual(view.rows.map(row => row.value), [9, 7, 5]);
-    assert.ok(view.rows.every(row => row.anonymous && /·[0-9a-f]{4}$/.test(row.name)));
+    add('alice-10001', 5);
+    add('bobby-20002', 9);
+    add('carol-30003', 7);
+    let view = board(store, 'chat', 'today', 'all', 'alice-10001');
+    assert.deepEqual(view.rows.map(row => [row.name, row.value]), [['bo***02', 9], ['ca***03', 7], ['al***01', 5]]);
+    assert.ok(view.rows.every(row => row.anonymous && /^[0-9a-f]{10}$/.test(row.key)));
     assert.equal(view.me.rank, 3);
     assert.equal(view.me.gap, 2);
     assert.equal(view.me.explicit, false, 'not asked yet');
+    assert.equal(store.prefsOf('alice-10001').anonymousName, 'al***01');
 
-    assert.equal(store.setPrefs('b', { mode: 'public', nickname: '官方客服' }).error, 'nickname_reserved');
-    assert.ok(store.setPrefs('b', { mode: 'public', nickname: '小明' }).prefs);
-    assert.equal(store.setPrefs('c', { mode: 'public', nickname: ' 小明 ' }).error, 'nickname_taken');
-    assert.ok(store.setPrefs('c', { mode: 'none' }).prefs);
-    view = board(store, 'chat', 'today', 'all', 'c');
-    assert.deepEqual(view.rows.map(row => [row.name, row.value]), [['小明', 9], [store.anonymousName(store.personKey(store.accounts.get('a'))), 5]]);
+    assert.equal(store.setPrefs('bobby-20002', { mode: 'public', nickname: '官方客服' }).error, 'nickname_reserved');
+    assert.ok(store.setPrefs('bobby-20002', { mode: 'public', nickname: '小明' }).prefs);
+    assert.equal(store.setPrefs('carol-30003', { mode: 'public', nickname: ' 小明 ' }).error, 'nickname_taken');
+    assert.ok(store.setPrefs('carol-30003', { mode: 'none' }).prefs);
+    view = board(store, 'chat', 'today', 'all', 'carol-30003');
+    assert.deepEqual(view.rows.map(row => [row.name, row.value]), [['小明', 9], ['al***01', 5]]);
     assert.equal(view.me.rank, 2, 'the one who left still sees where they would be');
     assert.equal(view.me.mode, 'none');
-    // The labels never contain the account name.
-    assert.ok(!JSON.stringify(board(store)).includes('"a"'));
+    // The whole account name never shows.
+    assert.ok(!JSON.stringify(board(store)).includes('alice-10001'));
 });
 
 test('ties share a rank; streak, active days, variety and rookies', () => {
@@ -346,7 +360,7 @@ test('administrators take someone off the board on both sites; the latest decisi
     legacy.ensureAccount({ handle: 'honest' });
     modern.ensureAccount({ handle: 'cheat2', discord: '555555555555' });
     modern.ensureAccount({ handle: 'viewer' });
-    for (const [store, handle, count] of [[legacy, 'cheat', 900], [legacy, 'honest', 50], [modern, 'cheat2', 900]]) {
+    for (const [store, handle, count] of [[legacy, 'cheat', 900], [legacy, 'honest', 50], [modern, 'cheat2', 901]]) {
         const account = store.accounts.get(handle);
         const stats = store.dayStats(account, dayOf(NOON));
         stats.ai = count;
@@ -360,7 +374,7 @@ test('administrators take someone off the board on both sites; the latest decisi
     const adminView = legacy.board({ metric: 'chat', window: 'today', site: 'all', handle: 'boss' });
     assert.ok(adminView.rows.every(row => typeof row.id === 'string'), 'administrators see whom to act on');
     assert.ok(!('id' in legacy.board({ metric: 'chat', window: 'today', site: 'all', handle: 'honest' }).rows[0]), 'others do not');
-    const cheatId = adminView.rows.find(row => row.value === 1800).id;
+    const cheatId = adminView.rows.find(row => row.value === 1801).id;
     assert.equal(legacy.setBan('nobody', true), false);
     assert.ok(legacy.setBan(cheatId, true));
     sync();
@@ -414,7 +428,7 @@ test('two sites: the same Discord account is one person with both badges; change
         const view = store.board({ metric: 'chat', window: 'today', site: 'all', handle });
         assert.deepEqual(view.rows.map(row => [row.name, row.value, row.sites.join('+')]), [
             ['跨站的我', 9, 'legacy+modern'],
-            [store.anonymousName(legacy.personKey(legacy.accounts.get('old-other'))), 6, 'legacy'],
+            ['ol***er', 6, 'legacy'],
         ]);
         assert.equal(view.me.rank, 1);
         // Online time of one person is capped per day across both sites.
@@ -422,9 +436,8 @@ test('two sites: the same Discord account is one person with both badges; change
     }
     // The site filter ranks only what was done on that site.
     assert.deepEqual(modern.board({ metric: 'chat', window: 'today', site: 'modern', handle: 'new-me' }).rows.map(row => row.value), [5]);
-    // The anonymous name is the same on both sites.
-    const otherKey = legacy.personKey(legacy.accounts.get('old-other'));
-    assert.equal(legacy.anonymousName(otherKey), modern.anonymousName(otherKey));
+    // Only the starred-out name went over, and both sites show the same one.
+    assert.ok(!JSON.stringify(legacy.exportForPeer(-1, 'none')).includes('old-other'));
 
     // A delta carries only what changed; a removed account is dropped by the peer.
     const peer = modern.peers.get('https://legacy');
@@ -448,6 +461,44 @@ test('two sites: the same Discord account is one person with both badges; change
     modern.applyPeer('https://legacy', legacy.exportForPeer(modern.peers.get('https://legacy').version, legacy.epoch));
     assert.equal(modern.prefsOf('new-me').mode, 'anon');
     assert.equal(modern.prefsOf('new-me').explicit, true);
+});
+
+test('one person on two sites: the oldest account names them, badges show where the numbers came from, copied days count once', () => {
+    const legacy = makeStore('legacy').store;
+    const modern = makeStore('modern').store;
+    const today = dayOf(NOON);
+    legacy.ensureAccount({ handle: 'oldtimer-11111', discord: '777777777777', created: NOON - 300 * 864e5 });
+    modern.ensureAccount({ handle: 'newname-99999', discord: '777777777777', created: NOON - 30 * 864e5 });
+    modern.ensureAccount({ handle: 'stayer-22222', discord: '888888888888', created: NOON - 30 * 864e5 });
+    legacy.ensureAccount({ handle: 'idle-33333', discord: '888888888888', created: NOON - 200 * 864e5 });
+    const set = (store, handle, day, values) => {
+        const account = store.accounts.get(handle);
+        const stats = store.dayStats(account, day);
+        Object.assign(stats, values);
+        store.touch(account, stats);
+    };
+    // History copied to the new site with the account: the same numbers on the same days.
+    set(legacy, 'oldtimer-11111', today - 10, { ai: 40, chars: 8000, user: 35 });
+    set(modern, 'newname-99999', today - 10, { ai: 40, chars: 8000, user: 35 });
+    // Since then: on the new site only.
+    set(modern, 'newname-99999', today, { ai: 7, chars: 700, user: 6 });
+    // Someone with an idle old account: all of it on the new site.
+    set(modern, 'stayer-22222', today, { ai: 3, chars: 300, user: 3 });
+    modern.applyPeer('https://legacy', legacy.exportForPeer(-1, 'none'));
+    legacy.applyPeer('https://modern', modern.exportForPeer(-1, 'none'));
+    for (const [store, handle] of [[legacy, 'oldtimer-11111'], [modern, 'newname-99999']]) {
+        const all = store.board({ metric: 'chat', window: 'all', site: 'all', handle });
+        assert.deepEqual(all.rows.map(row => [row.name, row.value, row.sites.join('+')]), [
+            ['ol***11', 47, 'legacy+modern'],
+            ['id***33', 3, 'modern'],
+        ], 'copied days once; the idle account adds no badge; named after the oldest account');
+        const today_ = store.board({ metric: 'chat', window: 'today', site: 'all', handle });
+        assert.deepEqual(today_.rows.map(row => [row.value, row.sites.join('+')]), [[7, 'modern'], [3, 'modern']]);
+        assert.equal(all.me.name, 'ol***11');
+    }
+    // Looking at one site alone, each counts what it has.
+    assert.equal(modern.board({ metric: 'chat', window: 'all', site: 'modern', handle: 'newname-99999' }).me.value, 47);
+    assert.equal(modern.board({ metric: 'chat', window: 'all', site: 'legacy', handle: 'newname-99999' }).me.value, 40);
 });
 
 test('administrators are not ranked and not sent to the other site', () => {

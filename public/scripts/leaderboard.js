@@ -227,6 +227,7 @@ export async function openLeaderboard() {
 
 function closeLeaderboard() {
     if (!popup) return;
+    window.removeEventListener('resize', fitNames);
     clearInterval(pollTimer);
     pollTimer = null;
     const root = popup.root;
@@ -292,6 +293,7 @@ function buildPopup() {
     popup = { root, list, me, footer, hint, panel };
     updateControls();
     document.addEventListener('keydown', onKeydown, true);
+    window.addEventListener('resize', fitNames);
     requestAnimationFrame(() => root.classList.add('show'));
 }
 
@@ -371,37 +373,42 @@ function render(board) {
         fragment.append(h('div', { class: 'leaderboard-empty', text: view.window === 'today' ? '今天还没有人上榜，去聊两句就是第一名' : '这里还没有人上榜' }));
     }
     for (const row of rows) {
-        const before = lastValues.get(row.name);
-        values.set(row.name, row.value);
+        // 打码后的名字可能撞车，行按服务器给的 key 区分
+        const id = row.key ?? row.name;
+        const before = lastValues.get(id);
+        values.set(id, row.value);
         const bumped = lastValues.size > 0 && (before === undefined || row.value > before);
         const breakdown = row.parts ? formatScoreParts(row.parts, board.scoreParts) : '';
-        const expanded = !!breakdown && expandedRows.has(row.name);
+        const canRemove = !!(board.admin && row.id);
+        const expandable = !!breakdown || canRemove;
+        const expanded = expandable && expandedRows.has(id);
         const element = h('div', {
-            class: `leaderboard-row${row.rank <= 3 ? ` leaderboard-top leaderboard-top${row.rank}` : ''}${row.me ? ' leaderboard-row-me' : ''}${bumped ? ' leaderboard-bumped' : ''}${breakdown ? ' leaderboard-row-expandable' : ''}${expanded ? ' expanded' : ''}`,
+            class: `leaderboard-row${row.rank <= 3 ? ` leaderboard-top leaderboard-top${row.rank}` : ''}${row.me ? ' leaderboard-row-me' : ''}${bumped ? ' leaderboard-bumped' : ''}${expandable ? ' leaderboard-row-expandable' : ''}${expanded ? ' expanded' : ''}`,
             title: breakdown || null,
         },
         rankCell(row.rank),
         h('span', { class: 'leaderboard-name' },
-            h('span', { class: `leaderboard-name-text${row.anonymous ? ' leaderboard-anonymous' : ''}`, text: row.name, title: row.anonymous ? '匿名代号' : '' }),
+            h('span', { class: `leaderboard-name-text${row.anonymous ? ' leaderboard-anonymous' : ''}`, text: row.name, title: row.anonymous ? '匿名：账号打了码' : '' }),
             row.me ? h('span', { class: 'leaderboard-you', text: '我' }) : null,
-            ...siteBadges(row.sites),
-            board.admin && row.id ? h('button', {
+            ...siteBadges(row.sites)),
+        h('span', { class: 'leaderboard-value', text: formatLeaderboardValue(view.metric, row.value) }),
+        expandable ? h('span', { class: 'leaderboard-row-details' },
+            breakdown ? h('span', { class: 'leaderboard-row-parts', text: breakdown }) : null,
+            // 管理员的「移出」收在点开后的详情里，不占名字的地方
+            canRemove ? h('button', {
                 type: 'button',
                 class: 'leaderboard-remove',
-                title: '移出榜单（两个站都生效，可在 ⓘ 里恢复）',
                 onclick: event => {
                     event.stopPropagation();
                     void setRemoved(row.id, row.name, true);
                 },
-            }, h('i', { class: 'fa-solid fa-user-slash' })) : null),
-        h('span', { class: 'leaderboard-value', text: formatLeaderboardValue(view.metric, row.value) }),
-        breakdown ? h('span', { class: 'leaderboard-row-parts', text: breakdown }) : null);
-        if (breakdown) {
-            // 手机上没有悬停提示：点一下展开各项得分
+            }, h('i', { class: 'fa-solid fa-user-slash' }), h('span', { text: '移出榜单' })) : null) : null);
+        if (expandable) {
+            // 手机上没有悬停提示：点一下展开
             element.addEventListener('click', () => {
-                if (expandedRows.has(row.name)) expandedRows.delete(row.name);
-                else expandedRows.add(row.name);
-                element.classList.toggle('expanded', expandedRows.has(row.name));
+                if (expandedRows.has(id)) expandedRows.delete(id);
+                else expandedRows.add(id);
+                element.classList.toggle('expanded', expandedRows.has(id));
             });
         }
         fragment.append(element);
@@ -410,6 +417,22 @@ function render(board) {
     popup.list.replaceChildren(fragment);
     renderMe(board);
     renderFooter(board);
+    fitNames();
+}
+
+/**
+ * 名字不省略、不换行：放不下就把这个名字的字缩小到正好放下。
+ */
+function fitNames() {
+    if (!popup) return;
+    for (const box of popup.root.querySelectorAll('.leaderboard-name, .leaderboard-me-name')) {
+        const text = box.querySelector('.leaderboard-name-text, .leaderboard-me-name-text');
+        if (!(text instanceof HTMLElement)) continue;
+        text.style.fontSize = '';
+        for (let size = 1; box.scrollWidth > box.clientWidth + 1 && size > 0.6; size -= 0.05) {
+            text.style.fontSize = `${size.toFixed(2)}em`;
+        }
+    }
 }
 
 function renderMe(board) {
@@ -423,11 +446,12 @@ function renderMe(board) {
         ? '已被管理员移出榜单'
         : me.mode === 'none' ? '不上榜（只有你自己看得到）' : me.rank ? `第 ${me.rank} 名` : '还没上榜';
     const gap = me.rank && me.gap ? `距上一名还差 ${formatLeaderboardValue(view.metric, me.gap)}` : (me.rank === 1 ? '目前第一' : '');
-    popup.me.replaceChildren(
+    // replaceChildren 会把 null 当成文字「null」显示出来，没有的部分要先去掉
+    popup.me.replaceChildren(...[
         h('div', { class: 'leaderboard-me-main' },
             h('span', { class: 'leaderboard-me-rank', text: status }),
             h('span', { class: 'leaderboard-me-name' },
-                h('span', { class: me.mode === 'public' ? '' : 'leaderboard-anonymous', text: me.name }),
+                h('span', { class: `leaderboard-me-name-text${me.mode === 'public' ? '' : ' leaderboard-anonymous'}`, text: me.name }),
                 ...siteBadges(me.sites)),
             h('span', { class: 'leaderboard-me-value', text: formatLeaderboardValue(view.metric, me.value) })),
         me.parts ? h('div', { class: 'leaderboard-me-parts', text: formatScoreParts(me.parts, board.scoreParts) }) : null,
@@ -438,7 +462,8 @@ function renderMe(board) {
                 class: 'leaderboard-settings',
                 title: '改匿名、昵称或不上榜',
                 onclick: () => void openSettings(),
-            }, h('i', { class: 'fa-solid fa-user-gear' }), h('span', { text: MODE_TEXT[me.mode] ?? '设置' }))));
+            }, h('i', { class: 'fa-solid fa-user-gear' }), h('span', { text: MODE_TEXT[me.mode] ?? '设置' }))),
+    ].filter(Boolean));
 }
 
 function renderFooter(board) {
@@ -497,7 +522,7 @@ function showRules() {
             h('li', { text: '在综合榜点一下某一行，可以看到这个人每一项各得了多少分。' })),
         h('h4', { text: '各榜' }),
         h('ul', {},
-            h('li', { text: '两个站一起排：legacy 是老站，modern 是新站。两个站用同一个 Discord 账号的，算同一个人，名字后面两个标记都有。' }),
+            h('li', { text: '两个站一起排：legacy 是老站，modern 是新站。两个站用同一个 Discord 账号的，算同一个人。' }),
             h('li', { text: '聊天、字数：每次 AI 生成回复都算（重新生成、继续也算；继续只算新写的字）。导入、复制的旧聊天不算，没有真的发生成请求的回复也不算。' }),
             h('li', { text: '话痨：你发出去、并且让 AI 回了的消息。' }),
             h('li', { text: '时长：页面在用（有点击、输入、滚动）才计时，开着不动不算。' }),
@@ -505,7 +530,9 @@ function showRules() {
             h('li', { text: '博爱只统计聊过多少个不同的角色，不记录是谁。' }),
             h('li', { text: '今日、本周、本月按北京时间算，每周从周一开始。' }),
             h('li', { text: since ? `${since} 之前的聊天按现有聊天记录补算（删掉的不算）；时长从这天开始算。` : '上线之前的聊天按现有聊天记录补算（删掉的不算）；时长从上线开始算。' }),
-            h('li', { text: '默认匿名：代号是固定的，别人没法从代号知道你是谁。管理员不参与排行，可以把刷榜的人移出榜单。' })),
+            h('li', { text: '默认匿名：只显示打了码的账号（前两位和后两位，比如「ne***45」），看不到完整账号；两个站都有账号的，用注册最早的那个。也可以改成显示昵称，或者不上榜。' }),
+            h('li', { text: '名字后面的标记是这段时间的数据来自哪个站。两个站有完全一样的天（带着聊天记录换了站），只算一次。' }),
+            h('li', { text: '管理员不参与排行，可以把刷榜的人移出榜单（点一下那一行）。' })),
         removed ? h('h4', { text: '已移出榜单（只有管理员看得到）' }) : null,
         removed ? (removed.length
             ? h('div', { class: 'leaderboard-removed' }, ...removed.map(person => h('div', { class: 'leaderboard-removed-row' },
@@ -560,8 +587,8 @@ function showChoice(me, first) {
     const nickname = h('input', {
         type: 'text',
         class: 'text_pole leaderboard-nickname',
-        maxlength: 16,
-        placeholder: '起个昵称（最多 16 个字）',
+        maxlength: 12,
+        placeholder: '起个昵称（最多 12 个字）',
         value: me.nickname || '',
         onfocus: () => select('public'),
     });
@@ -571,7 +598,7 @@ function showChoice(me, first) {
         h('span', { class: 'leaderboard-option-text' }, h('b', { text: title }), h('small', { text: detail })),
         value === 'public' ? nickname : null);
     const options = h('div', { class: 'leaderboard-options' },
-        option('anon', `匿名参加（代号「${me.anonymousName}」）`, '别人只看到这个代号，看不到你的账号'),
+        option('anon', `匿名参加（显示为「${me.anonymousName}」）`, '只显示打了码的账号：前两位和后两位，中间是星号'),
         option('public', '显示昵称', '只显示你起的昵称和数字，不显示账号、角色和聊天内容'),
         option('none', '不上榜', '别人看不到你，你自己仍能看到自己排第几'));
     function select(value) {
@@ -609,7 +636,7 @@ function showChoice(me, first) {
     const both = (me.sites ?? []).length > 1;
     popup.panel.replaceChildren(h('div', { class: 'leaderboard-card' },
         h('h3', { text: first ? '要匿名参加排行榜吗？' : '排行榜设置' }),
-        first ? h('p', { text: '排行榜默认匿名参加：别人只会看到一个代号，不知道是你。' }) : null,
+        first ? h('p', { text: `排行榜默认匿名参加：别人只会看到打了码的账号「${me.anonymousName}」，看不到完整账号。` }) : null,
         first ? h('p', { text: '不匿名也完全没关系——只会显示你起的昵称和次数、字数这些数字，不会显示你的账号、角色或聊天内容。' }) : null,
         options,
         error,

@@ -243,9 +243,9 @@
     min-width: 0;
 }
 
-.leaderboard-name-text {
-    overflow: hidden;
-    text-overflow: ellipsis;
+.leaderboard-name-text,
+.leaderboard-me-name-text {
+    flex-shrink: 0;
     white-space: nowrap;
 }
 
@@ -293,16 +293,23 @@
     cursor: pointer;
 }
 
-.leaderboard-row-parts {
+.leaderboard-row-details {
     display: none;
     grid-column: 2 / -1;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+}
+
+.leaderboard-row.expanded .leaderboard-row-details {
+    display: flex;
+}
+
+.leaderboard-row-parts {
+    flex: 1 1 12em;
     font-size: 0.78em;
     line-height: 1.5;
     opacity: 0.75;
-}
-
-.leaderboard-row.expanded .leaderboard-row-parts {
-    display: block;
 }
 
 .leaderboard-me-parts {
@@ -314,22 +321,21 @@
 }
 
 .leaderboard-remove {
-    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
     margin-left: auto;
-    padding: 1px 6px;
+    padding: 2px 10px;
     font-size: 0.8em;
-    color: var(--SmartThemeBodyColor);
+    color: #ff7b72;
     background: none;
-    border: 1px solid transparent;
-    border-radius: 4px;
-    opacity: 0.45;
+    border: 1px solid currentColor;
+    border-radius: 6px;
     cursor: pointer;
 }
 
 .leaderboard-remove:hover {
-    opacity: 1;
-    color: #ff7b72;
-    border-color: currentColor;
+    background-color: rgba(255, 123, 114, 0.12);
 }
 
 .leaderboard-removed {
@@ -397,10 +403,9 @@
     white-space: nowrap;
 }
 
-.leaderboard-me-name > span:first-child {
-    min-width: 0;
+.leaderboard-name,
+.leaderboard-me-name {
     overflow: hidden;
-    text-overflow: ellipsis;
 }
 
 .leaderboard-me-value {
@@ -628,5 +633,26 @@
 
     .leaderboard-gap {
         display: none;
+    }
+
+    .leaderboard-list {
+        padding: 2px 6px 6px;
+    }
+
+    .leaderboard-row {
+        grid-template-columns: 2em minmax(0, 1fr) auto;
+        gap: 6px;
+        padding: 4px 6px;
+    }
+
+    .leaderboard-name,
+    .leaderboard-me-name {
+        gap: 3px;
+    }
+
+    .leaderboard-badge {
+        padding: 0 3px;
+        font-size: 0.62em;
+        letter-spacing: 0;
     }
 }
