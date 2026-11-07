@@ -241,6 +241,16 @@ test('a deploy changes the versions of the files it changed, and only those', ()
 
     write('css/x.css', 'body{color:red}');
     assert.notEqual(computeAssetManifest(root, null).styles['css/x.css'], first.styles['css/x.css']);
+
+    // lib.js is rebuilt with the same bytes whenever the server starts: its URL stays.
+    const libFile = path.join(root, 'dist-lib.js');
+    fs.writeFileSync(libFile, 'export const lib = 1;');
+    fs.utimesSync(libFile, old, old);
+    const built = computeAssetManifest(root, libFile).files['lib.js'];
+    fs.writeFileSync(libFile, 'export const lib = 1;');
+    assert.equal(computeAssetManifest(root, libFile).files['lib.js'], built);
+    fs.writeFileSync(libFile, 'export const lib = 2;');
+    assert.notEqual(computeAssetManifest(root, libFile).files['lib.js'], built);
 });
 
 test('the modules the page starts with are found from its entry modules', () => {

@@ -50,6 +50,24 @@ function getFileVersion(size, mtimeMs) {
     return crypto.createHash('sha256').update(`${size}:${Math.trunc(mtimeMs)}`).digest('hex').slice(0, 8);
 }
 
+/** @type {Map<string, {size: number, mtimeMs: number, version: string}>} */
+const contentVersions = new Map();
+
+/**
+ * Version of a generated file from its content: lib.js is written again (with a new
+ * modification time) every time the server starts, with the same bytes.
+ * @param {string} file File path
+ * @param {fs.Stats} stats Its stats
+ * @returns {string} Version
+ */
+function getContentVersion(file, stats) {
+    const cached = contentVersions.get(file);
+    if (cached?.size === stats.size && cached.mtimeMs === stats.mtimeMs) return cached.version;
+    const version = crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex').slice(0, 8);
+    contentVersions.set(file, { size: stats.size, mtimeMs: stats.mtimeMs, version });
+    return version;
+}
+
 /**
  * @param {string} directory Folder to walk
  * @param {(relative: string) => boolean} skip Folders to leave out
@@ -102,7 +120,7 @@ export function computeAssetManifest(publicDirectory, libFile) {
         try {
             if (file) {
                 const stats = fs.statSync(file);
-                into.set(name, getFileVersion(stats.size, stats.mtimeMs));
+                into.set(name, name === 'lib.js' ? getContentVersion(file, stats) : getFileVersion(stats.size, stats.mtimeMs));
             }
         } catch {
             // A missing file is simply not versioned.
