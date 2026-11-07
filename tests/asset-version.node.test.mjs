@@ -29,7 +29,7 @@ const MANIFEST = Object.freeze({
  * @param {string} page Page
  * @param {{zone?: string, storage?: Record<string, string>, importMaps?: boolean}} [browser] Time zone, localStorage, import map support
  */
-function runAssetScript(page, { zone = 'Asia/Shanghai', storage = {}, importMaps = true } = {}) {
+function runAssetScript(page, { zone = 'Asia/Shanghai', storage = {}, importMaps = true, language = 'zh-CN' } = {}) {
     const script = /<script>(\(function \(o\)[\s\S]*?)<\/script>/.exec(page)[1];
     const listeners = {};
     const inserted = [];
@@ -41,6 +41,7 @@ function runAssetScript(page, { zone = 'Asia/Shanghai', storage = {}, importMaps
         document: { createElement: element, currentScript: element('SCRIPT') },
         addEventListener: (type, listener) => { listeners[type] = listener; },
         location: { origin: 'https://example.org', reload: () => { context.reloaded = true; } },
+        navigator: { language },
         console: { warn: () => {} },
         reloaded: false,
     };
@@ -50,6 +51,7 @@ function runAssetScript(page, { zone = 'Asia/Shanghai', storage = {}, importMaps
     return {
         imports: map ? JSON.parse(map.textContent).imports : null,
         preloads: inserted.filter(item => item.rel === 'modulepreload').map(item => item.href),
+        fetchPreloads: inserted.filter(item => item.rel === 'preload').map(item => `${item.as} ${item.crossOrigin} ${item.href}`),
         urls: context.__stAssets.urls,
         listeners,
         storage,
@@ -98,6 +100,33 @@ test('index.html loads its modules through an import map of the file versions', 
     assert.equal(transformAppHtml(page, { manifest: MANIFEST }), null);
     assert.equal(transformAppHtml(html, { manifest: { ...MANIFEST, version: 'not-a-version' } }), null);
     assert.equal(transformAppHtml(html, {}), null);
+});
+
+test('the files the app fetches as it starts are downloaded with the modules', () => {
+    const manifest = {
+        ...MANIFEST,
+        files: {
+            ...MANIFEST.files,
+            'locales/lang.json': 'aaaaaaaa',
+            'locales/zh-cn.json': 'bbbbbbbb',
+            'locales/en.json': 'cccccccc',
+            'scripts/templates/welcome.html': 'dddddddd',
+            'scripts/extensions/memory/manifest.json': 'eeeeeeee',
+            'scripts/extensions/memory/settings.html': 'ffffffff',
+        },
+    };
+    const page = transformAppHtml('<html><head><meta charset="utf-8"></head><body><script type="module" src="script.js"></script></body></html>', { manifest });
+    const expected = [
+        'fetch anonymous /v/s/locales/lang.json?v=aaaaaaaa',
+        'fetch anonymous /v/s/scripts/templates/welcome.html?v=dddddddd',
+        'fetch anonymous /v/s/scripts/extensions/memory/manifest.json?v=eeeeeeee',
+    ];
+    assert.deepEqual(runAssetScript(page, { language: 'zh-CN' }).fetchPreloads, [...expected, 'fetch anonymous /v/s/locales/zh-cn.json?v=bbbbbbbb']);
+    assert.deepEqual(runAssetScript(page, { language: 'en-US' }).fetchPreloads, expected, 'English has no language file to fetch');
+    assert.deepEqual(runAssetScript(page, { language: 'xx-yy' }).fetchPreloads, expected, 'nor does a language without one');
+    assert.deepEqual(runAssetScript(page, { language: 'en-US', storage: { language: 'zh-cn' } }).fetchPreloads, [...expected, 'fetch anonymous /v/s/locales/zh-cn.json?v=bbbbbbbb'], 'the chosen language wins');
+    const mirrored = runAssetScript(transformAppHtml('<html><head></head><body></body></html>', { manifest, cdn: { baseUrl: 'https://s1.example.cn', timeZones: [] } }));
+    assert.ok(mirrored.fetchPreloads.includes('fetch anonymous https://s1.example.cn/v/s/locales/lang.json?v=aaaaaaaa'), 'from the mirror when the page uses it');
 });
 
 test('local stylesheets carry their version so a deploy reaches cached browsers', () => {

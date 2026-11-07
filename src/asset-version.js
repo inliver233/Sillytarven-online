@@ -33,6 +33,11 @@ const IMMUTABLE_CACHE_CONTROL = 'public, max-age=31536000, immutable';
 const ADDRESSED_FILE_PATTERN = /\.(?:m?js|html|json|css)$/;
 const MODULE_FILE_PATTERN = /\.m?js$/;
 const FILE_VERSION_PATTERN = /^[0-9a-f]{8}$/;
+/**
+ * Templates the app renders as it starts (see script.js), fetched up front with the modules.
+ * A name that no longer exists is simply skipped.
+ */
+const STARTUP_TEMPLATES = ['wandButton', 'wandMenu', 'help', 'hotkeys', 'formatting', 'welcomePrompt', 'assistantNote', 'welcome'];
 /** Entry modules of index.html; their static imports are what the page needs before it starts. */
 const ENTRY_MODULES = ['lib/structured-clone/monkey-patch.js', 'lib/swiped-events.js', 'lib/eventemitter.js', 'scripts/i18n.js', 'script.js'];
 
@@ -275,10 +280,17 @@ export function normalizeAssetCdnBaseUrl(value) {
  * @returns {string} Inline script that adds the import map
  */
 function getAssetScript(manifest, preload, cdn) {
+    // Files the app fetches as it starts: the language list, startup templates, built-in extension manifests.
+    const fetches = [
+        'locales/lang.json',
+        ...STARTUP_TEMPLATES.map(name => `scripts/templates/${name}.html`),
+        ...Object.keys(manifest.files).filter(name => /^scripts\/extensions\/[^/]+\/manifest\.json$/.test(name)),
+    ].filter(name => manifest.files[name]);
     // thirdParty is filled in per user when the page is sent (popular extensions, see extension-cdn.js).
     const options = JSON.stringify({
         files: manifest.files,
         preload: preload.filter(name => manifest.files[name]),
+        fetches,
         cdn: cdn?.baseUrl ?? '',
         origin: cdn ? new URL(cdn.baseUrl).origin : '',
         zones: cdn?.timeZones ?? [],
@@ -387,6 +399,23 @@ function getAssetScript(manifest, preload, cdn) {
         o.preload.forEach(function (path) {
             var link = document.createElement('link');
             link.rel = 'modulepreload';
+            link.href = urls['/' + path];
+            last.after(link);
+            last = link;
+        });
+        // The files the app fetches as it starts (and the page's language, chosen as i18n.js does),
+        // downloaded with the modules instead of after them.
+        var fetches = o.fetches.slice();
+        try {
+            var language = String(localStorage.getItem('language') || navigator.language || navigator.userLanguage || 'en').toLowerCase();
+            if (language.indexOf('en') !== 0) fetches.push('locales/' + language + '.json');
+        } catch (e) { /* no language file up front */ }
+        fetches.forEach(function (path) {
+            if (!urls['/' + path]) return;
+            var link = document.createElement('link');
+            link.rel = 'preload';
+            link.as = 'fetch';
+            link.crossOrigin = 'anonymous';
             link.href = urls['/' + path];
             last.after(link);
             last = link;

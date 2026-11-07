@@ -27,26 +27,16 @@ function getUrlSync(url) {
 }
 
 /**
- * Loads a URL content using XMLHttpRequest asynchronously.
+ * Loads a URL content asynchronously. With fetch, a template the page preloaded is used as is.
  * @param {string} url URL to load asynchronously
  * @returns {Promise<string>} Response text
  */
-function getUrlAsync(url) {
-    return new Promise((resolve, reject) => {
-        const request = new XMLHttpRequest();
-        request.open('GET', url, true);
-        request.onload = () => {
-            if (request.status >= 200 && request.status < 300) {
-                resolve(request.responseText);
-            } else {
-                reject(new Error(`Error loading ${url}: ${request.status} ${request.statusText}`));
-            }
-        };
-        request.onerror = () => {
-            reject(new Error(`Error loading ${url}: ${request.status} ${request.statusText}`));
-        };
-        request.send();
-    });
+async function getUrlAsync(url) {
+    const response = await fetch(url);
+    if (!response.ok) {
+        throw new Error(`Error loading ${url}: ${response.status} ${response.statusText}`);
+    }
+    return response.text();
 }
 
 /**
