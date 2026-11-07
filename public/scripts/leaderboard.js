@@ -47,15 +47,8 @@ const SITES = [
     { id: 'modern', label: 'modern' },
 ];
 const MODE_TEXT = {
-    anon: '匿名参加',
-    public: '显示昵称',
-    none: '不上榜',
-};
-const ERROR_TEXT = {
-    nickname_empty: '昵称不能是空的',
-    nickname_reserved: '这个昵称容易让人误会成官方，换一个吧',
-    nickname_taken: '这个昵称已经有人用了',
-    admin: '管理员不参与排行',
+    anon: '匿名',
+    public: '实名',
 };
 
 /** @type {boolean|null} 排行榜开没开（第一次报在用时知道） */
@@ -161,6 +154,7 @@ function setEnabled(value) {
     if (enabled === value) return;
     enabled = value;
     document.getElementById('option_leaderboard')?.classList.toggle('displayNone', !value);
+    if (value) setTimeout(() => void maybeShowLaunchNotice(), NOTICE_DELAY_MS);
 }
 
 function startActivityReports() {
@@ -219,7 +213,7 @@ export async function openLeaderboard() {
         }
         const me = response.ok ? await response.json() : null;
         // 两个站都还没选过：第一次打开问一下要不要匿名
-        if (popup && me && !me.admin && !me.explicit) showChoice(me, true);
+        if (popup && me && !me.explicit) showChoice(me, true);
     } catch {
         // 榜照样能看
     }
@@ -388,7 +382,7 @@ function render(board) {
         },
         rankCell(row.rank),
         h('span', { class: 'leaderboard-name' },
-            h('span', { class: `leaderboard-name-text${row.anonymous ? ' leaderboard-anonymous' : ''}`, text: row.name, title: row.anonymous ? '匿名：账号打了码' : '' }),
+            h('span', { class: `leaderboard-name-text${row.anonymous ? ' leaderboard-anonymous' : ''}`, text: row.name, title: row.anonymous ? '匿名' : '' }),
             row.me ? h('span', { class: 'leaderboard-you', text: '我' }) : null,
             ...siteBadges(row.sites)),
         h('span', { class: 'leaderboard-value', text: formatLeaderboardValue(view.metric, row.value) }),
@@ -438,13 +432,11 @@ function fitNames() {
 function renderMe(board) {
     if (!popup) return;
     const me = board.me;
-    if (board.admin || !me) {
-        popup.me.replaceChildren(h('span', { class: 'leaderboard-me-note', text: board.admin ? '管理员不参与排行' : '' }));
+    if (!me) {
+        popup.me.replaceChildren();
         return;
     }
-    const status = me.banned
-        ? '已被管理员移出榜单'
-        : me.mode === 'none' ? '不上榜（只有你自己看得到）' : me.rank ? `第 ${me.rank} 名` : '还没上榜';
+    const status = me.banned ? '已被管理员移出榜单' : me.rank ? `第 ${me.rank} 名` : '还没上榜';
     const gap = me.rank && me.gap ? `距上一名还差 ${formatLeaderboardValue(view.metric, me.gap)}` : (me.rank === 1 ? '目前第一' : '');
     // replaceChildren 会把 null 当成文字「null」显示出来，没有的部分要先去掉
     popup.me.replaceChildren(...[
@@ -460,7 +452,7 @@ function renderMe(board) {
             h('button', {
                 type: 'button',
                 class: 'leaderboard-settings',
-                title: '改匿名、昵称或不上榜',
+                title: '改成实名或匿名',
                 onclick: () => void openSettings(),
             }, h('i', { class: 'fa-solid fa-user-gear' }), h('span', { text: MODE_TEXT[me.mode] ?? '设置' }))),
     ].filter(Boolean));
@@ -481,7 +473,7 @@ function renderFooter(board) {
     popup.footer.textContent = parts.join(' · ');
 }
 
-// ---------- 设置：匿名 / 昵称 / 不上榜 ----------
+// ---------- 设置：实名 / 匿名 ----------
 
 function hidePanel() {
     popup?.panel.classList.add('displayNone');
@@ -530,9 +522,10 @@ function showRules() {
             h('li', { text: '博爱只统计聊过多少个不同的角色，不记录是谁。' }),
             h('li', { text: '今日、本周、本月按北京时间算，每周从周一开始。' }),
             h('li', { text: since ? `${since} 之前的聊天按现有聊天记录补算（删掉的不算）；时长从这天开始算。` : '上线之前的聊天按现有聊天记录补算（删掉的不算）；时长从上线开始算。' }),
-            h('li', { text: '默认匿名：只显示打了码的账号（前两位和后两位，比如「ne***45」），看不到完整账号；两个站都有账号的，用注册最早的那个。也可以改成显示昵称，或者不上榜。' }),
+            h('li', { text: '默认匿名，显示「匿名用户#编号」；选实名显示你的账号昵称加编号，比如「小明#1203」。' }),
+            h('li', { text: '编号每个账号一个、永久不变，两个站不会重复（老站单数、新站双数）；两个站都有账号的，用注册最早的那个账号的编号。' }),
             h('li', { text: '名字后面的标记是这段时间的数据来自哪个站。两个站有完全一样的天（带着聊天记录换了站），只算一次。' }),
-            h('li', { text: '管理员不参与排行，可以把刷榜的人移出榜单（点一下那一行）。' })),
+            h('li', { text: '管理员可以把刷榜的人移出榜单（点一下那一行）。' })),
         removed ? h('h4', { text: '已移出榜单（只有管理员看得到）' }) : null,
         removed ? (removed.length
             ? h('div', { class: 'leaderboard-removed' }, ...removed.map(person => h('div', { class: 'leaderboard-removed-row' },
@@ -578,29 +571,20 @@ async function openSettings() {
 }
 
 /**
- * @param {{mode: string, nickname: string, explicit: boolean, anonymousName: string, sites: string[]}} me
+ * @param {{mode: string, explicit: boolean, anonymousName: string, publicName: string, sites: string[]}} me
  * @param {boolean} first 第一次打开时的询问
  */
 function showChoice(me, first) {
     if (!popup) return;
-    let mode = me.explicit ? me.mode : 'anon';
-    const nickname = h('input', {
-        type: 'text',
-        class: 'text_pole leaderboard-nickname',
-        maxlength: 12,
-        placeholder: '起个昵称（最多 12 个字）',
-        value: me.nickname || '',
-        onfocus: () => select('public'),
-    });
+    // 没选过时先选中「实名」
+    let mode = me.explicit ? me.mode : 'public';
     const error = h('div', { class: 'leaderboard-error' });
     const option = (value, title, detail) => h('label', { class: 'leaderboard-option', 'data-mode': value },
         h('input', { type: 'radio', name: 'leaderboard-mode', value, onchange: () => select(value) }),
-        h('span', { class: 'leaderboard-option-text' }, h('b', { text: title }), h('small', { text: detail })),
-        value === 'public' ? nickname : null);
+        h('span', { class: 'leaderboard-option-text' }, h('b', { text: title }), h('small', { text: detail })));
     const options = h('div', { class: 'leaderboard-options' },
-        option('anon', `匿名参加（显示为「${me.anonymousName}」）`, '只显示打了码的账号：前两位和后两位，中间是星号'),
-        option('public', '显示昵称', '只显示你起的昵称和数字，不显示账号、角色和聊天内容'),
-        option('none', '不上榜', '别人看不到你，你自己仍能看到自己排第几'));
+        option('public', `实名（显示「${me.publicName}」）`, '你的账号昵称加编号，以后发奖励一眼就能找到你'),
+        option('anon', `匿名（显示「${me.anonymousName}」）`, '只显示「匿名用户」和你的编号'));
     function select(value) {
         mode = value;
         options.querySelectorAll('.leaderboard-option').forEach(item => {
@@ -612,21 +596,14 @@ function showChoice(me, first) {
         error.textContent = '';
     }
     async function save() {
-        const body = { mode, nickname: mode === 'public' ? String(nickname instanceof HTMLInputElement ? nickname.value : '') : '' };
-        if (mode === 'public' && !body.nickname.trim()) {
-            error.textContent = ERROR_TEXT.nickname_empty;
-            nickname.focus();
-            return;
-        }
         try {
-            const response = await fetch('/api/leaderboard/me', { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify(body) });
-            const data = await response.json().catch(() => ({}));
+            const response = await fetch('/api/leaderboard/me', { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify({ mode }) });
             if (!response.ok) {
-                error.textContent = ERROR_TEXT[data?.error] ?? '保存失败，请稍后再试';
+                error.textContent = '保存失败，请稍后再试';
                 return;
             }
             hidePanel();
-            toastr.success(mode === 'public' ? `之后排行榜上显示「${data.nickname}」` : mode === 'none' ? '已不上榜，只有你自己看得到自己的排名' : '已设为匿名参加');
+            toastr.success(`之后排行榜上显示「${mode === 'public' ? me.publicName : me.anonymousName}」`);
             boardVersion = '';
             void refresh();
         } catch {
@@ -635,9 +612,9 @@ function showChoice(me, first) {
     }
     const both = (me.sites ?? []).length > 1;
     popup.panel.replaceChildren(h('div', { class: 'leaderboard-card' },
-        h('h3', { text: first ? '要匿名参加排行榜吗？' : '排行榜设置' }),
-        first ? h('p', { text: `排行榜默认匿名参加：别人只会看到打了码的账号「${me.anonymousName}」，看不到完整账号。` }) : null,
-        first ? h('p', { text: '不匿名也完全没关系——只会显示你起的昵称和次数、字数这些数字，不会显示你的账号、角色或聊天内容。' }) : null,
+        h('h3', { text: first ? '你想怎么出现在榜上？' : '排行榜设置' }),
+        first ? h('p', { text: `不选的话默认匿名，显示「${me.anonymousName}」。` }) : null,
+        first ? h('p', { text: '实名也只显示你的账号昵称和编号、次数字数这些数字，不会显示你的角色或聊天内容。' }) : null,
         options,
         error,
         h('small', { class: 'leaderboard-note', text: both ? '你在两个站用的是同一个 Discord 账号，这个设置两个站一起生效。以后可以在榜单底部随时改。' : '以后可以在榜单底部随时改。' }),
@@ -646,6 +623,142 @@ function showChoice(me, first) {
             h('button', { type: 'button', class: 'menu_button leaderboard-primary', text: '确定', onclick: () => void save() }))));
     select(mode);
     popup.panel.classList.remove('displayNone');
+}
+
+// ---------- 上线公告：必须选「实名」或「匿名」，选过（哪个站都行）就不再出现 ----------
+
+/** 等别的启动弹窗先出来，免得两个叠在一起 */
+const NOTICE_DELAY_MS = 1500;
+let noticeChecked = false;
+
+/** 系统公告、通行密钥提示之类的弹窗还开着就先等着 */
+function screenIsBusy() {
+    return !!(document.getElementById('announcementsPopup') || document.querySelector('dialog.popup[open]') || popup);
+}
+
+async function maybeShowLaunchNotice() {
+    if (noticeChecked) return;
+    noticeChecked = true;
+    try {
+        await new Promise(resolve => {
+            if (!screenIsBusy()) return resolve();
+            const timer = setInterval(() => {
+                if (screenIsBusy()) return;
+                clearInterval(timer);
+                resolve();
+            }, 800);
+        });
+        // 等的时候可能已经在排行榜里或另一个站选过了：现在再问服务器
+        const response = await fetch('/api/leaderboard/me', { cache: 'no-store' });
+        if (!response.ok) return;
+        const me = await response.json();
+        if (me && !me.explicit && !screenIsBusy()) showLaunchNotice(me);
+    } catch {
+        // 下次打开页面再问
+    }
+}
+
+/**
+ * @param {{anonymousName: string, publicName: string}} me
+ */
+function showLaunchNotice(me) {
+    if (document.getElementById('leaderboardNotice')) return;
+    let failures = 0;
+    let saving = false;
+    const error = h('div', { class: 'leaderboard-notice-error', role: 'alert' });
+    const choice = (mode, recommended, title, detail) => h('button', {
+        type: 'button',
+        class: `leaderboard-notice-choice ${recommended ? 'leaderboard-notice-primary' : 'leaderboard-notice-secondary'}`,
+        'data-mode': mode,
+        onclick: event => void choose(mode, event.currentTarget),
+    },
+    recommended ? h('span', { class: 'leaderboard-notice-badge', text: '推荐' }) : null,
+    h('span', { class: 'leaderboard-notice-choice-title' },
+        h('i', { class: `fa-solid ${recommended ? 'fa-user-check' : 'fa-user-secret'}` }),
+        h('span', { text: title })),
+    h('span', { class: 'leaderboard-notice-choice-detail', text: detail }));
+    // 一直保存不了也不能把人卡在这里：失败两次后给个出口，下次打开页面再问
+    const skip = h('button', { type: 'button', class: 'leaderboard-notice-skip displayNone', text: '先跳过，下次再选', onclick: () => close() });
+    const root = h('div', { id: 'leaderboardNotice', class: 'leaderboard-notice-overlay', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'leaderboardNoticeTitle' },
+        h('div', { class: 'leaderboard-notice' },
+            h('div', { class: 'leaderboard-notice-hero' },
+                h('i', { class: 'fa-solid fa-trophy leaderboard-notice-trophy' }),
+                h('h2', { id: 'leaderboardNoticeTitle', text: '排行榜上线啦' }),
+                h('p', { text: '两个站一起排名 · 每 3 秒实时更新' })),
+            h('ul', { class: 'leaderboard-notice-points' },
+                h('li', {},
+                    h('i', { class: 'fa-solid fa-ranking-star' }),
+                    h('span', {}, '综合、聊天、字数、时长、夜猫子……', h('span', { class: 'leaderboard-notice-nowrap', text: '11 个榜' }), '，看看你排第几')),
+                h('li', {},
+                    h('i', { class: 'fa-solid fa-location-dot' }),
+                    h('span', {},
+                        '入口在',
+                        h('b', { text: '左下角' }),
+                        '：点输入框左边的 ',
+                        // 「☰ → 排行榜」不拆开换行
+                        h('span', { class: 'leaderboard-notice-nowrap' },
+                            h('span', { class: 'leaderboard-notice-key' }, h('i', { class: 'fa-solid fa-bars' })),
+                            ' → ',
+                            h('b', { text: '排行榜' })))),
+                h('li', {},
+                    h('i', { class: 'fa-solid fa-gift' }),
+                    h('span', {}, '以后可能会', h('b', { text: '按排行榜发放奖励' })))),
+            h('div', { class: 'leaderboard-notice-question', text: '你想怎么出现在榜上？' }),
+            h('div', { class: 'leaderboard-notice-choices' },
+                choice('public', true, '实名参加', `榜上显示你的昵称「${me.publicName}」，以后发奖励一眼就能找到你`),
+                choice('anon', false, '匿名参加', `榜上显示「${me.anonymousName}」`)),
+            error,
+            h('small', { class: 'leaderboard-notice-note', text: '昵称后面的编号每人一个、不会重复。选了以后随时能在 排行榜 → 底部「设置」里改。' }),
+            skip));
+
+    function close() {
+        document.removeEventListener('keydown', swallowEscape, true);
+        root.classList.remove('show');
+        setTimeout(() => root.remove(), 250);
+    }
+
+    /** 不能用 Esc 关掉，也别让 Esc 去关后面的东西 */
+    function swallowEscape(event) {
+        if (event.key !== 'Escape') return;
+        event.preventDefault();
+        event.stopPropagation();
+    }
+
+    /**
+     * @param {string} mode
+     * @param {HTMLElement} button
+     */
+    async function choose(mode, button) {
+        if (saving) return;
+        saving = true;
+        const buttons = [...root.querySelectorAll('.leaderboard-notice-choice')];
+        buttons.forEach(item => item.toggleAttribute('disabled', true));
+        button.classList.add('saving');
+        const title = button.querySelector('.leaderboard-notice-choice-title span');
+        const original = title?.textContent ?? '';
+        if (title) title.textContent = '保存中…';
+        error.textContent = '';
+        try {
+            const response = await fetch('/api/leaderboard/me', { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify({ mode }) });
+            // 排行榜被关了：问也没用，直接关掉
+            if (response.status === 404) return close();
+            if (!response.ok) throw new Error(`服务器返回 ${response.status}`);
+            close();
+            toastr.success(`榜上会显示「${mode === 'public' ? me.publicName : me.anonymousName}」`, '排行榜', { timeOut: 6000 });
+        } catch (failure) {
+            failures++;
+            error.textContent = `没保存上（${failure instanceof Error && failure.message !== 'Failed to fetch' ? failure.message : '网络不太好'}），再点一次试试`;
+            if (failures >= 2) skip.classList.remove('displayNone');
+            buttons.forEach(item => item.toggleAttribute('disabled', false));
+            button.classList.remove('saving');
+            if (title) title.textContent = original;
+            saving = false;
+        }
+    }
+
+    document.addEventListener('keydown', swallowEscape, true);
+    document.body.append(root);
+    requestAnimationFrame(() => root.classList.add('show'));
 }
 
 // 排在最前面：后面的监听器可能弹窗等用户点（比如通行密钥提示），不能让它们挡住菜单项

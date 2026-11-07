@@ -8,11 +8,12 @@ import crypto from 'node:crypto';
  * One person with an account on both sites (the same Discord account) is one entry: the sites
  * only ever exchange a keyed hash of the Discord id, never the id or the account name.
  *
- * Privacy: everybody takes part anonymously, shown as their account name with the middle starred
- * out ("ne***45"; the sites exchange only that) until they choose otherwise; they can show a
- * nickname or leave the board. The latest
- * choice made on either site counts. Accounts that left are still counted for their own rank,
- * which only they see. Administrators are not ranked.
+ * Names: every account gets a number once (odd on legacy, even on modern, so never the same
+ * twice) and keeps it. Everybody is on the board, as "匿名用户#<number>" until they choose real
+ * name (实名): their account's display name with the number ("小明#1203", whatever the name is:
+ * that is up to them). Someone with accounts on both sites goes by the number of the older one.
+ * The latest choice made on either site counts; a display name goes to the other site only for
+ * someone who chose real name. Administrators are ranked like everybody.
  *
  * Counting is meant to be hard to inflate:
  * - an AI reply counts only against a generation request this user made around that time (a
@@ -31,7 +32,9 @@ export const SITES = Object.freeze(['legacy', 'modern']);
 export const SITE_FILTERS = Object.freeze(['all', ...SITES]);
 export const METRICS = Object.freeze(['score', 'chat', 'words', 'online', 'talk', 'active', 'streak', 'night', 'variety', 'group', 'rookie']);
 export const WINDOWS = Object.freeze(['today', 'week', 'month', 'all']);
-export const MODES = Object.freeze(['anon', 'public', 'none']);
+/** anon: 匿名用户#number; public: real name, the account's display name with the number. Nobody can leave the board. */
+export const MODES = Object.freeze(['anon', 'public']);
+export const ANONYMOUS_NAME = '匿名用户';
 
 const DAY_MS = 864e5;
 const BEIJING_OFFSET_MS = 8 * 3600e3;
@@ -62,12 +65,12 @@ const ONLINE_GAP_MS = 10 * 60e3;
 const ONLINE_MIN_CREDIT_MS = 60e3;
 const ONLINE_DAY_CAP_MS = 16 * 3600e3;
 const ROOKIE_DAYS = 30;
-const NICKNAME_MAX = 12;
+/** Longer display names are shortened (with the number added they must fit on a phone). */
+const NAME_MAX = 16;
 const MAX_ROWS = 50;
 /** Rankings are recomputed at most this often while the numbers keep changing. */
 const BOARD_RECOMPUTE_MS = 1000;
 const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
-const RESERVED_NICKNAME = /管理|官方|系统|客服|站长|admin|staff|moderator|system|official/i;
 
 /**
  * @param {number} ts Time in ms
@@ -142,46 +145,37 @@ export function discordIdOf(user) {
 }
 
 /**
- * @param {unknown} value Requested nickname
- * @returns {string} Nickname safe to show ('' when unusable)
+ * @param {unknown} value A display name
+ * @returns {string} Safe to show on the board ('' when nothing is left)
  */
-export function cleanNickname(value) {
+export function cleanName(value) {
     return Array.from(String(value ?? '')
         .normalize('NFKC')
-        // "*" too: a nickname must not pass for someone's starred-out account name.
-        .replace(/[\u0000-\u001f\u007f<>&"'`\\*\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g, '')
+        .replace(/[\u0000-\u001f\u007f<>&"'`\\#\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g, '')
         .replace(/\s+/g, ' ')
         .trim())
-        .slice(0, NICKNAME_MAX)
+        .slice(0, NAME_MAX)
         .join('')
         .trim();
 }
 
 /**
- * An account name with the middle starred out, the way people are shown anonymously: the first
- * and last two characters stay ("neverzaxiu-27245" → "ne***45"; short names keep less).
- * @param {unknown} handle
+ * How someone is shown on the board.
+ * @param {{mode: string}} prefs
+ * @param {string} name Display name (for real name)
+ * @param {number|null} number
  * @returns {string}
  */
-export function maskHandle(handle) {
-    const chars = Array.from(String(handle ?? ''));
-    if (chars.length <= 2) return `${chars[0] ?? ''}***`;
-    if (chars.length <= 5) return `${chars[0]}***${chars[chars.length - 1]}`;
-    return `${chars.slice(0, 2).join('')}***${chars.slice(-2).join('')}`;
+export function numberedName(prefs, name, number) {
+    const tag = Number.isFinite(number) ? `#${number}` : '';
+    return prefs.mode === 'public' && name ? `${name}${tag}` : `${ANONYMOUS_NAME}${tag}`;
 }
-
-const ADJECTIVES = ['困倦的', '快乐的', '安静的', '好奇的', '勇敢的', '温柔的', '迷路的', '认真的', '害羞的', '慵懒的', '机灵的', '倔强的',
-    '优雅的', '冒失的', '神秘的', '贪吃的', '爱笑的', '发呆的', '沉思的', '热情的', '淡定的', '迷糊的', '执着的', '浪漫的',
-    '活泼的', '谨慎的', '自由的', '孤独的', '闪亮的', '朦胧的', '清醒的', '跳跃的'];
-const ANIMALS = ['水獭', '橘猫', '狐狸', '海豹', '企鹅', '仓鼠', '刺猬', '松鼠', '树懒', '浣熊', '柴犬', '兔子', '考拉', '小熊猫',
-    '猫头鹰', '水母', '海豚', '鲸鱼', '鹦鹉', '羊驼', '小鹿', '狸猫', '雪豹', '白鹤', '萤火虫', '蜗牛', '章鱼', '河豚',
-    '麻雀', '金鱼', '团子', '星星'];
 
 /**
  * @typedef {{ai: number, chars: number, user: number, night: number, group: number, online: number, cset: string[], v: number}} DayStats
  * @typedef {{mode: string, nickname: string, explicit: boolean, updatedAt: number}} Prefs
- * @typedef {{handle: string, created: number, discord: string|null, admin: boolean, prefs: Prefs, days: Map<number, DayStats>, v: number}} Account
- * @typedef {{key: string, created: number, prefs: Prefs, days: Map<number, DayStats>}} RemoteAccount
+ * @typedef {{handle: string, name: string, number: number, created: number, discord: string|null, admin: boolean, prefs: Prefs, days: Map<number, DayStats>, v: number}} Account
+ * @typedef {{key: string, number: number|null, name: string, created: number, prefs: Prefs, days: Map<number, DayStats>}} RemoteAccount
  * @typedef {{site: string, epoch: string, version: number, accounts: Map<string, RemoteAccount>, syncedAt: number, error: string}} Peer
  * @typedef {{ts: number, len: number, tail: string, counted: boolean, name: string}} RecentMessage
  * @typedef {{recent: Map<string, RecentMessage>, credits: number[], generations: {at: number, w: number}[], pending: {ts: number}[], ai: number[], user: number[], offset: number, lastActivity: number}} LiveState
@@ -239,7 +233,6 @@ export function compositeScore(values, best) {
     if (!weights) return { score: 0, parts: points.map(() => null) };
     return { score: 100 * total / weights, parts: points.map(point => point === null ? null : 100 * point / weights) };
 }
-const nicknameKey = nickname => nickname.normalize('NFKC').toLowerCase().replace(/\s+/g, '');
 
 /** A day as an array, for the state file and the peers. */
 const packDay = (day, stats) => [day, stats.ai, stats.chars, stats.user, stats.night, stats.group, Math.round(stats.online), stats.cset.join(',')];
@@ -253,11 +246,12 @@ const unpackDay = row => ({
     cset: row[7] ? String(row[7]).split(',').filter(Boolean).slice(0, MAX_CHARACTERS_PER_DAY) : [],
     v: 0,
 });
-const cleanPrefs = prefs => {
-    const mode = MODES.includes(prefs?.mode) ? prefs.mode : 'anon';
-    const nickname = mode === 'public' ? cleanNickname(prefs?.nickname) : '';
-    return { mode: mode === 'public' && !nickname ? 'anon' : mode, nickname, explicit: !!prefs?.explicit, updatedAt: Number(prefs?.updatedAt) || 0 };
-};
+const cleanPrefs = prefs => ({
+    mode: MODES.includes(prefs?.mode) ? prefs.mode : 'anon',
+    nickname: '',
+    explicit: !!prefs?.explicit,
+    updatedAt: Number(prefs?.updatedAt) || 0,
+});
 
 /**
  * @param {unknown} rows [key, banned (0/1), at][]
@@ -302,6 +296,8 @@ export class LeaderboardStore {
         this.peers = new Map();
         /** @type {Map<string, {banned: boolean, at: number}>} administrators' decisions made on this site, by person */
         this.bans = new Map();
+        /** The last number given to an account here (odd on legacy, even on modern). */
+        this.lastNumber = this.firstNumber() - SITES.length;
         /** @type {Map<string, any>} */
         this.boardCache = new Map();
         this.recomputeMs = recomputeMs;
@@ -322,16 +318,15 @@ export class LeaderboardStore {
         return this.hash(account.discord ? `discord:${account.discord}` : `${this.site}:${account.handle}`).slice(0, 24);
     }
 
-    /**
-     * @param {string} personKey
-     * @returns {string} Anonymous name, the same on both sites
-     */
-    anonymousName(personKey) {
-        const digest = this.hash(`label:${personKey}`);
-        const adjective = ADJECTIVES[parseInt(digest.slice(0, 2), 16) % ADJECTIVES.length];
-        const animal = ANIMALS[parseInt(digest.slice(2, 4), 16) % ANIMALS.length];
-        // 32 × 32 × 65536 names: among a few thousand people two alike are unlikely.
-        return `${adjective}${animal}·${digest.slice(4, 8)}`;
+    /** @returns {number} This site's first number (1 on legacy, 2 on modern) */
+    firstNumber() {
+        return SITES.indexOf(this.site) + 1;
+    }
+
+    /** @returns {number} A number no account on either site has had */
+    nextNumber() {
+        this.lastNumber += SITES.length;
+        return this.lastNumber;
     }
 
     /** @param {string} name Character name @returns {string} */
@@ -360,11 +355,15 @@ export class LeaderboardStore {
         const created = Number(user.created) || account.created;
         const discord = user.discord ?? null;
         const admin = !!user.admin;
-        if (account.created === created && account.discord === discord && account.admin === admin) return;
-        // The peers know the account by its old key (or must forget it now that it is not ranked).
-        if (account.discord !== discord || (admin && !account.admin)) {
-            this.tombstones.push({ key: this.personKey(account), v: this.bump() });
+        const name = user.name === undefined ? account.name : cleanName(user.name);
+        if (name !== account.name) {
+            // Shown (and sent to the other site) for real name.
+            account.name = name;
+            account.v = this.bump();
         }
+        if (account.created === created && account.discord === discord && account.admin === admin) return;
+        // The peers know the account by its old key.
+        if (account.discord !== discord) this.tombstones.push({ key: this.personKey(account), v: this.bump() });
         account.created = created;
         account.discord = discord;
         account.admin = admin;
@@ -375,14 +374,14 @@ export class LeaderboardStore {
 
     /**
      * The account of a signed-in user, added if it is new.
-     * @param {{handle: string, created?: number, admin?: boolean, discord?: string|null}} user
+     * @param {{handle: string, name?: string, created?: number, admin?: boolean, discord?: string|null}} user
      * @returns {Account|null}
      */
     ensureAccount(user) {
         if (!user?.handle) return null;
         let account = this.accounts.get(user.handle);
         if (!account) {
-            account = { handle: user.handle, created: Number(user.created) || 0, discord: user.discord ?? null, admin: !!user.admin, prefs: defaultPrefs(), days: new Map(), v: 0 };
+            account = { handle: user.handle, name: cleanName(user.name), number: this.nextNumber(), created: Number(user.created) || 0, discord: user.discord ?? null, admin: !!user.admin, prefs: defaultPrefs(), days: new Map(), v: 0 };
             this.accounts.set(user.handle, account);
             account.v = this.bump();
             return account;
@@ -407,7 +406,7 @@ export class LeaderboardStore {
             this.accounts.delete(handle);
             this.live.delete(handle);
             this.backfilled.delete(handle);
-            if (!account.admin) this.tombstones.push({ key: this.personKey(account), v: this.bump() });
+            this.tombstones.push({ key: this.personKey(account), v: this.bump() });
         }
         if (this.tombstones.length > 5000) this.tombstones.splice(0, this.tombstones.length - 5000);
     }
@@ -467,7 +466,7 @@ export class LeaderboardStore {
      */
     recordGeneration(handle, at = this.now()) {
         const account = this.accounts.get(handle);
-        if (!account || account.admin) return;
+        if (!account) return;
         const state = this.liveOf(handle);
         // Two requests in the same millisecond still make two credits (see revokeGeneration).
         while (state.credits.includes(at)) at++;
@@ -508,7 +507,7 @@ export class LeaderboardStore {
      */
     recordActivity(handle, at = this.now()) {
         const account = this.accounts.get(handle);
-        if (!account || account.admin) return;
+        if (!account) return;
         const state = this.liveOf(handle);
         const gap = state.lastActivity ? at - state.lastActivity : Infinity;
         if (gap < 0) return;
@@ -560,7 +559,7 @@ export class LeaderboardStore {
      */
     recordMessages(handle, messages, { isGroup = false, fromStart = false, at = this.now() } = {}) {
         const account = this.accounts.get(handle);
-        if (!account || account.admin || !Array.isArray(messages)) return 0;
+        if (!account || !Array.isArray(messages)) return 0;
         const state = this.liveOf(handle);
         const recent = state.recent;
         for (const [key, entry] of recent) {
@@ -672,26 +671,16 @@ export class LeaderboardStore {
 
     /**
      * @param {string} handle
-     * @param {{mode?: unknown, nickname?: unknown}} prefs
+     * @param {{mode?: unknown}} prefs
      * @returns {{prefs?: Prefs, error?: string}}
      */
-    setPrefs(handle, { mode, nickname }) {
+    setPrefs(handle, { mode }) {
         const account = this.accounts.get(handle);
         if (!account) return { error: 'unknown_account' };
         if (!MODES.includes(String(mode))) return { error: 'bad_mode' };
-        const clean = mode === 'public' ? cleanNickname(nickname) : '';
-        if (mode === 'public') {
-            if (!clean) return { error: 'nickname_empty' };
-            if (RESERVED_NICKNAME.test(clean)) return { error: 'nickname_reserved' };
-            const myKey = this.personKey(account);
-            const wanted = nicknameKey(clean);
-            for (const person of this.people().values()) {
-                if (person.key !== myKey && person.prefs.mode === 'public' && nicknameKey(person.prefs.nickname) === wanted) {
-                    return { error: 'nickname_taken' };
-                }
-            }
-        }
-        account.prefs = { mode: String(mode), nickname: clean, explicit: true, updatedAt: Math.max(this.now(), account.prefs.updatedAt + 1) };
+        // Later than any choice this person made on either site, whatever the two clocks say.
+        const latest = this.people().get(this.personKey(account))?.prefs.updatedAt ?? 0;
+        account.prefs = { mode: String(mode), nickname: '', explicit: true, updatedAt: Math.max(this.now(), account.prefs.updatedAt + 1, latest + 1) };
         account.v = this.bump();
         // The user looks at the board right after: show the change at once.
         this.boardCache.clear();
@@ -778,8 +767,11 @@ export class LeaderboardStore {
             backfilled: [...this.backfilled],
             backfillFinished: this.backfillFinished,
             bans: [...this.bans].map(([key, ban]) => [key, ban.banned ? 1 : 0, ban.at]),
+            lastNumber: this.lastNumber,
             accounts: [...this.accounts.values()].map(account => ({
                 h: account.handle,
+                n: account.number,
+                nm: account.name,
                 c: account.created,
                 d: account.discord,
                 a: account.admin,
@@ -800,12 +792,21 @@ export class LeaderboardStore {
         this.backfilled = new Set(Array.isArray(state.backfilled) ? state.backfilled : []);
         this.backfillFinished = !!state.backfillFinished;
         this.bans = parseBans(state.bans);
+        // From the saved state alone: a process that loads twice (on standby, then taking over) gives the same numbers.
+        this.lastNumber = this.firstNumber() - SITES.length;
+        if (Number.isFinite(state.lastNumber)) this.lastNumber = Math.max(this.lastNumber, state.lastNumber);
         this.accounts.clear();
         for (const row of state.accounts ?? []) {
             if (!row?.h) continue;
             const days = new Map((row.days ?? []).map(packed => [Number(packed[0]), unpackDay(packed)]));
-            this.accounts.set(row.h, { handle: row.h, created: Number(row.c) || 0, discord: row.d ?? null, admin: !!row.a, prefs: cleanPrefs(row.p), days, v: 0 });
+            const number = Number.isInteger(row.n) && row.n > 0 ? row.n : 0;
+            this.accounts.set(row.h, { handle: row.h, name: cleanName(row.nm), number, created: Number(row.c) || 0, discord: row.d ?? null, admin: !!row.a, prefs: cleanPrefs(row.p), days, v: 0 });
+            if (number) this.lastNumber = Math.max(this.lastNumber, number);
         }
+        // Accounts from before numbers: the oldest gets the smallest.
+        const unnumbered = [...this.accounts.values()].filter(account => !account.number)
+            .sort((a, b) => (a.created || Infinity) - (b.created || Infinity) || (a.handle < b.handle ? -1 : 1));
+        for (const account of unnumbered) account.number = this.nextNumber();
         this.live.clear();
         for (const [handle, saved] of Object.entries(state.live ?? {})) {
             if (!this.accounts.has(handle)) continue;
@@ -836,7 +837,7 @@ export class LeaderboardStore {
         const from = full ? 0 : since;
         const accounts = [];
         for (const account of this.accounts.values()) {
-            if (account.admin || (!full && account.v <= from)) continue;
+            if (!full && account.v <= from) continue;
             const days = [];
             for (const [day, stats] of account.days) {
                 if (full || stats.v > from) days.push(packDay(day, stats));
@@ -844,9 +845,11 @@ export class LeaderboardStore {
             const prefs = account.prefs;
             accounts.push({
                 k: this.personKey(account),
-                m: maskHandle(account.handle),
+                n: account.number,
                 c: account.created,
                 p: { mode: prefs.mode, nickname: prefs.mode === 'public' ? prefs.nickname : '', explicit: prefs.explicit, updatedAt: prefs.updatedAt },
+                // The display name leaves the site only for someone who chose real name here.
+                ...(prefs.mode === 'public' ? { nm: account.name } : {}),
                 days,
             });
         }
@@ -876,12 +879,12 @@ export class LeaderboardStore {
             if (!row?.k) continue;
             let account = peer.accounts.get(row.k);
             if (!account) {
-                account = { key: String(row.k), created: 0, masked: '', prefs: defaultPrefs(), days: new Map() };
+                account = { key: String(row.k), number: null, name: '', created: 0, prefs: defaultPrefs(), days: new Map() };
                 peer.accounts.set(account.key, account);
             }
             account.created = Number(row.c) || account.created;
-            // Starred out by the peer already; cleaned again so it can only ever be such a name.
-            if (typeof row.m === 'string') account.masked = Array.from(row.m.replace(/[^\p{L}\p{N}*_.-]/gu, '')).slice(0, 24).join('');
+            if (Number.isInteger(row.n) && row.n > 0) account.number = row.n;
+            account.name = cleanName(row.nm);
             account.prefs = cleanPrefs(row.p);
             for (const packed of row.days ?? []) account.days.set(Number(packed[0]), unpackDay(packed));
             changed = true;
@@ -900,35 +903,42 @@ export class LeaderboardStore {
     }
 
     /**
-     * Everybody, merged by person: local accounts (not administrators) and the peers' accounts.
+     * Everybody, merged by person: the local accounts and the peers' accounts.
      * @returns {Map<string, {key: string, sites: Set<string>, created: number, prefs: Prefs, parts: {site: string, days: Map<number, DayStats>}[]}>}
      */
     people() {
         if (this.peopleCache?.version === this.boardVersion) return this.peopleCache.people;
         const people = new Map();
-        const add = (key, site, created, prefs, days, masked) => {
+        const add = (key, site, created, prefs, days, number, name) => {
             let person = people.get(key);
             if (!person) {
-                person = { key, sites: new Set(), created: Infinity, prefs: defaultPrefs(), parts: [], masked: '', maskedFrom: null };
+                person = { key, sites: new Set(), created: Infinity, prefs: defaultPrefs(), prefsSite: '', parts: [], number: null, numberFrom: null, name: '' };
                 people.set(key, person);
             }
             person.sites.add(site);
             if (created > 0) person.created = Math.min(person.created, created);
-            // The latest choice made on either site counts.
-            if (prefs.explicit && (!person.prefs.explicit || prefs.updatedAt >= person.prefs.updatedAt)) person.prefs = prefs;
+            // The latest choice made on either site counts; real name shows the display name of the
+            // account it was made with. (The same moment on both sites: the later site name wins.)
+            const newer = !person.prefs.explicit || prefs.updatedAt > person.prefs.updatedAt ||
+                (prefs.updatedAt === person.prefs.updatedAt && site > person.prefsSite);
+            if (prefs.explicit && newer) {
+                person.prefs = prefs;
+                person.prefsSite = site;
+                person.name = name || '';
+            }
             person.parts.push({ site, days });
-            // Shown under the name of their oldest account: both sites pick the same one.
+            // The number of their oldest account: both sites pick the same one.
             const from = [created > 0 ? created : Infinity, site];
-            if (masked && (!person.maskedFrom || from[0] < person.maskedFrom[0] || (from[0] === person.maskedFrom[0] && from[1] < person.maskedFrom[1]))) {
-                person.masked = masked;
-                person.maskedFrom = from;
+            if (number && (!person.numberFrom || from[0] < person.numberFrom[0] || (from[0] === person.numberFrom[0] && from[1] < person.numberFrom[1]))) {
+                person.number = number;
+                person.numberFrom = from;
             }
         };
         for (const account of this.accounts.values()) {
-            if (!account.admin) add(this.personKey(account), this.site, account.created, account.prefs, account.days, maskHandle(account.handle));
+            add(this.personKey(account), this.site, account.created, account.prefs, account.days, account.number, account.name);
         }
         for (const peer of this.peers.values()) {
-            for (const account of peer.accounts.values()) add(account.key, peer.site, account.created, account.prefs, account.days, account.masked);
+            for (const account of peer.accounts.values()) add(account.key, peer.site, account.created, account.prefs, account.days, account.number, account.name);
         }
         // Site order, so that both sites go through a person's history the same way (see values()).
         for (const person of people.values()) person.parts.sort((a, b) => (a.site < b.site ? -1 : a.site > b.site ? 1 : 0));
@@ -1027,7 +1037,7 @@ export class LeaderboardStore {
         /** The best value of every part of the score among the people shown. */
         const best = {};
         for (const person of people.values()) {
-            if (person.prefs.mode === 'none' || person.banned) continue;
+            if (person.banned) continue;
             const values = LeaderboardStore.values(person, range, site, now);
             visible.push({ person, value: values[metric] ?? 0, values });
             for (const part of SCORE_PARTS) best[part.metric] = Math.max(best[part.metric] ?? 0, values[part.metric]);
@@ -1051,9 +1061,7 @@ export class LeaderboardStore {
      * @returns {string}
      */
     label(person) {
-        if (person.prefs.mode === 'public' && person.prefs.nickname) return person.prefs.nickname;
-        // A peer without starred-out names (older version): the made-up name instead.
-        return person.masked || this.anonymousName(person.key);
+        return numberedName(person.prefs, person.name, person.number);
     }
 
     /**
@@ -1064,7 +1072,7 @@ export class LeaderboardStore {
         const now = this.now();
         const ranking = this.ranking(metric, window, site);
         const account = this.accounts.get(handle);
-        const myKey = account && !account.admin ? this.personKey(account) : null;
+        const myKey = account ? this.personKey(account) : null;
         const isScore = metric === 'score';
         const admin = !!account?.admin;
         const rows = ranking.visible.slice(0, MAX_ROWS).map((entry, index) => ({
@@ -1073,7 +1081,7 @@ export class LeaderboardStore {
             key: this.hash(`row:${entry.person.key}`).slice(0, 10),
             rank: ranking.ranks[index],
             name: this.label(entry.person),
-            anonymous: !(entry.person.prefs.mode === 'public' && entry.person.prefs.nickname),
+            anonymous: !(entry.person.prefs.mode === 'public' && entry.person.name),
             // Where what is counted here came from (someone with an unused account elsewhere: one site).
             sites: entry.values.sites.length ? entry.values.sites : [...entry.person.sites].sort(),
             value: entry.value,
@@ -1132,13 +1140,15 @@ export class LeaderboardStore {
         const account = this.accounts.get(handle);
         if (!account) return null;
         const key = this.personKey(account);
-        const person = account.admin ? null : this.people().get(key);
+        const person = this.people().get(key);
         const prefs = person?.prefs ?? account.prefs;
+        // As they would be shown either way (real name: this account's display name).
+        const number = person?.number ?? account.number;
         return {
             mode: prefs.mode,
-            nickname: prefs.nickname,
             explicit: prefs.explicit,
-            anonymousName: person?.masked || maskHandle(account.handle),
+            anonymousName: numberedName({ mode: 'anon' }, '', number),
+            publicName: numberedName({ mode: 'public' }, account.name || ANONYMOUS_NAME, number),
             sites: [...(person?.sites ?? [this.site])].sort(),
             admin: account.admin,
         };
@@ -1173,5 +1183,5 @@ export function verifyPeerRequest(secret, header, query, now) {
 
 export const LIMITS = Object.freeze({
     LIVE_WINDOW_MS, CLOCK_SKEW_MS, WITNESS_AFTER_MS, WITNESS_BEFORE_MS, MAX_AI_PER_MINUTE, MAX_USER_PER_MINUTE,
-    MAX_REPLY_CHARS, ONLINE_GAP_MS, ONLINE_DAY_CAP_MS, NICKNAME_MAX, MAX_ROWS, ROOKIE_DAYS,
+    MAX_REPLY_CHARS, ONLINE_GAP_MS, ONLINE_DAY_CAP_MS, NAME_MAX, MAX_ROWS, ROOKIE_DAYS,
 });

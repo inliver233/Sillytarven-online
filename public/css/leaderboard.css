@@ -559,12 +559,6 @@
     opacity: 0.75;
 }
 
-.leaderboard-nickname {
-    flex: 1 1 100%;
-    margin: 2px 0 0 1.6em !important;
-    max-width: calc(100% - 1.6em);
-}
-
 .leaderboard-error {
     min-height: 1.2em;
     color: #ff7b72;
@@ -655,4 +649,237 @@
         font-size: 0.62em;
         letter-spacing: 0;
     }
+}
+
+/* 排行榜上线公告：没有 ✕，二选一；推荐「公开 ID」。用低饱和的暗金色，跟主题一起暗下来 */
+.leaderboard-notice-overlay {
+    --notice-gold: 204, 170, 102;
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100vh;
+    height: 100dvh;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 12px;
+    z-index: 10001;
+    background-color: rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    opacity: 0;
+    transition: opacity 0.25s ease;
+}
+
+.leaderboard-notice-overlay.show {
+    opacity: 1;
+}
+
+.leaderboard-notice {
+    width: 100%;
+    max-width: 440px;
+    max-height: 100%;
+    overflow-y: auto;
+    padding-bottom: 14px;
+    color: var(--SmartThemeBodyColor);
+    background-color: var(--SmartThemeBlurTintColor);
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 16px;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.45);
+    backdrop-filter: blur(var(--SmartThemeBlurStrength, 10px));
+    -webkit-backdrop-filter: blur(var(--SmartThemeBlurStrength, 10px));
+    transform: translateY(12px) scale(0.97);
+    transition: transform 0.25s ease;
+}
+
+.leaderboard-notice-overlay.show .leaderboard-notice {
+    transform: none;
+}
+
+.leaderboard-notice-hero {
+    padding: 22px 20px 12px;
+    text-align: center;
+    background: linear-gradient(170deg, rgba(var(--notice-gold), 0.13), transparent 70%);
+    border-radius: 16px 16px 0 0;
+}
+
+.leaderboard-notice-trophy {
+    font-size: 2.2em;
+    color: rgba(var(--notice-gold), 0.9);
+}
+
+.leaderboard-notice-hero h2 {
+    margin: 8px 0 4px;
+    font-size: 1.35em;
+}
+
+.leaderboard-notice-hero p {
+    margin: 0;
+    font-size: 0.9em;
+    opacity: 0.75;
+}
+
+.leaderboard-notice-points {
+    list-style: none;
+    margin: 0;
+    padding: 6px 20px 2px;
+}
+
+.leaderboard-notice-points li {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 5px 0;
+    line-height: 1.5;
+}
+
+.leaderboard-notice-points li > i {
+    flex-shrink: 0;
+    width: 1.2em;
+    margin-top: 0.25em;
+    text-align: center;
+    color: rgba(var(--notice-gold), 0.75);
+}
+
+.leaderboard-notice-key {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.8em;
+    height: 1.5em;
+    vertical-align: middle;
+    font-size: 0.9em;
+    background-color: var(--black30a);
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 5px;
+}
+
+.leaderboard-notice-question {
+    padding: 10px 20px 10px;
+    font-weight: bold;
+}
+
+.leaderboard-notice-choices {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 0 20px;
+}
+
+.leaderboard-notice-choice {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 3px;
+    width: 100%;
+    margin: 0;
+    padding: 12px 14px;
+    font: inherit;
+    text-align: left;
+    border-radius: 12px;
+    cursor: pointer;
+    transition: transform 0.12s ease, filter 0.12s ease, opacity 0.12s ease;
+}
+
+.leaderboard-notice-choice:active {
+    transform: scale(0.98);
+}
+
+.leaderboard-notice-choice[disabled] {
+    opacity: 0.55;
+    cursor: progress;
+}
+
+.leaderboard-notice-choice.saving {
+    opacity: 1;
+}
+
+.leaderboard-notice-primary {
+    color: var(--SmartThemeBodyColor);
+    background-color: rgba(var(--notice-gold), 0.16);
+    border: 1px solid rgba(var(--notice-gold), 0.55);
+}
+
+.leaderboard-notice-primary:hover {
+    background-color: rgba(var(--notice-gold), 0.22);
+}
+
+.leaderboard-notice-primary .leaderboard-notice-choice-title {
+    color: rgb(var(--notice-gold));
+}
+
+.leaderboard-notice-secondary {
+    color: var(--SmartThemeBodyColor);
+    background: transparent;
+    border: 1px solid var(--SmartThemeBorderColor);
+    opacity: 0.7;
+}
+
+.leaderboard-notice-secondary:hover {
+    opacity: 0.95;
+}
+
+.leaderboard-notice-choice-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 1.08em;
+    font-weight: bold;
+}
+
+.leaderboard-notice-secondary .leaderboard-notice-choice-title {
+    font-size: 1em;
+    font-weight: normal;
+}
+
+.leaderboard-notice-choice-detail {
+    font-size: 0.82em;
+    line-height: 1.45;
+    opacity: 0.8;
+    word-break: break-all;
+}
+
+.leaderboard-notice-badge {
+    position: absolute;
+    top: -9px;
+    right: 12px;
+    padding: 1px 9px;
+    font-size: 0.72em;
+    color: rgb(var(--notice-gold));
+    background-color: var(--SmartThemeBlurTintColor);
+    border: 1px solid rgba(var(--notice-gold), 0.55);
+    border-radius: 999px;
+}
+
+.leaderboard-notice-error {
+    min-height: 1.2em;
+    padding: 8px 20px 0;
+    font-size: 0.88em;
+    color: #ff7b72;
+}
+
+.leaderboard-notice-note {
+    display: block;
+    padding: 2px 20px 0;
+    line-height: 1.5;
+    opacity: 0.65;
+}
+
+.leaderboard-notice-skip {
+    display: block;
+    margin: 10px auto 0;
+    padding: 4px 10px;
+    font-size: 0.85em;
+    color: var(--SmartThemeBodyColor);
+    background: none;
+    border: none;
+    text-decoration: underline;
+    opacity: 0.6;
+    cursor: pointer;
+}
+
+.leaderboard-notice-nowrap {
+    white-space: nowrap;
 }

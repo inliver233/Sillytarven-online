@@ -40,9 +40,9 @@ router.get('/me', (request, response) => {
 });
 
 router.post('/me', (request, response) => {
+    // Administrators are not ranked, but their answer to the launch notice is kept like anybody's.
     const handle = leaderboard.account(request.user.profile);
-    if (request.user.profile.admin) return response.status(400).send({ error: 'admin' });
-    const result = leaderboard.store.setPrefs(handle, { mode: request.body?.mode, nickname: request.body?.nickname });
+    const result = leaderboard.store.setPrefs(handle, { mode: request.body?.mode });
     if (result.error) return response.status(400).send({ error: result.error });
     leaderboard.dirty = true;
     leaderboard.save();

@@ -40,10 +40,11 @@ export const GENERATION_PATHS = new Set([
 
 /**
  * @param {import('./users.js').User} user
- * @returns {{handle: string, created: number, admin: boolean, discord: string|null}}
+ * @returns {{handle: string, name: string, created: number, admin: boolean, discord: string|null}}
  */
 function accountOf(user) {
-    return { handle: user.handle, created: Number(user.created) || 0, admin: !!user.admin, discord: discordIdOf(user) };
+    // name: the display name, shown with the number for real name (实名)
+    return { handle: user.handle, name: String(user.name ?? ''), created: Number(user.created) || 0, admin: !!user.admin, discord: discordIdOf(user) };
 }
 
 class LeaderboardService {
@@ -297,18 +298,22 @@ class LeaderboardService {
         return response.json(this.store.exportForPeer(Number(request.query.since), String(request.query.epoch ?? '')));
     }
 
-    /** Scans the chat files once for what happened before counting started (in a worker, slowly). */
+    /**
+     * Scans the chat files once for what happened before counting started (in a worker, slowly):
+     * for every account from before then that was not scanned yet (also ones that come back, and
+     * administrators, who were left out before they were ranked).
+     */
     startBackfill() {
-        if (!this.store || this.worker || this.store.backfillFinished) return;
+        if (!this.store || this.worker) return;
         const users = [...this.store.accounts.values()]
-            .filter(account => !account.admin && !this.store.backfilled.has(account.handle))
+            .filter(account => !this.store.backfilled.has(account.handle) && !(account.created >= this.store.countingSince))
             .map(account => {
                 const directories = getUserDirectories(account.handle);
                 return { handle: account.handle, created: account.created, chats: directories.chats, groupChats: directories.groupChats };
             });
-        this.backfill = { total: this.store.backfilled.size + users.length, done: this.store.backfilled.size, running: true, error: '' };
+        this.backfill = { total: this.store.backfilled.size + users.length, done: this.store.backfilled.size, running: users.length > 0, error: '' };
         if (!users.length) {
-            this.finishBackfill();
+            if (!this.store.backfillFinished) this.finishBackfill();
             return;
         }
         const worker = new Worker(new URL('./leaderboard-backfill.js', import.meta.url), {
