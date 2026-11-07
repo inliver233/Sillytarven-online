@@ -31,13 +31,17 @@ import crypto from 'node:crypto';
 export const SITES = Object.freeze(['legacy', 'modern']);
 export const SITE_FILTERS = Object.freeze(['all', ...SITES]);
 export const METRICS = Object.freeze(['score', 'chat', 'words', 'online', 'talk', 'active', 'streak', 'night', 'variety', 'group', 'rookie']);
-export const WINDOWS = Object.freeze(['today', 'week', 'month', 'all']);
+/** hour: this clock hour (Beijing time), counted live only */
+export const WINDOWS = Object.freeze(['hour', 'today', 'week', 'month', 'all']);
 /** anon: 匿名用户#number; public: real name, the account's display name with the number. Nobody can leave the board. */
 export const MODES = Object.freeze(['anon', 'public']);
 export const ANONYMOUS_NAME = '匿名用户';
 
 const DAY_MS = 864e5;
+const HOUR_MS = 3600e3;
 const BEIJING_OFFSET_MS = 8 * 3600e3;
+/** Hours kept for the hour board (and sent to the peer): two days are plenty. */
+const HOURS_KEPT = 48;
 /** A message counts live only if it was sent this recently (older ones come from the scan). */
 const LIVE_WINDOW_MS = 15 * 60e3;
 /** Leeway for the browser's clock after correcting it by the measured offset. */
@@ -78,6 +82,14 @@ const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', '
  */
 export function dayOf(ts) {
     return Math.floor((ts + BEIJING_OFFSET_MS) / DAY_MS);
+}
+
+/**
+ * @param {number} ts Time in ms
+ * @returns {number} Hour number in Beijing time (hours since 1970)
+ */
+export function hourIndexOf(ts) {
+    return Math.floor((ts + BEIJING_OFFSET_MS) / HOUR_MS);
 }
 
 /**
@@ -174,8 +186,8 @@ export function numberedName(prefs, name, number) {
 /**
  * @typedef {{ai: number, chars: number, user: number, night: number, group: number, online: number, cset: string[], v: number}} DayStats
  * @typedef {{mode: string, nickname: string, explicit: boolean, updatedAt: number}} Prefs
- * @typedef {{handle: string, name: string, number: number, created: number, discord: string|null, admin: boolean, prefs: Prefs, days: Map<number, DayStats>, v: number}} Account
- * @typedef {{key: string, number: number|null, name: string, created: number, prefs: Prefs, days: Map<number, DayStats>}} RemoteAccount
+ * @typedef {{handle: string, name: string, number: number, created: number, discord: string|null, admin: boolean, prefs: Prefs, days: Map<number, DayStats>, hours: Map<number, DayStats>, v: number}} Account
+ * @typedef {{key: string, number: number|null, name: string, created: number, prefs: Prefs, days: Map<number, DayStats>, hours: Map<number, DayStats>}} RemoteAccount
  * @typedef {{site: string, epoch: string, version: number, accounts: Map<string, RemoteAccount>, syncedAt: number, error: string}} Peer
  * @typedef {{ts: number, len: number, tail: string, counted: boolean, name: string}} RecentMessage
  * @typedef {{recent: Map<string, RecentMessage>, credits: number[], generations: {at: number, w: number}[], pending: {ts: number}[], ai: number[], user: number[], offset: number, lastActivity: number}} LiveState
@@ -381,7 +393,7 @@ export class LeaderboardStore {
         if (!user?.handle) return null;
         let account = this.accounts.get(user.handle);
         if (!account) {
-            account = { handle: user.handle, name: cleanName(user.name), number: this.nextNumber(), created: Number(user.created) || 0, discord: user.discord ?? null, admin: !!user.admin, prefs: defaultPrefs(), days: new Map(), v: 0 };
+            account = { handle: user.handle, name: cleanName(user.name), number: this.nextNumber(), created: Number(user.created) || 0, discord: user.discord ?? null, admin: !!user.admin, prefs: defaultPrefs(), days: new Map(), hours: new Map(), v: 0 };
             this.accounts.set(user.handle, account);
             account.v = this.bump();
             return account;
@@ -421,6 +433,23 @@ export class LeaderboardStore {
         if (!stats) {
             stats = newDay();
             account.days.set(day, stats);
+        }
+        return stats;
+    }
+
+    /**
+     * The hour a time falls in, for the hour board; hours older than two days go.
+     * @param {Account} account
+     * @param {number} ts
+     * @returns {DayStats}
+     */
+    hourStats(account, ts) {
+        const hour = hourIndexOf(ts);
+        let stats = account.hours.get(hour);
+        if (!stats) {
+            stats = newDay();
+            account.hours.set(hour, stats);
+            for (const old of account.hours.keys()) if (old <= hour - HOURS_KEPT) account.hours.delete(old);
         }
         return stats;
     }
@@ -517,8 +546,14 @@ export class LeaderboardStore {
         const stats = this.dayStats(account, dayOf(at));
         const before = stats.online;
         stats.online = Math.min(ONLINE_DAY_CAP_MS, stats.online + credit);
+        const hour = this.hourStats(account, at);
+        const hourBefore = hour.online;
+        hour.online = Math.min(HOUR_MS, hour.online + stats.online - before);
         // The boards and the peers only need online time by the minute.
-        if (Math.floor(before / 60e3) !== Math.floor(stats.online / 60e3)) this.touch(account, stats);
+        if (Math.floor(before / 60e3) !== Math.floor(stats.online / 60e3) || Math.floor(hourBefore / 60e3) !== Math.floor(hour.online / 60e3)) {
+            this.touch(account, stats);
+            hour.v = stats.v;
+        }
     }
 
     /**
@@ -547,6 +582,9 @@ export class LeaderboardStore {
         state.user.push(at);
         stats.user++;
         this.touch(account, stats);
+        const hour = this.hourStats(account, ts);
+        hour.user++;
+        hour.v = stats.v;
         return true;
     }
 
@@ -625,15 +663,23 @@ export class LeaderboardStore {
                     break;
                 }
             }
+            const charsBefore = stats.chars;
             stats.ai++;
             stats.chars = Math.min(DAILY_CAPS.chars, stats.chars + Math.max(0, clampChars(text.length) - clampChars(base)));
-            if (hourOf(ts) < 5) stats.night++;
+            const night = hourOf(ts) < 5;
+            if (night) stats.night++;
             if (isGroup) stats.group++;
-            if (name && stats.cset.length < MAX_CHARACTERS_PER_DAY) {
-                const characterKey = this.characterKey(name);
-                if (!stats.cset.includes(characterKey)) stats.cset.push(characterKey);
-            }
+            const characterKey = name ? this.characterKey(name) : '';
+            if (characterKey && stats.cset.length < MAX_CHARACTERS_PER_DAY && !stats.cset.includes(characterKey)) stats.cset.push(characterKey);
             this.touch(account, stats);
+            // The same reply in its hour, for the hour board.
+            const hour = this.hourStats(account, ts);
+            hour.ai++;
+            hour.chars += stats.chars - charsBefore;
+            if (night) hour.night++;
+            if (isGroup) hour.group++;
+            if (characterKey && !hour.cset.includes(characterKey)) hour.cset.push(characterKey);
+            hour.v = stats.v;
             recent.set(key, { ts, len: text.length, tail: tailOf(text), counted: true, name });
             counted++;
         }
@@ -653,8 +699,11 @@ export class LeaderboardStore {
         const stats = this.dayStats(account, dayOf(entry.ts));
         const chars = Math.min(DAILY_CAPS.chars, stats.chars + add);
         if (chars === stats.chars) return;
+        const hour = this.hourStats(account, entry.ts);
+        hour.chars += chars - stats.chars;
         stats.chars = chars;
         this.touch(account, stats);
+        hour.v = stats.v;
     }
 
     /**
@@ -777,6 +826,7 @@ export class LeaderboardStore {
                 a: account.admin,
                 p: account.prefs,
                 days: [...account.days.entries()].map(([day, stats]) => packDay(day, stats)),
+                hrs: [...account.hours.entries()].filter(([hour]) => hour > hourIndexOf(now) - HOURS_KEPT).map(([hour, stats]) => packDay(hour, stats)),
             })),
             live,
         };
@@ -799,8 +849,9 @@ export class LeaderboardStore {
         for (const row of state.accounts ?? []) {
             if (!row?.h) continue;
             const days = new Map((row.days ?? []).map(packed => [Number(packed[0]), unpackDay(packed)]));
+            const hours = new Map((row.hrs ?? []).map(packed => [Number(packed[0]), unpackDay(packed)]));
             const number = Number.isInteger(row.n) && row.n > 0 ? row.n : 0;
-            this.accounts.set(row.h, { handle: row.h, name: cleanName(row.nm), number, created: Number(row.c) || 0, discord: row.d ?? null, admin: !!row.a, prefs: cleanPrefs(row.p), days, v: 0 });
+            this.accounts.set(row.h, { handle: row.h, name: cleanName(row.nm), number, created: Number(row.c) || 0, discord: row.d ?? null, admin: !!row.a, prefs: cleanPrefs(row.p), days, hours, v: 0 });
             if (number) this.lastNumber = Math.max(this.lastNumber, number);
         }
         // Accounts from before numbers: the oldest gets the smallest.
@@ -842,6 +893,11 @@ export class LeaderboardStore {
             for (const [day, stats] of account.days) {
                 if (full || stats.v > from) days.push(packDay(day, stats));
             }
+            const recentHour = hourIndexOf(this.now()) - HOURS_KEPT;
+            const hours = [];
+            for (const [hour, stats] of account.hours) {
+                if (hour > recentHour && (full || stats.v > from)) hours.push(packDay(hour, stats));
+            }
             const prefs = account.prefs;
             accounts.push({
                 k: this.personKey(account),
@@ -851,6 +907,7 @@ export class LeaderboardStore {
                 // The display name leaves the site only for someone who chose real name here.
                 ...(prefs.mode === 'public' ? { nm: account.name } : {}),
                 days,
+                hrs: hours,
             });
         }
         const removed = full ? [] : this.tombstones.filter(item => item.v > from).map(item => item.key);
@@ -879,7 +936,7 @@ export class LeaderboardStore {
             if (!row?.k) continue;
             let account = peer.accounts.get(row.k);
             if (!account) {
-                account = { key: String(row.k), number: null, name: '', created: 0, prefs: defaultPrefs(), days: new Map() };
+                account = { key: String(row.k), number: null, name: '', created: 0, prefs: defaultPrefs(), days: new Map(), hours: new Map() };
                 peer.accounts.set(account.key, account);
             }
             account.created = Number(row.c) || account.created;
@@ -887,6 +944,9 @@ export class LeaderboardStore {
             account.name = cleanName(row.nm);
             account.prefs = cleanPrefs(row.p);
             for (const packed of row.days ?? []) account.days.set(Number(packed[0]), unpackDay(packed));
+            for (const packed of row.hrs ?? []) account.hours.set(Number(packed[0]), unpackDay(packed));
+            const recentHour = hourIndexOf(this.now()) - HOURS_KEPT;
+            for (const hour of account.hours.keys()) if (hour <= recentHour) account.hours.delete(hour);
             changed = true;
         }
         const bans = parseBans(payload.bans);
@@ -909,7 +969,7 @@ export class LeaderboardStore {
     people() {
         if (this.peopleCache?.version === this.boardVersion) return this.peopleCache.people;
         const people = new Map();
-        const add = (key, site, created, prefs, days, number, name) => {
+        const add = (key, site, created, prefs, days, hours, number, name) => {
             let person = people.get(key);
             if (!person) {
                 person = { key, sites: new Set(), created: Infinity, prefs: defaultPrefs(), prefsSite: '', parts: [], number: null, numberFrom: null, name: '' };
@@ -926,7 +986,7 @@ export class LeaderboardStore {
                 person.prefsSite = site;
                 person.name = name || '';
             }
-            person.parts.push({ site, days });
+            person.parts.push({ site, days, hours });
             // The number of their oldest account: both sites pick the same one.
             const from = [created > 0 ? created : Infinity, site];
             if (number && (!person.numberFrom || from[0] < person.numberFrom[0] || (from[0] === person.numberFrom[0] && from[1] < person.numberFrom[1]))) {
@@ -935,10 +995,10 @@ export class LeaderboardStore {
             }
         };
         for (const account of this.accounts.values()) {
-            add(this.personKey(account), this.site, account.created, account.prefs, account.days, account.number, account.name);
+            add(this.personKey(account), this.site, account.created, account.prefs, account.days, account.hours, account.number, account.name);
         }
         for (const peer of this.peers.values()) {
-            for (const account of peer.accounts.values()) add(account.key, peer.site, account.created, account.prefs, account.days, account.number, account.name);
+            for (const account of peer.accounts.values()) add(account.key, peer.site, account.created, account.prefs, account.days, account.hours, account.number, account.name);
         }
         // Site order, so that both sites go through a person's history the same way (see values()).
         for (const person of people.values()) person.parts.sort((a, b) => (a.site < b.site ? -1 : a.site > b.site ? 1 : 0));
@@ -949,50 +1009,64 @@ export class LeaderboardStore {
 
     /**
      * Everything one person did in a window, in one pass (over the given site, or both).
-     * @param {{parts: {site: string, days: Map<number, DayStats>}[], created: number}} person
-     * @param {[number, number]} range Days of the window
+     * @param {{parts: {site: string, days: Map<number, DayStats>, hours?: Map<number, DayStats>}[], created: number}} person
+     * @param {[number, number]} range Days of the window (hours, for the hour board)
      * @param {string} site 'all' or one site
      * @param {number} now
+     * @param {boolean} [hourly] The window is hours (the hour board), not days
      * @returns {Record<string, number>} A value for every metric but 'score'
      */
-    static values(person, [first, last], site, now) {
+    static values(person, [first, last], site, now, hourly = false) {
         const values = { chat: 0, words: 0, online: 0, talk: 0, active: 0, streak: 0, night: 0, variety: 0, group: 0, rookie: 0, sites: [] };
         const parts = site === 'all' ? person.parts : person.parts.filter(part => part.site === site);
         if (!parts.length) return values;
         const activeDays = new Set();
         const activeInRange = new Set();
         const characters = new Set();
-        const onlinePerDay = new Map();
+        const onlinePerBucket = new Map();
         const sites = new Set();
         /** day -> fingerprints of the days already counted (from another site) */
-        const seenDays = parts.length > 1 ? new Map() : null;
+        const seenDays = parts.length > 1 && !hourly ? new Map() : null;
+        /**
+         * One day (or hour, for the hour board) in the window.
+         * @param {string} partSite
+         * @param {number} bucket
+         * @param {DayStats} stats
+         */
+        const add = (partSite, bucket, stats) => {
+            const active = isActiveDay(stats);
+            if (seenDays && active) {
+                // The very same numbers on both sites: history copied over (an account moved to
+                // the other site with its chats). Counted once, for the site it came from.
+                const fingerprint = `${stats.ai}|${stats.chars}|${stats.user}|${stats.night}|${stats.group}`;
+                const seen = seenDays.get(bucket);
+                if (seen?.includes(fingerprint)) return;
+                seenDays.set(bucket, [...(seen ?? []), fingerprint]);
+            }
+            if (active || stats.online) sites.add(partSite);
+            if (active) activeInRange.add(bucket);
+            values.chat += stats.ai;
+            values.words += stats.chars;
+            values.talk += stats.user;
+            values.night += stats.night;
+            values.group += stats.group;
+            for (const key of stats.cset) characters.add(key);
+            // Two sites open at once are still one person's time.
+            if (stats.online) onlinePerBucket.set(bucket, (onlinePerBucket.get(bucket) ?? 0) + stats.online);
+        };
         for (const part of parts) {
             for (const [day, stats] of part.days) {
-                const active = isActiveDay(stats);
-                if (active) activeDays.add(day);
-                if (day < first || day > last) continue;
-                if (seenDays && active) {
-                    // The very same numbers on both sites: history copied over (an account moved to
-                    // the other site with its chats). Counted once, for the site it came from.
-                    const fingerprint = `${stats.ai}|${stats.chars}|${stats.user}|${stats.night}|${stats.group}`;
-                    const seen = seenDays.get(day);
-                    if (seen?.includes(fingerprint)) continue;
-                    seenDays.set(day, [...(seen ?? []), fingerprint]);
+                if (isActiveDay(stats)) activeDays.add(day);
+                if (!hourly && day >= first && day <= last) add(part.site, day, stats);
+            }
+            if (hourly) {
+                for (const [hour, stats] of part.hours ?? []) {
+                    if (hour >= first && hour <= last) add(part.site, hour, stats);
                 }
-                if (active || stats.online) sites.add(part.site);
-                if (active) activeInRange.add(day);
-                values.chat += stats.ai;
-                values.words += stats.chars;
-                values.talk += stats.user;
-                values.night += stats.night;
-                values.group += stats.group;
-                for (const key of stats.cset) characters.add(key);
-                // Two sites open at once are still one person's time.
-                if (stats.online) onlinePerDay.set(day, (onlinePerDay.get(day) ?? 0) + stats.online);
             }
         }
         let online = 0;
-        for (const value of onlinePerDay.values()) online += Math.min(ONLINE_DAY_CAP_MS, value);
+        for (const value of onlinePerBucket.values()) online += Math.min(hourly ? HOUR_MS : ONLINE_DAY_CAP_MS, value);
         values.online = Math.floor(online / 60e3) * 60e3;
         values.active = activeInRange.size;
         values.variety = characters.size;
@@ -1015,8 +1089,8 @@ export class LeaderboardStore {
      * @param {number} now
      * @returns {number}
      */
-    static value(metric, person, range, site, now) {
-        return LeaderboardStore.values(person, range, site, now)[metric] ?? 0;
+    static value(metric, person, range, site, now, hourly = false) {
+        return LeaderboardStore.values(person, range, site, now, hourly)[metric] ?? 0;
     }
 
     /**
@@ -1027,18 +1101,21 @@ export class LeaderboardStore {
      */
     ranking(metric, window, site) {
         const now = this.now();
-        const cacheKey = `${metric}|${window}|${site}|${dayOf(now)}`;
+        const hourly = window === 'hour';
+        // The hour board starts over every hour, the others every day.
+        const period = hourly ? hourIndexOf(now) : dayOf(now);
+        const cacheKey = `${metric}|${window}|${site}|${period}`;
         const cached = this.boardCache.get(cacheKey);
         if (cached && (cached.version === this.boardVersion || now - cached.computedAt < this.recomputeMs)) return cached;
         const people = this.people();
-        const range = windowDays(window, now);
+        const range = hourly ? [period, period] : windowDays(window, now);
         /** @type {{person: any, value: number, values: Record<string, number>}[]} */
         const visible = [];
         /** The best value of every part of the score among the people shown. */
         const best = {};
         for (const person of people.values()) {
             if (person.banned) continue;
-            const values = LeaderboardStore.values(person, range, site, now);
+            const values = LeaderboardStore.values(person, range, site, now, hourly);
             visible.push({ person, value: values[metric] ?? 0, values });
             for (const part of SCORE_PARTS) best[part.metric] = Math.max(best[part.metric] ?? 0, values[part.metric]);
         }
@@ -1050,7 +1127,7 @@ export class LeaderboardStore {
         // Competition ranking: equal values share a rank.
         const ranks = [];
         for (let i = 0; i < shown.length; i++) ranks.push(i > 0 && shown[i].value === shown[i - 1].value ? ranks[i - 1] : i + 1);
-        const ranking = { version: this.boardVersion, computedAt: now, people, range, visible: shown, ranks, best };
+        const ranking = { version: this.boardVersion, computedAt: now, people, range, hourly, period, visible: shown, ranks, best };
         if (this.boardCache.size > 200) this.boardCache.clear();
         this.boardCache.set(cacheKey, ranking);
         return ranking;
@@ -1091,7 +1168,7 @@ export class LeaderboardStore {
         let me = null;
         const person = myKey ? ranking.people.get(myKey) : null;
         if (person) {
-            const values = LeaderboardStore.values(person, ranking.range, site, now);
+            const values = LeaderboardStore.values(person, ranking.range, site, now, ranking.hourly);
             // Someone off the board gets the score they would have, against the same best values.
             const composite = isScore ? compositeScore(values, ranking.best) : null;
             const value = composite ? composite.score : (values[metric] ?? 0);
@@ -1115,7 +1192,7 @@ export class LeaderboardStore {
             };
         }
         return {
-            version: `${ranking.version}-${dayOf(now)}`,
+            version: `${ranking.version}-${ranking.period}`,
             site: this.site,
             rows,
             me,

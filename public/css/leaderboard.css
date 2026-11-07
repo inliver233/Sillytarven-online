@@ -880,6 +880,7 @@
     cursor: pointer;
 }
 
-.leaderboard-notice-nowrap {
+.leaderboard-notice-nowrap,
+.leaderboard-nowrap {
     white-space: nowrap;
 }

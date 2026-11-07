@@ -267,6 +267,56 @@ test('everybody is anonymous by default; real name shows the display name with t
     assert.equal(board(store, 'chat', 'today', 'all', 'x').rows[0].name, '大明#3');
 });
 
+test('the hour board: this clock hour only, starting over on the hour, merged over both sites', () => {
+    const legacy = makeStore('legacy');
+    const modern = makeStore('modern');
+    legacy.store.ensureAccount({ handle: 'a', discord: '101010101010' });
+    modern.store.ensureAccount({ handle: 'b', discord: '101010101010' });
+    modern.store.ensureAccount({ handle: 'c' });
+    const at = minutes => NOON + minutes * MINUTE;
+    const reply = (store, handle, minute, earlier = []) => {
+        store.recordGeneration(handle, at(minute) - 1000);
+        const message = ai(at(minute) - 500, `reply at ${minute}`);
+        store.recordMessages(handle, [...earlier, message], { at: at(minute) });
+        return message;
+    };
+    // 11:50 (the hour before), then 12:10 on the old site; 12:20 on the new site (the same person).
+    const first = reply(legacy.store, 'a', -10);
+    reply(legacy.store, 'a', 10, [first]);
+    reply(modern.store, 'b', 20);
+    for (const minute of [25, 26, 27]) reply(modern.store, 'c', minute);
+    // Online time in the hour: two reports a couple of minutes apart.
+    modern.store.recordActivity('c', at(30));
+    modern.store.recordActivity('c', at(32));
+    const sync = () => {
+        modern.store.applyPeer('https://legacy', legacy.store.exportForPeer(-1, 'none'));
+        legacy.store.applyPeer('https://modern', modern.store.exportForPeer(-1, 'none'));
+    };
+    legacy.clock.now = modern.clock.now = at(40);
+    sync();
+    for (const store of [legacy.store, modern.store]) {
+        const hour = store.board({ metric: 'chat', window: 'hour', site: 'all', handle: 'a' });
+        assert.deepEqual(hour.rows.map(row => [row.value, row.sites.join('+')]), [[3, 'modern'], [2, 'legacy+modern']], '12:00–12:59 only');
+        assert.deepEqual(store.board({ metric: 'chat', window: 'today', site: 'all', handle: 'a' }).rows.map(row => row.value), [3, 3]);
+        assert.deepEqual(store.board({ metric: 'online', window: 'hour', site: 'all', handle: 'a' }).rows.map(row => row.value), [3 * MINUTE]);
+        assert.equal(store.board({ metric: 'score', window: 'hour', site: 'all', handle: 'a' }).rows.length, 2);
+    }
+    assert.equal(modern.store.board({ metric: 'online', window: 'hour', site: 'all', handle: 'c' }).me.value, 3 * MINUTE);
+    // 13:05: a new hour, nobody on its board yet; the day goes on.
+    legacy.clock.now = modern.clock.now = at(65);
+    for (const store of [legacy.store, modern.store]) {
+        assert.deepEqual(store.board({ metric: 'chat', window: 'hour', site: 'all', handle: 'a' }).rows, []);
+        assert.equal(store.board({ metric: 'chat', window: 'today', site: 'all', handle: 'a' }).rows.length, 2);
+    }
+    // Hours survive a restart; after two days they are gone.
+    const { store: next } = makeStore('modern', at(40));
+    next.importState(JSON.parse(JSON.stringify(modern.store.exportState())));
+    assert.equal(next.board({ metric: 'chat', window: 'hour', site: 'all', handle: 'c' }).me.value, 3);
+    const account = modern.store.accounts.get('c');
+    modern.store.recordActivity('c', at(40 + 50 * 60));
+    assert.deepEqual([...account.hours.keys()], [Math.floor((at(40 + 50 * 60) + 8 * 3600e3) / 3600e3)]);
+});
+
 test('ties share a rank; streak, active days, variety and rookies', () => {
     const { store } = makeStore();
     store.ensureAccount({ handle: 'a', created: NOON - 100 * 864e5 });

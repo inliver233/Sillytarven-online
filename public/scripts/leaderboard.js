@@ -15,7 +15,7 @@ const METRICS = [
     { id: 'words', label: '字数', icon: 'fa-feather', unit: '字', hint: 'AI 回复的字数，「继续」只算新写的部分' },
     { id: 'online', label: '时长', icon: 'fa-clock', unit: '', hint: '在用酒馆的时间：页面开着但没人动不算，每天最多 16 小时' },
     { id: 'talk', label: '话痨', icon: 'fa-keyboard', unit: '条', hint: '你发出去、并且让 AI 回了的消息条数' },
-    { id: 'active', label: '活跃', icon: 'fa-calendar-check', unit: '天', hint: '有聊天的天数' },
+    { id: 'active', label: '活跃', icon: 'fa-calendar-check', unit: '天', hint: '有聊天的天数', noHour: true },
     { id: 'streak', label: '连续', icon: 'fa-fire', unit: '天', hint: '到今天连续聊天的天数（今天还没聊不算断）', noWindow: true },
     { id: 'night', label: '夜猫子', icon: 'fa-moon', unit: '条', hint: '凌晨 0–5 点（北京时间）的 AI 回复' },
     { id: 'variety', label: '博爱', icon: 'fa-heart', unit: '位', hint: '聊过的不同角色数：只统计个数，不记是谁' },
@@ -36,6 +36,7 @@ const DEFAULT_SCORE_PARTS = [
 ];
 const DEFAULT_DAILY_CAPS = { ai: 1000, chars: 1500000, user: 800 };
 const WINDOWS = [
+    { id: 'hour', label: '本小时' },
     { id: 'today', label: '今日' },
     { id: 'week', label: '本周' },
     { id: 'month', label: '本月' },
@@ -305,6 +306,11 @@ function pick(key, id) {
 function updateControls() {
     if (!popup) return;
     const metric = metricOf(view.metric);
+    // 「活跃天数」按小时没意义：换到今日
+    if (metric.noHour && view.window === 'hour') {
+        view.window = 'today';
+        saveView();
+    }
     popup.root.querySelectorAll('.leaderboard-chip').forEach(chip => {
         const active = chip.getAttribute('data-id') === view.metric;
         chip.classList.toggle('active', active);
@@ -319,7 +325,25 @@ function updateControls() {
         });
     }
     popup.root.querySelector('.leaderboard-windows')?.classList.toggle('displayNone', !!metric.noWindow);
-    popup.hint.textContent = metric.hint;
+    popup.root.querySelector('.leaderboard-windows button[data-id="hour"]')?.classList.toggle('displayNone', !!metric.noHour);
+    updateHint();
+}
+
+/** 榜的说明；小时榜加上是哪个小时（过了整点跟着变） */
+function updateHint() {
+    if (!popup) return;
+    const metric = metricOf(view.metric);
+    if (view.window === 'hour' && !metric.noWindow) {
+        popup.hint.replaceChildren(`${metric.hint} · `, h('span', { class: 'leaderboard-nowrap', text: `本小时 ${currentHourText()}` }));
+    } else {
+        popup.hint.textContent = metric.hint;
+    }
+}
+
+/** 现在这个小时（北京时间），比如「01:00–01:59」 */
+function currentHourText() {
+    const hour = new Intl.DateTimeFormat('zh-CN', { timeZone: 'Asia/Shanghai', hour: '2-digit', hourCycle: 'h23' }).format(new Date()).replace(/\D/g, '').padStart(2, '0');
+    return `${hour}:00–${hour}:59`;
 }
 
 async function refresh() {
@@ -364,7 +388,8 @@ function render(board) {
     const values = new Map();
     const fragment = document.createDocumentFragment();
     if (!rows.length) {
-        fragment.append(h('div', { class: 'leaderboard-empty', text: view.window === 'today' ? '今天还没有人上榜，去聊两句就是第一名' : '这里还没有人上榜' }));
+        const empty = { hour: '这个小时还没有人上榜，去聊两句就是第一名', today: '今天还没有人上榜，去聊两句就是第一名' };
+        fragment.append(h('div', { class: 'leaderboard-empty', text: empty[view.window] ?? '这里还没有人上榜' }));
     }
     for (const row of rows) {
         // 打码后的名字可能撞车，行按服务器给的 key 区分
@@ -409,6 +434,7 @@ function render(board) {
     }
     lastValues = values;
     popup.list.replaceChildren(fragment);
+    updateHint();
     renderMe(board);
     renderFooter(board);
     fitNames();
@@ -520,7 +546,7 @@ function showRules() {
             h('li', { text: '时长：页面在用（有点击、输入、滚动）才计时，开着不动不算。' }),
             h('li', { text: `每人每天最多计入：AI 回复 ${caps.ai} 条、你的消息 ${caps.user} 条、字数 ${caps.chars / 10000} 万、时长 16 小时。再怎么刷，一天也只能拿满这么多。` }),
             h('li', { text: '博爱只统计聊过多少个不同的角色，不记录是谁。' }),
-            h('li', { text: '今日、本周、本月按北京时间算，每周从周一开始。' }),
+            h('li', { text: '本小时、今日、本周、本月都按北京时间算：每个整点、每天零点重新开始，每周从周一开始。本小时榜从上线这天才开始记。' }),
             h('li', { text: since ? `${since} 之前的聊天按现有聊天记录补算（删掉的不算）；时长从这天开始算。` : '上线之前的聊天按现有聊天记录补算（删掉的不算）；时长从上线开始算。' }),
             h('li', { text: '默认匿名，显示「匿名用户#编号」；选实名显示你的账号昵称加编号，比如「小明#1203」。' }),
             h('li', { text: '编号每个账号一个、永久不变，两个站不会重复（老站单数、新站双数）；两个站都有账号的，用注册最早的那个账号的编号。' }),
