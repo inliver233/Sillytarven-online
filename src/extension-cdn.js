@@ -312,6 +312,8 @@ export class ExtensionCdn {
 export function createExtensionCdnMiddleware(extensionCdn, listExtensionDirectories) {
     return async (request, response, next) => {
         if (!request.path.startsWith(EXTENSION_CDN_PREFIX)) return next();
+        // A CDN must not keep an error: the file may well be there on the next try.
+        response.setHeader('Cache-Control', 'no-store');
         if (request.method !== 'GET' && request.method !== 'HEAD') return response.sendStatus(405);
         const match = /^\/v\/e\/([0-9a-f]{40})\/scripts\/extensions\/third-party\/([^/]+)\/(.+)$/.exec(request.path);
         if (!match || !extensionCdn.enabled) return response.sendStatus(404);

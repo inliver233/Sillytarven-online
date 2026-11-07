@@ -98,7 +98,9 @@ test('only clean checkouts of the listed repositories use the CDN, and it serves
     assert.equal(served.headers['content-type'], 'text/javascript; charset=utf-8', 'module scripts need a JavaScript type');
     assert.equal(served.headers['cache-control'], 'public, max-age=31536000, immutable');
     assert.equal(served.headers['access-control-allow-origin'], '*');
-    assert.equal((await call(`/v/e/${official.sha}/scripts/extensions/third-party/Helper/missing.js`)).status, 404);
+    const missing = await call(`/v/e/${official.sha}/scripts/extensions/third-party/Helper/missing.js`);
+    assert.equal(missing.status, 404);
+    assert.equal(missing.headers['cache-control'], 'no-store', 'a CDN must not keep a 404');
     assert.equal((await call(`/v/e/${official.sha}/scripts/extensions/third-party/Helper/index.js`, 'POST')).status, 405);
     assert.equal((await call(`/v/e/${'0'.repeat(40)}/scripts/extensions/third-party/Helper/index.js`)).status, 404);
     assert.equal((await call('/v/abc123def456/script.js')).next, true, 'other /v/ paths are left to the next handler');

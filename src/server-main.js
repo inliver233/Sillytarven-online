@@ -414,7 +414,7 @@ async function refreshExtensionDirectories() {
     }
 }
 if (extensionCdn.enabled) {
-    void refreshExtensionDirectories();
+    // The first listing waits for the user storage (see the startup below).
     setInterval(() => void refreshExtensionDirectories(), 5 * 60 * 1000).unref?.();
 }
 
@@ -695,6 +695,9 @@ async function preSetupTasks() {
     console.log();
 
     const directories = await getUserDirectoriesList();
+    if (extensionCdn.enabled) {
+        void refreshExtensionDirectories();
+    }
     // Monitor numbers of deleted accounts would otherwise be loaded (and counted) forever.
     // A server taking over reloads them from disk first, so prune again after that.
     const pruneMonitorStats = async () => systemMonitor.retainUsers(await getAllUserHandles());
