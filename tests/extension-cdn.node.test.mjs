@@ -120,6 +120,7 @@ test('a mirrored extension resolves its relative imports to the app, to itself a
         document: { createElement: () => ({}), currentScript: { after: element => { inserted = element; } } },
         addEventListener: () => {},
         location: { origin: 'https://site.example', reload: () => {} },
+        console: { warn: () => {} },
         Worker: function Worker(url, options) { this.url = String(url); this.options = options; },
     };
     context.window = context;

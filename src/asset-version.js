@@ -153,9 +153,9 @@ export function normalizeAssetCdnBaseUrl(value) {
  * Cloudflare). The page is the same for every visitor, so a cache in front of it cannot
  * mix up visitors. With time zones listed, only browsers in them use the mirror; with
  * none, every browser does. Absolute imports inside mirrored modules resolve against the mirror, so they are
- * mapped too. If a module cannot be loaded from the mirror (down, or no CORS), the page notes
- * it and loads everything from this server for a day; before the app starts it reloads
- * once to do so. localStorage "st-asset-cdn" = "on" / "off" overrides the choice.
+ * mapped too. If a module cannot be loaded from the mirror (down, or no CORS), the page tries
+ * it once more and then loads everything from this server for half an hour (see fail()).
+ * localStorage "st-asset-cdn" = "on" / "off" overrides the choice.
  * @param {Record<string, string>} imports Import map entries for this server
  * @param {{baseUrl: string, timeZones: string[]}} cdn Mirror address, and the time zones that use it (empty = all)
  * @returns {string} Inline script that adds the import map
@@ -165,13 +165,18 @@ function getAssetCdnScript(imports, cdn) {
     // thirdParty is filled in per user when the page is sent (popular extensions, see extension-cdn.js).
     const options = JSON.stringify({ imports, cdn: cdn.baseUrl, origin, zones: cdn.timeZones, thirdParty: [] }).replace(/</g, '\\u003c');
     return `<script>(function (o) {
-        var KEY = 'st-asset-cdn-failed', use = false, map = document.createElement('script'), mapped = {};
+        var KEY = 'st-asset-cdn-failed', PAUSE = 30 * 60e3, use = false, map = document.createElement('script'), mapped = {};
+        var failure = { at: 0, count: 0 };
         try {
             var choice = localStorage.getItem('st-asset-cdn');
-            var failedAt = Number(localStorage.getItem(KEY)) || 0;
+            var saved = JSON.parse(localStorage.getItem(KEY) || 'null');
+            // A bare timestamp is the old format: a confirmed failure.
+            if (typeof saved === 'number') failure = { at: saved, count: 2 };
+            else if (saved) failure = { at: Number(saved.at) || 0, count: Number(saved.count) || 0 };
             var zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
             var inZone = o.zones.length === 0 || o.zones.indexOf(zone) !== -1;
-            use = choice === 'on' || (choice !== 'off' && inZone && Date.now() - failedAt > 864e5);
+            var paused = failure.count >= 2 && Date.now() - failure.at < PAUSE;
+            use = choice === 'on' || (choice !== 'off' && inZone && !paused);
         } catch (e) { use = false; }
         Object.keys(o.imports).forEach(function (key) {
             var versioned = o.imports[key].indexOf('/v/') === 0;
@@ -214,17 +219,26 @@ function getAssetCdnScript(imports, cdn) {
                 Local.prototype = Native.prototype;
                 window[name] = Local;
             });
-            var fail = function (reload) {
-                try { localStorage.setItem(KEY, String(Date.now())); } catch (e) { return; }
-                if (reload && !window.SillyTavern) location.reload();
+            // The app's modules failing before it starts: reload and try the mirror once more, then
+            // (a second failure within a minute) load from this server for half an hour. A module
+            // failing later only pauses the mirror from the next page on. The last failure is kept
+            // for diagnosis.
+            var fail = function (beforeStart, what) {
+                var now = Date.now();
+                var count = beforeStart ? (now - failure.at < 60e3 ? failure.count + 1 : 1) : 2;
+                try {
+                    localStorage.setItem(KEY, JSON.stringify({ at: now, count: count, what: String(what || '').slice(0, 300) }));
+                } catch (e) { return; }
+                console.warn('Could not load the app from the CDN mirror' + (count >= 2 ? '; using this server for a while.' : '; trying again.'), what);
+                if (beforeStart && !window.SillyTavern) location.reload();
             };
             addEventListener('error', function (event) {
                 var target = event.target;
-                if (target && target.tagName === 'SCRIPT' && (!target.src || target.src.indexOf(o.cdn) === 0)) fail(true);
+                if (target && target.tagName === 'SCRIPT' && (!target.src || target.src.indexOf(o.cdn) === 0)) fail(true, target.src || 'app modules');
             }, true);
             addEventListener('unhandledrejection', function (event) {
                 var reason = event.reason && (event.reason.message || String(event.reason));
-                if (typeof reason === 'string' && reason.indexOf(o.cdn) !== -1) fail(false);
+                if (typeof reason === 'string' && reason.indexOf(o.cdn) !== -1) fail(false, reason);
             });
         }
         map.type = 'importmap';

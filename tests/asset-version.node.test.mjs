@@ -114,6 +114,7 @@ function runCdnScript(page, { zone, storage = {} }) {
         document: { createElement: () => ({}), currentScript: { after: element => { inserted = element; } } },
         addEventListener: (type, listener) => { listeners[type] = listener; },
         location: { origin: 'https://example.org', reload: () => { context.reloaded = true; } },
+        console: { warn: () => {} },
         reloaded: false,
     };
     context.window = context;
@@ -146,10 +147,13 @@ test('a CDN mirror of /v/ is used by pages in its time zones and dropped when it
 
     assert.equal(runCdnScript(page, { zone: 'Asia/Shanghai', storage: { 'st-asset-cdn': 'off' } }).imports['/scripts/'], '/v/abc123def456/scripts/');
     assert.equal(runCdnScript(page, { zone: 'Europe/Berlin', storage: { 'st-asset-cdn': 'on' } }).imports['/scripts/'], 'https://static.example.cn/st/v/abc123def456/scripts/');
-    const recentFailure = { 'st-asset-cdn-failed': String(Date.now() - 60_000) };
-    assert.equal(runCdnScript(page, { zone: 'Asia/Shanghai', storage: recentFailure }).imports['/scripts/'], '/v/abc123def456/scripts/');
-    const oldFailure = { 'st-asset-cdn-failed': String(Date.now() - 2 * 864e5) };
-    assert.equal(runCdnScript(page, { zone: 'Asia/Shanghai', storage: oldFailure }).imports['/scripts/'], 'https://static.example.cn/st/v/abc123def456/scripts/');
+    const failed = (minutesAgo, count) => ({ 'st-asset-cdn-failed': JSON.stringify({ at: Date.now() - minutesAgo * 60e3, count }) });
+    assert.equal(runCdnScript(page, { zone: 'Asia/Shanghai', storage: failed(10, 2) }).imports['/scripts/'], '/v/abc123def456/scripts/', 'paused');
+    assert.equal(runCdnScript(page, { zone: 'Asia/Shanghai', storage: failed(31, 2) }).imports['/scripts/'], 'https://static.example.cn/st/v/abc123def456/scripts/', 'tried again after half an hour');
+    assert.equal(runCdnScript(page, { zone: 'Asia/Shanghai', storage: failed(0.1, 1) }).imports['/scripts/'], 'https://static.example.cn/st/v/abc123def456/scripts/', 'one failure: retried');
+    // The old format (a bare timestamp) counts as a confirmed failure, paused for half an hour.
+    assert.equal(runCdnScript(page, { zone: 'Asia/Shanghai', storage: { 'st-asset-cdn-failed': String(Date.now() - 10 * 60e3) } }).imports['/scripts/'], '/v/abc123def456/scripts/');
+    assert.equal(runCdnScript(page, { zone: 'Asia/Shanghai', storage: { 'st-asset-cdn-failed': String(Date.now() - 40 * 60e3) } }).imports['/scripts/'], 'https://static.example.cn/st/v/abc123def456/scripts/');
 
     // A module of this server failing is not the mirror's fault.
     const unrelated = runCdnScript(page, { zone: 'Asia/Shanghai' });
@@ -158,18 +162,25 @@ test('a CDN mirror of /v/ is used by pages in its time zones and dropped when it
     assert.equal(unrelated.storage['st-asset-cdn-failed'], undefined);
     assert.equal(unrelated.context.reloaded, false);
 
-    // The app's entry modules cannot be loaded from the mirror: note it and reload from here.
+    // The app's entry modules cannot be loaded from the mirror: reload and try it once more...
     const broken = runCdnScript(page, { zone: 'Asia/Shanghai' });
     broken.listeners.error({ target: { tagName: 'SCRIPT', src: '' } });
-    assert.ok(Number(broken.storage['st-asset-cdn-failed']) > 0);
+    assert.equal(JSON.parse(broken.storage['st-asset-cdn-failed']).count, 1);
     assert.equal(broken.context.reloaded, true);
-    assert.equal(runCdnScript(page, { zone: 'Asia/Shanghai', storage: broken.storage }).imports['/scripts/'], '/v/abc123def456/scripts/');
+    const retry = runCdnScript(page, { zone: 'Asia/Shanghai', storage: broken.storage });
+    assert.equal(retry.imports['/scripts/'], 'https://static.example.cn/st/v/abc123def456/scripts/');
+    // ...and when that fails too, load from here for a while; the failed file is kept.
+    retry.listeners.error({ target: { tagName: 'SCRIPT', src: 'https://static.example.cn/st/v/abc123def456/script.js' } });
+    assert.equal(retry.context.reloaded, true);
+    assert.equal(JSON.parse(retry.storage['st-asset-cdn-failed']).count, 2);
+    assert.equal(JSON.parse(retry.storage['st-asset-cdn-failed']).what, 'https://static.example.cn/st/v/abc123def456/script.js');
+    assert.equal(runCdnScript(page, { zone: 'Asia/Shanghai', storage: retry.storage }).imports['/scripts/'], '/v/abc123def456/scripts/');
 
     // A lazy import failing after the app started is noted for the next load, without a reload.
     const late = runCdnScript(page, { zone: 'Asia/Shanghai' });
     late.context.SillyTavern = {};
     late.listeners.unhandledrejection({ reason: new TypeError('Failed to fetch dynamically imported module: https://static.example.cn/st/v/abc123def456/scripts/a.js') });
-    assert.ok(Number(late.storage['st-asset-cdn-failed']) > 0);
+    assert.equal(JSON.parse(late.storage['st-asset-cdn-failed']).count, 2, 'paused from the next page on');
     late.listeners.error({ target: { tagName: 'SCRIPT', src: 'https://static.example.cn/st/v/abc123def456/scripts/b.js' } });
     assert.equal(late.context.reloaded, false);
 
@@ -185,7 +196,7 @@ test('with no time zones listed, every page uses the CDN mirror', () => {
         assert.equal(runCdnScript(page, { zone }).imports['/scripts/'], 'https://s1.example.cn/v/abc123def456/scripts/', zone);
     }
     assert.equal(runCdnScript(page, { zone: 'Asia/Shanghai', storage: { 'st-asset-cdn': 'off' } }).imports['/scripts/'], '/v/abc123def456/scripts/');
-    const recentFailure = { 'st-asset-cdn-failed': String(Date.now() - 60_000) };
+    const recentFailure = { 'st-asset-cdn-failed': JSON.stringify({ at: Date.now() - 60_000, count: 2 }) };
     assert.equal(runCdnScript(page, { zone: 'Europe/Berlin', storage: recentFailure }).imports['/scripts/'], '/v/abc123def456/scripts/');
 });
 
