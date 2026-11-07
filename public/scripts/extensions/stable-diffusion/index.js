@@ -611,7 +611,9 @@ async function loadSettingOptions() {
         loadModels(),
         loadSchedulers(),
         loadVaes(),
-        loadComfyWorkflows(),
+        // Only ComfyUI has workflows (switching to it loads them); asking the server for them
+        // otherwise holds up the extension's start by a round trip.
+        extension_settings.sd.source === sources.comfy ? loadComfyWorkflows() : Promise.resolve(),
     ]);
 }
 

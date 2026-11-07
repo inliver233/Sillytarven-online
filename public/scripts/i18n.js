@@ -1,5 +1,6 @@
 import { registerDebugFunction } from './power-user.js';
 import { updateSecretDisplay } from './secrets.js';
+import { getVersionedAssetUrl } from './util/module-url.js';
 
 const storageKey = 'language';
 const overrideLanguage = localStorage.getItem(storageKey);
@@ -121,7 +122,7 @@ async function getLocaleData(language) {
         return {};
     }
 
-    const data = await fetch(`./locales/${language}.json`).then(response => {
+    const data = await fetch(getVersionedAssetUrl(`/locales/${language}.json`)).then(response => {
         console.log(`Loading locale data from ./locales/${language}.json`);
         if (!response.ok) {
             return {};
@@ -276,7 +277,7 @@ function addLanguagesToDropdown() {
 }
 
 export async function initLocales() {
-    langs = await fetch('/locales/lang.json').then(response => response.json());
+    langs = await fetch(getVersionedAssetUrl('/locales/lang.json')).then(response => response.json());
     localeData = await getLocaleData(localeFile);
     document.documentElement.lang = localeFile;
     applyLocale();

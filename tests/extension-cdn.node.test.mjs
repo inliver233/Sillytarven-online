@@ -108,16 +108,19 @@ test('only clean checkouts of the listed repositories use the CDN, and it serves
 
 test('a mirrored extension resolves its relative imports to the app, to itself and to other extensions', () => {
     const html = '<html><head></head><body><script type="module" src="script.js"></script></body></html>';
-    const page = transformAppHtml(html, { version: 'abc123def456', cdn: { baseUrl: 'https://s1.example.cn', timeZones: [] } });
+    const manifest = { version: 'abc123def456', files: { 'script.js': '11111111', 'scripts/extensions.js': '22222222' }, styles: {} };
+    const page = transformAppHtml(html, { manifest, cdn: { baseUrl: 'https://s1.example.cn', timeZones: [] } });
     const sha = 'a'.repeat(40);
-    const withUser = page.replace('"thirdParty":[]', JSON.stringify({ thirdParty: [{ name: 'Helper', sha }] }).slice(1, -1));
+    const withUser = page.replace('"thirdParty":[]', JSON.stringify({ thirdParty: [{ name: 'Helper', sha }, { name: 'Other', sha: 'b'.repeat(40) }] }).slice(1, -1));
     assert.notEqual(withUser, page);
     const script = /<script>(\(function \(o\)[\s\S]*?)<\/script>/.exec(withUser)[1];
-    let inserted = null;
+    const inserted = [];
+    const element = tagName => ({ tagName, after(next) { inserted.push(next); } });
     const context = {
+        HTMLScriptElement: { supports: type => type === 'importmap' },
         localStorage: { getItem: () => null, setItem: () => {} },
         Intl: { DateTimeFormat: () => ({ resolvedOptions: () => ({ timeZone: 'Asia/Shanghai' }) }) },
-        document: { createElement: () => ({}), currentScript: { after: element => { inserted = element; } } },
+        document: { createElement: element, currentScript: element('SCRIPT') },
         addEventListener: () => {},
         location: { origin: 'https://site.example', reload: () => {} },
         console: { warn: () => {} },
@@ -126,24 +129,27 @@ test('a mirrored extension resolves its relative imports to the app, to itself a
     context.window = context;
     const NativeWorker = context.Worker;
     vm.runInNewContext(script, context);
-    const imports = JSON.parse(inserted.textContent).imports;
+    const imports = JSON.parse(inserted.find(item => item.type === 'importmap').textContent).imports;
     const base = `https://s1.example.cn/v/e/${sha}`;
+    const extensions = 'https://s1.example.cn/v/s/scripts/extensions.js?v=22222222';
     assert.equal(imports['/scripts/extensions/third-party/Helper/'], `${base}/scripts/extensions/third-party/Helper/`);
-    // "../../../extensions.js" from the extension: the app's own module on the mirror.
-    assert.equal(imports[`${base}/scripts/`], 'https://s1.example.cn/v/abc123def456/scripts/');
-    assert.equal(imports[`${base}/script.js`], 'https://s1.example.cn/v/abc123def456/script.js');
-    // Its own files stay where they are; other third-party extensions come from this server.
+    // "../../../extensions.js" from the extension: the app's own module on the mirror, the same instance.
+    assert.equal(imports[`${base}/scripts/extensions.js`], extensions);
+    assert.equal(imports['/scripts/extensions.js'], extensions);
+    assert.equal(imports[`${base}/script.js`], 'https://s1.example.cn/v/s/script.js?v=11111111');
+    // Its own files stay where they are; another mirrored extension at its own commit; others come from this server.
+    assert.equal(imports[`${base}/scripts/extensions/third-party/Other/`], `https://s1.example.cn/v/e/${'b'.repeat(40)}/scripts/extensions/third-party/Other/`);
+    assert.equal(imports[`${base}/scripts/extensions/third-party/`], 'https://site.example/scripts/extensions/third-party/');
     assert.equal(imports[`${base}/scripts/extensions/third-party/Helper/`], `${base}/scripts/extensions/third-party/Helper/`);
-    assert.equal(imports[`${base}/scripts/extensions/third-party/`], '/scripts/extensions/third-party/');
-    assert.deepEqual(JSON.parse(JSON.stringify(context.__stAssetCdn)), { thirdParty: { Helper: base } }, 'the extension loader uses the same URL');
+    assert.deepEqual(JSON.parse(JSON.stringify(context.__stAssetCdn)), { thirdParty: { Helper: base, Other: `https://s1.example.cn/v/e/${'b'.repeat(40)}` } }, 'the extension loader uses the same URL');
 
     // Workers cannot come from another origin: one made from a mirrored module is created from this server.
     const fromExtension = new context.Worker(`${base}/scripts/extensions/third-party/Helper/assets/runtime.worker.js`, { type: 'module' });
     assert.equal(fromExtension.url, 'https://site.example/scripts/extensions/third-party/Helper/assets/runtime.worker.js');
     assert.deepEqual(fromExtension.options, { type: 'module' });
     assert.ok(fromExtension instanceof NativeWorker && fromExtension instanceof context.Worker);
-    assert.equal(new context.Worker({ href: 'https://s1.example.cn/v/abc123def456/scripts/extensions/tts/kokoro-worker.js' }).url,
-        'https://site.example/v/abc123def456/scripts/extensions/tts/kokoro-worker.js');
+    assert.equal(new context.Worker({ href: 'https://s1.example.cn/v/s/scripts/extensions/tts/kokoro-worker.js?v=12345678' }).url,
+        'https://site.example/v/s/scripts/extensions/tts/kokoro-worker.js?v=12345678');
     assert.equal(new context.Worker('blob:https://site.example/1234').url, 'blob:https://site.example/1234', 'other workers are left alone');
     assert.equal(new context.Worker('/scripts/extensions/third-party/Other/w.js').url, '/scripts/extensions/third-party/Other/w.js');
 });

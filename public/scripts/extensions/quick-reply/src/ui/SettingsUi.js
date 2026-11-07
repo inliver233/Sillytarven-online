@@ -1,5 +1,6 @@
 import { Popup } from '../../../../popup.js';
 import { getSortableDelay } from '../../../../utils.js';
+import { getVersionedAssetUrl } from '../../../../util/module-url.js';
 import { log, warn } from '../../index.js';
 import { QuickReply } from '../QuickReply.js';
 import { QuickReplySet } from '../QuickReplySet.js';
@@ -51,7 +52,8 @@ export class SettingsUi {
     }
     async render() {
         if (!this.dom) {
-            const response = await fetch('/scripts/extensions/quick-reply/html/settings.html', { cache: 'no-store' });
+            // At its version: kept by the browser (and the CDN) until a deploy changes it.
+            const response = await fetch(getVersionedAssetUrl('/scripts/extensions/quick-reply/html/settings.html'));
             if (response.ok) {
                 this.template = document.createRange().createContextualFragment(await response.text()).querySelector('#qr--settings');
                 // @ts-ignore

@@ -1,6 +1,7 @@
 import { debounce_timeout } from '../../constants.js';
 import { debounceAsync, splitRecursive } from '../../utils.js';
 import { getPreviewString, saveTtsProviderSettings } from './index.js';
+import { getVersionedAssetUrl } from '../../util/module-url.js';
 
 export class KokoroTtsProvider {
     constructor() {
@@ -88,11 +89,9 @@ export class KokoroTtsProvider {
                 }
 
                 // Create a new worker
-                // A worker must come from the page's own origin, while this module may be on a CDN mirror.
-                const workerUrl = new URL('./kokoro-worker.js', import.meta.url);
-                const sameOriginWorkerUrl = workerUrl.origin === location.origin
-                    ? workerUrl
-                    : new URL(workerUrl.pathname.replace(/^.*?(?=\/v\/[0-9a-f]+\/)/, ''), location.origin);
+                // A worker must come from the page's own origin, while the versioned file may be on a CDN mirror.
+                const workerUrl = new URL(getVersionedAssetUrl('/scripts/extensions/tts/kokoro-worker.js'), location.origin);
+                const sameOriginWorkerUrl = new URL(workerUrl.pathname + workerUrl.search, location.origin);
                 this.worker = new Worker(sameOriginWorkerUrl, { type: 'module' });
 
                 // Set up message handling

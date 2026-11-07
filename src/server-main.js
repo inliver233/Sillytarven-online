@@ -47,12 +47,16 @@ import {
 import getWebpackServeMiddleware from './middleware/webpack-serve.js';
 import { ExtensionCdn, createExtensionCdnMiddleware, parseAllowedExtensions } from './extension-cdn.js';
 import {
-    computeAssetVersion,
+    computeAssetManifest,
     createVersionedAssetsMiddleware,
+    getQueryVersionCacheControl,
+    getStartupModules,
     getVersionedAssetCacheControl,
+    insertAtHeadStart,
     normalizeAssetCdnBaseUrl,
     transformAppHtml,
 } from './asset-version.js';
+import { fillStartupPrefetchToken, getStartupPrefetchScript } from './startup-prefetch.js';
 import basicAuthMiddleware from './middleware/basicAuth.js';
 import getWhitelistMiddleware from './middleware/whitelist.js';
 import accessLoggerMiddleware, { getAccessLogPath, migrateAccessLog } from './middleware/accessLogWriter.js';
@@ -242,6 +246,12 @@ function setPrivateNoStoreHeaders(response) {
     response.vary('Cookie');
 }
 
+/**
+ * The user's CSRF token, as /csrf-token sends it (written into the app page, see startup-prefetch.js).
+ * @type {(request: import('express').Request) => string}
+ */
+let getCsrfToken = () => 'disabled';
+
 // CSRF Protection //
 if (!cliArgs.disableCsrf) {
     const csrfSyncProtection = csrfSync({
@@ -268,6 +278,7 @@ if (!cliArgs.disableCsrf) {
         size: 32,
     });
 
+    getCsrfToken = (req) => csrfSyncProtection.generateToken(req);
     app.get('/csrf-token', (req, res) => {
         res.json({
             'token': csrfSyncProtection.generateToken(req),
@@ -398,9 +409,12 @@ if (discordApplicationEnabled) {
 const webpackMiddleware = getWebpackServeMiddleware();
 const publicDirectory = path.join(serverDirectory, 'public');
 
-// The app's modules under /v/<version>/ with a long-lived cache (see asset-version.js).
+// The app's files under /v/s/ by their own versions, with a long-lived cache (see asset-version.js).
 const versionedAssetsEnabled = getConfigValue('performance.versionedAssets', true, 'boolean');
-const assetVersioning = { version: null, checkedAt: 0, pageKey: null, page: null };
+/** @type {{manifest: import('./asset-version.js').AssetManifest|null, checkedAt: number, pageKey: string|null, page: string|null}} */
+const assetVersioning = { manifest: null, checkedAt: 0, pageKey: null, page: null };
+// Startup reads sent by the page itself while its modules load (see startup-prefetch.js).
+const startupPrefetchEnabled = getConfigValue('performance.startupPrefetch', true, 'boolean');
 const assetCdn = getAssetCdnConfig();
 // Popular third-party extensions through the same CDN (see extension-cdn.js).
 const extensionCdn = new ExtensionCdn(assetCdn ? parseAllowedExtensions(getConfigValue('performance.assetCdn.extensions', [])) : []);
@@ -431,14 +445,14 @@ function getAssetCdnConfig() {
     return { baseUrl, timeZones };
 }
 
-/** @returns {string} Version of the files served under /v/, rechecked every few seconds */
-function getAssetVersion() {
+/** @returns {import('./asset-version.js').AssetManifest} Versions of the files served under /v/, rechecked every few seconds */
+function getAssetManifest() {
     const now = Date.now();
-    if (!assetVersioning.version || now - assetVersioning.checkedAt > 10_000) {
-        assetVersioning.version = computeAssetVersion(publicDirectory, webpackMiddleware.getOutputFile());
+    if (!assetVersioning.manifest || now - assetVersioning.checkedAt > 10_000) {
+        assetVersioning.manifest = computeAssetManifest(publicDirectory, webpackMiddleware.getOutputFile());
         assetVersioning.checkedAt = now;
     }
-    return assetVersioning.version;
+    return assetVersioning.manifest;
 }
 
 /** @returns {string} The Controller's login address on a managed node, else '' */
@@ -484,11 +498,15 @@ function sendAppPage(request, response) {
     if (versionedAssetsEnabled) {
         try {
             const indexFile = path.join(publicDirectory, 'index.html');
-            const version = getAssetVersion();
+            const manifest = getAssetManifest();
             const stats = fs.statSync(indexFile);
-            const key = `${version}:${stats.size}:${stats.mtimeMs}:${controllerUrl}`;
+            const key = `${manifest.version}:${stats.size}:${stats.mtimeMs}:${controllerUrl}`;
             if (assetVersioning.pageKey !== key) {
-                const page = transformAppHtml(fs.readFileSync(indexFile, 'utf8'), { version, cdn: assetCdn });
+                const libFile = webpackMiddleware.getOutputFile();
+                const preload = getStartupModules(publicDirectory, libFile, manifest);
+                let page = transformAppHtml(fs.readFileSync(indexFile, 'utf8'), { manifest, preload, cdn: assetCdn });
+                // Inserted last, so it comes first: the requests start before anything else.
+                if (page && startupPrefetchEnabled) page = insertAtHeadStart(page, getStartupPrefetchScript());
                 assetVersioning.page = page && addControllerAddress(page, controllerUrl);
                 assetVersioning.pageKey = key;
                 if (!assetVersioning.page) {
@@ -496,7 +514,9 @@ function sendAppPage(request, response) {
                 }
             }
             if (assetVersioning.page) {
-                return response.type('html').send(addUserCdnExtensions(assetVersioning.page, request));
+                let page = addUserCdnExtensions(assetVersioning.page, request);
+                if (startupPrefetchEnabled) page = fillStartupPrefetchToken(page, getCsrfToken(request));
+                return response.type('html').send(page);
             }
         } catch (error) {
             console.warn('Could not version the app assets; serving the page as is.', error);
@@ -513,7 +533,7 @@ function sendAppPage(request, response) {
 }
 
 app.use(createExtensionCdnMiddleware(extensionCdn, () => extensionDirectories));
-app.use(createVersionedAssetsMiddleware(getAssetVersion));
+app.use(createVersionedAssetsMiddleware(getAssetManifest));
 app.use(webpackMiddleware);
 app.use(userCssMiddleware);
 const templatesDirectory = path.join(publicDirectory, 'scripts', 'templates');
@@ -523,7 +543,8 @@ app.use(express.static(publicDirectory, {
     lastModified: true,
     setHeaders: (res, filePath) => {
         dropVaryOrigin(res);
-        const versionedCacheControl = getVersionedAssetCacheControl(res);
+        const versionedCacheControl = getVersionedAssetCacheControl(res)
+            ?? (versionedAssetsEnabled ? getQueryVersionCacheControl(getAssetManifest(), path.relative(publicDirectory, filePath).split(path.sep).join('/'), res.req?.query?.v) : null);
         if (versionedCacheControl) {
             res.setHeader('Cache-Control', versionedCacheControl);
             return;

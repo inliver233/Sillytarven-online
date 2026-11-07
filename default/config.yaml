@@ -288,7 +288,10 @@ performance:
   longChatDomRenderOptimization:
     enabled: true
   # Memoize the complete /version payload while package.json and Git HEAD/ref stay unchanged.
-  # Load the app's own modules (everything under /v/<version>/) from a CDN mirror, e.g. a
+  # The page sends the app's startup reads (settings, secrets, extensions, ...) itself as soon
+  # as it starts to load, all at once, instead of one after another once the modules have run.
+  startupPrefetch: true
+  # Load the app's own files (everything under /v/) from a CDN mirror, e.g. a
   # domain whose DNS sends mainland China to a local CDN and everyone else to Cloudflare.
   # The CDN pulls /v/... from this server (responses are public, immutable and allow CORS).
   # A page that cannot load from the mirror tries again once, then uses this server for 30 minutes.
