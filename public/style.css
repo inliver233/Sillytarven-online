@@ -761,6 +761,24 @@ hr {
     opacity: 0.8;
 }
 
+/* With more account buttons than fit in a row, the settings search moves to its own line instead
+   of being squeezed beside them; on phones it always has a full-width line of its own.
+   (.flexFlowRow's "flex-flow: row" turns off the wrapping .flex-container gives the row.) */
+#user-settings-block [name="UserSettingsRowTwo"] {
+    flex-wrap: wrap;
+}
+
+#settingsSearch {
+    flex: 1 1 12em;
+    min-width: 12em;
+}
+
+@media screen and (max-width: 1000px) {
+    #settingsSearch {
+        flex-basis: 100%;
+    }
+}
+
 /*TOPPER margin*/
 
 #top-bar {
