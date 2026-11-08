@@ -547,7 +547,7 @@ function catgirlElement(rank) {
 /** 综合榜第四、五名的头像（静止；那一行的边框颜色在 leaderboard.css 里，取自图片） */
 const PLACE_FACES = { 4: '/img/leaderboard-fourth.webp', 5: '/img/leaderboard-fifth.webp' };
 /** 这个名次被挤下去时，那一行先换成这张哭脸 */
-const PLACE_SAD_FACES = { 4: '/img/leaderboard-fourth-sad.webp' };
+const PLACE_SAD_FACES = { 4: '/img/leaderboard-fourth-sad.webp', 5: '/img/leaderboard-fifth-sad.webp' };
 
 /**
  * @param {number} rank
@@ -557,7 +557,7 @@ const PLACE_SAD_FACES = { 4: '/img/leaderboard-fourth-sad.webp' };
 function rankCell(rank, fancy, mood) {
     let mark;
     if (fancy && mood?.mood === 'placeSad') {
-        mark = h('img', { class: 'leaderboard-place-face leaderboard-place-sad', src: PLACE_SAD_FACES[mood.place], alt: `第 ${rank} 名`, title: `第 ${rank} 名`, draggable: 'false' });
+        mark = h('img', { class: `leaderboard-place-face leaderboard-place-sad${mood.place}`, src: PLACE_SAD_FACES[mood.place], alt: `第 ${rank} 名`, title: `第 ${rank} 名`, draggable: 'false' });
     } else if (fancy && rank <= 3) {
         mark = catgirlElement(/** @type {1|2|3} */ (rank));
         if (mood) mark.classList.add(`cg-mood-${mood.mood}`);
@@ -685,7 +685,7 @@ const MOOD_MS = { excited: 3600, happy: 2400, shocked: 3000, sad: 3200, placeSad
 
 /**
  * 综合榜前三的猫娘跟着发生的事换表情：下克上、登顶得意，往上换位、冲进前三、加分开心，
- * 被顶替吃惊，名次往下掉难过；第四名被挤下去时那一行先换成第四名的哭脸。过几秒自己换回来
+ * 被顶替吃惊，名次往下掉难过；第四、五名被挤下去时那一行先换成那个名次的哭脸。过几秒自己换回来
  * （期间刷新也接着这个表情）。
  * @param {{key?: string, name: string, rank: number, value: number}[]} rows
  * @param {Map<string, string>} events topEvents() 的结果

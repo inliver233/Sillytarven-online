@@ -414,9 +414,13 @@
     box-shadow: inset 0 0 0 1px var(--lb-place-color);
 }
 
-/* 第四名被挤下去时那一行的哭脸，边框还是第四名的樱花粉 */
-.leaderboard-place-face.leaderboard-place-sad {
+/* 第四、五名被挤下去时那一行的哭脸，边框还是原来名次的颜色 */
+.leaderboard-place-face.leaderboard-place-sad4 {
     box-shadow: 0 0 0 1px #f2b4c3;
+}
+
+.leaderboard-place-face.leaderboard-place-sad5 {
+    box-shadow: 0 0 0 1px #d9ad99;
 }
 
 /* 猫娘四周有透明的边，头像是满的：小一点才一样大 */
