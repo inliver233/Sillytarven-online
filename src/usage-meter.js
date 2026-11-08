@@ -6,16 +6,26 @@ import express from 'express';
 import fetch from 'node-fetch';
 import { sync as writeFileAtomicSync } from 'write-file-atomic';
 
+import { readSecret, SECRET_KEYS } from './endpoints/secrets.js';
 import { canPersistSharedState, onActivate } from './process-lifecycle.js';
+import { describeRelay, detectRelay, FREE_RELAYS, knownRelay, readRelaySpend, RELAY_LABELS } from './relay-billing.js';
 import { getLocalDateKey } from './storage-quota.js';
 
 /**
  * Usage meter: reads the tokens each AI service reports in its answer (streamed or not) and adds
  * them to the user's daily totals. Nothing is estimated: what the service reports is what it bills,
- * whatever the model is called. Services that bill by the token at their published prices also get
- * a price, from models.dev's list (fetched once a day); for relays only the tokens are known.
+ * whatever the model is called. Money, all kept in US dollars:
+ * - official services: their published prices, from models.dev's list (fetched once a day);
+ * - relays (custom endpoint or reverse proxy), the first that applies:
+ *   1. what the relay itself says the key spent (relay-billing.js: new-api, sub2api, gpt-load, ...),
+ *      read after generations; the difference is shared out among them;
+ *   2. the user's own price for that relay (free, per call, per million tokens, or official × ratio);
+ *   3. the prices models.dev lists for that address (OpenCode Zen, DeepSeek, OpenRouter, ...);
+ *   otherwise only the tokens.
  *
- * Per user, <data>/_usage/<handle>.json: { days: { 'YYYY-MM-DD': Totals & { models } }, recent: Entry[] }.
+ * Per user, <data>/_usage/<handle>.json:
+ *   { days: { 'YYYY-MM-DD': Totals & { models } }, recent: Entry[], relays: { [relay id]: last reading },
+ *     settings: { rate, pricing: { [relay address]: Pricing } } }
  * The page sends an X-Usage-Id header with each generation and reads its entry back afterwards.
  */
 
@@ -46,7 +56,8 @@ const FREE_SOURCES = new Set(['free-gemini']);
 /**
  * @typedef {{ input: number, cached: number, cacheWrite: number, output: number, reasoning: number, reportedCost?: number }} Usage
  * @typedef {{ requests: number, reported: number, input: number, cached: number, output: number, reasoning: number, cost: number, priced: number }} Totals
- * @typedef {{ id: string, at: number, source: string, model: string, input: number, cached: number, output: number, reasoning: number, cost: number|null, priced: string|null, provider?: string }} Entry
+ * @typedef {{ id: string, at: number, source: string, model: string, input: number, cached: number, output: number, reasoning: number, cost: number|null, priced: string|null, provider?: string, relay?: { address: string, kind: string|null }, pending?: boolean }} Entry
+ * @typedef {{ mode: 'free'|'call'|'token'|'ratio', currency?: 'USD'|'CNY', value?: number, input?: number, output?: number, ratio?: number }} Pricing
  */
 
 const finite = value => (Number.isFinite(Number(value)) ? Number(value) : 0);
@@ -146,7 +157,12 @@ export class UsageReader {
 // Prices (models.dev)
 // ---------------------------------------------------------------------------
 
-/** @type {{ fetchedAt: number, providers: Record<string, Record<string, any>> }|null} */
+/** For "official price × ratio": the providers whose model names relays copy, best first. */
+const OFFICIAL_ORDER = Object.freeze(['google', 'openai', 'anthropic', 'deepseek', 'xai', 'mistral', 'moonshotai', 'zai']);
+
+/**
+ * @type {{ fetchedAt: number, providers: Record<string, Record<string, any>>, catalog: { provider: string, name: string, base: string }[] }|null}
+ */
 let prices = null;
 let refreshing = null;
 
@@ -155,27 +171,43 @@ const pricesFile = () => path.join(globalThis.DATA_ROOT, '_global', 'model-price
 function loadPrices() {
     try {
         const stored = JSON.parse(fs.readFileSync(pricesFile(), 'utf8'));
-        if (stored?.providers && typeof stored.providers === 'object') prices = stored;
+        if (stored?.providers && typeof stored.providers === 'object') prices = { catalog: [], ...stored };
     } catch {
         // Not fetched yet.
     }
 }
 
-/** Fetches models.dev and keeps the prices of the providers above. */
+/** A relay address as "host/path" for comparing with the addresses models.dev lists. */
+const addressKey = url => {
+    try {
+        const parsed = new URL(url);
+        return `${parsed.host}${parsed.pathname.replace(/\/+$/, '')}`.toLowerCase();
+    } catch {
+        return '';
+    }
+};
+
+/** Fetches models.dev: the prices of the official providers and of every service with an address. */
 export async function refreshPrices() {
     refreshing ??= (async () => {
         try {
             const response = await fetch(PRICES_URL, { signal: AbortSignal.timeout(60e3) });
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
             const data = /** @type {any} */ (await response.json());
+            const official = new Set([...Object.values(OFFICIAL_PROVIDERS).flat(), ...OFFICIAL_ORDER]);
             /** @type {Record<string, Record<string, any>>} */
             const providers = {};
-            for (const id of new Set(Object.values(OFFICIAL_PROVIDERS).flat())) {
-                providers[id] = {};
-                for (const [model, info] of Object.entries(data?.[id]?.models ?? {})) {
+            const catalog = [];
+            for (const [id, provider] of Object.entries(data ?? {})) {
+                const base = addressKey(provider?.api ?? '');
+                const host = base.split('/')[0];
+                const listed = Boolean(base) && !/^(localhost|127\.|0\.0\.0\.0|\[)/.test(host);
+                if (!official.has(id) && !listed) continue;
+                const models = {};
+                for (const [model, info] of Object.entries(provider?.models ?? {})) {
                     const cost = /** @type {any} */ (info)?.cost;
                     if (!Number.isFinite(cost?.input) || !Number.isFinite(cost?.output)) continue;
-                    providers[id][model] = {
+                    models[model] = {
                         input: cost.input, output: cost.output,
                         ...(Number.isFinite(cost.cache_read) ? { cache_read: cost.cache_read } : {}),
                         ...(Number.isFinite(cost.cache_write) ? { cache_write: cost.cache_write } : {}),
@@ -183,11 +215,13 @@ export async function refreshPrices() {
                         ...(cost.context_over_200k ? { context_over_200k: cost.context_over_200k } : {}),
                     };
                 }
+                providers[id] = models;
+                if (listed) catalog.push({ provider: id, name: String(provider.name ?? id).slice(0, 60), base });
             }
-            prices = { fetchedAt: Date.now(), providers };
+            prices = { fetchedAt: Date.now(), providers, catalog };
             fs.mkdirSync(path.dirname(pricesFile()), { recursive: true });
             writeFileAtomicSync(pricesFile(), JSON.stringify(prices), 'utf8');
-            console.info(`[usage] Prices updated from models.dev (${Object.values(providers).reduce((sum, list) => sum + Object.keys(list).length, 0)} models)`);
+            console.info(`[usage] Prices updated from models.dev (${Object.keys(providers).length} services, ${catalog.length} with an address)`);
         } catch (error) {
             console.warn('[usage] Could not update prices from models.dev:', error?.message ?? error);
         } finally {
@@ -217,6 +251,70 @@ export function findPrice(source, model, body = {}) {
     return null;
 }
 
+/** Words relays put around model names (抗截断-pg-gemini-…), without telling anything about the model. */
+const DECORATION = /^(?:抗截断|假流式|流式保活|流式|保活|满血|官逆|公益|捐赠|反代|pggo|pg|build|agy|antigravity|aistudio|ai-studio|vertex|gcli|cli)(?:[-_ .:]+|(?=[一-鿿])|(?=gemini|claude|gpt|o\d|deepseek|glm|kimi|grok|qwen|mistral))/i;
+const SUFFIX = /[-_](?:high|low|medium|minimal|max|ci|search|online|thinking|nothinking|no-thinking|fc|latest|free)$/i;
+
+/**
+ * Candidate official names for a relay's model name, most specific first:
+ * "【次哈-0.11】 抗截断-pg-gemini-4-argon-high" → gemini-4-argon-high, gemini-4-argon.
+ * @param {string} name
+ * @returns {string[]}
+ */
+export function officialNames(name) {
+    let text = String(name ?? '').trim().toLowerCase();
+    text = text.replace(/[[【(（{<][^\]】)）}>]*[\]】)）}>]/g, ' ').trim();
+    text = text.replace(/\/(?:fc|search|thinking)$/, '');
+    text = text.split('/').map(part => part.trim()).filter(Boolean).pop() ?? '';
+    for (let i = 0; i < 6; i++) {
+        const next = text.replace(DECORATION, '').trim();
+        if (next === text) break;
+        text = next;
+    }
+    const names = [];
+    for (let i = 0; i < 5 && text; i++) {
+        names.push(text);
+        const next = text.replace(SUFFIX, '');
+        if (next === text) break;
+        text = next;
+    }
+    return names;
+}
+
+/**
+ * The official price of a relay's model, by its name without the relay's decorations.
+ * @param {string} model
+ * @returns {{ provider: string, cost: any, model: string }|null}
+ */
+export function officialPrice(model) {
+    if (!prices) return null;
+    for (const name of officialNames(model)) {
+        for (const provider of OFFICIAL_ORDER) {
+            const cost = prices.providers[provider]?.[name];
+            if (cost) return { provider, cost, model: name };
+        }
+    }
+    return null;
+}
+
+/**
+ * The prices models.dev lists for a relay's address (OpenCode Zen, DeepSeek, OpenRouter, ...).
+ * @param {string} base The relay address
+ * @param {string} model
+ * @returns {{ provider: string, name: string, cost: any }|null}
+ */
+export function catalogPrice(base, model) {
+    if (!prices?.catalog?.length) return null;
+    const key = addressKey(base);
+    const listed = prices.catalog
+        .filter(item => key === item.base || key.startsWith(`${item.base}/`) || item.base.startsWith(`${key}/`))
+        .sort((a, b) => b.base.length - a.base.length)[0];
+    if (!listed) return null;
+    const models = prices.providers[listed.provider] ?? {};
+    const cost = models[model] ?? officialNames(model).map(name => models[name]).find(Boolean);
+    return cost ? { provider: listed.provider, name: listed.name, cost } : null;
+}
+
 /**
  * @param {any} cost Prices per million tokens (models.dev)
  * @param {Usage} usage
@@ -236,9 +334,66 @@ export function priceUsage(cost, usage) {
         + usage.output * rates.output) / 1e6;
 }
 
+/**
+ * The user's own price for a relay.
+ * @param {Pricing} pricing
+ * @param {string} model
+ * @param {Usage} usage
+ * @param {number} rate Yuan per dollar
+ * @returns {{ cost: number, provider?: string }|null} US dollars
+ */
+export function applyPricing(pricing, model, usage, rate) {
+    const toUsd = value => (pricing.currency === 'CNY' ? value / rate : value);
+    switch (pricing.mode) {
+        case 'free': return { cost: 0 };
+        case 'call': return { cost: toUsd(finite(pricing.value)) };
+        case 'token': return { cost: toUsd((usage.input * finite(pricing.input) + usage.output * finite(pricing.output)) / 1e6) };
+        case 'ratio': {
+            const official = officialPrice(model);
+            return official ? { cost: priceUsage(official.cost, usage) * finite(pricing.ratio), provider: official.provider } : null;
+        }
+        default: return null;
+    }
+}
+
+/**
+ * @param {any} value
+ * @returns {Pricing|null}
+ */
+export function sanitizePricing(value) {
+    if (!value || typeof value !== 'object') return null;
+    const positive = item => Math.max(0, Math.min(1e6, Number(item) || 0));
+    const currency = value.currency === 'CNY' ? 'CNY' : 'USD';
+    switch (value.mode) {
+        case 'free': return { mode: 'free' };
+        case 'call': return { mode: 'call', currency, value: positive(value.value) };
+        case 'token': return { mode: 'token', currency, input: positive(value.input), output: positive(value.output) };
+        case 'ratio': return { mode: 'ratio', ratio: Math.max(0, Math.min(100, Number(value.ratio) || 0)) };
+        default: return null;
+    }
+}
+
+/**
+ * What a relay's model names say about its price: "[公益]…" is free, "[0.06/次]" or "次哈-0.11" per call.
+ * Only a suggestion for the user, never applied by itself.
+ * @param {string[]} models
+ * @returns {Pricing|null}
+ */
+export function pricingHint(models) {
+    for (const model of models) {
+        const name = String(model ?? '');
+        const perCall = name.match(/(\d+(?:\.\d+)?)\s*(?:元|¥|￥)?\s*\/\s*次/) ?? name.match(/次[^\d\s/]{0,4}[-:：]?\s*(\d+(?:\.\d+)?)/);
+        if (perCall) return { mode: 'call', currency: 'CNY', value: Number(perCall[1]) };
+        if (/公益|免费|free/i.test(name)) return { mode: 'free' };
+    }
+    return null;
+}
+
 // ---------------------------------------------------------------------------
 // Totals per user
 // ---------------------------------------------------------------------------
+
+const DEFAULT_RATE = 7.2;
 
 /** @type {Map<string, Promise<void>>} */
 const writing = new Map();
@@ -247,12 +402,43 @@ const usageFile = handle => path.join(globalThis.DATA_ROOT, '_usage', `${handle}
 
 /** @param {string} handle */
 export function readUsage(handle) {
+    let stored = null;
     try {
-        const stored = JSON.parse(fs.readFileSync(usageFile(handle), 'utf8'));
-        return { days: stored?.days && typeof stored.days === 'object' ? stored.days : {}, recent: Array.isArray(stored?.recent) ? stored.recent : [] };
+        stored = JSON.parse(fs.readFileSync(usageFile(handle), 'utf8'));
     } catch {
-        return { days: {}, recent: [] };
+        // Nothing recorded yet.
     }
+    const settings = stored?.settings && typeof stored.settings === 'object' ? stored.settings : {};
+    return {
+        days: stored?.days && typeof stored.days === 'object' ? stored.days : {},
+        recent: Array.isArray(stored?.recent) ? stored.recent : [],
+        relays: stored?.relays && typeof stored.relays === 'object' ? stored.relays : {},
+        settings: {
+            rate: Number(settings.rate) > 0 ? Number(settings.rate) : DEFAULT_RATE,
+            pricing: settings.pricing && typeof settings.pricing === 'object' ? settings.pricing : {},
+        },
+    };
+}
+
+/**
+ * Changes the user's file, one change at a time (the file is read again each time, so a process
+ * handing over to another one does not lose the other's additions).
+ * @param {string} handle
+ * @param {(data: ReturnType<typeof readUsage>) => void} change
+ */
+function updateUsage(handle, change) {
+    const previous = writing.get(handle) ?? Promise.resolve();
+    const next = previous.then(() => {
+        const data = readUsage(handle);
+        change(data);
+        fs.mkdirSync(path.dirname(usageFile(handle)), { recursive: true });
+        writeFileAtomicSync(usageFile(handle), JSON.stringify(data), 'utf8');
+    }).catch(error => console.warn('[usage] Could not update the usage of', handle, error?.message ?? error));
+    writing.set(handle, next);
+    void next.then(() => {
+        if (writing.get(handle) === next) writing.delete(handle);
+    });
+    return next;
 }
 
 /** @returns {Totals} */
@@ -278,35 +464,176 @@ function add(totals, entry, reported) {
 }
 
 /**
- * Adds one generation to the user's totals (the file is read again each time, so a process
- * handing over to another one does not lose the other's additions).
+ * Adds one generation to the user's totals.
  * @param {string} handle
  * @param {Entry} entry
  * @param {boolean} reported Whether the service reported its usage
  */
 export function recordUsage(handle, entry, reported) {
-    const previous = writing.get(handle) ?? Promise.resolve();
-    const next = previous.then(() => {
-        const data = readUsage(handle);
+    return updateUsage(handle, data => {
         const day = getLocalDateKey(new Date(entry.at));
         const today = data.days[day] ??= { ...emptyTotals(), models: {} };
         add(today, entry, reported);
-        const key = `${entry.source}|${entry.model}`;
-        add(today.models[key] ??= emptyTotals(), entry, reported);
+        add(today.models[`${entry.source}|${entry.model}`] ??= emptyTotals(), entry, reported);
         const oldest = getLocalDateKey(new Date(entry.at - KEEP_DAYS * 86400e3));
         for (const date of Object.keys(data.days)) {
             if (date < oldest) delete data.days[date];
         }
         data.recent = [...data.recent.filter(item => item.id !== entry.id), entry].slice(-KEEP_RECENT);
-        fs.mkdirSync(path.dirname(usageFile(handle)), { recursive: true });
-        writeFileAtomicSync(usageFile(handle), JSON.stringify(data), 'utf8');
-    }).catch(error => console.warn('[usage] Could not record usage of', handle, error?.message ?? error));
-    writing.set(handle, next);
-    void next.then(() => {
-        if (writing.get(handle) === next) writing.delete(handle);
     });
-    return next;
 }
+
+/**
+ * Prices generations recorded earlier (relay spending, known only after reading the relay).
+ * @param {ReturnType<typeof readUsage>} data
+ * @param {Map<string, number|null>} costs Entry id → US dollars (null: could not tell)
+ */
+function settleEntries(data, costs) {
+    for (const entry of data.recent) {
+        if (!costs.has(entry.id) || !entry.pending) continue;
+        const cost = costs.get(entry.id);
+        entry.pending = false;
+        if (cost === null || cost === undefined) continue;
+        entry.cost = cost;
+        entry.priced = 'relay';
+        const day = data.days[getLocalDateKey(new Date(entry.at))];
+        for (const totals of [day, day?.models?.[`${entry.source}|${entry.model}`]]) {
+            if (!totals) continue;
+            totals.cost += cost;
+            totals.priced++;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Relays that report what a key spent
+// ---------------------------------------------------------------------------
+
+/** Between two reads of one relay key: lets several quick generations settle together. */
+const SETTLE_INTERVAL_MS = 15e3;
+/** A first wait after a generation, so the relay has booked it. */
+const SETTLE_DELAY_MS = 1500;
+/** An older reading is taken again before a generation (other apps may have used the key since). */
+const BASELINE_MAX_AGE_MS = 30 * 60e3;
+const SETTLE_TRIES = 3;
+
+/** @type {Map<string, { pending: { id: string, weight: number }[], timer: NodeJS.Timeout|null, lastReadAt: number, tries: number }>} */
+const settling = new Map();
+
+/**
+ * The relay of a generation (custom endpoint or reverse proxy), or null for an official service.
+ * @param {import('express').Request} request
+ */
+function relayOf(request) {
+    const body = request.body ?? {};
+    try {
+        if (body.chat_completion_source === 'custom' && body.custom_url) {
+            return describeRelay(body.custom_url, readSecret(request.user.directories, SECRET_KEYS.CUSTOM, body.secret_id) ?? '');
+        }
+        if (body.reverse_proxy) return describeRelay(body.reverse_proxy, body.proxy_password ?? '');
+    } catch (error) {
+        // Metering never gets in the way of the generation itself.
+        console.warn('[usage] Could not tell the relay of a generation:', error?.message ?? error);
+    }
+    return null;
+}
+
+const billed = kind => Boolean(kind) && !FREE_RELAYS.has(kind);
+
+/**
+ * Takes a reading of what the key has spent, to compare with after later generations (not while
+ * earlier generations still wait for theirs).
+ * @param {string} handle
+ * @param {import('./relay-billing.js').Relay} relay
+ * @param {string} kind
+ */
+async function takeReading(handle, relay, kind) {
+    if (settling.get(`${handle}|${relay.id}`)?.pending.length) return;
+    const spend = await readRelaySpend(relay);
+    if (!spend || settling.get(`${handle}|${relay.id}`)?.pending.length) return;
+    await updateUsage(handle, data => {
+        data.relays[relay.id] = { address: relay.address, kind, used: spend.usedUsd, remaining: spend.remainingUsd, at: Date.now() };
+    });
+}
+
+/**
+ * Before a generation through a relay already known to report spending: an old reading is taken
+ * again (the key may have been used elsewhere since). Unknown relays are not asked anything here.
+ * @param {string} handle
+ * @param {import('./relay-billing.js').Relay} relay
+ */
+async function prepareRelay(handle, relay) {
+    const kind = knownRelay(relay)?.kind;
+    if (!billed(kind)) return;
+    const last = readUsage(handle).relays[relay.id];
+    if (last && Date.now() - last.at < BASELINE_MAX_AGE_MS) return;
+    await takeReading(handle, relay, /** @type {string} */ (kind));
+}
+
+/**
+ * After a generation through such a relay: read what the key has spent since the last reading and
+ * share it out among the generations that waited for it (by tokens).
+ * @param {string} handle
+ * @param {import('./relay-billing.js').Relay} relay
+ * @param {string} id
+ * @param {number} weight
+ */
+function settleRelay(handle, relay, id, weight) {
+    const key = `${handle}|${relay.id}`;
+    const state = settling.get(key) ?? { pending: [], timer: null, lastReadAt: 0, tries: 0 };
+    settling.set(key, state);
+    state.pending.push({ id, weight });
+    if (state.timer) return;
+    const wait = Math.max(SETTLE_DELAY_MS, SETTLE_INTERVAL_MS - (Date.now() - state.lastReadAt));
+    state.timer = setTimeout(() => void readAndShare(handle, relay, key), wait);
+    state.timer.unref?.();
+}
+
+async function readAndShare(handle, relay, key) {
+    const state = settling.get(key);
+    if (!state) return;
+    state.timer = null;
+    state.lastReadAt = Date.now();
+    const spend = await readRelaySpend(relay).catch(() => null);
+    if (!spend && ++state.tries < SETTLE_TRIES) {
+        // Not now (rate window, network): try again a little later.
+        state.timer = setTimeout(() => void readAndShare(handle, relay, key), SETTLE_INTERVAL_MS * state.tries);
+        state.timer.unref?.();
+        return;
+    }
+    const batch = state.pending.splice(0);
+    state.tries = 0;
+    const kind = knownRelay(relay)?.kind ?? null;
+    await updateUsage(handle, data => {
+        const last = data.relays[relay.id];
+        // Generations still waiting from before a restart: their spending is in this reading too.
+        const waiting = new Set(batch.map(item => item.id));
+        for (const entry of data.recent) {
+            if (entry.pending && entry.relay?.address === relay.address && !waiting.has(entry.id) && Date.now() - entry.at > 60e3) {
+                batch.push({ id: entry.id, weight: Math.max(1, entry.input + entry.output) });
+            }
+        }
+        /** @type {Map<string, number|null>} */
+        const costs = new Map(batch.map(item => [item.id, null]));
+        if (spend && last && spend.usedUsd >= last.used) {
+            const spent = spend.usedUsd - last.used;
+            const total = batch.reduce((sum, item) => sum + item.weight, 0);
+            for (const item of batch) costs.set(item.id, total > 0 ? spent * (item.weight / total) : spent / batch.length);
+        }
+        settleEntries(data, costs);
+        if (spend) data.relays[relay.id] = { address: relay.address, kind, used: spend.usedUsd, remaining: spend.remainingUsd, at: Date.now() };
+    });
+    if (state.pending.length) {
+        state.timer = setTimeout(() => void readAndShare(handle, relay, key), SETTLE_INTERVAL_MS);
+        state.timer.unref?.();
+    } else {
+        settling.delete(key);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Metering a generation
+// ---------------------------------------------------------------------------
 
 /**
  * Meters one generation: reads the usage from the answer (forwardFetchResponse feeds streamed
@@ -333,55 +660,115 @@ export function meterGeneration(request, response) {
     };
     const id = String(request.get('x-usage-id') ?? '').slice(0, 64).replace(/[^\w-]/g, '') || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const startedAt = Date.now();
+    const relay = relayOf(request);
+    if (relay) void prepareRelay(handle, relay).catch(error => console.warn('[usage] Relay reading failed:', error?.message ?? error));
     response.once('close', () => {
         reader.end();
+        void record().catch(error => console.warn('[usage] Could not meter a generation:', error?.message ?? error));
+    });
+
+    async function record() {
         const usage = reader.result();
         // Refused before reaching the service, or failed: nothing was used.
         if (response.statusCode >= 400 || (failed && !usage)) return;
         const source = String(request.body?.chat_completion_source ?? '');
         const model = String(request.body?.model ?? '');
-        let cost = null;
-        let priced = null;
-        let provider;
-        if (usage && FREE_SOURCES.has(source)) {
-            cost = 0;
-            priced = 'free';
-        } else if (usage && source === 'openrouter' && Number.isFinite(usage.reportedCost)) {
-            // OpenRouter reports what it charged, in dollars (relays may use their own units).
-            cost = usage.reportedCost;
-            priced = 'reported';
-        } else if (usage) {
-            const price = findPrice(source, model, request.body);
-            if (price) {
-                cost = priceUsage(price.cost, usage);
-                priced = 'official';
-                provider = price.provider;
-            }
-        }
         /** @type {Entry} */
         const entry = {
             id, at: startedAt, source, model,
             input: usage?.input ?? 0, cached: usage?.cached ?? 0, output: usage?.output ?? 0, reasoning: usage?.reasoning ?? 0,
-            cost, priced, ...(provider ? { provider } : {}),
+            cost: null, priced: null,
         };
-        void recordUsage(handle, entry, Boolean(usage));
-    });
+        let waitForRelay = false;
+        let firstReading = false;
+        if (relay) {
+            // Only after a generation went through is the relay asked what it runs (once in a while).
+            const found = await detectRelay(relay).catch(() => null);
+            entry.relay = { address: relay.address, kind: found?.kind ?? null };
+            const { settings, relays } = readUsage(handle);
+            const own = sanitizePricing(settings.pricing[relay.address]);
+            const listed = usage ? catalogPrice(relay.base, model) : null;
+            if (billed(found?.kind) && !relays[relay.id]) {
+                // No earlier reading to compare with: this one becomes it (this generation stays unpriced).
+                firstReading = true;
+            } else if (billed(found?.kind)) {
+                // What the relay booked comes after reading it again.
+                entry.pending = true;
+                waitForRelay = true;
+            } else if (usage && own) {
+                const priced = applyPricing(own, model, usage, settings.rate);
+                if (priced) Object.assign(entry, { cost: priced.cost, priced: 'custom' }, priced.provider ? { provider: priced.provider } : {});
+            } else if (listed) {
+                Object.assign(entry, { cost: priceUsage(listed.cost, usage), priced: 'catalog', provider: listed.provider });
+            }
+        } else if (usage && FREE_SOURCES.has(source)) {
+            Object.assign(entry, { cost: 0, priced: 'free' });
+        } else if (usage && source === 'openrouter' && Number.isFinite(usage.reportedCost)) {
+            // OpenRouter reports what it charged, in dollars.
+            Object.assign(entry, { cost: usage.reportedCost, priced: 'reported' });
+        } else if (usage) {
+            const price = findPrice(source, model, request.body);
+            if (price) Object.assign(entry, { cost: priceUsage(price.cost, usage), priced: 'official', provider: price.provider });
+        }
+        await recordUsage(handle, entry, Boolean(usage));
+        if (waitForRelay && relay) settleRelay(handle, relay, id, Math.max(1, entry.input + entry.output));
+        if (firstReading && relay && entry.relay?.kind) await takeReading(handle, relay, entry.relay.kind);
+    }
 }
 
 /** The server calls this: prices are fetched by the serving process, once a day. */
 export function startUsageMeter() {
     loadPrices();
     const run = () => {
-        if (!prices || Date.now() - prices.fetchedAt > PRICES_MAX_AGE_MS) void refreshPrices();
+        if (!prices || !prices.catalog?.length || Date.now() - prices.fetchedAt > PRICES_MAX_AGE_MS) void refreshPrices();
         setInterval(() => void refreshPrices(), PRICES_MAX_AGE_MS).unref?.();
     };
     if (canPersistSharedState()) run();
     else onActivate(run);
 }
 
+// ---------------------------------------------------------------------------
+// API
+// ---------------------------------------------------------------------------
+
 export const router = express.Router();
 
-/** Today's totals, the last 7 days, and (with ?id=) one generation. */
+/**
+ * The relays the user went through lately: what they are, what they report, how they are priced.
+ * @param {ReturnType<typeof readUsage>} data
+ */
+function describeRelays(data) {
+    /** @type {Map<string, any>} */
+    const relays = new Map();
+    const since = Date.now() - 7 * 86400e3;
+    for (const entry of data.recent) {
+        if (!entry.relay?.address || entry.at < since) continue;
+        const item = relays.get(entry.relay.address) ?? { address: entry.relay.address, kind: null, models: [], catalog: null, at: 0 };
+        if (entry.at >= item.at) {
+            item.at = entry.at;
+            item.kind = entry.relay.kind ?? item.kind;
+        }
+        if (!item.models.includes(entry.model)) item.models.push(entry.model);
+        if (entry.priced === 'catalog') item.catalog = prices?.catalog?.find(listed => listed.provider === entry.provider)?.name ?? entry.provider;
+        relays.set(entry.relay.address, item);
+    }
+    for (const [id, reading] of Object.entries(data.relays)) {
+        const item = relays.get(reading.address);
+        if (!item || (item.checkedAt ?? 0) > reading.at) continue;
+        Object.assign(item, { remaining: reading.remaining ?? null, checkedAt: reading.at, relayId: id });
+    }
+    return [...relays.values()].map(({ at, relayId, ...item }) => ({
+        ...item,
+        label: item.kind ? RELAY_LABELS[item.kind] ?? item.kind : null,
+        billing: billed(item.kind),
+        free: FREE_RELAYS.has(item.kind),
+        pricing: sanitizePricing(data.settings.pricing[item.address]),
+        hint: pricingHint(item.models),
+        official: item.models.map(model => officialPrice(model)?.model).find(Boolean) ?? null,
+    }));
+}
+
+/** Today's totals, the last 7 days, the relays and settings, and (with ?id=) one generation. */
 router.get('/summary', (request, response) => {
     const handle = request.user?.profile?.handle;
     if (!handle) return response.sendStatus(403);
@@ -400,6 +787,27 @@ router.get('/summary', (request, response) => {
         today,
         days,
         item: id ? data.recent.find(item => item.id === id) ?? null : null,
+        relays: describeRelays(data),
+        settings: { rate: data.settings.rate },
         pricesFetchedAt: prices?.fetchedAt ?? null,
     });
+});
+
+/** The exchange rate, and the user's own price for a relay ({ address, pricing } – null pricing removes it). */
+router.post('/settings', async (request, response) => {
+    const handle = request.user?.profile?.handle;
+    if (!handle) return response.sendStatus(403);
+    const body = request.body ?? {};
+    const rate = Number(body.rate);
+    const address = typeof body.address === 'string' ? body.address.trim().toLowerCase().slice(0, 300) : '';
+    await updateUsage(handle, data => {
+        data.settings ??= { rate: DEFAULT_RATE, pricing: {} };
+        if (Number.isFinite(rate) && rate > 0 && rate < 1000) data.settings.rate = rate;
+        if (address && 'pricing' in body) {
+            const pricing = sanitizePricing(body.pricing);
+            if (pricing) data.settings.pricing[address] = pricing;
+            else delete data.settings.pricing[address];
+        }
+    });
+    return response.sendStatus(204);
 });

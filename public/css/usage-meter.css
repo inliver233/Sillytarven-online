@@ -124,3 +124,44 @@
     width: 160px;
     margin: 0;
 }
+
+/* 面板里的中转站 */
+.usageMeterRelay {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px 10px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 8px;
+}
+
+.usageMeterRelayName {
+    font-weight: 600;
+    word-break: break-all;
+}
+
+.usageMeterPricing {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+}
+
+.usageMeterPricing .text_pole {
+    width: auto;
+    min-width: 90px;
+    max-width: 160px;
+    margin: 0;
+}
+
+.usageMeterPricing [hidden] {
+    display: none;
+}
+
+.usageMeterPanel .menu_button.usageMeterHint {
+    align-self: flex-start;
+    width: auto;
+    margin: 0;
+    padding: 3px 10px;
+    font-size: 0.9em;
+}

@@ -11,6 +11,10 @@ import fetch from 'node-fetch';
 const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sillytavern-usage-'));
 globalThis.DATA_ROOT = dataRoot;
 after(() => fs.rmSync(dataRoot, { recursive: true, force: true }));
+const configPath = path.join(dataRoot, 'config.yaml');
+fs.writeFileSync(configPath, 'dataRoot: ./data\n');
+const { setConfigFilePath } = await import('../src/util.js');
+setConfigFilePath(configPath);
 
 // Prices as fetched from models.dev (fresh, so nothing is downloaded during the tests).
 fs.mkdirSync(path.join(dataRoot, '_global'), { recursive: true });
@@ -18,12 +22,15 @@ fs.writeFileSync(path.join(dataRoot, '_global', 'model-prices.json'), JSON.strin
     fetchedAt: Date.now(),
     providers: {
         'google-vertex': { 'gemini-4-argon': { input: 2, output: 10, cache_read: 0.1 } },
-        google: { 'gemini-pro-latest': { input: 2, output: 12, cache_read: 0.2, tiers: [{ input: 4, output: 18, cache_read: 0.4, tier: { type: 'context', size: 200000 } }] } },
+        google: { 'gemini-4-argon': { input: 2, output: 10, cache_read: 0.1 }, 'gemini-pro-latest': { input: 2, output: 12, cache_read: 0.2, tiers: [{ input: 4, output: 18, cache_read: 0.4, tier: { type: 'context', size: 200000 } }] } },
         anthropic: { 'claude-sonnet-4-5': { input: 3, output: 15, cache_read: 0.3, cache_write: 3.75 } },
+        opencode: { 'gemini-4-argon': { input: 2.5, output: 12 } },
     },
+    catalog: [{ provider: 'opencode', name: 'OpenCode Zen', base: 'opencode.ai/inference/openai/v1' }],
 }));
 
-const { UsageReader, findPrice, priceUsage, meterGeneration, router, startUsageMeter } = await import('../src/usage-meter.js');
+const { UsageReader, applyPricing, catalogPrice, findPrice, officialNames, officialPrice, priceUsage, pricingHint, meterGeneration, router, startUsageMeter } = await import('../src/usage-meter.js');
+const { resetRelayBilling } = await import('../src/relay-billing.js');
 const { forwardFetchResponse } = await import('../src/util.js');
 startUsageMeter();
 
@@ -151,4 +158,137 @@ test('a generation is metered from the stream and can be read back by its id', a
     assert.equal(days.length, 7);
     assert.equal(days.at(-1).requests, 2);
     assert.equal(days.at(-1).models, undefined);
+});
+
+test('relay model names are matched to official models; the names hint at prices', () => {
+    assert.deepEqual(officialNames('【次哈-0.11】 抗截断-pg-gemini-4-argon-high'), ['gemini-4-argon-high', 'gemini-4-argon']);
+    assert.equal(officialNames('流式保活抗截断-gemini-3.8-flash')[0], 'gemini-3.8-flash');
+    assert.equal(officialNames('[公益]火山方舟/deepseek-v4.1-flash')[0], 'deepseek-v4.1-flash');
+    assert.equal(officialNames('gemini-4-argon/fc')[0], 'gemini-4-argon');
+    assert.equal(officialNames('(build)AISTUDIO-gemini-4-argon')[0], 'gemini-4-argon');
+    assert.equal(officialPrice('[z1]gemini-4-argon-high-ci').model, 'gemini-4-argon');
+    assert.equal(officialPrice('gemini-pro-latest').model, 'gemini-pro-latest', 'a real name is kept');
+    assert.equal(officialPrice('my-own-model'), null);
+
+    assert.deepEqual(pricingHint(['[0.06/次][官逆] gemini-4-argon']), { mode: 'call', currency: 'CNY', value: 0.06 });
+    assert.deepEqual(pricingHint(['【次哈-0.11】 gemini-4-argon']), { mode: 'call', currency: 'CNY', value: 0.11 });
+    assert.deepEqual(pricingHint(['gemini-3.8-flash', '[公益]鬼/minimax-m3']), { mode: 'free' });
+    assert.equal(pricingHint(['pg-gemini-3.8-flash']), null);
+});
+
+test('the user\'s own prices for a relay, and the prices models.dev lists for its address', () => {
+    const usage = { input: 300000, cached: 0, cacheWrite: 0, output: 10000, reasoning: 0 };
+    assert.deepEqual(applyPricing({ mode: 'free' }, 'x', usage, 7.2), { cost: 0 });
+    assert.equal(applyPricing({ mode: 'call', currency: 'CNY', value: 0.72 }, 'x', usage, 7.2).cost.toFixed(4), '0.1000');
+    assert.equal(applyPricing({ mode: 'token', currency: 'USD', input: 1, output: 4 }, 'x', usage, 7.2).cost.toFixed(4), (0.3 + 0.04).toFixed(4));
+    assert.equal(applyPricing({ mode: 'ratio', ratio: 0.5 }, '抗截断-pg-gemini-4-argon', usage, 7.2).cost.toFixed(4), ((0.6 + 0.1) * 0.5).toFixed(4));
+    // Over 200k tokens of context: the long-context prices
+    assert.equal(applyPricing({ mode: 'ratio', ratio: 0.5 }, 'pg-gemini-pro-latest', usage, 7.2).cost.toFixed(4), ((1.2 + 0.18) * 0.5).toFixed(4));
+    assert.equal(applyPricing({ mode: 'ratio', ratio: 1 }, 'my-own-model', usage, 7.2), null);
+
+    assert.equal(catalogPrice('https://opencode.ai/inference/openai/v1', 'gemini-4-argon').name, 'OpenCode Zen');
+    assert.equal(catalogPrice('https://opencode.ai/inference/openai/v1/', 'gemini-4-argon-high').cost.input, 2.5);
+    assert.equal(catalogPrice('https://relay.example/v1', 'gemini-4-argon'), null);
+});
+
+test('relays: spending read from new-api, sub2api and gpt-load is shared out; gcli2api is recognised as free', async t => {
+    resetRelayBilling();
+    // One fake relay per project, each charging $0.05 per generation in its own way.
+    const spent = { 'new-api': 1, sub2api: 2, 'gpt-load': 3 };
+    const relay = http.createServer((request, response) => {
+        const [, kind, ...rest] = request.url.split('/');
+        const route = `/${rest.join('/')}`;
+        const json = value => {
+            response.writeHead(200, { 'Content-Type': 'application/json' });
+            response.end(JSON.stringify(value));
+        };
+        if (route.startsWith('/v1/chat/completions')) {
+            spent[kind] = (spent[kind] ?? 0) + 0.05;
+            return json({});
+        }
+        if (kind === 'new-api' && route === '/api/status') return json({ success: true, data: { quota_per_unit: 500000, quota_display_type: 'CNY', usd_exchange_rate: 7 } });
+        if (kind === 'new-api' && route === '/v1/dashboard/billing/usage' && request.headers.authorization === 'Bearer sk-new') return json({ object: 'list', total_usage: spent['new-api'] * 7 * 100 });
+        if (kind === 'sub2api' && route === '/v1/usage' && request.headers.authorization === 'Bearer sk-sub') return json({ mode: 'unrestricted', unit: 'USD', remaining: 10, usage: { total: { actual_cost: spent.sub2api } } });
+        if (kind === 'gpt-load' && route === '/v1/user/balance' && request.headers.authorization === 'Bearer sk-load') return json({ is_active: true, balance: 0, used: spent['gpt-load'], total: 0 });
+        if (kind === 'gcli' && route === '/version/info') return json({ success: true, version: 'd61bcf8', full_hash: 'd61bcf8e8', message: 'x', date: '2026-11-07' });
+        response.writeHead(404).end();
+    });
+    await new Promise(resolve => relay.listen(0, '127.0.0.1', resolve));
+    t.after(() => new Promise(resolve => relay.close(resolve)));
+    const relayBase = `http://127.0.0.1:${relay.address().port}`;
+
+    const upstream = http.createServer((_request, response) => {
+        response.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        setTimeout(() => response.end(sse([{ choices: [{ delta: { content: 'hi' } }] }, { choices: [], usage: { prompt_tokens: 1000, completion_tokens: 100 } }])), 150);
+    });
+    await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve));
+    t.after(() => new Promise(resolve => upstream.close(resolve)));
+
+    const app = express();
+    app.use(express.json());
+    app.use((request, _response, next) => {
+        request.user = { profile: { handle: 'relay-test' }, directories: {} };
+        next();
+    });
+    app.post('/generate', async (request, response) => {
+        meterGeneration(request, response);
+        // The relay books the generation when it is done.
+        const answer = await fetch(`http://127.0.0.1:${upstream.address().port}/`);
+        await fetch(`${request.body.reverse_proxy.replace(/\/v1$/, '')}/v1/chat/completions`, { method: 'POST' });
+        return forwardFetchResponse(answer, response);
+    });
+    app.use('/api/usage', router);
+    const server = await new Promise(resolve => {
+        const listener = app.listen(0, '127.0.0.1', () => resolve(listener));
+    });
+    t.after(() => new Promise(resolve => server.close(resolve)));
+    const base = `http://127.0.0.1:${server.address().port}`;
+
+    const generate = (id, kind, key) => fetch(`${base}/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Usage-Id': id },
+        body: JSON.stringify({ chat_completion_source: 'openai', model: '抗截断-pg-gemini-4-argon', stream: true, reverse_proxy: `${relayBase}/${kind}/v1`, proxy_password: key }),
+    }).then(response => response.text());
+    const settled = async id => {
+        for (let i = 0; i < 100; i++) {
+            const data = await (await fetch(`${base}/api/usage/summary?id=${id}`)).json();
+            if (data.item && !data.item.pending) return data;
+            await new Promise(resolve => setTimeout(resolve, 50));
+        }
+        throw new Error(`${id} never settled`);
+    };
+
+    for (const [kind, key] of [['new-api', 'sk-new'], ['sub2api', 'sk-sub'], ['gpt-load', 'sk-load']]) {
+        // The first generation through a relay: it is recognised afterwards, and its reading becomes the baseline.
+        await generate(`${kind}-1`, kind, key);
+        const first = await settled(`${kind}-1`);
+        assert.deepEqual([first.item.priced, first.item.relay.kind], [null, kind]);
+        await new Promise(resolve => setTimeout(resolve, 100));
+        await generate(`${kind}-2`, kind, key);
+        const { item } = await settled(`${kind}-2`);
+        assert.equal(item.priced, 'relay', kind);
+        assert.equal(item.cost.toFixed(4), '0.0500', kind);
+    }
+
+    // gcli2api: recognised, free quota, nothing to read: tokens only.
+    await generate('gcli-1', 'gcli', 'sk-x');
+    const gcli = await settled('gcli-1');
+    assert.deepEqual([gcli.item.priced, gcli.item.cost, gcli.item.input], [null, null, 1000]);
+    const described = Object.fromEntries(gcli.relays.map(item => [item.label ?? item.address, item]));
+    assert.equal(described.gcli2api.free, true);
+    assert.equal(described.sub2api.billing, true);
+    assert.equal(described.sub2api.remaining, 10);
+    assert.equal(described['new-api / one-api'].billing, true);
+    assert.equal(described.gcli2api.official, 'gemini-4-argon');
+
+    // The user's own price for a relay without reports: applied from then on.
+    await fetch(`${base}/api/usage/settings`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rate: 7.2, address: described.gcli2api.address, pricing: { mode: 'call', currency: 'CNY', value: 0.36 } }),
+    });
+    await generate('gcli-2', 'gcli', 'sk-x');
+    const priced = await settled('gcli-2');
+    assert.equal(priced.item.priced, 'custom');
+    assert.equal(priced.item.cost.toFixed(3), '0.050');
+    assert.equal(priced.today.cost.toFixed(3), '0.200', 'three relay readings and one own price');
 });
