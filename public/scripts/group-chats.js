@@ -104,6 +104,7 @@ import {
     noteChatSaved,
     scheduleChangedChatReload,
 } from '../script.js';
+import { isOwnRevisionConflict, sendWithRetry } from './util/save-retry.js';
 import { printTagList, createTagMapFromList, applyTagsOnCharacterSelect, tag_map, applyTagsOnGroupSelect, printTagFilters, tag_filter_type } from './tags.js';
 import { FILTER_TYPES, FilterHelper } from './filters.js';
 import { isExternalMediaAllowed } from './chats.js';
@@ -805,9 +806,11 @@ async function saveGroupChat(groupId, shouldSaveGroup, force = false) {
     const runSave = async () => {
         let prepared = null;
         let saveRequest;
+        // Retried when the connection drops; the revision proposed here tells a lost answer (saved after all) apart
+        const nextRevision = uuidv4();
         if (useSession && session.hydrated) {
             // A snapshot taken before the hydration lacks the history it added.
-            prepared = session.prepareSave(wasHydrated ? messages : [...session.history, ...messages], { header: chatHeader, force });
+            prepared = session.prepareSave(wasHydrated ? messages : [...session.history, ...messages], { header: chatHeader, force, nextRevision });
             saveRequest = { url: '/api/chats/group/save-patch', body: prepared.body, tail: true };
         } else {
             const request = createGroupChatSaveRequest({
@@ -819,25 +822,30 @@ async function saveGroupChat(groupId, shouldSaveGroup, force = false) {
                 allowShrink: canShrinkSavedChat(),
                 revision: getFullChatRevision(),
             });
-            saveRequest = { ...request, body: JSON.stringify(request.body) };
+            saveRequest = { ...request, body: JSON.stringify({ ...request.body, nextRevision }) };
         }
         let response;
         try {
-            response = await fetch(saveRequest.url, {
+            response = await sendWithRetry(() => fetch(saveRequest.url, {
                 method: 'POST',
                 headers: getRequestHeaders(),
                 body: saveRequest.body,
-            });
+            }));
         } catch (error) {
             prepared?.rollback();
             throw error;
         }
+        let ownRevision = false;
         if (!response.ok) {
-            prepared?.rollback();
-            return { response };
+            const errorData = await response.clone().json().catch(() => null);
+            ownRevision = isOwnRevisionConflict(response, errorData, nextRevision);
+            if (!ownRevision) {
+                prepared?.rollback();
+                return { response };
+            }
         }
         if (saveRequest.tail) {
-            const responseData = await response.json().catch(() => null);
+            const responseData = ownRevision ? { revision: nextRevision } : await response.json().catch(() => null);
             if (typeof responseData?.revision !== 'string') {
                 prepared?.rollback();
                 toastr.error(t`Check the server connection and reload the page to prevent data loss.`, t`Group Chat could not be saved`);
@@ -852,7 +860,7 @@ async function saveGroupChat(groupId, shouldSaveGroup, force = false) {
             }
         } else {
             // Whole-chat save: the revision it wrote goes with the next one
-            const responseData = await response.json().catch(() => null);
+            const responseData = ownRevision ? { revision: nextRevision } : await response.json().catch(() => null);
             setFullChatRevision(responseData?.revision);
         }
         noteChatSaved(messages);

@@ -125,3 +125,22 @@ test('group chats: the whole-chat load hands out the revision and a stale save i
     const stored = await post('/group/get', { id });
     assert.deepEqual(stored.data.slice(1).map(item => item.mes), ['hi', 'A']);
 });
+
+test('a save writes the revision the page proposed, so a retry after a lost answer is recognised', async () => {
+    const chat = { ...target, file_name: 'Alice - retry' };
+    const first = await post('/save', { ...chat, chat: [header, message('hello')] });
+    const proposed = '0f8fad5b-d9cb-469f-a165-70867728950e';
+    const saved = await post('/save', { ...chat, chat: [header, message('hello'), message('again')], expectedRevision: first.data.revision, nextRevision: proposed });
+    assert.equal(saved.response.status, 200);
+    assert.equal(saved.data.revision, proposed);
+    // the same save sent again (its answer never arrived): refused, and the stored revision is the proposed one
+    const retried = await post('/save', { ...chat, chat: [header, message('hello'), message('again')], expectedRevision: first.data.revision, nextRevision: proposed });
+    assert.equal(retried.response.status, 409);
+    assert.equal(retried.data.currentRevision, proposed);
+    // not a UUID: a fresh one instead
+    const odd = await post('/save', { ...chat, chat: [header, message('hello'), message('again'), message('more')], expectedRevision: proposed, nextRevision: '../x' });
+    assert.equal(odd.response.status, 200);
+    assert.match(odd.data.revision, /^[0-9a-f]{8}-[0-9a-f]{4}-/);
+    assert.notEqual(odd.data.revision, '../x');
+});
+

@@ -631,6 +631,19 @@ function setChatRevisionHeader(response, filePath) {
     }
 }
 
+/**
+ * 这次保存写下的新版本号：页面带来的（nextRevision，UUID）就用它——重试时页面能认出「上一次其实存上了」；
+ * 没带或格式不对就新生成一个。
+ * @param {import('express').Request} request
+ * @returns {string}
+ */
+function nextChatRevision(request) {
+    const proposed = request.body?.nextRevision;
+    return typeof proposed === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(proposed)
+        ? proposed
+        : crypto.randomUUID();
+}
+
 function validateExpectedChatRevision(request, response, filePath) {
     if (!Object.hasOwn(request.body ?? {}, 'expectedRevision')) {
         response.status(428).send({ error: 'revision_required' });
@@ -1867,7 +1880,7 @@ async function persistChatTail({
             lastMessage = messages[messages.length - 1] ?? null;
         }
 
-        const revision = crypto.randomUUID();
+        const revision = nextChatRevision(request);
         writeChatRevision(filePath, revision);
         backupTailChat(request.user.profile.handle, request.user.directories.backups, backupName, backupPayload);
 
@@ -1953,7 +1966,7 @@ async function persistFullChat({ request, response, filePath, header, messages, 
             writeFileAtomicSync(filePath, jsonlData, 'utf8');
             writeChatHeader(filePath, header);
         }
-        const revision = crypto.randomUUID();
+        const revision = nextChatRevision(request);
         writeChatRevision(filePath, revision);
         backupTailChat(request.user.profile.handle, request.user.directories.backups, backupName, jsonlData);
 

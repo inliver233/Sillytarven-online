@@ -293,6 +293,7 @@ import { ChatHydrationSession, copyMessageForPrompt } from './scripts/chat-hydra
 import { scrollCoordinator, ScrollPriority } from './scripts/util/scroll-coordinator.js';
 import { drawerSwitchCoordinator, getInlineDrawerDuration } from './scripts/util/drawer-switch-coordinator.js';
 import { requireSettingsSaveSuccess, SettingsSaveQueue, SettingsSaveTracker } from './scripts/util/settings-save-tracker.js';
+import { isOwnRevisionConflict, sendWithRetry } from './scripts/util/save-retry.js';
 import { applyStreamFadeIn, StreamRenderBuffer } from './scripts/util/stream-fadein.js';
 import { initDomHandlers } from './scripts/dom-handlers.js';
 import { SimpleMutex } from './scripts/util/SimpleMutex.js';
@@ -860,7 +861,8 @@ let changedChatReload = null;
  */
 export function reloadChatChangedElsewhere({ fromOtherTab = false } = {}) {
     changedChatReload ??= (async () => {
-        const pending = fromOtherTab ? null : unsavedUserMessage?.text ?? null;
+        const unsaved = fromOtherTab ? null : unsavedUserMessage;
+        let pending = unsaved?.text ?? null;
         unsavedUserMessage = null;
         try {
             for (let tries = 0; isGenerating() && tries < 100; tries++) {
@@ -870,6 +872,10 @@ export function reloadChatChangedElsewhere({ fromOtherTab = false } = {}) {
             clearCachedChatPage({ isGroup: Boolean(selected_group), chatId: selected_group ? getCurrentChatId() : null });
             if (!await reloadCurrentChat()) {
                 throw new Error('The chat changed while it was being reloaded.');
+            }
+            // 其实已经存上了（回应丢了、或者另一个标签页先存了同一条）：已经在聊天里，就不放回输入框
+            if (pending && chat.some(message => message.is_user && message.send_date === unsaved.message.send_date && message.mes === unsaved.message.mes)) {
+                pending = null;
             }
             if (pending) {
                 putUnsentMessageBack(pending);
@@ -8643,31 +8649,50 @@ async function saveChatTail(options = {}) {
     const before = Number.isFinite(options.before) ? options.before
         : Number.isFinite(chatPagingState.cursor) ? chatPagingState.cursor : 0;
     const expectedRevision = session ? session.revision : chatPagingState.revision;
-    const result = await fetch('/api/chats/save-tail', {
+    // 网络抖一下自动重试；带上自己定的新版本号，回应丢了的那次重试时能认出来
+    const nextRevision = uuidv4();
+    const body = JSON.stringify({
+        ch_name: session?.target.ch_name ?? characters[this_chid].name,
+        file_name: fileName,
+        avatar_url: session?.target.avatar_url ?? characters[this_chid].avatar,
+        header,
+        messages,
+        before,
+        expectedRevision: typeof expectedRevision === 'string' ? expectedRevision : null,
+        nextRevision,
+        force: force,
+        allow_shrink: canShrinkSavedChat(),
+    });
+    const result = await sendWithRetry(() => fetch('/api/chats/save-tail', {
         method: 'POST',
         cache: 'no-cache',
         headers: getRequestHeaders(),
-        body: JSON.stringify({
-            ch_name: session?.target.ch_name ?? characters[this_chid].name,
-            file_name: fileName,
-            avatar_url: session?.target.avatar_url ?? characters[this_chid].avatar,
-            header,
-            messages,
-            before,
-            expectedRevision: typeof expectedRevision === 'string' ? expectedRevision : null,
-            force: force,
-            allow_shrink: canShrinkSavedChat(),
-        }),
-    });
+        body,
+    }));
 
+    let errorData = null;
+    let savedRevision = null;
     if (result.ok) {
         const responseData = await result.json();
         if (typeof responseData?.revision !== 'string') {
             throw new Error('Chat tail save response did not include a revision.');
         }
-        session?.noteRevision(responseData.revision);
+        savedRevision = responseData.revision;
+    } else {
+        try {
+            errorData = await result.json();
+        } catch {
+            // The HTTP status still determines the failure path.
+        }
+        if (isOwnRevisionConflict(result, errorData, nextRevision)) {
+            savedRevision = nextRevision;
+        }
+    }
+
+    if (savedRevision) {
+        session?.noteRevision(savedRevision);
         if (!session || session === chatHydration) {
-            chatPagingState.revision = responseData.revision;
+            chatPagingState.revision = savedRevision;
             noteChatSaved(messages);
         }
         if (chatPagingState.active) {
@@ -8683,12 +8708,6 @@ async function saveChatTail(options = {}) {
         return;
     }
 
-    let errorData = null;
-    try {
-        errorData = await result.json();
-    } catch {
-        // The HTTP status still determines the failure path.
-    }
     if (result.status === 409 && errorData?.error === 'revision_conflict') {
         clearCachedChatPage({ isGroup: false });
         scheduleChangedChatReload();
@@ -8736,36 +8755,48 @@ async function saveChatTail(options = {}) {
  * @returns {Promise<void>}
  */
 async function saveChatPatch({ session, messages, header, force = false }) {
-    const prepared = session.prepareSave(messages, { header, force });
+    // 网络抖一下自动重试；带上自己定的新版本号，回应丢了的那次重试时能认出来
+    const nextRevision = uuidv4();
+    const prepared = session.prepareSave(messages, { header, force, nextRevision });
     let result;
     try {
-        result = await fetch(`${session.baseUrl}/save-patch`, {
+        result = await sendWithRetry(() => fetch(`${session.baseUrl}/save-patch`, {
             method: 'POST',
             cache: 'no-cache',
             headers: getRequestHeaders(),
             body: prepared.body,
-        });
+        }));
     } catch (error) {
         prepared.rollback();
         throw error;
     }
 
+    let savedRevision = null;
+    let errorData = null;
     if (result.ok) {
         const responseData = await result.json().catch(() => null);
         if (typeof responseData?.revision !== 'string') {
             prepared.rollback();
             throw new Error('Chat save response did not include a revision.');
         }
-        prepared.commit(responseData.revision);
+        savedRevision = responseData.revision;
+    } else {
+        errorData = await result.json().catch(() => null);
+        if (isOwnRevisionConflict(result, errorData, nextRevision)) {
+            savedRevision = nextRevision;
+        }
+    }
+
+    if (savedRevision) {
+        prepared.commit(savedRevision);
         if (session === chatHydration) {
-            chatPagingState.revision = responseData.revision;
+            chatPagingState.revision = savedRevision;
             noteChatSaved(messages);
         }
         return;
     }
 
     prepared.rollback();
-    const errorData = await result.json().catch(() => null);
     if (result.status === 409 && errorData?.error === 'revision_conflict') {
         scheduleChangedChatReload();
         return;
@@ -9019,6 +9050,7 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false, c
     ];
     // 存的是当前这个聊天：带上加载时的版本号，文件在别处改过就会被拒（409）
     const isCurrentChatFile = fileName === characters[this_chid]?.chat;
+    const nextRevision = uuidv4();
 
     try {
         const saveChatRequest = await compressRequest({
@@ -9033,20 +9065,22 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false, c
                 force: force,
                 allow_shrink: canShrinkSavedChat(),
                 ...(isCurrentChatFile && fullChatRevision ? { expectedRevision: fullChatRevision } : {}),
+                nextRevision,
             }),
         });
-        const result = await fetch('/api/chats/save', saveChatRequest);
+        // 网络抖一下自动重试；回应丢了的那次（其实存上了）重试时按带去的版本号认出来
+        const result = await sendWithRetry(() => fetch('/api/chats/save', saveChatRequest));
 
-        if (result.ok) {
+        const errorData = result.ok ? null : await result.json();
+        if (result.ok || isOwnRevisionConflict(result, errorData, nextRevision)) {
             if (isCurrentChatFile) {
-                const saved = await result.json().catch(() => null);
+                const saved = result.ok ? await result.json().catch(() => null) : { revision: nextRevision };
                 setFullChatRevision(saved?.revision);
                 noteChatSaved(trimmedChat);
             }
             return;
         }
 
-        const errorData = await result.json();
         if (result.status === 409 && errorData?.error === 'revision_conflict') {
             scheduleChangedChatReload();
             return;
@@ -9911,7 +9945,8 @@ export async function saveSettings(loopCounter = 0) {
                     body: serializedPayload,
                     cache: 'no-cache',
                 });
-                const response = await fetch('/api/settings/save', saveSettingsRequest);
+                // 网络抖一下自动重试（整份覆盖，重发同一份没有副作用）
+                const response = await sendWithRetry(() => fetch('/api/settings/save', saveSettingsRequest));
                 await requireSettingsSaveSuccess(response);
                 settingsSaveTracker.commit(serializedPayload);
             });
