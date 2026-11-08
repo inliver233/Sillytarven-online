@@ -2045,6 +2045,9 @@ async function openAdminPanel(initialTab = 'usersList') {
         if (target === 'passkeysAdminBlock') {
             void import('./passkeys-admin.js').then(module => module.openPasskeysAdmin(template.find('.passkeysAdminBlock')[0]));
         }
+        if (target === 'liveAdminBlock') {
+            void import('./live-admin.js').then(module => module.openLiveAdmin(template.find('.liveAdminBlock')[0]));
+        }
         // 初始化管理员扩展功能
         if (typeof window.initializeAdminExtensions === 'function') {
             setTimeout(() => {

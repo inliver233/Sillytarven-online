@@ -640,3 +640,7 @@ leaderboard:
   # The other sites, fetched every syncIntervalMs: - url: https://other.example
   peers: []
   syncIntervalMs: 3000
+# Live channel: a WebSocket from every open page, so administrators can reload pages or show a
+# message right away (admin panel → 实时推送). It needs the reverse proxy to pass WebSocket upgrades.
+live:
+  enabled: true

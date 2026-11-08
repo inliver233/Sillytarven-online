@@ -14,6 +14,7 @@ import {
 import { humanizedDateTime, favsToHotswap, getMessageTimeStamp, dragElement, isMobile, initRossMods } from './scripts/RossAscends-mods.js';
 import { openAnnouncements } from './scripts/announcements.js';
 import { openLeaderboard } from './scripts/leaderboard.js';
+import './scripts/live.js';
 import { openChatTransferPanel } from './scripts/chat-transfer.js';
 import { userStatsHandler, statMesProcess, initStats } from './scripts/stats.js';
 import {

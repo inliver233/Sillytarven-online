@@ -86,6 +86,7 @@ import systemMonitor from './system-monitor.js';
 import scheduledTasksManager from './scheduled-tasks.js';
 import { startGitSync } from './git-sync/router.js';
 import { leaderboard, leaderboardPeerHandler } from './leaderboard-service.js';
+import { live } from './live.js';
 
 // Routers
 import { router as usersPublicRouter } from './endpoints/users-public.js';
@@ -669,6 +670,8 @@ async function preSetupTasks() {
     systemMonitor.start();
     // Leaderboard counting, saving and the exchange with the other site.
     leaderboard.start();
+    // Pushing to open pages (reload, messages) over WebSocket.
+    live.start();
     // Scheduled git backups of users who turned them on.
     startGitSync();
 

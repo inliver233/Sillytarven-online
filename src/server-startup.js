@@ -59,6 +59,7 @@ import { router as forumRouter } from './endpoints/forum.js';
 import { router as invitationCodesRouter } from './endpoints/invitation-codes.js';
 import { router as userInvitationsRouter } from './endpoints/user-invitations.js';
 import { router as leaderboardRouter } from './endpoints/leaderboard.js';
+import { live, router as liveRouter } from './live.js';
 import { leaderboardGenerationMiddleware } from './leaderboard-service.js';
 import { router as systemLoadRouter } from './endpoints/system-load.js';
 import { router as publicCharactersRouter } from './endpoints/public-characters.js';
@@ -246,6 +247,7 @@ export function setupPrivateEndpoints(app) {
 
     app.use('/api/announcements', announcementsRouter);
     app.use('/api/leaderboard', leaderboardRouter);
+    app.use('/api/live', liveRouter);
     app.use('/api/scheduled-tasks', scheduledTasksRouter);
     app.use('/api/user-storage', userStorageRouter);
     app.use('/api/backup-limits', backupLimitsRouter);
@@ -347,6 +349,7 @@ export class ServerStartup {
                 passphrase: String(this.cliArgs.keyPassphrase ?? ''),
             };
             const server = https.createServer(sslOptions, this.app);
+            live.attach(server);
             server.on('error', reject);
             server.on('listening', resolve);
 
@@ -384,6 +387,7 @@ export class ServerStartup {
     #createHttpServer(url, ipVersion) {
         return new Promise((resolve, reject) => {
             const server = http.createServer(this.app);
+            live.attach(server);
             server.on('error', reject);
             server.on('listening', resolve);
 

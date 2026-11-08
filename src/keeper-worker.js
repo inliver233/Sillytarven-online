@@ -125,6 +125,8 @@ export function registerKeeperServer(server) {
         // Responses on connections that stay open after a handover must not invite more requests.
         if (getProcessPhase() === 'draining') response.shouldKeepAlive = false;
     });
+    // A WebSocket (live channel) sends its request too; the handover closes it like the rest.
+    server.on('upgrade', request => unreadConnections.delete(request.socket));
 }
 
 /**
