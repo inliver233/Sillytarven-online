@@ -548,6 +548,138 @@ function catgirlElement(rank) {
     return catgirlTemplates[rank].content.firstElementChild.cloneNode(true);
 }
 
+/**
+ * 综合榜总榜第一名（殿堂总冠军）：傲娇贵族千金（32×32）。黑长直姬发、吊梢蓝眼、白蕾丝圆领红裙，平时一脸得意。
+ * 小皇冠歪戴着，时不时晃一下像要掉下来：皇冠单独一层，像素图是正的、整个转过去（逐像素画歪的会糊）。
+ */
+const OJOU_PIXELS = [
+    '................................',
+    '................................',
+    '................................',
+    '............OOOOOOOO............',
+    '..........OOHHHhhHHHOO..........',
+    '.........OHHHHHhhHHHHHO.........',
+    '........OHLLLLlHHHLllHHO........',
+    '.......OHLlllHHHHHHLHllHO.......',
+    '......OHLlhHHhHHHHhHHhHlHO......',
+    '......OHHHhHHhHHHHhHHhHHHO......',
+    '....OOHhHHhHHhHhhHhHHhHHhHOO....',
+    '...OhOHhHHhHHhHhhHhHHhHHhHOhO...',
+    '..OhhOHhHHhHHhHHHHhHHhHHhHOhhO..',
+    '.OhHhOlhEESSSSSSSSSSSSEEhlOhHhO.',
+    '.OhlhOlhsEEEEESSSSEEEEEshlOhlhO.',
+    '.OhlhOlhsSWeeESSSSEeeWSshlOhlhO.',
+    '.OhLhOlhsSeeneSSSSeneeSshlOhLhO.',
+    '.OhLhOlhsSniinSSSSniinSshlOhLhO.',
+    '.OhLhOlhsSSnnSSSSSSnnSSshlOhLhO.',
+    '.OhLhOHhsbBBbSSSSSSbBBbshHOhLhO.',
+    '.OhLhOHhhsSSSSmSSmSSSSshhHOhLhO.',
+    '.OhLhOHhhhssSSSMMSSSsshhhHOhLhO.',
+    '.OhLhOHhhOOOsSSSSSSsOOOhhHOhLhO.',
+    '.OhlhOHhOOOOOOttttOOOOOOhHOhlhO.',
+    '.OhlhOOO.OCCCcsGGscCCCO.OOOhlhO.',
+    '.OhlhddOCCCCCCgjJgCCCCCCOddhlhO.',
+    '.OhlhddOcCCCCCgJJgCCCCCcOddhlhO.',
+    '.OhlhdOxDcCCCcxGGxcCCCcDxOdhlhO.',
+    '.OhlhOxDDDXDDDDDDDDDDXDDDxOhlhO.',
+    '.OhlhOxDDXDDDDDDDDDDDDXDDxOhlhO.',
+    '.OhlhOxDDXDDDDDDDDDDDDXDDxOhlhO.',
+    '.OhHhOxDDXDDDDDDDDDDDDXDDxOhHhO.',
+];
+const OJOU_COLORS = {
+    O: '#120d1c', d: '#1f1a30', h: '#2b2542', H: '#3b3456', l: '#5a5382', L: '#a3a6dc',
+    S: '#ffe9de', s: '#f5cbbd', t: '#e7aea0', E: '#26162e', e: '#2b4fb8', n: '#4a78e6', i: '#a3c6ff', W: '#ffffff',
+    B: '#ff9db0', b: '#ffc4ce', M: '#b5404f', m: '#d9788a', P: '#ff8aa0', q: '#9fd8ff', Q: '#5fb8f0',
+    C: '#ffffff', c: '#ddd3ea', D: '#a51d3e', x: '#6e1129', X: '#cc3358',
+    G: '#ffd34d', g: '#c48a12', Y: '#fff6c8', K: '#ffe58a', J: '#e11d48', j: '#ff8fae',
+};
+
+/**
+ * 左右对称的像素：只写左边的，右边照着翻过去。
+ * @param {[number, number, string][]} pixels
+ */
+function bothSides(pixels) {
+    return pixels.flatMap(([x, y, letter]) => [[x, y, letter], [31 - x, y, letter]]);
+}
+
+/** 平时的眼睛和嘴（眨眼、换表情时这些格子是皮肤） */
+const OJOU_EYES = bothSides([[8, 13, 'E'], [9, 13, 'E'], [9, 14, 'E'], [10, 14, 'E'], [11, 14, 'E'], [12, 14, 'E'], [13, 14, 'E'],
+    [10, 15, 'W'], [11, 15, 'e'], [12, 15, 'e'], [13, 15, 'E'], [10, 16, 'e'], [11, 16, 'e'], [12, 16, 'n'], [13, 16, 'e'],
+    [10, 17, 'n'], [11, 17, 'i'], [12, 17, 'i'], [13, 17, 'n'], [11, 18, 'n'], [12, 18, 'n']]);
+const OJOU_MOUTH = [[14, 20, 'm'], [15, 21, 'M'], [16, 21, 'M'], [17, 20, 'm']];
+const OJOU_CLOSED_EYES = bothSides([[8, 14, 'E'], [9, 15, 'E'], [10, 16, 'E'], [11, 16, 'E'], [12, 16, 'E'], [13, 16, 'E']]);
+const OJOU_SMILE_EYES = bothSides([[8, 14, 'E'], [9, 17, 'E'], [10, 16, 'E'], [11, 15, 'E'], [12, 15, 'E'], [13, 16, 'E']]);
+const OJOU_POUT = [[14, 21, 'M'], [15, 20, 'M'], [16, 20, 'M'], [17, 21, 'M']];
+/**
+ * 表情（盖在脸上）：哼（傲娇：闭眼撇嘴、脸更红、哼出一口气，平时隔一阵来一下）、开心（笑眼）、
+ * 得意（哦呵呵大笑、闪光）、吃惊（瞪眼、o 嘴、冷汗、脸不红了）、难过（泪汪汪、撇嘴）。
+ */
+const OJOU_FACES = {
+    hmph: [...OJOU_CLOSED_EYES, ...OJOU_POUT, ...bothSides([[9, 18, 'B'], [13, 19, 'b']]), [24, 22, 'W'], [25, 21, 'W'], [26, 22, 'W'], [27, 21, 'W']],
+    happy: [...OJOU_SMILE_EYES, [14, 20, 'M'], [15, 21, 'M'], [16, 21, 'M'], [17, 20, 'M']],
+    excited: [...OJOU_SMILE_EYES, [14, 20, 'M'], [15, 20, 'M'], [16, 20, 'M'], [17, 20, 'M'], [14, 21, 'M'], [15, 21, 'P'], [16, 21, 'P'], [17, 21, 'M'], [15, 22, 'M'], [16, 22, 'M'],
+        [2, 3, 'Y'], [1, 4, 'Y'], [2, 4, 'W'], [3, 4, 'Y'], [2, 5, 'Y'], [28, 9, 'Y'], [27, 10, 'Y'], [28, 10, 'W'], [29, 10, 'Y'], [28, 11, 'Y'], [5, 7, 'K'], [26, 5, 'K']],
+    shocked: [...bothSides([[9, 13, 'E'], [10, 13, 'E'], [11, 13, 'E'], [12, 13, 'E'], [13, 13, 'E'], [10, 14, 'W'], [11, 14, 'W'], [12, 14, 'W'], [13, 14, 'W'],
+        [10, 15, 'W'], [11, 15, 'E'], [12, 15, 'E'], [13, 15, 'W'], [10, 16, 'W'], [11, 16, 'E'], [12, 16, 'E'], [13, 16, 'W'], [10, 17, 'W'], [11, 17, 'W'], [12, 17, 'W'], [13, 17, 'W'],
+        [9, 19, 'S'], [10, 19, 'S'], [11, 19, 'S'], [12, 19, 'S']]),
+    [15, 20, 'M'], [16, 20, 'M'], [15, 21, 'M'], [16, 21, 'M'], [24, 9, 'q'], [23, 10, 'q'], [24, 10, 'q'], [23, 11, 'Q'], [24, 11, 'Q']],
+    sad: [...bothSides([[8, 13, 'E'], [9, 13, 'E'], [9, 14, 'E'], [10, 14, 'E'], [11, 14, 'E'], [12, 14, 'E'], [13, 14, 'E'],
+        [10, 15, 'W'], [11, 15, 'e'], [12, 15, 'W'], [13, 15, 'E'], [10, 16, 'e'], [11, 16, 'n'], [12, 16, 'n'], [13, 16, 'e'],
+        [10, 17, 'q'], [11, 17, 'W'], [12, 17, 'q'], [13, 17, 'q'], [10, 18, 'q'], [11, 18, 'q'], [12, 18, 'q'], [10, 19, 'q'], [10, 20, 'Q']]), ...OJOU_POUT],
+};
+/** 皇冠（正的）；底边中点在 OJOU_CROWN_AT，CSS 绕这一点转（leaderboard.css 的 transform-origin 要一致） */
+const OJOU_CROWN = [
+    'Y...Y...Y',
+    'G...G...G',
+    'GK.GGG.KG',
+    'GGGGJGGGG',
+    'GGGJjJGGG',
+    'ggggggggg',
+];
+const OJOU_CROWN_AT = [20.5, 7.4];
+
+/**
+ * 千金（SVG）：分层同猫娘（眨眼、表情、呼吸共用那套动画），外加皇冠一层（歪着、会晃，尖上的珍珠一闪一闪）。
+ * @returns {string}
+ */
+function ojouSvg() {
+    const colors = OJOU_COLORS;
+    const face = new Set([...OJOU_EYES, ...OJOU_MOUTH].map(([x, y]) => `${x},${y}`));
+    /** @type {[number, number, string][]} */
+    const body = [];
+    OJOU_PIXELS.forEach((row, y) => [...row].forEach((letter, x) => {
+        if (letter !== '.') body.push([x, y, face.has(`${x},${y}`) ? 'S' : letter]);
+    }));
+    const left = OJOU_CROWN_AT[0] - OJOU_CROWN[0].length / 2;
+    const top = OJOU_CROWN_AT[1] - OJOU_CROWN.length;
+    /** @type {Record<string, string[]>} */
+    const paths = {};
+    OJOU_CROWN.forEach((row, y) => [...row].forEach((letter, x) => {
+        if (letter !== '.') (paths[letter] ??= []).push(`M${left + x} ${top + y}h1v1h-1z`);
+    }));
+    // 每种颜色一条路径、底下先铺一层金色：转过去以后不会透出缝
+    const crown = `<path fill="${colors.G}" d="${Object.values(paths).flat().join('')}"/>`
+        + Object.entries(paths).map(([letter, d]) => `<path fill="${colors[letter]}" d="${d.join('')}"/>`).join('');
+    const glints = [0, 4, 8].map(x => `<rect x="${left + x}" y="${top}" width="1" height="1" fill="#ffffff"/>`).join('');
+    return '<svg class="leaderboard-catgirl leaderboard-ojou" viewBox="0 0 32 32" shape-rendering="crispEdges" role="img" aria-label="总冠军"><title>总冠军</title><g class="cg-all">'
+        + `<g class="cg-body">${pixelRects(body, colors)}</g>`
+        + `<g class="cg-normal"><g class="cg-eyes">${pixelRects(OJOU_EYES, colors)}</g><g class="cg-blink">${pixelRects(OJOU_CLOSED_EYES, colors)}</g><g class="cg-mouth">${pixelRects(OJOU_MOUTH, colors)}</g></g>`
+        + Object.entries(OJOU_FACES).map(([mood, pixels]) => `<g class="cg-face cg-face-${mood}">${pixelRects(pixels, colors)}</g>`).join('')
+        + `<g class="oj-crown"><g class="oj-crown-tilt" shape-rendering="geometricPrecision">${crown}<g class="cg-glint">${glints}</g></g></g></g></svg>`;
+}
+
+/** @type {HTMLTemplateElement|null} */
+let ojouTemplate = null;
+
+/** @returns {Element} */
+function ojouElement() {
+    if (!ojouTemplate) {
+        ojouTemplate = document.createElement('template');
+        ojouTemplate.innerHTML = ojouSvg();
+    }
+    return ojouTemplate.content.firstElementChild.cloneNode(true);
+}
+
 /** 综合榜第四、五名的头像（静止；那一行的边框颜色在 leaderboard.css 里，取自图片） */
 const PLACE_FACES = { 4: '/img/leaderboard-fourth.webp', 5: '/img/leaderboard-fifth.webp' };
 /** 这个名次被挤下去时，那一行先换成这张哭脸 */
@@ -570,18 +702,22 @@ function currentPhase(mood, now) {
 
 /**
  * @param {number} rank
- * @param {boolean} fancy 综合榜：前三是像素猫娘，第四、五名是头像；其他榜是奖牌
+ * @param {boolean} fancy 综合榜：前三是像素猫娘（总榜第一是千金），第四、五名是头像；其他榜是奖牌
  * @param {any} [mood] 这一行的表情（见 moods）
  */
 function rankCell(rank, fancy, mood) {
     const phase = fancy ? currentPhase(mood, Date.now()) : null;
+    // 综合榜总榜：第一名是殿堂总冠军（千金），被挤出前三时哭的也是她
+    const hall = fancy && view.window === 'all';
     let mark;
     if (phase?.place) {
         mark = h('img', { class: `leaderboard-place-face leaderboard-place-sad${phase.place}`, src: PLACE_SAD_FACES[phase.place], alt: `第 ${rank} 名`, title: `第 ${rank} 名`, draggable: 'false' });
     } else if (phase?.catgirl) {
         // 可能是原来那个名次的猫娘（刚被挤下去，还在哭）
-        mark = catgirlElement(/** @type {1|2|3} */ (phase.catgirl));
+        mark = hall && phase.catgirl === 1 ? ojouElement() : catgirlElement(/** @type {1|2|3} */ (phase.catgirl));
         mark.classList.add(`cg-mood-${phase.face}`);
+    } else if (hall && rank === 1) {
+        mark = ojouElement();
     } else if (fancy && rank <= 3) {
         mark = catgirlElement(/** @type {1|2|3} */ (rank));
     } else if (fancy && PLACE_FACES[rank]) {
@@ -589,7 +725,8 @@ function rankCell(rank, fancy, mood) {
     } else {
         mark = h('span', { class: 'leaderboard-medal', text: MEDALS[rank] ?? String(rank) });
     }
-    return h('span', { class: 'leaderboard-rank' }, mark);
+    // 殿堂总冠军的头像后面有光（重画这一格时也要带上）
+    return h('span', { class: `leaderboard-rank${hall && rank === 1 ? ' leaderboard-legend-avatar' : ''}` }, mark);
 }
 
 function adminBadge() {
@@ -877,7 +1014,6 @@ function render(board) {
         // 综合榜总榜的第一名：殿堂总冠军
         const legend = fancy && view.window === 'all' && row.rank === 1;
         const rankMark = rankCell(row.rank, fancy, moods.get(id));
-        if (legend) rankMark.classList.add('leaderboard-legend-avatar');
         const element = h('div', {
             class: `leaderboard-row${row.rank <= 3 ? ` leaderboard-top leaderboard-top${row.rank}` : ''}${PLACE_FACES[row.rank] ? ` leaderboard-place${row.rank}` : ''}${legend ? ` leaderboard-legend${fresh ? ' leaderboard-legend-enter' : ''}` : ''}${row.me ? ' leaderboard-row-me' : ''}${expandable ? ' leaderboard-row-expandable' : ''}${expanded ? ' expanded' : ''}`,
             'data-key': id,

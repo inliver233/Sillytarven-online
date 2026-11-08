@@ -778,7 +778,7 @@
     --lb-spin: 4s;
     --lb-shine: 4.5s;
     --lb-ring-colors: #ffd86b, #fff6d5, #ff7ad9, #8f7cff, #5cc8ff, #6ee7a8, #ffe066, #ffd86b;
-    grid-template-columns: 46px minmax(0, 1fr) auto;
+    grid-template-columns: 50px minmax(0, 1fr) auto;
     min-height: 3.4em;
     margin: 8px 0 10px;
     padding: 6px 12px 6px 6px;
@@ -922,11 +922,92 @@
 .leaderboard-legend-frame i:nth-child(3)::after { bottom: -5px; left: -5px; }
 .leaderboard-legend-frame i:nth-child(4)::after { bottom: -5px; right: -5px; }
 
-/* 头像：放大，背后金色放射光和光晕 */
-.leaderboard-legend .leaderboard-catgirl {
-    width: 40px;
-    height: 40px;
-    margin: -4px auto;
+/*
+ * 头像：傲娇千金（32×32，显示成 48px），背后金色放射光和光晕。
+ * 平时一脸得意，隔一阵「哼」一下；歪戴的小皇冠时不时晃一晃，「哼」的时候差点甩掉。
+ * 有事时：吃惊皇冠弹起来摆正，难过皇冠滑下去一截，开心、得意跟着蹦、晃得更欢。
+ */
+.leaderboard-ojou {
+    --cg-breathe: 3.2s;
+    --cg-blink: 4.8s;
+    --cg-glint: 4.4s;
+    --cg-smile: 9.6s;
+    --cg-shift: 0s;
+}
+
+.leaderboard-list-score .leaderboard-legend .leaderboard-ojou {
+    width: 48px;
+    height: 48px;
+    margin: -8px auto -6px;
+    filter: drop-shadow(0 0 3px rgba(255, 216, 107, 0.55));
+    animation: none;
+}
+
+/* 猫娘那套「隔一阵笑一下」换成「哼」 */
+.leaderboard-ojou .cg-face-happy {
+    animation: none;
+}
+
+.leaderboard-ojou .cg-face-hmph {
+    animation: leaderboard-cg-face-smile var(--cg-smile) steps(1, end) infinite;
+    animation-delay: calc(var(--cg-t) + var(--cg-shift) - 2s);
+}
+
+/* 皇冠绕底边中点转（和 leaderboard.js 的 OJOU_CROWN_AT 一致），和「哼」同一个周期 */
+.leaderboard-ojou .oj-crown-tilt {
+    transform-origin: 20.5px 7.4px;
+    transform: rotate(22deg);
+    animation: leaderboard-oj-crown var(--cg-smile) ease-in-out infinite;
+    animation-delay: calc(var(--cg-t) + var(--cg-shift) - 2s);
+}
+
+.leaderboard-ojou[class*='cg-mood-'] .oj-crown-tilt {
+    animation: leaderboard-oj-crown-cheer 0.8s ease-in-out infinite;
+}
+
+.leaderboard-ojou.cg-mood-excited .oj-crown-tilt {
+    animation-duration: 0.45s;
+}
+
+.leaderboard-ojou.cg-mood-shocked .oj-crown-tilt {
+    animation: none;
+    transform: rotate(0deg);
+}
+
+.leaderboard-ojou.cg-mood-shocked .oj-crown {
+    animation: leaderboard-oj-crown-pop 0.7s steps(1, end) 1 both;
+}
+
+.leaderboard-ojou.cg-mood-sad .oj-crown-tilt {
+    animation: none;
+    transform: rotate(40deg);
+}
+
+.leaderboard-ojou.cg-mood-sad .oj-crown {
+    transform: translate(1px, 1px);
+}
+
+@keyframes leaderboard-oj-crown {
+    0%, 30%, 82%, 100% { transform: rotate(22deg); }
+    34% { transform: rotate(30deg); }
+    38% { transform: rotate(16deg); }
+    42% { transform: rotate(25deg); }
+    46% { transform: rotate(21deg); }
+    89% { transform: rotate(38deg); }
+    92% { transform: rotate(31deg); }
+    95% { transform: rotate(40deg); }
+    98% { transform: rotate(17deg); }
+}
+
+@keyframes leaderboard-oj-crown-cheer {
+    0%, 100% { transform: rotate(16deg); }
+    50% { transform: rotate(30deg); }
+}
+
+@keyframes leaderboard-oj-crown-pop {
+    0% { transform: translateY(-4px); }
+    30% { transform: translateY(-2px); }
+    55% { transform: translateY(0); }
 }
 
 .leaderboard-legend-avatar::before,
@@ -941,9 +1022,9 @@
 }
 
 .leaderboard-legend-avatar::before {
-    width: 70px;
-    height: 70px;
-    margin: -35px 0 0 -35px;
+    width: 80px;
+    height: 80px;
+    margin: -40px 0 0 -40px;
     background: repeating-conic-gradient(from var(--lb-angle), rgba(255, 216, 107, 0.6) 0 7deg, transparent 7deg 20deg);
     -webkit-mask: radial-gradient(circle, #000 18%, transparent 68%);
     mask: radial-gradient(circle, #000 18%, transparent 68%);
@@ -952,9 +1033,9 @@
 }
 
 .leaderboard-legend-avatar::after {
-    width: 44px;
-    height: 44px;
-    margin: -22px 0 0 -22px;
+    width: 54px;
+    height: 54px;
+    margin: -27px 0 0 -27px;
     background: radial-gradient(circle, rgba(255, 236, 160, 0.75), transparent 70%);
     animation: leaderboard-halo 2.4s ease-in-out infinite;
     animation-delay: calc(var(--lb-clock, 0) * -1ms);
