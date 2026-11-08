@@ -398,8 +398,56 @@
     padding: 2px 12px;
 }
 
+/* 计算规则：公式、权重表、两列对照 */
+.leaderboard-rules h4 {
+    margin: 16px 0 6px;
+}
+
 .leaderboard-weights {
-    margin-bottom: 8px !important;
+    display: grid;
+    gap: 3px;
+    margin: 8px 0 0;
+    font-size: 0.9em;
+}
+
+.leaderboard-weight-row {
+    display: flex;
+    gap: 10px;
+}
+
+.leaderboard-weight-dimension {
+    flex: 0 0 4em;
+    font-weight: bold;
+}
+
+.leaderboard-weight-parts {
+    opacity: 0.85;
+}
+
+.leaderboard-rules-note {
+    margin: 8px 0 0 !important;
+    font-size: 0.8em;
+    line-height: 1.55 !important;
+    opacity: 0.65;
+}
+
+.leaderboard-defs {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 5px 12px;
+    margin: 0;
+    font-size: 0.9em;
+    line-height: 1.45;
+}
+
+.leaderboard-defs dt {
+    font-weight: bold;
+    white-space: nowrap;
+}
+
+.leaderboard-defs dd {
+    margin: 0;
+    opacity: 0.85;
 }
 
 .leaderboard-empty {

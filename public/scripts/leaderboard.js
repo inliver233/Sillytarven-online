@@ -10,17 +10,17 @@ const ACTIVE_PING_MS = 60 * 1000;
 const VIEW_KEY = 'leaderboard_view';
 
 const METRICS = [
-    { id: 'score', label: '综合', icon: 'fa-trophy', unit: '分', hint: '综合得分 = Σ 权重 × ln(1+你的数值) ÷ ln(1+第一名的数值)，满分 100；点行看各项得分，点右上角 ⓘ 看权重' },
-    { id: 'chat', label: '聊天', icon: 'fa-comments', unit: '条', hint: 'AI 回复条数：每次生成都算，重新生成、继续也算' },
-    { id: 'words', label: '字数', icon: 'fa-feather', unit: '字', hint: 'AI 回复的字数，「继续」只算新写的部分' },
-    { id: 'online', label: '时长', icon: 'fa-clock', unit: '', hint: '在用酒馆的时间：页面开着但没人动不算，每天最多 16 小时' },
-    { id: 'talk', label: '话痨', icon: 'fa-keyboard', unit: '条', hint: '你发出去、并且让 AI 回了的消息条数' },
+    { id: 'score', label: '综合', icon: 'fa-trophy', unit: '分', hint: '各项加权得分，满分 100。点击某行查看明细，ⓘ 查看公式' },
+    { id: 'chat', label: '聊天', icon: 'fa-comments', unit: '条', hint: 'AI 回复条数（含重新生成、继续）' },
+    { id: 'words', label: '字数', icon: 'fa-feather', unit: '字', hint: 'AI 回复字数（继续只计新增部分）' },
+    { id: 'online', label: '时长', icon: 'fa-clock', unit: '', hint: '页面有操作时的在线时长，每日上限 16 小时' },
+    { id: 'talk', label: '话痨', icon: 'fa-keyboard', unit: '条', hint: '发出并得到 AI 回复的消息数' },
     { id: 'active', label: '活跃', icon: 'fa-calendar-check', unit: '天', hint: '有聊天的天数', noHour: true },
-    { id: 'streak', label: '连续', icon: 'fa-fire', unit: '天', hint: '到今天连续聊天的天数（今天还没聊不算断）', noWindow: true },
-    { id: 'night', label: '夜猫子', icon: 'fa-moon', unit: '条', hint: '凌晨 0–5 点（北京时间）的 AI 回复' },
-    { id: 'variety', label: '博爱', icon: 'fa-heart', unit: '位', hint: '聊过的不同角色数：只统计个数，不记是谁' },
-    { id: 'group', label: '群聊', icon: 'fa-users', unit: '条', hint: '群聊里的 AI 回复条数' },
-    { id: 'rookie', label: '新星', icon: 'fa-star', unit: '条', hint: '注册 30 天内的新人，按 AI 回复条数排' },
+    { id: 'streak', label: '连续', icon: 'fa-fire', unit: '天', hint: '截至今日的连续聊天天数（今日未聊不中断）', noWindow: true },
+    { id: 'night', label: '夜猫子', icon: 'fa-moon', unit: '条', hint: '0–5 点（北京时间）的 AI 回复数' },
+    { id: 'variety', label: '博爱', icon: 'fa-heart', unit: '位', hint: '聊过的不同角色数（仅计数量）' },
+    { id: 'group', label: '群聊', icon: 'fa-users', unit: '条', hint: '群聊中的 AI 回复数' },
+    { id: 'rookie', label: '新星', icon: 'fa-star', unit: '条', hint: '注册 30 天内用户的 AI 回复数' },
 ];
 /** 综合榜各项的叫法（服务器发来权重，说明里照着写） */
 const SCORE_LABELS = { chat: '聊天', words: '字数', online: '时长', active: '活跃天数', talk: '话痨', variety: '博爱', streak: '连续天数' };
@@ -278,7 +278,7 @@ function buildPopup() {
                 h('h2', {}, h('i', { class: 'fa-solid fa-ranking-star' }), h('span', { text: '排行榜' })),
                 h('span', { class: 'leaderboard-live', title: '打开时每 3 秒自动更新' }, h('span', { class: 'leaderboard-live-dot' }), h('span', { text: '实时' })),
                 h('span', { class: 'leaderboard-spacer' }),
-                h('button', { type: 'button', class: 'leaderboard-icon-button', title: '怎么算的', onclick: showRules }, h('i', { class: 'fa-solid fa-circle-info' })),
+                h('button', { type: 'button', class: 'leaderboard-icon-button', title: '计算规则', onclick: showRules }, h('i', { class: 'fa-solid fa-circle-info' })),
                 h('button', { type: 'button', class: 'leaderboard-icon-button', title: '关闭', onclick: closeLeaderboard }, h('i', { class: 'fa-solid fa-times' }))),
             metrics,
             h('div', { class: 'leaderboard-filters' },
@@ -530,50 +530,42 @@ function showRules() {
     const dimensions = new Map();
     for (const part of scoreParts) dimensions.set(part.dimension ?? '', [...(dimensions.get(part.dimension ?? '') ?? []), part]);
     const units = scoreParts.filter(part => part.unit !== 1).map(part => part.metric === 'online'
-        ? `时长每 ${part.unit / 60000} 分钟算 1`
-        : part.metric === 'words' ? `字数每 ${part.unit} 字算 1` : `${labelOf(part.metric)}每 ${part.unit} 算 1`);
+        ? `时长按${part.unit === 60000 ? '' : ` ${part.unit / 60000} `}分钟计`
+        : part.metric === 'words' ? `字数按${part.unit === 100 ? '百' : ` ${part.unit} `}字计` : `${labelOf(part.metric)}按 ${part.unit} 计`);
+    /** 两列对照：左边名称，右边说明 */
+    const definitions = rows => h('dl', { class: 'leaderboard-defs' }, ...rows.flatMap(([term, text]) => [h('dt', { text: term }), h('dd', { text })]));
     const removed = lastBoard?.admin ? (lastBoard.removed ?? []) : null;
-    popup.panel.replaceChildren(h('div', { class: 'leaderboard-card' },
-        h('h3', { text: '怎么算的' }),
-        h('h4', { text: '综合榜' }),
+    popup.panel.replaceChildren(h('div', { class: 'leaderboard-card leaderboard-rules' },
+        h('h3', { text: '计算规则' }),
+        h('h4', { text: '综合分' }),
         h('div', { class: 'leaderboard-formula' },
-            h('div', { text: '单项分 = ln(1 + 你的数值) ÷ ln(1 + 本期第一名的数值)' }),
-            h('div', { text: '综合得分 = 100 × Σ(权重 × 单项分) ÷ Σ权重' })),
-        h('p', { text: `单项分在 0 到 1 之间，每一项都是第一名就是满分 100。权重按维度分（合计 ${total}）：` }),
-        h('ul', { class: 'leaderboard-weights' },
-            ...[...dimensions].map(([dimension, parts]) => h('li', {},
-                h('b', { text: `${DIMENSION_LABELS[dimension] ?? '其他'} ${parts.reduce((sum, part) => sum + part.weight, 0)}` }),
-                h('span', { text: `：${parts.map(part => `${labelOf(part.metric)} ${part.weight}`).join(' · ')}` })))),
-        h('ul', {},
-            h('li', { text: '取对数是「边际递减」：从 10 条到 100 条，和从 100 条到 1000 条，加的分差不多。所以各方面都有，比只死刷一项划算。' }),
-            h('li', { text: '再除以第一名的对数，每一项都变成 0～1：条、字、分钟、天这些单位不一样的数，才能按权重加在一起。' }),
-            h('li', { text: '聊天、字数、话痨说的都是「聊了多少」，合起来只算一个维度，不重复计分；活跃天数、连续天数只能靠每天真的来，刷不出来，所以占得多。' }),
-            h('li', { text: `${units.length ? `${units.join('，')}；` : ''}连续天数不分时间范围，用的是当前的连续天数。` }),
-            h('li', { text: '「第一名」是同一时间范围、同一站点筛选下上榜的人。这一期还没人有数据的项不计入，它的权重也从分母里去掉。' }),
-            h('li', { text: '在综合榜点一下某一行，可以看到这个人每一项各得了多少分。' })),
-        h('h4', { text: '各榜' }),
-        h('ul', {},
-            h('li', { text: '两个站一起排：legacy 是老站，modern 是新站。两个站用同一个 Discord 账号的，算同一个人。' }),
-            h('li', { text: '聊天、字数：每次 AI 生成回复都算（重新生成、继续也算；继续只算新写的字）。导入、复制的旧聊天不算，没有真的发生成请求的回复也不算。' }),
-            h('li', { text: '话痨：你发出去、并且让 AI 回了的消息。' }),
-            h('li', { text: '时长：页面在用（有点击、输入、滚动）才计时，开着不动不算。' }),
-            h('li', { text: `每人每天最多计入：AI 回复 ${caps.ai} 条、你的消息 ${caps.user} 条、字数 ${caps.chars / 10000} 万、时长 16 小时。再怎么刷，一天也只能拿满这么多。` }),
-            h('li', { text: '博爱只统计聊过多少个不同的角色，不记录是谁。' }),
-            h('li', { text: '本小时、今日、本周、本月都按北京时间算：每个整点、每天零点重新开始，每周从周一开始。本小时榜从上线这天才开始记。' }),
-            h('li', { text: since ? `${since} 之前的聊天按现有聊天记录补算（删掉的不算）；时长从这天开始算。` : '上线之前的聊天按现有聊天记录补算（删掉的不算）；时长从上线开始算。' }),
-            h('li', { text: '默认匿名，显示「匿名用户#编号」；选实名显示你的账号昵称加编号，比如「小明#1203」。' }),
-            h('li', { text: '编号每个账号一个、永久不变，两个站不会重复（老站单数、新站双数）；两个站都有账号的，用注册最早的那个账号的编号。' }),
-            h('li', { text: '名字后面的标记是这段时间的数据来自哪个站。两个站有完全一样的天（带着聊天记录换了站），只算一次。' }),
-            h('li', { text: '管理员可以把刷榜的人移出榜单（点一下那一行）。' })),
-        removed ? h('h4', { text: '让某人重新选实名/匿名（只有管理员看得到）' }) : null,
+            h('div', { text: '单项分 = ln(1+数值) ÷ ln(1+最高值)' }),
+            h('div', { text: `综合分 = Σ 单项分 × 权重（满分 ${total}）` })),
+        h('div', { class: 'leaderboard-weights' },
+            ...[...dimensions].map(([dimension, parts]) => h('div', { class: 'leaderboard-weight-row' },
+                h('span', { class: 'leaderboard-weight-dimension', text: `${DIMENSION_LABELS[dimension] ?? '其他'} ${parts.reduce((sum, part) => sum + part.weight, 0)}` }),
+                h('span', { class: 'leaderboard-weight-parts', text: parts.map(part => `${labelOf(part.metric)} ${part.weight}`).join(' · ') })))),
+        h('p', { class: 'leaderboard-rules-note', text: `取对数使数值越高增长越慢，鼓励各项均衡。最高值取同一时间范围、同一站点下的最高者${units.length ? `；${units.join('，')}` : ''}；连续天数不受时间范围影响。` }),
+        h('h4', { text: '各榜统计' }),
+        definitions(METRICS.filter(metric => metric.id !== 'score').map(metric => [metric.label, metric.hint])),
+        h('h4', { text: '其他规则' }),
+        definitions([
+            ['时间', '北京时间。本小时、今日分别在整点、零点重置，本周自周一起。'],
+            ['两站', '同一 Discord 账号合并为一人；名字后的标记表示数据来源站点。'],
+            ['名称', '实名显示「昵称#编号」，匿名显示「匿名用户#编号」，编号终身不变。'],
+            ['计入', '仅统计真实生成的回复；导入、复制的聊天不计入，刷榜者会被移出榜单。'],
+            ['上限', `每人每日最多计入 AI 回复 ${caps.ai} 条、消息 ${caps.user} 条、字数 ${caps.chars / 10000} 万、时长 16 小时。`],
+            ['历史', since ? `${since} 前的数据按现有聊天记录补算；时长和本小时榜自该日起统计。` : '上线前的数据按现有聊天记录补算；时长和本小时榜自上线起统计。'],
+        ]),
+        removed ? h('h4', { text: '让某人重新选实名/匿名（仅管理员可见）' }) : null,
         removed ? chooseAgainForm() : null,
-        removed ? h('h4', { text: '已移出榜单（只有管理员看得到）' }) : null,
+        removed ? h('h4', { text: '已移出榜单（仅管理员可见）' }) : null,
         removed ? (removed.length
             ? h('div', { class: 'leaderboard-removed' }, ...removed.map(person => h('div', { class: 'leaderboard-removed-row' },
                 h('span', { text: person.name }),
                 ...siteBadges(person.sites),
                 h('button', { type: 'button', class: 'menu_button', text: '恢复', onclick: () => void setRemoved(person.id, person.name, false) }))))
-            : h('p', { class: 'leaderboard-note', text: '没有' })) : null,
+            : h('p', { class: 'leaderboard-note', text: '无' })) : null,
         h('div', { class: 'leaderboard-card-actions' },
             h('button', { type: 'button', class: 'menu_button', text: '知道了', onclick: hidePanel }))));
     popup.panel.classList.remove('displayNone');
