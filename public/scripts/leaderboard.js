@@ -1000,13 +1000,12 @@ function burst(row, kind, label) {
     row.append(callout);
 }
 
-/** 殿堂总冠军那一行的底：星空（两层，漂移、闪烁）、流过的极光、往上飘的火星 */
+/** 殿堂总冠军那一行的底：深色丝绒（菱格暗纹在 CSS 里）、头像那边一束暖光、漆面反光、几点金色闪光 */
 function legendBackdrop() {
     return h('span', { class: 'leaderboard-legend-fx', 'aria-hidden': 'true' },
-        h('span', { class: 'lg-stars' }),
-        h('span', { class: 'lg-stars lg-stars-far' }),
-        h('span', { class: 'lg-aurora' }),
-        h('span', { class: 'lg-embers' }, ...Array.from({ length: 8 }, () => h('i'))));
+        h('span', { class: 'lg-light' }),
+        h('span', { class: 'lg-sheen' }),
+        h('span', { class: 'lg-glints' }, ...Array.from({ length: 5 }, () => h('i'))));
 }
 
 /** 各行（按 key）在列表内容里的位置 */
@@ -1260,7 +1259,8 @@ function render(board) {
                 },
             }, h('i', { class: 'fa-solid fa-user-slash' }), h('span', { text: '移出榜单' })) : null) : null,
         sparkles ? h('span', { class: 'leaderboard-sparkles', 'aria-hidden': 'true' }, ...Array.from({ length: sparkles }, () => h('i'))) : null,
-        legend ? h('span', { class: 'leaderboard-legend-frame', 'aria-hidden': 'true' }, h('i'), h('i'), h('i'), h('i')) : null);
+        // 四角金饰，上下边框正中的钻饰
+        legend ? h('span', { class: 'leaderboard-legend-frame', 'aria-hidden': 'true' }, h('i'), h('i'), h('i'), h('i'), h('b'), h('b')) : null);
         if (expandable) {
             // 手机上没有悬停提示：点一下展开
             element.addEventListener('click', () => {
