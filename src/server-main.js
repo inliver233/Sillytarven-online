@@ -87,6 +87,7 @@ import scheduledTasksManager from './scheduled-tasks.js';
 import { startGitSync } from './git-sync/router.js';
 import { leaderboard, leaderboardPeerHandler } from './leaderboard-service.js';
 import { live } from './live.js';
+import { startUsageMeter } from './usage-meter.js';
 
 // Routers
 import { router as usersPublicRouter } from './endpoints/users-public.js';
@@ -672,6 +673,8 @@ async function preSetupTasks() {
     leaderboard.start();
     // Pushing to open pages (reload, messages) over WebSocket.
     live.start();
+    // Prices of official AI services for the usage meter (models.dev, once a day).
+    startUsageMeter();
     // Scheduled git backups of users who turned them on.
     startGitSync();
 

@@ -282,6 +282,7 @@ import { extractReasoningFromData, extractReasoningSignatureFromData, initReason
 import { accountStorage } from './scripts/util/AccountStorage.js';
 import { initWelcomeScreen, openPermanentAssistantChat, openPermanentAssistantCard, getPermanentAssistantAvatar } from './scripts/welcome-screen.js';
 import { initTabSync, noteSettingsSaved, reloadPageKeepingChat, tellOtherTabs } from './scripts/tab-sync.js';
+import { confirmUsageBudget, initUsageMeter, renderMessageUsage } from './scripts/usage-meter.js';
 import { initDataMaid } from './scripts/data-maid.js';
 import { clearItemizedPrompts, deleteItemizedPromptForMessage, deleteItemizedPrompts, findItemizedPromptSet, initItemizedPrompts, itemizedParams, itemizedPrompts, loadItemizedPrompts, promptItemize, replaceItemizedPromptText, saveItemizedPrompts, swapItemizedPrompts } from './scripts/itemized-prompts.js';
 import { getSystemMessageByType, initSystemMessages, SAFETY_CHAT, sendSystemMessage, system_message_types, system_messages } from './scripts/system-messages.js';
@@ -1424,6 +1425,7 @@ async function firstLoadInit() {
     initReasoning();
     initWelcomeScreen();
     initTabSync();
+    initUsageMeter();
     startupLap('ui-panels');
     await initScrapers();
     startupLap('scrapers');
@@ -3752,6 +3754,7 @@ export function updateMessageElement(mes, { messageId = chat.length - 1, message
     messageElement.find('.timestamp').text(timestamp).attr('title', `${mes.extra?.api ? mes.extra.api + ' - ' : ''}${mes.extra?.model ?? ''}`);
     messageElement.find('.mesIDDisplay').text(`#${messageId}`);
     tokenCount && messageElement.find('.tokenCounterDisplay').text(`${tokenCount}t`);
+    renderMessageUsage(messageElement, mes);
     mes.title && messageElement.attr('title', mes.title);
     timerValue && messageElement.find('.mes_timer').attr('title', timerTitle).text(timerValue);
     bookmarkLink && updateBookmarkDisplay(messageElement);
@@ -5512,6 +5515,11 @@ export async function Generate(type, { automatic_trigger, force_name2, quiet_pro
     if (!dryRun && type !== 'quiet') {
         const canProceed = await ensureStorageAvailableForChatAction();
         if (!canProceed) {
+            unblockGeneration(type);
+            return Promise.resolve();
+        }
+        // Over the daily spending limit the user set: ask first.
+        if (main_api === 'openai' && !(await confirmUsageBudget())) {
             unblockGeneration(type);
             return Promise.resolve();
         }
@@ -12122,6 +12130,7 @@ export async function swipe(event, direction, { source, repeated, message = chat
             // resets the timer
             thisMesDiv.find('.mes_timer').html('');
             thisMesDiv.find('.tokenCounterDisplay').text('');
+            thisMesDiv.find('.mesCostDisplay').text('').removeAttr('title');
             updateReasoningUI(thisMesDiv, { reset: true });
         } else {
             //console.log('showing previously generated swipe candidate, or "..."');

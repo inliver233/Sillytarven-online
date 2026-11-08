@@ -1,0 +1,126 @@
+/* 用量与花费：回复头像下的花费 */
+.mes .mesCostDisplay {
+    cursor: pointer;
+    opacity: 0.7;
+    font-size: calc(var(--mainFontSize) * 0.85);
+    font-weight: 600;
+    text-align: center;
+    white-space: nowrap;
+}
+
+.mes .mesCostDisplay:empty {
+    display: none;
+}
+
+.mes .mesCostDisplay:hover {
+    opacity: 1;
+}
+
+/* 输入框右上角的「今日 ≈ $x」：不占位置 */
+#usageMeterChipHolder {
+    position: relative;
+    height: 0;
+}
+
+#usageMeterChipHolder[hidden] {
+    display: none;
+}
+
+#usageMeterChip {
+    position: absolute;
+    right: 10px;
+    bottom: 4px;
+    padding: 1px 9px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 999px;
+    background-color: var(--SmartThemeBlurTintColor);
+    backdrop-filter: blur(var(--SmartThemeBlurStrength));
+    color: var(--SmartThemeBodyColor);
+    font-size: calc(var(--mainFontSize) * 0.8);
+    line-height: 1.6;
+    opacity: 0.75;
+    cursor: pointer;
+}
+
+#usageMeterChip:hover {
+    opacity: 1;
+}
+
+#usageMeterChip.is-warn {
+    border-color: #f59e0b;
+    color: #f59e0b;
+    opacity: 1;
+}
+
+#usageMeterChip.is-over {
+    border-color: #ef4444;
+    color: #ef4444;
+    opacity: 1;
+}
+
+/* 用量面板 */
+.usageMeterPanel {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    text-align: left;
+}
+
+.usageMeterPanel h3,
+.usageMeterPanel h4 {
+    margin: 4px 0 0;
+}
+
+.usageMeterPanel p {
+    margin: 0;
+}
+
+.usageMeterToday {
+    font-weight: 600;
+}
+
+.usageMeterMuted {
+    opacity: 0.7;
+    font-size: 0.9em;
+}
+
+.usageMeterTable {
+    width: 100%;
+    border-collapse: collapse;
+    font-variant-numeric: tabular-nums;
+}
+
+.usageMeterTable th,
+.usageMeterTable td {
+    padding: 3px 6px;
+    border-bottom: 1px solid var(--SmartThemeBorderColor);
+    text-align: right;
+}
+
+.usageMeterTable th:first-child,
+.usageMeterTable td:first-child {
+    text-align: left;
+}
+
+.usageMeterModels {
+    margin: 0;
+    padding-left: 1.2em;
+    word-break: break-all;
+}
+
+.usageMeterField {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.usageMeterField.is-checkbox {
+    flex-direction: row;
+    align-items: center;
+    gap: 8px;
+}
+
+.usageMeterField .text_pole {
+    width: 160px;
+    margin: 0;
+}

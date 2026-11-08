@@ -34,6 +34,7 @@ import {
     trimTrailingSlash,
     flattenSchema,
 } from '../../util.js';
+import { meterGeneration } from '../../usage-meter.js';
 import {
     convertClaudeMessages,
     convertGooglePrompt,
@@ -1372,6 +1373,8 @@ async function sendClaudeRequest(request, response) {
 
             /** @type {any} */
             const generateResponseJson = await generateResponse.json();
+            // The reply below drops the usage: read it first.
+            response.locals.usageMeter?.observe(generateResponseJson);
             const responseText = generateResponseJson?.content?.[0]?.text || '';
             console.debug('Claude response:', generateResponseJson);
 
@@ -1998,6 +2001,8 @@ async function sendMakerSuiteRequest(request, response, options = {}) {
 
         const responseTextBody = await generateResponse.text();
         const generateResponseJson = tryParse(responseTextBody);
+        // The reply below drops usageMetadata: read it first.
+        response.locals.usageMeter?.observe(generateResponseJson);
         if (!generateResponseJson || typeof generateResponseJson !== 'object') {
             if (freeGeminiChannel) {
                 return returnFreeGeminiFailure(502, {
@@ -2477,6 +2482,8 @@ async function sendDeepSeekRequest(request, response) {
             'stop': request.body.stop,
             'seed': request.body.seed,
             'thinking': { type: request.body.include_reasoning ? 'enabled' : 'disabled' },
+            // Usage (tokens) in the last streamed chunk, for the usage meter (DeepSeek itself; relays may refuse the option).
+            ...(request.body.stream && !request.body.reverse_proxy ? { stream_options: { include_usage: true } } : {}),
             ...bodyParams,
         };
 
@@ -3595,6 +3602,7 @@ router.post('/bias', async function (request, response) {
 router.post('/generate', async function (request, response) {
     try {
         if (!request.body) return response.status(400).send({ error: true });
+        meterGeneration(request, response);
 
         const postProcessingType = request.body.custom_prompt_post_processing;
         if (Array.isArray(request.body.messages) && postProcessingType) {
@@ -3753,6 +3761,8 @@ router.post('/generate', async function (request, response) {
                 reasoning: {
                     exclude: !includeReasoning,
                 },
+                // The usage meter reads the cost OpenRouter reports.
+                usage: { include: true },
             };
 
             if (request.body.logprobs > 0) {
@@ -4112,6 +4122,11 @@ router.post('/generate', async function (request, response) {
 
         if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.CUSTOM) {
             excludeKeysByYaml(requestBody, request.body.custom_exclude_body);
+        }
+
+        // Usage (tokens) in the last streamed chunk, for the usage meter: OpenAI itself only, relays may refuse the option.
+        if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.OPENAI && !request.body.reverse_proxy && request.body.stream && !isTextCompletion) {
+            requestBody['stream_options'] = { include_usage: true };
         }
 
         /** @type {import('node-fetch').RequestInit} */

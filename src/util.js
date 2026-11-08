@@ -581,6 +581,9 @@ export async function forwardFetchResponse(from, to) {
     }
 
     if (from.body && to.socket) {
+        // The usage meter (src/usage-meter.js) reads the tokens the service reports as they pass.
+        const usageMeter = to.locals?.usageMeter;
+        if (usageMeter) from.body.on('data', chunk => usageMeter.feed(chunk));
         from.body.pipe(to);
 
         to.socket.on('close', function () {
