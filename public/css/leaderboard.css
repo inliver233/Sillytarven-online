@@ -1060,14 +1060,28 @@
     font-variant-numeric: tabular-nums;
 }
 
+/* 「我」的第二行：左边是标识，右边是差距和设置 */
 .leaderboard-me-side {
     display: flex;
     align-items: center;
     gap: 8px;
-    margin-left: auto;
+    flex: 1 1 100%;
+    min-width: 0;
+}
+
+.leaderboard-me-tags {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px;
+    min-width: 0;
+    margin-right: auto;
 }
 
 .leaderboard-gap {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
     opacity: 0.75;
     white-space: nowrap;
 }
@@ -1367,7 +1381,7 @@
         text-overflow: ellipsis;
     }
 
-    .leaderboard-gap {
+    .leaderboard-gap-prefix {
         display: none;
     }
 

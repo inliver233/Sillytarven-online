@@ -791,7 +791,10 @@ function renderMe(board, animate) {
     }
     lastMeValue = me.value;
     const status = me.banned ? '已被管理员移出榜单' : me.rank ? `第 ${me.rank} 名` : '还没上榜';
-    const gap = me.rank && me.gap ? `距上一名还差 ${formatLeaderboardValue(view.metric, me.gap)}` : (me.rank === 1 ? '目前第一' : '');
+    // 手机上只写「还差 …」（前半句藏起来），免得把数字挤成省略号
+    const gap = me.rank && me.gap
+        ? h('small', { class: 'leaderboard-gap' }, h('span', { class: 'leaderboard-gap-prefix', text: '距上一名' }), `还差 ${formatLeaderboardValue(view.metric, me.gap)}`)
+        : (me.rank === 1 ? h('small', { class: 'leaderboard-gap', text: '目前第一' }) : null);
     // replaceChildren 会把 null 当成文字「null」显示出来，没有的部分要先去掉
     popup.me.replaceChildren(...[
         h('div', { class: 'leaderboard-me-main' },
@@ -803,13 +806,13 @@ function renderMe(board, animate) {
                     class: `leaderboard-emoji-button${me.emoji ? '' : ' empty'}`,
                     title: me.emoji ? '更换或删除名字旁的表情' : '在名字旁加一个表情',
                     onclick: () => showEmojiEditor(me),
-                }, me.emoji || h('i', { class: 'fa-regular fa-face-smile' })),
-                me.admin ? adminBadge() : null,
-                ...siteBadges(me.sites)),
+                }, me.emoji || h('i', { class: 'fa-regular fa-face-smile' }))),
             valueCell),
         me.parts ? h('div', { class: 'leaderboard-me-parts', text: formatScoreParts(me.parts, board.scoreParts) }) : null,
+        // 第二行：标识在左，差距和设置在右（一行放不下名字、标识和按钮）
         h('div', { class: 'leaderboard-me-side' },
-            gap ? h('small', { class: 'leaderboard-gap', text: gap }) : null,
+            h('span', { class: 'leaderboard-me-tags' }, me.admin ? adminBadge() : null, ...siteBadges(me.sites)),
+            gap,
             h('button', {
                 type: 'button',
                 class: 'leaderboard-settings',
