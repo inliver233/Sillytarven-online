@@ -614,6 +614,23 @@ function createChatWriteSnapshot(filePath, temporaryRoot) {
     };
 }
 
+/**
+ * 不分页加载（整份读取）时把聊天的版本号放进响应头：整份保存时带回来，文件在别的标签页或设备上改过就拒绝（409），
+ * 不再把别处刚写的内容整份覆盖掉。读不出版本号时不带（保存时也就不检查）。
+ * @param {import('express').Response} response
+ * @param {string} filePath
+ */
+function setChatRevisionHeader(response, filePath) {
+    try {
+        const revision = readChatRevision(filePath);
+        if (revision) {
+            response.set('X-Chat-Revision', revision);
+        }
+    } catch (error) {
+        console.warn('Chat revision could not be read', error);
+    }
+}
+
 function validateExpectedChatRevision(request, response, filePath) {
     if (!Object.hasOwn(request.body ?? {}, 'expectedRevision')) {
         response.status(428).send({ error: 'revision_required' });
@@ -1894,6 +1911,10 @@ async function persistChatTail({
 }
 
 async function persistFullChat({ request, response, filePath, header, messages, isGroup, backupName }) {
+    // 带了版本号（不分页加载的聊天）：文件在别处改过就拒绝，不整份覆盖。没带的（旧页面、扩展）照旧
+    if (Object.hasOwn(request.body ?? {}, 'expectedRevision') && !validateExpectedChatRevision(request, response, filePath)) {
+        return null;
+    }
     updateChatHeaderMetadata(header, messages.length, messages[messages.length - 1]);
     const jsonlData = [header, ...messages].map(item => JSON.stringify(item)).join('\n');
     const newSize = chatChunkingEnabled
@@ -2111,6 +2132,7 @@ router.post('/get', validateAvatarUrlMiddleware, async function (request, respon
         if (chatChunkingEnabled && !isChunkedChat(filePath)) {
             await convertLegacyChatToChunks(filePath);
         }
+        setChatRevisionHeader(response, filePath);
 
         if (chatChunkingEnabled && isChunkedChat(filePath)) {
             const header = await readChatHeader(filePath);
@@ -4206,6 +4228,7 @@ router.post('/group/get', async (request, response) => {
             if (chatChunkingEnabled && !isChunkedChat(pathToFile)) {
                 await convertLegacyChatToChunks(pathToFile);
             }
+            setChatRevisionHeader(response, pathToFile);
             if (chatChunkingEnabled && isChunkedChat(pathToFile)) {
                 const [headerInfo, storedMessages] = await Promise.all([
                     readGroupChatHeaderInfo(pathToFile),

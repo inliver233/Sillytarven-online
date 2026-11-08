@@ -48,9 +48,10 @@ export function splitGroupChatFile(data) {
  * @param {object} options.pagingState Shared paging state snapshot
  * @param {boolean} [options.force] Override integrity mismatch
  * @param {boolean} [options.allowShrink] The chat was loaded, so it may shrink the stored one to a single message
+ * @param {string} [options.revision] Revision the whole chat was loaded at: a whole-chat save is refused when it changed since
  * @returns {{url: string, body: object, tail: boolean}}
  */
-export function createGroupChatSaveRequest({ chatId, header, messages, pagingState, force = false, allowShrink = false }) {
+export function createGroupChatSaveRequest({ chatId, header, messages, pagingState, force = false, allowShrink = false, revision }) {
     const tail = Boolean(
         pagingState?.active
         && pagingState?.isGroup
@@ -74,7 +75,13 @@ export function createGroupChatSaveRequest({ chatId, header, messages, pagingSta
 
     return {
         url: '/api/chats/group/save',
-        body: { id: chatId, chat: [header, ...messages], force, allow_shrink: allowShrink },
+        body: {
+            id: chatId,
+            chat: [header, ...messages],
+            force,
+            allow_shrink: allowShrink,
+            ...(typeof revision === 'string' && revision ? { expectedRevision: revision } : {}),
+        },
         tail: false,
     };
 }

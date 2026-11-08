@@ -99,6 +99,10 @@ import {
     canShrinkSavedChat,
     assertChatHistoryPresent,
     reportChatWipeRejected,
+    getFullChatRevision,
+    setFullChatRevision,
+    noteChatSaved,
+    scheduleChangedChatReload,
 } from '../script.js';
 import { printTagList, createTagMapFromList, applyTagsOnCharacterSelect, tag_map, applyTagsOnGroupSelect, printTagFilters, tag_filter_type } from './tags.js';
 import { FILTER_TYPES, FilterHelper } from './filters.js';
@@ -218,10 +222,11 @@ async function regenerateGroup() {
 /**
  * Loads group chat messages from the server.
  * @param {string} chatId Chat ID
- * @param {{signal?: AbortSignal}} [options] Request options
+ * @param {{signal?: AbortSignal, keepRevision?: boolean}} [options] Request options; keepRevision: this is the chat
+ *   being opened, remember its revision so that whole-chat saves can be refused when it was changed elsewhere
  * @returns {Promise<ChatFile|null>} Array of chat messages, or null on request failure
  */
-async function loadGroupChat(chatId, { signal } = {}) {
+async function loadGroupChat(chatId, { signal, keepRevision = false } = {}) {
     const response = await fetch('/api/chats/group/get', {
         method: 'POST',
         headers: getRequestHeaders(),
@@ -230,6 +235,9 @@ async function loadGroupChat(chatId, { signal } = {}) {
     });
 
     if (response.ok) {
+        if (keepRevision) {
+            setFullChatRevision(response.headers.get('X-Chat-Revision'));
+        }
         const data = await response.json();
         if (!Array.isArray(data)) {
             return [];
@@ -374,8 +382,9 @@ export async function getGroupChat(groupId, reload = false, { signal: parentSign
             }
         }
 
+        setFullChatRevision(undefined);
         if (!usedPaging) {
-            const fullChat = await loadGroupChat(chatId, { signal: controller.signal });
+            const fullChat = await loadGroupChat(chatId, { signal: controller.signal, keepRevision: true });
             if (isStale()) return;
             if (!fullChat) {
                 throw new Error('The group chat request failed.');
@@ -808,6 +817,7 @@ async function saveGroupChat(groupId, shouldSaveGroup, force = false) {
                 pagingState: useSession ? { ...pagingState, revision: session.revision } : pagingState,
                 force,
                 allowShrink: canShrinkSavedChat(),
+                revision: getFullChatRevision(),
             });
             saveRequest = { ...request, body: JSON.stringify(request.body) };
         }
@@ -840,7 +850,12 @@ async function saveGroupChat(groupId, shouldSaveGroup, force = false) {
             if (!useSession || session === getChatHydration()) {
                 setChatPagingState({ revision: responseData.revision });
             }
+        } else {
+            // Whole-chat save: the revision it wrote goes with the next one
+            const responseData = await response.json().catch(() => null);
+            setFullChatRevision(responseData?.revision);
         }
+        noteChatSaved(messages);
         return { saved: true };
     };
 
@@ -870,8 +885,7 @@ async function saveGroupChat(groupId, shouldSaveGroup, force = false) {
         }
         if (response.status === 409 && errorData?.error === 'revision_conflict') {
             clearCachedChatPage({ isGroup: true, chatId });
-            toastr.error(t`Chat changed in another tab. Reloading to prevent data loss.`, t`Chat changed`);
-            window.location.reload();
+            scheduleChangedChatReload();
             return false;
         }
         if (errorData?.error === 'chat_wipe_rejected') {

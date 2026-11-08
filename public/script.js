@@ -281,6 +281,7 @@ import { getContext } from './scripts/st-context.js';
 import { extractReasoningFromData, extractReasoningSignatureFromData, initReasoning, parseReasoningInSwipes, PromptReasoning, ReasoningHandler, removeReasoningFromString, updateReasoningUI } from './scripts/reasoning.js';
 import { accountStorage } from './scripts/util/AccountStorage.js';
 import { initWelcomeScreen, openPermanentAssistantChat, openPermanentAssistantCard, getPermanentAssistantAvatar } from './scripts/welcome-screen.js';
+import { initTabSync, noteSettingsSaved, reloadPageKeepingChat, tellOtherTabs } from './scripts/tab-sync.js';
 import { initDataMaid } from './scripts/data-maid.js';
 import { clearItemizedPrompts, deleteItemizedPromptForMessage, deleteItemizedPrompts, findItemizedPromptSet, initItemizedPrompts, itemizedParams, itemizedPrompts, loadItemizedPrompts, promptItemize, replaceItemizedPromptText, saveItemizedPrompts, swapItemizedPrompts } from './scripts/itemized-prompts.js';
 import { getSystemMessageByType, initSystemMessages, SAFETY_CHAT, sendSystemMessage, system_message_types, system_messages } from './scripts/system-messages.js';
@@ -794,15 +795,129 @@ export function reportChatWipeRejected() {
  * @type {ChatHydrationSession|null}
  */
 let chatHydration = null;
-let missingHistoryReported = false;
 
-function reportMissingChatHistory() {
-    if (missingHistoryReported) {
+/**
+ * 不分页加载的聊天（老站）的版本号：加载时从响应头拿，整份保存时带上；文件在别的标签页或设备上改过，
+ * 服务器就拒绝这次保存（409），不再整份覆盖掉别处刚写的内容。undefined：不知道（新聊天、读不出），不检查。
+ * @type {string|undefined}
+ */
+let fullChatRevision;
+
+/** @param {string|null|undefined} revision */
+export function setFullChatRevision(revision) {
+    fullChatRevision = typeof revision === 'string' && revision ? revision : undefined;
+}
+
+export function getFullChatRevision() {
+    return fullChatRevision;
+}
+
+/**
+ * 刚发出、还没存上的那条用户消息：聊天在别处改过、这次保存被拒时放回输入框；存上了就清掉。
+ * @type {{ text: string, message: ChatMessage }|null}
+ */
+let unsavedUserMessage = null;
+
+/**
+ * 当前打开的聊天在同一浏览器各标签页之间通用的标识（和输入框草稿同一种写法）。
+ * @returns {string|null}
+ */
+export function getCurrentChatKey() {
+    const chatId = getCurrentChatId();
+    if (!chatId) return null;
+    if (selected_group) return `g:${selected_group}:${chatId}`;
+    const avatar = characters[this_chid]?.avatar;
+    return avatar ? `c:${avatar}:${chatId}` : null;
+}
+
+/**
+ * 当前聊天存好了：发出去的那条已经在里面就不用再记着；告诉同一浏览器里开着同一个聊天的标签页。
+ * @param {ChatMessage[]} savedMessages 这次存进去的消息
+ */
+export function noteChatSaved(savedMessages) {
+    if (unsavedUserMessage && savedMessages.includes(unsavedUserMessage.message)) {
+        unsavedUserMessage = null;
+    }
+    const chatKey = getCurrentChatKey();
+    if (chatKey) {
+        tellOtherTabs('chat-saved', { chat: chatKey });
+    }
+}
+
+/** 有没有还没存上的聊天改动（延迟保存还在等，或者正在存） */
+export function hasPendingChatSave() {
+    return Boolean(chatSaveTimeout) || isChatSaving;
+}
+
+/** @type {Promise<void>|null} */
+let changedChatReload = null;
+
+/**
+ * 这个聊天在别的标签页或设备上改过了，这里拿着的是旧的：只重新载入这个聊天（不刷新整页、不回首页），
+ * 刚才发出去但没存上的那条消息放回输入框。正在生成就先停掉。
+ * @param {{ fromOtherTab?: boolean }} [options] 同一浏览器的另一个标签页刚存过、这里没有没存的改动：轻轻提示
+ * @returns {Promise<void>}
+ */
+export function reloadChatChangedElsewhere({ fromOtherTab = false } = {}) {
+    changedChatReload ??= (async () => {
+        const pending = fromOtherTab ? null : unsavedUserMessage?.text ?? null;
+        unsavedUserMessage = null;
+        try {
+            for (let tries = 0; isGenerating() && tries < 100; tries++) {
+                stopGeneration();
+                await delay(100);
+            }
+            clearCachedChatPage({ isGroup: Boolean(selected_group), chatId: selected_group ? getCurrentChatId() : null });
+            if (!await reloadCurrentChat()) {
+                throw new Error('The chat changed while it was being reloaded.');
+            }
+            if (pending) {
+                putUnsentMessageBack(pending);
+            }
+            if (fromOtherTab) {
+                toastr.info('已同步另一个标签页里的新内容。', '聊天已更新', { timeOut: 2500, preventDuplicates: true });
+            } else {
+                toastr.warning(
+                    pending
+                        ? '这个聊天在另一个标签页或设备上改过了，已换成最新内容；刚才没存上的那条消息放回了输入框。'
+                        : '这个聊天在另一个标签页或设备上改过了，已换成最新内容。',
+                    '聊天已更新',
+                    { preventDuplicates: true },
+                );
+            }
+        } catch (error) {
+            console.error('Reloading the changed chat failed, reloading the page', error);
+            if (pending) {
+                putUnsentMessageBack(pending);
+            }
+            reloadPageKeepingChat();
+        } finally {
+            changedChatReload = null;
+        }
+    })();
+    return changedChatReload;
+}
+
+/** 保存流程里发现冲突：等这次保存的调用都退出了再重新载入，免得互相等待 */
+export function scheduleChangedChatReload() {
+    setTimeout(() => void reloadChatChangedElsewhere(), 0);
+}
+
+/**
+ * 没存上的消息放回输入框（输入框里已经有别的字就放在前面）。
+ * @param {string} text
+ */
+function putUnsentMessageBack(text) {
+    const box = document.getElementById('send_textarea');
+    if (!(box instanceof HTMLTextAreaElement) || box.value.trim() === text.trim()) {
         return;
     }
-    missingHistoryReported = true;
-    toastr.error(t`Chat changed in another tab. Reloading to prevent data loss.`, t`Chat changed`);
-    setTimeout(() => window.location.reload(), 1500);
+    box.value = box.value.trim() ? `${text}\n\n${box.value}` : text;
+    box.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+function reportMissingChatHistory() {
+    void reloadChatChangedElsewhere();
 }
 
 /**
@@ -1302,6 +1417,7 @@ async function firstLoadInit() {
     initBulkEdit();
     initReasoning();
     initWelcomeScreen();
+    initTabSync();
     startupLap('ui-panels');
     await initScrapers();
     startupLap('scrapers');
@@ -2227,8 +2343,7 @@ async function loadMoreChatMessages(messagesToLoad = null) {
 
         if (chatPagingState.revision && data.revision !== chatPagingState.revision) {
             clearCachedChatPage({ isGroup: chatPagingState.isGroup, chatId: requestedChatId });
-            toastr.error(t`Chat changed in another tab. Reloading to prevent data loss.`, t`Chat changed`);
-            window.location.reload();
+            void reloadChatChangedElsewhere();
             return;
         }
 
@@ -6940,6 +7055,7 @@ export function removeMacros(str) {
  */
 export async function sendMessageAsUser(messageText, messageBias, insertAt = null, compact = false, name = name1, avatar = user_avatar, options = null) {
     const { skipStorageCheck = false } = options && typeof options === 'object' ? options : {};
+    const typedText = String(messageText ?? '');
     if (!skipStorageCheck) {
         const canProceed = await ensureStorageAvailableForChatAction();
         if (!canProceed) {
@@ -6979,6 +7095,8 @@ export async function sendMessageAsUser(messageText, messageBias, insertAt = nul
 
     chat_metadata.tainted = true;
 
+    // 存上之前记着：这个聊天在别处改过、保存被拒时放回输入框
+    unsavedUserMessage = typedText.trim() ? { text: typedText, message } : null;
     if (typeof insertAt === 'number' && insertAt >= 0 && insertAt <= chat.length) {
         chat.splice(insertAt, 0, message);
         await saveChatConditional();
@@ -8550,6 +8668,7 @@ async function saveChatTail(options = {}) {
         session?.noteRevision(responseData.revision);
         if (!session || session === chatHydration) {
             chatPagingState.revision = responseData.revision;
+            noteChatSaved(messages);
         }
         if (chatPagingState.active) {
             setCachedChatPage({
@@ -8572,8 +8691,7 @@ async function saveChatTail(options = {}) {
     }
     if (result.status === 409 && errorData?.error === 'revision_conflict') {
         clearCachedChatPage({ isGroup: false });
-        toastr.error(t`Chat changed in another tab. Reloading to prevent data loss.`, t`Chat changed`);
-        window.location.reload();
+        scheduleChangedChatReload();
         return;
     }
     if (errorData?.error === 'chat_wipe_rejected') {
@@ -8641,6 +8759,7 @@ async function saveChatPatch({ session, messages, header, force = false }) {
         prepared.commit(responseData.revision);
         if (session === chatHydration) {
             chatPagingState.revision = responseData.revision;
+            noteChatSaved(messages);
         }
         return;
     }
@@ -8648,8 +8767,7 @@ async function saveChatPatch({ session, messages, header, force = false }) {
     prepared.rollback();
     const errorData = await result.json().catch(() => null);
     if (result.status === 409 && errorData?.error === 'revision_conflict') {
-        toastr.error(t`Chat changed in another tab. Reloading to prevent data loss.`, t`Chat changed`);
-        window.location.reload();
+        scheduleChangedChatReload();
         return;
     }
     if (errorData?.error === 'storage_limit') {
@@ -8899,6 +9017,8 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false, c
         header,
         ...trimmedChat,
     ];
+    // 存的是当前这个聊天：带上加载时的版本号，文件在别处改过就会被拒（409）
+    const isCurrentChatFile = fileName === characters[this_chid]?.chat;
 
     try {
         const saveChatRequest = await compressRequest({
@@ -8912,15 +9032,25 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false, c
                 avatar_url: characters[this_chid].avatar,
                 force: force,
                 allow_shrink: canShrinkSavedChat(),
+                ...(isCurrentChatFile && fullChatRevision ? { expectedRevision: fullChatRevision } : {}),
             }),
         });
         const result = await fetch('/api/chats/save', saveChatRequest);
 
         if (result.ok) {
+            if (isCurrentChatFile) {
+                const saved = await result.json().catch(() => null);
+                setFullChatRevision(saved?.revision);
+                noteChatSaved(trimmedChat);
+            }
             return;
         }
 
         const errorData = await result.json();
+        if (result.status === 409 && errorData?.error === 'revision_conflict') {
+            scheduleChangedChatReload();
+            return;
+        }
         if (errorData?.error === 'chat_wipe_rejected') {
             reportChatWipeRejected();
             return;
@@ -9220,6 +9350,7 @@ export async function getChat({ signal: parentSignal, isCurrent: parentIsCurrent
             }
         }
 
+        setFullChatRevision(undefined);
         if (!usedPaging) {
             const ajaxRequest = $.ajax({
                 type: 'POST',
@@ -9241,6 +9372,7 @@ export async function getChat({ signal: parentSignal, isCurrent: parentIsCurrent
                 controller.signal.removeEventListener('abort', abortAjax);
             }
             if (isStale()) return false;
+            setFullChatRevision(ajaxRequest.getResponseHeader('X-Chat-Revision'));
             if (response[0] !== undefined) {
                 assertChatHistoryPresent(response[0], response.slice(1));
                 chat.splice(0, chat.length, ...response);
@@ -9701,25 +9833,12 @@ export async function getSettings() {
 }
 
 //MARK: saveSettings()
-export async function saveSettings(loopCounter = 0) {
-    if (!settingsReady) {
-        console.warn('Settings not ready, scheduling another save');
-        saveSettingsDebounced();
-        return;
-    }
-
-    const MAX_RETRIES = 3;
-    if (TempResponseLength.isCustomized()) {
-        if (loopCounter < MAX_RETRIES) {
-            console.warn('Response length is currently being overridden, scheduling another save');
-            saveSettingsDebounced(++loopCounter);
-            return;
-        }
-        console.error('Response length is currently being overridden, but the save loop has reached the maximum number of retries');
-        TempResponseLength.restore(null);
-    }
-
-    const payload = {
+/**
+ * Everything saveSettings stores, as one object.
+ * @returns {object}
+ */
+export function getSettingsPayload() {
+    return {
         firstRun: firstRun,
         accountStorage: accountStorage.getState(),
         currentVersion: currentVersion,
@@ -9745,6 +9864,27 @@ export async function saveSettings(loopCounter = 0) {
         proxies: proxies,
         selected_proxy: selected_proxy,
     };
+}
+
+export async function saveSettings(loopCounter = 0) {
+    if (!settingsReady) {
+        console.warn('Settings not ready, scheduling another save');
+        saveSettingsDebounced();
+        return;
+    }
+
+    const MAX_RETRIES = 3;
+    if (TempResponseLength.isCustomized()) {
+        if (loopCounter < MAX_RETRIES) {
+            console.warn('Response length is currently being overridden, scheduling another save');
+            saveSettingsDebounced(++loopCounter);
+            return;
+        }
+        console.error('Response length is currently being overridden, but the save loop has reached the maximum number of retries');
+        TempResponseLength.restore(null);
+    }
+
+    const payload = getSettingsPayload();
 
     try {
         const serializeStartedAt = performance.now();
@@ -9780,6 +9920,7 @@ export async function saveSettings(loopCounter = 0) {
         }
 
         settings = payload;
+        noteSettingsSaved(payload);
         await eventSource.emit(event_types.SETTINGS_UPDATED);
     } catch (error) {
         console.error('Error saving settings:', error);

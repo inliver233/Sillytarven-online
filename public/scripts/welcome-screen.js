@@ -681,6 +681,18 @@ function getRecentChatMotionTarget() {
  * @param {string} avatarId Avatar file name
  * @param {string} fileName Chat file name
  */
+/**
+ * Opens a chat by what identifies it across page loads (used to come back to it after a reload).
+ * @param {{ groupId?: string, avatar?: string, chatId: string }} target
+ */
+export async function openChatByIdentity({ groupId, avatar, chatId }) {
+    if (groupId) {
+        await openRecentGroupChat(groupId, chatId);
+    } else if (avatar) {
+        await openRecentCharacterChat(avatar, chatId);
+    }
+}
+
 async function openRecentCharacterChat(avatarId, fileName) {
     const characterId = characters.findIndex(x => x.avatar === avatarId);
     if (characterId === -1) {
