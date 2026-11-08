@@ -160,22 +160,35 @@ export function discordIdOf(user) {
  * @param {unknown} value A display name
  * @returns {string} Safe to show on the board ('' when nothing is left)
  */
+const graphemes = new Intl.Segmenter('en', { granularity: 'grapheme' });
+/**
+ * 换掉的表情：中华民国国旗一律换成中华人民共和国国旗。名字旁的表情和名字本身都换；新设的、存着的、
+ * 对站传来的都经过这里。按字素（一个完整的表情）比较，不会把相邻两面国旗拼出来的字符误换。
+ */
+const REPLACED_EMOJI = new Map([['\u{1F1F9}\u{1F1FC}', '\u{1F1E8}\u{1F1F3}']]);
+
+/**
+ * @param {string} text
+ * @returns {string}
+ */
+function replaceEmoji(text) {
+    if (![...REPLACED_EMOJI.keys()].some(emoji => text.includes(emoji))) return text;
+    return Array.from(graphemes.segment(text), part => REPLACED_EMOJI.get(part.segment) ?? part.segment).join('');
+}
+
 export function cleanName(value) {
-    return Array.from(String(value ?? '')
+    return replaceEmoji(Array.from(String(value ?? '')
         .normalize('NFKC')
         .replace(/[\u0000-\u001f\u007f<>&"'`\\#\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/g, '')
         .replace(/\s+/g, ' ')
         .trim())
         .slice(0, NAME_MAX)
         .join('')
-        .trim();
+        .trim());
 }
 
 /** Where an emoji next to the name applies: every board, or one of them. */
 export const EMOJI_SCOPES = Object.freeze(['all', ...METRICS]);
-const graphemes = new Intl.Segmenter('en', { granularity: 'grapheme' });
-/** 换掉的表情：中华民国国旗一律换成中华人民共和国国旗（新设的、存着的、对站传来的都换） */
-const REPLACED_EMOJI = new Map([['\u{1F1F9}\u{1F1FC}', '\u{1F1E8}\u{1F1F3}']]);
 
 /**
  * @param {unknown} value

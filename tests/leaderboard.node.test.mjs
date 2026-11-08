@@ -678,6 +678,15 @@ test('the ROC flag is replaced by the PRC flag: when set, when stored before, wh
     account.v = legacy.store.bump();
     modern.store.applyPeer('https://legacy', legacy.store.exportForPeer(-1, 'none'));
     assert.equal(modern.store.prefsOf('flag-2').emojis.all, '🇨🇳');
+    // Ways around it: the flag with extra characters is not one emoji (refused); in the name it is replaced too,
+    // but two flags next to each other (🇬🇹 + 🇼🇸) are left alone although their letters spell T W in the middle.
+    for (const text of ['🇹🇼\ufe0f', '🇹🇼\u200d', '🇹🇼🇹🇼', '🇹 🇼']) assert.equal(cleanEmoji(text), '', JSON.stringify(text));
+    assert.equal(cleanEmoji(' 🇹🇼 '), '🇨🇳');
+    assert.equal(cleanName('小明🇹🇼'), '小明🇨🇳');
+    assert.equal(cleanName('🇹🇼🇹🇼'), '🇨🇳🇨🇳');
+    assert.equal(cleanName('🇬🇹🇼🇸'), '🇬🇹🇼🇸');
+    legacy.store.ensureAccount({ handle: 'flag', name: '旗🇹🇼', discord: '575757575757', created: NOON - 100 * 864e5 });
+    assert.equal(legacy.store.accounts.get('flag').name, '旗🇨🇳');
 });
 
 test('an emoji next to the name: one board or all, both sites, apart from the choice; administrators clear it', () => {
