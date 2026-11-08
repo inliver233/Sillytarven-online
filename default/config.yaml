@@ -628,8 +628,8 @@ gitSync:
     # Sites sharing the server, id: label. Discord accounts may restore from any of them.
     sites: {}
     label: 酒馆云
-# 排行榜: anonymous rankings (AI replies, characters, online time, ...) shared by the sites.
-# Everybody takes part under an anonymous name unless they choose a nickname or opt out.
+# 排行榜: rankings (AI replies, characters, online time, ...) shared by the sites. Everybody
+# takes part, as 匿名用户#number or, if they choose, as their display name#number.
 leaderboard:
   enabled: false
   # The badge this site's users get: legacy (老站) or modern (新站).
