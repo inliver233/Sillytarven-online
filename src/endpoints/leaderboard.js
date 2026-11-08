@@ -12,10 +12,14 @@ router.use((request, response, next) => {
     return next();
 });
 
-/** The page says somebody is using it (online time); t is the page's clock. */
+/**
+ * The page says somebody is using it (online time); t is the page's clock. The answer says whether
+ * they still have to choose real name or anonymous (new, or asked again by an administrator).
+ */
 router.get('/ping', (request, response) => {
     leaderboard.onPing(request.user.profile, Number(request.query.t));
-    return response.sendStatus(204);
+    const prefs = leaderboard.store.prefsOf(request.user.profile.handle);
+    return response.send({ choose: !!prefs && !prefs.explicit });
 });
 
 router.get('/board', (request, response) => {
@@ -53,6 +57,18 @@ router.post('/me', (request, response) => {
 router.post('/admin/ban', requireAdminMiddleware, (request, response) => {
     const id = String(request.body?.id ?? '');
     if (!leaderboard.store.setBan(id, request.body?.banned !== false)) return response.status(404).send({ error: 'unknown_person' });
+    leaderboard.dirty = true;
+    leaderboard.save();
+    return response.sendStatus(204);
+});
+
+/** An administrator asks someone (by row, or by account name on this site) to choose again. */
+router.post('/admin/reset-choice', requireAdminMiddleware, (request, response) => {
+    const handle = typeof request.body?.handle === 'string' ? request.body.handle.trim() : '';
+    const key = handle ? leaderboard.store.personKeyOf(handle) : String(request.body?.id ?? '');
+    if (!key || !leaderboard.store.resetChoice(key)) {
+        return response.status(404).send({ error: handle ? 'no_such_account' : 'not_on_this_site' });
+    }
     leaderboard.dirty = true;
     leaderboard.save();
     return response.sendStatus(204);

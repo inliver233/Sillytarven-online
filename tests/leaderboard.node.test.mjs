@@ -623,6 +623,40 @@ test('real name: the display name of the account it was chosen with, sent over o
     for (const store of [legacy, modern]) assert.ok(names(store).some(([name]) => name === `站长#${boss.number}`));
 });
 
+test('an administrator asks someone to choose again: undone on both sites, until they choose', () => {
+    const legacy = makeStore('legacy');
+    const modern = makeStore('modern');
+    legacy.store.ensureAccount({ handle: 'lingxi-1', name: '灵犀', discord: '121212121212', created: NOON - 100 * 864e5 });
+    modern.store.ensureAccount({ handle: 'lingxi-2', name: '灵犀', discord: '121212121212', created: NOON - 10 * 864e5 });
+    modern.store.ensureAccount({ handle: 'only-modern' });
+    const sync = () => {
+        modern.store.applyPeer('https://legacy', legacy.store.exportForPeer(-1, 'none'));
+        legacy.store.applyPeer('https://modern', modern.store.exportForPeer(-1, 'none'));
+    };
+    // Chose real name on the new site.
+    assert.ok(modern.store.setPrefs('lingxi-2', { mode: 'public' }).prefs);
+    sync();
+    assert.equal(legacy.store.prefsOf('lingxi-1').explicit, true);
+    // An administrator on the old site undoes it: both sites ask again, anonymous meanwhile.
+    legacy.clock.now = modern.clock.now = NOON + MINUTE;
+    const key = legacy.store.personKeyOf('lingxi-1');
+    assert.equal(legacy.store.resetChoice(key), 1);
+    sync();
+    for (const [store, handle] of [[legacy.store, 'lingxi-1'], [modern.store, 'lingxi-2']]) {
+        assert.deepEqual([store.prefsOf(handle).explicit, store.prefsOf(handle).mode], [false, 'anon']);
+    }
+    // They choose again (on either site): asked no more.
+    modern.clock.now = NOON + 2 * MINUTE;
+    assert.ok(modern.store.setPrefs('lingxi-2', { mode: 'anon' }).prefs);
+    sync();
+    for (const [store, handle] of [[legacy.store, 'lingxi-1'], [modern.store, 'lingxi-2']]) {
+        assert.equal(store.prefsOf(handle).explicit, true);
+    }
+    // Someone with no account on this site cannot be reset from here; unknown accounts neither.
+    assert.equal(legacy.store.resetChoice(modern.store.personKeyOf('only-modern')), 0);
+    assert.equal(legacy.store.personKeyOf('nobody'), null);
+});
+
 test('administrators are counted, ranked and sent to the other site like everybody', () => {
     const { store } = makeStore();
     store.ensureAccount({ handle: 'boss', admin: true });

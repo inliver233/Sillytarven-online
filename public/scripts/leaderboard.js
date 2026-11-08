@@ -145,7 +145,12 @@ async function ping() {
     try {
         const response = await fetch(`/api/leaderboard/ping?t=${Date.now()}`, { cache: 'no-store' });
         if (response.status === 404) setEnabled(false);
-        else if (response.ok) setEnabled(true);
+        else if (response.ok) {
+            setEnabled(true);
+            // 还没选（或者管理员让 TA 重新选）：页面开着也弹出来
+            const data = await response.json().catch(() => null);
+            if (data?.choose) void maybeShowLaunchNotice();
+        }
     } catch {
         // 下一分钟再报
     }
@@ -416,6 +421,14 @@ function render(board) {
             // 管理员的「移出」收在点开后的详情里，不占名字的地方
             canRemove ? h('button', {
                 type: 'button',
+                class: 'leaderboard-admin-action',
+                onclick: event => {
+                    event.stopPropagation();
+                    void askToChooseAgain({ id: row.id }, row.name);
+                },
+            }, h('i', { class: 'fa-solid fa-rotate-left' }), h('span', { text: '让 TA 重新选' })) : null,
+            canRemove ? h('button', {
+                type: 'button',
                 class: 'leaderboard-remove',
                 onclick: event => {
                     event.stopPropagation();
@@ -552,6 +565,8 @@ function showRules() {
             h('li', { text: '编号每个账号一个、永久不变，两个站不会重复（老站单数、新站双数）；两个站都有账号的，用注册最早的那个账号的编号。' }),
             h('li', { text: '名字后面的标记是这段时间的数据来自哪个站。两个站有完全一样的天（带着聊天记录换了站），只算一次。' }),
             h('li', { text: '管理员可以把刷榜的人移出榜单（点一下那一行）。' })),
+        removed ? h('h4', { text: '让某人重新选实名/匿名（只有管理员看得到）' }) : null,
+        removed ? chooseAgainForm() : null,
         removed ? h('h4', { text: '已移出榜单（只有管理员看得到）' }) : null,
         removed ? (removed.length
             ? h('div', { class: 'leaderboard-removed' }, ...removed.map(person => h('div', { class: 'leaderboard-removed-row' },
@@ -562,6 +577,44 @@ function showRules() {
         h('div', { class: 'leaderboard-card-actions' },
             h('button', { type: 'button', class: 'menu_button', text: '知道了', onclick: hidePanel }))));
     popup.panel.classList.remove('displayNone');
+}
+
+/** 管理员：输入本站的账号，让这个人重新选 */
+function chooseAgainForm() {
+    const input = h('input', { type: 'text', class: 'text_pole', placeholder: '本站的账号，比如 lingxi2205' });
+    const submit = () => {
+        const handle = input instanceof HTMLInputElement ? input.value.trim() : '';
+        if (handle) void askToChooseAgain({ handle }, handle, false);
+    };
+    input.addEventListener('keydown', event => event.key === 'Enter' && submit());
+    return h('div', { class: 'leaderboard-choose-again' },
+        input,
+        h('button', { type: 'button', class: 'menu_button', text: '重新弹出', onclick: submit }));
+}
+
+/**
+ * 管理员让某人重新选实名/匿名：撤回 TA 的选择，下次在线上报（或打开页面）时公告再弹出来
+ * @param {{id?: string, handle?: string}} who
+ * @param {string} name
+ * @param {boolean} [confirm] 先问一下
+ */
+async function askToChooseAgain(who, name, confirm = true) {
+    if (confirm && !await callGenericPopup(`让「${name}」重新选实名还是匿名？TA 页面开着的话一分钟内会弹出上线公告（没选之前按匿名显示）。`, POPUP_TYPE.CONFIRM)) {
+        return;
+    }
+    try {
+        const response = await fetch('/api/leaderboard/admin/reset-choice', { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify(who) });
+        if (response.status === 404) {
+            toastr.warning(who.handle ? `本站没有「${name}」这个账号（另一个站的人要到那个站操作）` : '这个人的账号不在本站，请到另一个站操作');
+            return;
+        }
+        if (!response.ok) throw new Error(String(response.status));
+        toastr.success(`「${name}」下次在线时会重新弹出选择`);
+        boardVersion = '';
+        await refresh();
+    } catch {
+        toastr.error('操作失败，请稍后再试');
+    }
 }
 
 /**
@@ -655,7 +708,9 @@ function showChoice(me, first) {
 
 /** 等别的启动弹窗先出来，免得两个叠在一起 */
 const NOTICE_DELAY_MS = 1500;
-let noticeChecked = false;
+let noticeChecking = false;
+/** 这个页面里点过「先跳过」：等下次打开页面再问 */
+let noticeSkipped = false;
 
 /** 系统公告、通行密钥提示之类的弹窗还开着就先等着 */
 function screenIsBusy() {
@@ -663,8 +718,8 @@ function screenIsBusy() {
 }
 
 async function maybeShowLaunchNotice() {
-    if (noticeChecked) return;
-    noticeChecked = true;
+    if (noticeChecking || noticeSkipped || document.getElementById('leaderboardNotice')) return;
+    noticeChecking = true;
     try {
         await new Promise(resolve => {
             if (!screenIsBusy()) return resolve();
@@ -678,9 +733,11 @@ async function maybeShowLaunchNotice() {
         const response = await fetch('/api/leaderboard/me', { cache: 'no-store' });
         if (!response.ok) return;
         const me = await response.json();
-        if (me && !me.explicit && !screenIsBusy()) showLaunchNotice(me);
+        if (me && !me.explicit && !screenIsBusy() && !noticeSkipped) showLaunchNotice(me);
     } catch {
-        // 下次打开页面再问
+        // 下次再问
+    } finally {
+        noticeChecking = false;
     }
 }
 
@@ -704,7 +761,15 @@ function showLaunchNotice(me) {
         h('span', { text: title })),
     h('span', { class: 'leaderboard-notice-choice-detail', text: detail }));
     // 一直保存不了也不能把人卡在这里：失败两次后给个出口，下次打开页面再问
-    const skip = h('button', { type: 'button', class: 'leaderboard-notice-skip displayNone', text: '先跳过，下次再选', onclick: () => close() });
+    const skip = h('button', {
+        type: 'button',
+        class: 'leaderboard-notice-skip displayNone',
+        text: '先跳过，下次再选',
+        onclick: () => {
+            noticeSkipped = true;
+            close();
+        },
+    });
     const root = h('div', { id: 'leaderboardNotice', class: 'leaderboard-notice-overlay', role: 'dialog', 'aria-modal': 'true', 'aria-labelledby': 'leaderboardNoticeTitle' },
         h('div', { class: 'leaderboard-notice' },
             h('div', { class: 'leaderboard-notice-hero' },

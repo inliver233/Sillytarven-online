@@ -1145,6 +1145,7 @@ const STCONTROL_READ_ONLY_POST_PATHS = new Set([
     // Leaderboard settings live in the site's leaderboard file, not in the user's data.
     '/api/leaderboard/me',
     '/api/leaderboard/admin/ban',
+    '/api/leaderboard/admin/reset-choice',
 ]);
 
 function isStcontrolWriteRequest(request) {

@@ -737,6 +737,34 @@ export class LeaderboardStore {
     }
 
     /**
+     * @param {string} handle An account of this site
+     * @returns {string|null} The person it belongs to
+     */
+    personKeyOf(handle) {
+        const account = this.accounts.get(handle);
+        return account ? this.personKey(account) : null;
+    }
+
+    /**
+     * An administrator asks someone to choose real name or anonymous again: their choice is undone
+     * (anonymous until they choose), on both sites, so the launch notice comes back.
+     * @param {string} key Person key
+     * @returns {number} Accounts of this site that were reset (0: not someone with an account here)
+     */
+    resetChoice(key) {
+        const latest = this.people().get(key)?.prefs.updatedAt ?? 0;
+        let reset = 0;
+        for (const account of this.accounts.values()) {
+            if (this.personKey(account) !== key) continue;
+            account.prefs = { ...defaultPrefs(), updatedAt: Math.max(this.now(), account.prefs.updatedAt + 1, latest + 1) };
+            account.v = this.bump();
+            reset++;
+        }
+        if (reset) this.boardCache.clear();
+        return reset;
+    }
+
+    /**
      * An administrator takes someone off the board (or back). Applies on both sites; the latest
      * decision made on either site counts.
      * @param {string} key Person key (as the board gives it to administrators)
@@ -977,11 +1005,12 @@ export class LeaderboardStore {
             }
             person.sites.add(site);
             if (created > 0) person.created = Math.min(person.created, created);
-            // The latest choice made on either site counts; real name shows the display name of the
-            // account it was made with. (The same moment on both sites: the later site name wins.)
-            const newer = !person.prefs.explicit || prefs.updatedAt > person.prefs.updatedAt ||
+            // The latest decision on either site counts (a choice, or an administrator asking them to
+            // choose again); real name shows the display name of the account it was made with.
+            // (The same moment on both sites: the later site name wins, so both sites agree.)
+            const newer = prefs.updatedAt > person.prefs.updatedAt ||
                 (prefs.updatedAt === person.prefs.updatedAt && site > person.prefsSite);
-            if (prefs.explicit && newer) {
+            if (prefs.updatedAt > 0 && newer) {
                 person.prefs = prefs;
                 person.prefsSite = site;
                 person.name = name || '';
