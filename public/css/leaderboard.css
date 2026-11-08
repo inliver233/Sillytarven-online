@@ -462,9 +462,9 @@
     overflow: visible;
 }
 
-.leaderboard-catgirl-1 { --cg-breathe: 2.6s; --cg-blink: 4.2s; --cg-ear: 6.2s; --cg-glint: 3.6s; --cg-shift: 0s; }
-.leaderboard-catgirl-2 { --cg-breathe: 3.1s; --cg-blink: 5.1s; --cg-ear: 7.7s; --cg-glint: 4.8s; --cg-shift: -1.7s; }
-.leaderboard-catgirl-3 { --cg-breathe: 3.5s; --cg-blink: 5.9s; --cg-ear: 9.3s; --cg-glint: 4s; --cg-shift: -3.1s; }
+.leaderboard-catgirl-1 { --cg-breathe: 2.6s; --cg-blink: 4.2s; --cg-ear: 6.2s; --cg-glint: 3.6s; --cg-smile: 11s; --cg-shift: 0s; }
+.leaderboard-catgirl-2 { --cg-breathe: 3.1s; --cg-blink: 5.1s; --cg-ear: 7.7s; --cg-glint: 4.8s; --cg-smile: 13.5s; --cg-shift: -1.7s; }
+.leaderboard-catgirl-3 { --cg-breathe: 3.5s; --cg-blink: 5.9s; --cg-ear: 9.3s; --cg-glint: 4s; --cg-smile: 16s; --cg-shift: -3.1s; }
 
 .leaderboard-catgirl .cg-all {
     animation: leaderboard-cg-breathe var(--cg-breathe) steps(1, end) infinite;
@@ -498,6 +498,83 @@
     opacity: 0;
     animation: leaderboard-cg-glint var(--cg-glint) steps(1, end) infinite;
     animation-delay: calc(var(--cg-t) + var(--cg-shift) + var(--cg-glint-at));
+}
+
+/*
+ * 表情：平时是普通的脸，隔一阵自己笑一下；有事时换表情（JS 加 cg-mood-*），连带身体动作：
+ * 开心轻轻蹦、得意蹦得快耳朵直抖、吃惊一震、难过整只和耳朵都往下耷拉。
+ */
+.leaderboard-catgirl .cg-face {
+    opacity: 0;
+}
+
+.leaderboard-catgirl .cg-normal {
+    animation: leaderboard-cg-face-normal var(--cg-smile) steps(1, end) infinite;
+    animation-delay: calc(var(--cg-t) + var(--cg-shift) - 2s);
+}
+
+.leaderboard-catgirl .cg-face-happy {
+    animation: leaderboard-cg-face-smile var(--cg-smile) steps(1, end) infinite;
+    animation-delay: calc(var(--cg-t) + var(--cg-shift) - 2s);
+}
+
+.leaderboard-catgirl[class*='cg-mood-'] .cg-normal,
+.leaderboard-catgirl[class*='cg-mood-'] .cg-face {
+    opacity: 0;
+    animation: none;
+}
+
+.leaderboard-catgirl.cg-mood-happy .cg-face-happy,
+.leaderboard-catgirl.cg-mood-excited .cg-face-excited,
+.leaderboard-catgirl.cg-mood-shocked .cg-face-shocked,
+.leaderboard-catgirl.cg-mood-sad .cg-face-sad {
+    opacity: 1;
+}
+
+.leaderboard-catgirl.cg-mood-happy .cg-all {
+    animation: leaderboard-cg-cheer 0.8s steps(1, end) infinite;
+}
+
+.leaderboard-catgirl.cg-mood-excited .cg-all {
+    animation: leaderboard-cg-cheer 0.45s steps(1, end) infinite;
+}
+
+.leaderboard-catgirl.cg-mood-excited .cg-ear-left,
+.leaderboard-catgirl.cg-mood-excited .cg-ear-right {
+    animation-duration: 0.9s;
+}
+
+.leaderboard-catgirl.cg-mood-shocked .cg-all {
+    animation: leaderboard-cg-jolt 0.7s steps(1, end) 1 both;
+}
+
+.leaderboard-catgirl.cg-mood-sad .cg-all,
+.leaderboard-catgirl.cg-mood-sad .cg-ear-left,
+.leaderboard-catgirl.cg-mood-sad .cg-ear-right {
+    animation: none;
+    transform: translateY(1px);
+}
+
+@keyframes leaderboard-cg-face-normal {
+    0% { opacity: 1; }
+    88% { opacity: 0; }
+}
+
+@keyframes leaderboard-cg-face-smile {
+    0% { opacity: 0; }
+    88% { opacity: 1; }
+}
+
+@keyframes leaderboard-cg-cheer {
+    0% { transform: translateY(0); }
+    50% { transform: translateY(-1px); }
+}
+
+@keyframes leaderboard-cg-jolt {
+    0% { transform: translateY(-2px); }
+    25% { transform: translateY(0); }
+    45% { transform: translateY(-1px); }
+    65% { transform: translateY(0); }
 }
 
 /* 王冠的三个尖依次闪过去 */

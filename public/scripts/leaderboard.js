@@ -76,6 +76,8 @@ let lastPeriod = '';
 let lastMeValue = null;
 /** 名次变化的标记（▲2、▼1、NEW）显示一会儿，刷新后接着显示：key → {kind, text, at} */
 const moveMarks = new Map();
+/** 猫娘的表情，跟着发生的事换几秒：key → {mood, until} */
+const moods = new Map();
 const MOVE_MARK_MS = 8000;
 let requestSerial = 0;
 
@@ -86,6 +88,7 @@ function resetEffects() {
     lastPeriod = '';
     lastMeValue = null;
     moveMarks.clear();
+    moods.clear();
 }
 
 /**
@@ -439,7 +442,7 @@ const CATGIRL_EXTRAS = {
     2: [[12, 4, 'w'], [11, 5, 'w'], [12, 5, 'K'], [13, 5, 'w'], [12, 6, 'g']],
     3: [[2, 4, 'K'], [4, 4, 'K'], [2, 5, 'K'], [3, 5, 'k'], [4, 5, 'K']],
 };
-const CATGIRL_COMMON = { P: '#ff9ab3', S: '#ffe3d1', W: '#ffffff', B: '#ff8fa3', M: '#9a3412', R: '#d6334f', J: '#e11d48' };
+const CATGIRL_COMMON = { P: '#ff9ab3', S: '#ffe3d1', W: '#ffffff', B: '#ff8fa3', M: '#9a3412', R: '#d6334f', J: '#e11d48', r: '#ff6b81', Q: '#7dd3fc', q: '#e0f2fe', Y: '#ffe066' };
 const CATGIRL_COLORS = {
     1: { O: '#3b2410', H: '#f8c537', h: '#c98f12', L: '#fff1a8', E: '#3b2410', e: '#e11d48', G: '#ffd34d', g: '#b8860b', w: '#fff6c8' },
     2: { O: '#2b3442', H: '#e6ecf3', h: '#9fadbe', L: '#ffffff', E: '#2b3442', e: '#3b82f6', G: '#dfe6ee', g: '#8592a3', w: '#ffffff', K: '#60a5fa' },
@@ -449,8 +452,27 @@ const CATGIRL_COLORS = {
 /** 睁眼的像素：闭眼时这几格是皮肤，中间一行画一道线 */
 const CATGIRL_EYES = [[4, 8], [5, 8], [4, 9], [5, 9], [4, 10], [5, 10], [10, 8], [11, 8], [10, 9], [11, 9], [10, 10], [11, 10]];
 const CATGIRL_CLOSED_EYES = [[4, 9, 'E'], [5, 9, 'E'], [10, 9, 'E'], [11, 9, 'E']];
+/** 平时的嘴：换表情时这两格是皮肤 */
+const CATGIRL_MOUTH = [[7, 11], [8, 11]];
 /** 一闪一闪的像素：第一名王冠尖上的光，第二名星星发夹的光 */
 const CATGIRL_GLINTS = { 1: [[5, 1], [8, 1], [10, 1]], 2: [[12, 5]], 3: [] };
+/**
+ * 表情（盖在脸上，平时的眼睛和嘴藏起来）：开心（笑眼、张嘴笑）、得意（星星眼、张嘴笑、身边闪光）、
+ * 吃惊（瞪眼、o 嘴、冷汗）、难过（闭眼流泪、嘴角往下）。
+ */
+const CATGIRL_FACES = {
+    happy: [[3, 10, 'E'], [4, 9, 'E'], [5, 9, 'E'], [6, 10, 'E'], [9, 10, 'E'], [10, 9, 'E'], [11, 9, 'E'], [12, 10, 'E'],
+        [6, 11, 'M'], [7, 11, 'r'], [8, 11, 'r'], [9, 11, 'M'], [7, 12, 'M'], [8, 12, 'M']],
+    excited: [[4, 8, 'E'], [5, 8, 'E'], [4, 9, 'Y'], [5, 9, 'W'], [4, 10, 'W'], [5, 10, 'Y'],
+        [10, 8, 'E'], [11, 8, 'E'], [10, 9, 'Y'], [11, 9, 'W'], [10, 10, 'W'], [11, 10, 'Y'],
+        [6, 11, 'M'], [7, 11, 'r'], [8, 11, 'r'], [9, 11, 'M'], [7, 12, 'M'], [8, 12, 'M'],
+        [0, 2, 'Y'], [15, 2, 'Y'], [0, 14, 'Y'], [15, 14, 'Y']],
+    shocked: [[4, 8, 'E'], [5, 8, 'E'], [4, 9, 'W'], [5, 9, 'W'], [4, 10, 'W'], [5, 10, 'E'],
+        [10, 8, 'E'], [11, 8, 'E'], [10, 9, 'W'], [11, 9, 'W'], [10, 10, 'E'], [11, 10, 'W'],
+        [7, 11, 'M'], [8, 11, 'M'], [7, 12, 'M'], [8, 12, 'M'], [13, 5, 'q'], [13, 6, 'Q'], [13, 7, 'Q']],
+    sad: [[4, 10, 'E'], [5, 10, 'E'], [10, 10, 'E'], [11, 10, 'E'], [4, 11, 'Q'], [4, 12, 'Q'], [11, 11, 'Q'], [11, 12, 'Q'],
+        [7, 11, 'M'], [8, 11, 'M'], [6, 12, 'M'], [9, 12, 'M']],
+};
 
 /**
  * @param {[number, number, string][]} pixels
@@ -471,7 +493,7 @@ function pixelRects(pixels, colors) {
 }
 
 /**
- * 一只猫娘（SVG），分成会动的几层：耳朵（抖）、眼睛（眨）、闪光，整只一起呼吸；动画在 leaderboard.css。
+ * 一只猫娘（SVG），分成会动的几层：耳朵（抖）、眼睛（眨）、嘴、各种表情、闪光，整只一起呼吸；动画在 leaderboard.css。
  * @param {1|2|3} rank
  * @returns {string}
  */
@@ -479,14 +501,15 @@ function catgirlSvg(rank) {
     const colors = { ...CATGIRL_COMMON, ...CATGIRL_COLORS[rank] };
     const extras = new Map(CATGIRL_EXTRAS[rank].map(([x, y, letter]) => [`${x},${y}`, letter]));
     const eyes = new Set(CATGIRL_EYES.map(([x, y]) => `${x},${y}`));
+    const mouth = new Set(CATGIRL_MOUTH.map(([x, y]) => `${x},${y}`));
     /** @type {Record<string, [number, number, string][]>} */
-    const layers = { earLeft: [], earRight: [], body: [], eyes: [], extras: [] };
+    const layers = { earLeft: [], earRight: [], body: [], eyes: [], mouth: [], extras: [] };
     CATGIRL_PIXELS.forEach((row, y) => [...row].forEach((letter, x) => {
         const key = `${x},${y}`;
         if (extras.has(key)) layers.extras.push([x, y, extras.get(key)]);
         if (letter === '.' || extras.has(key)) return;
-        if (eyes.has(key)) {
-            layers.eyes.push([x, y, letter]);
+        if (eyes.has(key) || mouth.has(key)) {
+            layers[eyes.has(key) ? 'eyes' : 'mouth'].push([x, y, letter]);
             layers.body.push([x, y, 'S']);
         } else if (y <= 3 && x <= 4) {
             layers.earLeft.push([x, y, letter]);
@@ -500,7 +523,8 @@ function catgirlSvg(rank) {
     return `<svg class="leaderboard-catgirl leaderboard-catgirl-${rank}" viewBox="0 0 16 16" shape-rendering="crispEdges" role="img" aria-label="第 ${rank} 名"><title>第 ${rank} 名</title><g class="cg-all">`
         + `<g class="cg-ear-left">${pixelRects(layers.earLeft, colors)}</g><g class="cg-ear-right">${pixelRects(layers.earRight, colors)}</g>`
         + `<g class="cg-body">${pixelRects(layers.body, colors)}</g>`
-        + `<g class="cg-eyes">${pixelRects(layers.eyes, colors)}</g><g class="cg-blink">${pixelRects(CATGIRL_CLOSED_EYES, colors)}</g>`
+        + `<g class="cg-normal"><g class="cg-eyes">${pixelRects(layers.eyes, colors)}</g><g class="cg-blink">${pixelRects(CATGIRL_CLOSED_EYES, colors)}</g><g class="cg-mouth">${pixelRects(layers.mouth, colors)}</g></g>`
+        + Object.entries(CATGIRL_FACES).map(([mood, pixels]) => `<g class="cg-face cg-face-${mood}">${pixelRects(pixels, colors)}</g>`).join('')
         + `<g class="cg-extras">${pixelRects(layers.extras, colors)}</g>${glints ? `<g class="cg-glint">${glints}</g>` : ''}</g></svg>`;
 }
 
@@ -526,12 +550,18 @@ const PLACE_FACES = { 4: '/img/leaderboard-fourth.webp', 5: '/img/leaderboard-fi
 /**
  * @param {number} rank
  * @param {boolean} fancy 综合榜：前三是像素猫娘，第四、五名是头像；其他榜是奖牌
+ * @param {string} [mood] 猫娘这会儿的表情（见 CATGIRL_FACES）
  */
-function rankCell(rank, fancy) {
+function rankCell(rank, fancy, mood) {
     let mark;
-    if (fancy && rank <= 3) mark = catgirlElement(/** @type {1|2|3} */ (rank));
-    else if (fancy && PLACE_FACES[rank]) mark = h('img', { class: 'leaderboard-place-face', src: PLACE_FACES[rank], alt: `第 ${rank} 名`, title: `第 ${rank} 名`, draggable: 'false' });
-    else mark = h('span', { class: 'leaderboard-medal', text: MEDALS[rank] ?? String(rank) });
+    if (fancy && rank <= 3) {
+        mark = catgirlElement(/** @type {1|2|3} */ (rank));
+        if (mood) mark.classList.add(`cg-mood-${mood}`);
+    } else if (fancy && PLACE_FACES[rank]) {
+        mark = h('img', { class: 'leaderboard-place-face', src: PLACE_FACES[rank], alt: `第 ${rank} 名`, title: `第 ${rank} 名`, draggable: 'false' });
+    } else {
+        mark = h('span', { class: 'leaderboard-medal', text: MEDALS[rank] ?? String(rank) });
+    }
     return h('span', { class: 'leaderboard-rank' }, mark);
 }
 
@@ -646,6 +676,41 @@ function topEvents(rows) {
     return events;
 }
 
+/** 表情持续多久 */
+const MOOD_MS = { excited: 3600, happy: 2400, shocked: 3000, sad: 3200 };
+
+/**
+ * 综合榜前三的猫娘跟着发生的事换表情：下克上、登顶得意，往上换位、冲进前三、加分开心，
+ * 被顶替吃惊，名次往下掉难过；过几秒自己换回来（期间刷新也接着这个表情）。
+ * @param {{key?: string, name: string, rank: number, value: number}[]} rows
+ * @param {Map<string, string>} events topEvents() 的结果
+ * @param {number} now
+ */
+function setMoods(rows, events, now) {
+    for (const row of rows) {
+        if (row.rank > 3) continue;
+        const id = row.key ?? row.name;
+        const event = events.get(id);
+        const previousRank = lastRanks.get(id);
+        const previous = lastValues.get(id);
+        let mood = null;
+        if (event === 'upset' || event === 'crown') mood = 'excited';
+        else if (event === 'swap' || event === 'podium') mood = 'happy';
+        else if (event === 'displaced') mood = 'shocked';
+        else if (previousRank !== undefined && row.rank > previousRank) mood = 'sad';
+        else if (previous !== undefined && significant(view.metric, row.value - previous) && row.value > previous) mood = 'happy';
+        if (!mood) continue;
+        const until = now + MOOD_MS[mood];
+        moods.set(id, { mood, until });
+        // 没有新数据就不会重画：到时间自己把表情摘掉
+        setTimeout(() => {
+            if (moods.get(id)?.until !== until) return;
+            moods.delete(id);
+            popup?.list.querySelector(`.leaderboard-row[data-key="${CSS.escape(id)}"] .leaderboard-catgirl`)?.classList.remove(`cg-mood-${mood}`);
+        }, MOOD_MS[mood]);
+    }
+}
+
 /**
  * 换了名次的行从原来的位置滑到新位置（往上走的盖在别人上面），新上榜的从左边滑进来。
  * 前三名的变动走得更有戏：互换时两行交叉划弧，下克上先蓄力再冲上去。
@@ -707,8 +772,9 @@ function render(board) {
     if (fresh) moveMarks.clear();
     const animate = !fresh && !calmMotion();
     const before = animate ? rowTops(popup.list) : null;
-    const events = animate ? topEvents(rows) : new Map();
     const now = Date.now();
+    const events = animate ? topEvents(rows) : new Map();
+    if (animate && fancy) setMoods(rows, events, now);
     const values = new Map();
     const ranks = new Map();
     const fragment = document.createDocumentFragment();
@@ -745,7 +811,7 @@ function render(board) {
             'data-key': id,
             title: breakdown || null,
         },
-        rankCell(row.rank, fancy),
+        rankCell(row.rank, fancy, moods.get(id)?.until > now ? moods.get(id).mood : undefined),
         h('span', { class: 'leaderboard-name' },
             h('span', { class: `leaderboard-name-text${row.anonymous ? ' leaderboard-anonymous' : ''}`, text: row.name, title: row.anonymous ? '匿名' : '' }),
             row.emoji ? h('span', { class: 'leaderboard-emoji', text: row.emoji }) : null,
