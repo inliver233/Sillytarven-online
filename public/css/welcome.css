@@ -220,6 +220,32 @@
     text-align: center;
 }
 
+/* 「最近聊天」「我的角色卡」可以收起：点标题或右边的箭头，收起后只留标题行 */
+.welcomeSectionTitle {
+    cursor: pointer;
+    user-select: none;
+}
+
+.welcomeSectionTools {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+}
+
+.welcomeSectionToggle i {
+    transition: transform 0.2s ease;
+}
+
+.welcomeRecent.collapsed > :not(.welcomeRecentHeader),
+.welcomeCharacters.collapsed > :not(.welcomeCharactersHeader) {
+    display: none;
+}
+
+.collapsed .welcomeSectionToggle i {
+    transform: rotate(180deg);
+}
+
 /* 最近聊天区域头部 */
 .welcomeRecentHeader {
     display: flex;
@@ -547,19 +573,12 @@ body.big-avatars .welcomeRecent .recentChatList .recentChat .chatMessageContaine
 }
 
 @media screen and (max-width: 500px) {
-    .welcomeRecentHeader {
-        flex-direction: column;
-        align-items: flex-start;
-        gap: 8px;
-    }
-
+    /* 手机上标题和右边的按钮仍在一行（临时聊天只留图标） */
     .welcomeRecentHeader .openTemporaryChat span {
         display: none;
     }
 
     .welcomeCharactersHeader {
-        flex-direction: column;
-        align-items: flex-start;
         gap: 6px;
     }
 }

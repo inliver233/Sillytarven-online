@@ -441,6 +441,42 @@ function renderCharactersGridOnly() {
     if (pageInfo) pageInfo.textContent = `${currentPage} / ${totalPages}`;
 }
 
+/** 欢迎页可以收起的两块：「最近聊天」「我的角色卡」（按账号记住；角色卡收起时不加载图片） */
+const COLLAPSIBLE_SECTIONS = [
+    { selector: '.welcomeRecent', key: 'WelcomePage_RecentCollapsed' },
+    { selector: '.welcomeCharacters', key: 'WelcomePage_CharactersCollapsed' },
+];
+
+/**
+ * 点标题或右边的箭头收起/展开，收起后只留标题行。
+ * @param {Element} root 欢迎面板
+ */
+function initCollapsibleSections(root) {
+    for (const { selector, key } of COLLAPSIBLE_SECTIONS) {
+        const section = root.querySelector(selector);
+        if (!section) {
+            continue;
+        }
+        const toggle = section.querySelector('.welcomeSectionToggle');
+        const apply = (collapsed) => {
+            section.classList.toggle('collapsed', collapsed);
+            toggle?.setAttribute('aria-expanded', String(!collapsed));
+            toggle?.setAttribute('title', collapsed ? '展开' : '收起');
+        };
+        const flip = () => {
+            const collapsed = !section.classList.contains('collapsed');
+            apply(collapsed);
+            accountStorage.setItem(key, String(collapsed));
+        };
+        apply(accountStorage.getItem(key) === 'true');
+        toggle?.addEventListener('click', (event) => {
+            event.stopPropagation();
+            flip();
+        });
+        section.querySelector('.welcomeSectionTitle')?.addEventListener('click', flip);
+    }
+}
+
 /**
  * Sends the welcome panel to the chat.
  * @param {RecentChat[]} chats List of recent chats
@@ -468,23 +504,7 @@ async function sendWelcomePanel(chats, expand = false) {
         const template = await renderTemplateAsync('welcomePanel', templateData);
         const fragment = document.createRange().createContextualFragment(template);
         fragment.querySelectorAll('.welcomePanel').forEach((root) => {
-            const recentHiddenClass = 'recentHidden';
-            const recentHiddenKey = 'WelcomePage_RecentChatsHidden';
-            if (accountStorage.getItem(recentHiddenKey) === 'true') {
-                root.classList.add(recentHiddenClass);
-            }
-            root.querySelectorAll('.showRecentChats').forEach((button) => {
-                button.addEventListener('click', () => {
-                    root.classList.remove(recentHiddenClass);
-                    accountStorage.setItem(recentHiddenKey, 'false');
-                });
-            });
-            root.querySelectorAll('.hideRecentChats').forEach((button) => {
-                button.addEventListener('click', () => {
-                    root.classList.add(recentHiddenClass);
-                    accountStorage.setItem(recentHiddenKey, 'true');
-                });
-            });
+            initCollapsibleSections(root);
             root.querySelectorAll('.recentChatsSettings').forEach((button) => {
                 button.addEventListener('click', async (event) => {
                     event.stopPropagation();
@@ -1169,6 +1189,11 @@ function initLazyLoadCharacters(fragment) {
     lazyImages.forEach((img) => {
         imageObserver.observe(img);
     });
+
+    // 角色卡那块收起着：一张都不先加载，展开后按视口再加载
+    if (lazyImages[0].closest('.welcomeCharacters.collapsed')) {
+        return;
+    }
 
     // 前几张图片立即开始加载（分批避免阻塞）
     const immediateLoadCount = 5;  // 一页5张全部预加载

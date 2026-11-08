@@ -10,14 +10,19 @@
     <!-- 最近聊天区域 (移到最上面) -->
     <div class="welcomeRecent">
         <div class="welcomeRecentHeader">
-            <h3 class="recentChatsTitle" data-i18n="Recent Chats">
+            <h3 class="recentChatsTitle welcomeSectionTitle" data-i18n="Recent Chats">
                 <i class="fa-solid fa-clock-rotate-left"></i>
                 最近聊天
             </h3>
-            <button class="menu_button menu_button_icon openTemporaryChat" title="开始临时聊天">
-                <i class="fa-solid fa-comment-dots"></i>
-                <span>临时聊天</span>
-            </button>
+            <div class="welcomeSectionTools">
+                <button class="menu_button menu_button_icon openTemporaryChat" title="开始临时聊天">
+                    <i class="fa-solid fa-comment-dots"></i>
+                    <span>临时聊天</span>
+                </button>
+                <button class="menu_button menu_button_icon welcomeSectionToggle" title="收起" aria-expanded="true">
+                    <i class="fa-solid fa-chevron-up fa-fw"></i>
+                </button>
+            </div>
         </div>
         <div class="recentChatList">
         {{#if empty}}
@@ -84,11 +89,16 @@
     <!-- 角色卡展示区域 -->
     <div class="welcomeCharacters">
         <div class="welcomeCharactersHeader">
-            <h3 class="welcomeCharactersTitle">
+            <h3 class="welcomeCharactersTitle welcomeSectionTitle">
                 <i class="fa-solid fa-id-card"></i>
                 我的角色卡
             </h3>
-            <span class="welcomeCharactersCount">{{characterCount}} 个角色</span>
+            <div class="welcomeSectionTools">
+                <span class="welcomeCharactersCount">{{characterCount}} 个角色</span>
+                <button class="menu_button menu_button_icon welcomeSectionToggle" title="收起" aria-expanded="true">
+                    <i class="fa-solid fa-chevron-up fa-fw"></i>
+                </button>
+            </div>
         </div>
         <div class="welcomeCharactersGrid" id="welcomeCharactersGrid">
             {{#if noCharacters}}
