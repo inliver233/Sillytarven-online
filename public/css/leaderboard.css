@@ -1204,6 +1204,12 @@
     filter: drop-shadow(0 0 3px rgba(255, 214, 140, 0.7));
 }
 
+/* 一行放不下时，总冠军和站点标签换到名字下面（这一行本来就有头像那么高），名字不用硬缩 */
+.leaderboard-list-score .leaderboard-legend .leaderboard-name {
+    flex-wrap: wrap;
+    row-gap: 3px;
+}
+
 /* 站点标签在这一行里收一收：深底、细描边 */
 .leaderboard-legend .leaderboard-badge {
     background-color: rgba(0, 0, 0, 0.35);
