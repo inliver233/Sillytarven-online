@@ -77,7 +77,7 @@ import { ARGUMENT_TYPE, SlashCommandArgument } from './slash-commands/SlashComma
 import { renderTemplateAsync } from './templates.js';
 import { SlashCommandEnumValue } from './slash-commands/SlashCommandEnumValue.js';
 import { callGenericPopup, Popup, POPUP_RESULT, POPUP_TYPE } from './popup.js';
-import { startUsageRequest } from './usage-meter.js';
+import { usageRequestHeaders } from './usage-meter.js';
 import { t } from './i18n.js';
 import { ToolManager } from './tool-calling.js';
 import { commitPromptManagerResult, createPromptManagerResult } from './util/prompt-manager-result.js';
@@ -3292,7 +3292,7 @@ async function sendOpenAIRequest(type, messages, signal, { jsonSchema = null } =
         method: 'POST',
         body: JSON.stringify(generate_data),
         // The server reports this generation's usage (tokens, cost) under this id.
-        headers: { ...getRequestHeaders(), 'X-Usage-Id': startUsageRequest(type) },
+        headers: { ...getRequestHeaders(), ...usageRequestHeaders(type) },
         signal: signal,
     });
 

@@ -34,7 +34,7 @@ import {
     trimTrailingSlash,
     flattenSchema,
 } from '../../util.js';
-import { meterGeneration } from '../../usage-meter.js';
+import { meterGeneration, relayStreamsUsage, usageMeterOn } from '../../usage-meter.js';
 import {
     convertClaudeMessages,
     convertGooglePrompt,
@@ -2482,8 +2482,8 @@ async function sendDeepSeekRequest(request, response) {
             'stop': request.body.stop,
             'seed': request.body.seed,
             'thinking': { type: request.body.include_reasoning ? 'enabled' : 'disabled' },
-            // Usage (tokens) in the last streamed chunk, for the usage meter (DeepSeek itself; relays may refuse the option).
-            ...(request.body.stream && !request.body.reverse_proxy ? { stream_options: { include_usage: true } } : {}),
+            // Usage (tokens) in the last streamed chunk, for users who turned the usage meter on (DeepSeek itself; relays may refuse the option).
+            ...(request.body.stream && !request.body.reverse_proxy && usageMeterOn(request) ? { stream_options: { include_usage: true } } : {}),
             ...bodyParams,
         };
 
@@ -3761,8 +3761,8 @@ router.post('/generate', async function (request, response) {
                 reasoning: {
                     exclude: !includeReasoning,
                 },
-                // The usage meter reads the cost OpenRouter reports.
-                usage: { include: true },
+                // The usage meter reads the cost OpenRouter reports (for users who turned it on).
+                ...(usageMeterOn(request) ? { usage: { include: true } } : {}),
             };
 
             if (request.body.logprobs > 0) {
@@ -4120,13 +4120,16 @@ router.post('/generate', async function (request, response) {
             ...bodyParams,
         };
 
-        if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.CUSTOM) {
-            excludeKeysByYaml(requestBody, request.body.custom_exclude_body);
+        // Usage (tokens) in the last streamed chunk, for users who turned the usage meter on: OpenAI itself,
+        // and relays recognised as projects that support the option (others may refuse it).
+        if (request.body.stream && !isTextCompletion && !requestBody['stream_options']
+            && ((request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.OPENAI && !request.body.reverse_proxy && usageMeterOn(request))
+                || (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.CUSTOM && relayStreamsUsage(request)))) {
+            requestBody['stream_options'] = { include_usage: true };
         }
 
-        // Usage (tokens) in the last streamed chunk, for the usage meter: OpenAI itself only, relays may refuse the option.
-        if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.OPENAI && !request.body.reverse_proxy && request.body.stream && !isTextCompletion) {
-            requestBody['stream_options'] = { include_usage: true };
+        if (request.body.chat_completion_source === CHAT_COMPLETION_SOURCES.CUSTOM) {
+            excludeKeysByYaml(requestBody, request.body.custom_exclude_body);
         }
 
         /** @type {import('node-fetch').RequestInit} */

@@ -4,6 +4,9 @@
  * 钱怎么算：官方接口按 models.dev 的官方价；中转站能报已用金额的（new-api、sub2api、gpt-load……）
  * 按它报的；其余按用户在面板里给这个中转站设的价格，或 models.dev 上这个地址的价格；都没有就只显示 token。
  * 服务器一律记美元，这里按用户选的币种显示。
+ *
+ * 默认关闭：用户在「用户设置」的「用量与花费」里打开后才显示、提醒，生成请求也才带 X-Usage-Meter: on
+ * （服务器据此才去识别、查询中转站，给认得的中转站加要 token 数的参数）。关着时服务器只在本地记 token。
  */
 import { chat, eventSource, event_types, getRequestHeaders, main_api, saveChatDebounced, saveSettingsDebounced } from '../script.js';
 import { extension_settings } from './extensions.js';
@@ -35,6 +38,7 @@ let summary = null;
 function settings() {
     extension_settings.usageMeter ??= {};
     const value = extension_settings.usageMeter;
+    value.enabled = value.enabled === true;
     // 每日上限按美元存，显示时换算
     value.dailyBudget = Math.max(0, Number(value.dailyBudget) || 0);
     value.showOnMessages = value.showOnMessages !== false;
@@ -99,7 +103,8 @@ export function renderMessageUsage(messageElement, message) {
     const node = messageElement?.find('.mesCostDisplay')[0];
     if (!node) return;
     const usage = message?.extra?.usage;
-    if (!usage || message.is_user || !settings().showOnMessages) {
+    const { enabled, showOnMessages } = settings();
+    if (!usage || message.is_user || !enabled || !showOnMessages) {
         node.textContent = '';
         node.removeAttribute('title');
         return;
@@ -129,8 +134,8 @@ function renderChip() {
     }
     const chip = /** @type {HTMLButtonElement} */ (holder.firstElementChild);
     const today = summary?.today;
-    const { dailyBudget } = settings();
-    const visible = Boolean(today && (today.priced > 0 || dailyBudget > 0));
+    const { dailyBudget, enabled } = settings();
+    const visible = Boolean(enabled && today && (today.priced > 0 || dailyBudget > 0));
     holder.hidden = !visible;
     if (!visible) return;
     const ratio = dailyBudget > 0 ? today.cost / dailyBudget : 0;
@@ -150,13 +155,15 @@ async function loadSummary(id) {
 }
 
 /**
- * 发生成请求时调用，返回放进 X-Usage-Id 请求头的编号。
+ * 发生成请求时调用，返回要加的请求头：这次生成的编号，打开了用量与花费时再加 X-Usage-Meter。
  * @param {string} type 生成类型
+ * @returns {Record<string, string>}
  */
-export function startUsageRequest(type) {
+export function usageRequestHeaders(type) {
     const id = uuidv4();
-    if (type !== 'quiet') pending = { id, type };
-    return id;
+    const { enabled } = settings();
+    if (type !== 'quiet' && enabled) pending = { id, type };
+    return enabled ? { 'X-Usage-Id': id, 'X-Usage-Meter': 'on' } : { 'X-Usage-Id': id };
 }
 
 /** 把服务器的记录写到消息上（「继续」接在同一条后面：加在一起） */
@@ -184,7 +191,7 @@ function attachUsage(message, item, request, previous) {
  * @param {string} type
  */
 async function onMessageReceived(messageId, type) {
-    if (type === 'first_message' || !pending || main_api !== 'openai') return;
+    if (type === 'first_message' || !pending || main_api !== 'openai' || !settings().enabled) return;
     const request = pending;
     pending = null;
     let data = null;
@@ -247,8 +254,8 @@ function remind(item, data) {
  * @returns {Promise<boolean>} 是否继续
  */
 export async function confirmUsageBudget() {
-    const { dailyBudget } = settings();
-    if (!(dailyBudget > 0)) return true;
+    const { dailyBudget, enabled } = settings();
+    if (!enabled || !(dailyBudget > 0)) return true;
     const data = await loadSummary().catch(() => summary);
     const spent = Number(data?.today?.cost) || 0;
     const day = data?.days?.at(-1)?.date ?? '';
@@ -375,6 +382,12 @@ export async function openUsagePanel() {
     const options = settings();
     const root = element('div', 'usageMeterPanel');
     root.append(element('h3', '', '用量与花费'));
+    const enableRow = element('label', 'usageMeterField is-checkbox usageMeterEnable');
+    const enable = /** @type {HTMLInputElement} */ (element('input'));
+    enable.type = 'checkbox';
+    enable.checked = options.enabled;
+    enableRow.append(enable, element('span', '', '启用：每条回复显示用了多少、花了多少，输入框右上角显示今天的合计，可设每日上限'));
+    root.append(enableRow, element('p', 'usageMeterMuted', '启用后，用中转站时会查询它的已用金额（能查的才查），并让认得的中转站在回复里带上 token 数。'));
     const costText = today.priced ? `≈ ${formatCost(today.cost)}` : '没有可计价的用量';
     root.append(element('p', 'usageMeterToday', `今天 ${today.requests} 次请求 · 输入 ${formatTokens(today.input)} · 输出 ${formatTokens(today.output)} token · ${costText}`));
     const missing = today.requests - today.reported;
@@ -436,6 +449,8 @@ export async function openUsagePanel() {
     const result = await callGenericPopup(root, POPUP_TYPE.TEXT, '', { okButton: '保存', cancelButton: '关闭', allowVerticalScrolling: true, wide: true });
     if (result !== POPUP_RESULT.AFFIRMATIVE) return;
     const newRate = Number(rateInput.value);
+    const turnedOn = enable.checked && !options.enabled;
+    options.enabled = enable.checked;
     options.currency = currency.value === 'CNY' ? 'CNY' : 'USD';
     const shownRate = newRate > 0 ? newRate : rate();
     options.dailyBudget = Math.max(0, Number(budget.value) || 0) / (options.currency === 'CNY' ? shownRate : 1);
@@ -453,10 +468,14 @@ export async function openUsagePanel() {
     }
     await loadSummary().catch(() => null);
     renderAllMessages();
+    if (turnedOn) toastr.success('从下一条回复开始显示用量和花费。', '已启用用量与花费');
 }
 
 export function initUsageMeter() {
+    $('#usage_meter_button').on('click', () => void openUsagePanel());
     $(document).on('click', '#chat .mesCostDisplay', () => void openUsagePanel());
     eventSource.on(event_types.MESSAGE_RECEIVED, (messageId, type) => void onMessageReceived(messageId, type).catch(error => console.warn('[usage] Reading the usage failed', error)));
-    eventSource.on(event_types.APP_READY, () => void loadSummary().catch(() => null));
+    eventSource.on(event_types.APP_READY, () => {
+        if (settings().enabled) void loadSummary().catch(() => null);
+    });
 }

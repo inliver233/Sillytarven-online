@@ -29,7 +29,7 @@ fs.writeFileSync(path.join(dataRoot, '_global', 'model-prices.json'), JSON.strin
     catalog: [{ provider: 'opencode', name: 'OpenCode Zen', base: 'opencode.ai/inference/openai/v1' }],
 }));
 
-const { UsageReader, applyPricing, catalogPrice, findPrice, officialNames, officialPrice, priceUsage, pricingHint, meterGeneration, router, startUsageMeter } = await import('../src/usage-meter.js');
+const { UsageReader, applyPricing, catalogPrice, findPrice, officialNames, officialPrice, priceUsage, pricingHint, meterGeneration, relayStreamsUsage, router, startUsageMeter } = await import('../src/usage-meter.js');
 const { resetRelayBilling } = await import('../src/relay-billing.js');
 const { forwardFetchResponse } = await import('../src/util.js');
 startUsageMeter();
@@ -195,9 +195,12 @@ test('relays: spending read from new-api, sub2api and gpt-load is shared out; gc
     resetRelayBilling();
     // One fake relay per project, each charging $0.05 per generation in its own way.
     const spent = { 'new-api': 1, sub2api: 2, 'gpt-load': 3 };
+    /** Requests the relays got other than generations (probes, readings) */
+    const asked = [];
     const relay = http.createServer((request, response) => {
         const [, kind, ...rest] = request.url.split('/');
         const route = `/${rest.join('/')}`;
+        if (!route.startsWith('/v1/chat/completions')) asked.push(`${kind}${route}`);
         const json = value => {
             response.writeHead(200, { 'Content-Type': 'application/json' });
             response.end(JSON.stringify(value));
@@ -244,9 +247,9 @@ test('relays: spending read from new-api, sub2api and gpt-load is shared out; gc
     t.after(() => new Promise(resolve => server.close(resolve)));
     const base = `http://127.0.0.1:${server.address().port}`;
 
-    const generate = (id, kind, key) => fetch(`${base}/generate`, {
+    const generate = (id, kind, key, meter = true) => fetch(`${base}/generate`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Usage-Id': id },
+        headers: { 'Content-Type': 'application/json', 'X-Usage-Id': id, ...(meter ? { 'X-Usage-Meter': 'on' } : {}) },
         body: JSON.stringify({ chat_completion_source: 'openai', model: '抗截断-pg-gemini-4-argon', stream: true, reverse_proxy: `${relayBase}/${kind}/v1`, proxy_password: key }),
     }).then(response => response.text());
     const settled = async id => {
@@ -257,6 +260,15 @@ test('relays: spending read from new-api, sub2api and gpt-load is shared out; gc
         }
         throw new Error(`${id} never settled`);
     };
+
+    // The meter off (the default): tokens recorded, the relay asked nothing.
+    await generate('off-1', 'new-api', 'sk-new', false);
+    const off = await settled('off-1');
+    assert.deepEqual([off.item.priced, off.item.input, off.item.relay.kind], [null, 1000, null]);
+    await new Promise(resolve => setTimeout(resolve, 300));
+    assert.deepEqual(asked, [], 'nothing but the generation reached the relay');
+    const request = (url, meter) => ({ get: name => (name === 'x-usage-meter' && meter ? 'on' : undefined), body: { custom_url: url } });
+    assert.equal(relayStreamsUsage(request(`${relayBase}/new-api/v1`, true)), false, 'not recognised yet');
 
     for (const [kind, key] of [['new-api', 'sk-new'], ['sub2api', 'sk-sub'], ['gpt-load', 'sk-load']]) {
         // The first generation through a relay: it is recognised afterwards, and its reading becomes the baseline.
@@ -269,6 +281,10 @@ test('relays: spending read from new-api, sub2api and gpt-load is shared out; gc
         assert.equal(item.priced, 'relay', kind);
         assert.equal(item.cost.toFixed(4), '0.0500', kind);
     }
+
+    // Recognised relays that support it are asked for the tokens in streamed answers, if the meter is on.
+    assert.equal(relayStreamsUsage(request(`${relayBase}/new-api/v1`, true)), true);
+    assert.equal(relayStreamsUsage(request(`${relayBase}/new-api/v1`, false)), false);
 
     // gcli2api: recognised, free quota, nothing to read: tokens only.
     await generate('gcli-1', 'gcli', 'sk-x');

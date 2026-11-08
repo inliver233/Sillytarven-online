@@ -23,6 +23,9 @@ import { getLocalDateKey } from './storage-quota.js';
  *   3. the prices models.dev lists for that address (OpenCode Zen, DeepSeek, OpenRouter, ...);
  *   otherwise only the tokens.
  *
+ * Off unless the user turns it on (the page then sends X-Usage-Meter: on with generations). Off, only
+ * the tokens (and local prices) are recorded: no relay is asked anything, no request is changed.
+ *
  * Per user, <data>/_usage/<handle>.json:
  *   { days: { 'YYYY-MM-DD': Totals & { models } }, recent: Entry[], relays: { [relay id]: last reading },
  *     settings: { rate, pricing: { [relay address]: Pricing } } }
@@ -540,6 +543,28 @@ function relayOf(request) {
 
 const billed = kind => Boolean(kind) && !FREE_RELAYS.has(kind);
 
+/** Relay projects that answer stream_options.include_usage with the tokens in the last chunk. */
+const STREAM_USAGE_RELAYS = new Set(['new-api', 'sub2api', 'gpt-load', 'litellm']);
+
+/**
+ * Whether the user turned the usage meter on (sent by the page with each generation).
+ * @param {import('express').Request} request
+ */
+export function usageMeterOn(request) {
+    return String(request.get?.('x-usage-meter') ?? '') === 'on';
+}
+
+/**
+ * Whether to ask a custom endpoint for the tokens in its streamed answer: only relays recognised
+ * as projects that support it, and only for users who turned the meter on.
+ * @param {import('express').Request} request
+ */
+export function relayStreamsUsage(request) {
+    if (!usageMeterOn(request) || !request.body?.custom_url) return false;
+    const relay = describeRelay(request.body.custom_url, '');
+    return Boolean(relay) && STREAM_USAGE_RELAYS.has(knownRelay(/** @type {any} */ (relay))?.kind ?? '');
+}
+
 /**
  * Takes a reading of what the key has spent, to compare with after later generations (not while
  * earlier generations still wait for theirs).
@@ -661,7 +686,9 @@ export function meterGeneration(request, response) {
     const id = String(request.get('x-usage-id') ?? '').slice(0, 64).replace(/[^\w-]/g, '') || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const startedAt = Date.now();
     const relay = relayOf(request);
-    if (relay) void prepareRelay(handle, relay).catch(error => console.warn('[usage] Relay reading failed:', error?.message ?? error));
+    // Asking relays anything is only for users who turned the meter on.
+    const enabled = usageMeterOn(request);
+    if (relay && enabled) void prepareRelay(handle, relay).catch(error => console.warn('[usage] Relay reading failed:', error?.message ?? error));
     response.once('close', () => {
         reader.end();
         void record().catch(error => console.warn('[usage] Could not meter a generation:', error?.message ?? error));
@@ -683,7 +710,7 @@ export function meterGeneration(request, response) {
         let firstReading = false;
         if (relay) {
             // Only after a generation went through is the relay asked what it runs (once in a while).
-            const found = await detectRelay(relay).catch(() => null);
+            const found = enabled ? await detectRelay(relay).catch(() => null) : null;
             entry.relay = { address: relay.address, kind: found?.kind ?? null };
             const { settings, relays } = readUsage(handle);
             const own = sanitizePricing(settings.pricing[relay.address]);
