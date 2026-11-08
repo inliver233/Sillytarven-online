@@ -594,7 +594,7 @@ function floatDelta(cell, metric, delta) {
 /**
  * 一次性的效果：整行闪一下（涨、跌、登顶、冲进前三），可带一句文字，放完就移除。
  * @param {HTMLElement} row
- * @param {'gain'|'loss'|'crown'|'podium'} kind
+ * @param {string} kind gain、loss，或者前三名的变动（见 topEvents）
  * @param {string} [label]
  */
 function burst(row, kind, label) {
@@ -615,12 +615,45 @@ function rowTops(list) {
     return tops;
 }
 
+/** 前三名变动时的文字 */
+const TOP_EVENT_LABELS = { upset: '⚡ 下克上！', crown: '👑 登顶', swap: '⇅ 互换', podium: '冲进前三', displaced: '被顶替', out: '跌出前三' };
+
+/**
+ * 前三名的变动，按行（key）：
+ * upset 下克上（一次升三名以上，或从第三名以下直接登顶）、crown 登顶、swap 前三之内往上换位、
+ * podium 冲进前三、displaced 名次被人抢走（还在前三）、out 跌出前三。
+ * @param {{key?: string, name: string, rank: number}[]} rows
+ * @returns {Map<string, string>}
+ */
+function topEvents(rows) {
+    const events = new Map();
+    /** 上一次各名次是谁 */
+    const holders = new Map([...lastRanks].map(([id, rank]) => [rank, id]));
+    for (const row of rows) {
+        const id = row.key ?? row.name;
+        const before = lastRanks.get(id);
+        if (before === undefined || row.rank >= before || row.rank > 3) continue;
+        const jump = before - row.rank;
+        events.set(id, jump >= 3 || (row.rank === 1 && before > 3) ? 'upset' : row.rank === 1 ? 'crown' : before <= 3 ? 'swap' : 'podium');
+        const displaced = holders.get(row.rank);
+        if (displaced !== undefined && displaced !== id && !events.has(displaced)) events.set(displaced, 'displaced');
+    }
+    for (const row of rows) {
+        const id = row.key ?? row.name;
+        const before = lastRanks.get(id);
+        if (before !== undefined && before <= 3 && row.rank > 3) events.set(id, 'out');
+    }
+    return events;
+}
+
 /**
  * 换了名次的行从原来的位置滑到新位置（往上走的盖在别人上面），新上榜的从左边滑进来。
+ * 前三名的变动走得更有戏：互换时两行交叉划弧，下克上先蓄力再冲上去。
  * @param {HTMLElement} list
  * @param {Map<string, number>} before 刷新前的位置
+ * @param {Map<string, string>} events topEvents() 的结果
  */
-function slideRows(list, before) {
+function slideRows(list, before, events) {
     const after = rowTops(list);
     for (const row of list.querySelectorAll('.leaderboard-row[data-key]')) {
         const from = before.get(row.dataset.key);
@@ -631,10 +664,34 @@ function slideRows(list, before) {
         const dy = from - after.get(row.dataset.key);
         if (Math.abs(dy) < 1) continue;
         row.classList.add(dy > 0 ? 'leaderboard-moving-up' : 'leaderboard-moving-down');
-        const animation = row.animate([{ transform: `translateY(${dy}px)` }, { transform: 'none' }], { duration: Math.min(900, 400 + Math.abs(dy) * 0.5), easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)' });
+        const event = events.get(row.dataset.key);
+        let frames = [{ transform: `translateY(${dy}px)` }, { transform: 'none' }];
+        let duration = Math.min(900, 400 + Math.abs(dy) * 0.5);
+        if (event === 'upset') {
+            frames = [
+                { transform: `translateY(${dy}px) scale(1)` },
+                { transform: `translateY(${dy + 6}px) scale(0.97)`, offset: 0.18 },
+                { transform: `translateY(${dy * 0.3}px) scale(1.06)`, offset: 0.62 },
+                { transform: 'translateY(-6px) scale(1.04)', offset: 0.82 },
+                { transform: 'none' },
+            ];
+            duration = 1000;
+        } else if (event === 'swap' || event === 'crown' || (event === 'displaced' && dy < 0)) {
+            // 交叉换位：往上的从右边划过去，往下的从左边
+            const side = dy > 0 ? 16 : -16;
+            frames = [{ transform: `translateY(${dy}px)` }, { transform: `translate(${side}px, ${dy / 2}px) scale(${dy > 0 ? 1.04 : 0.97})`, offset: 0.5 }, { transform: 'none' }];
+            duration = 750;
+        }
+        const animation = row.animate(frames, { duration, easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)' });
         const done = () => row.classList.remove('leaderboard-moving-up', 'leaderboard-moving-down');
         animation.addEventListener('finish', done);
         animation.addEventListener('cancel', done);
+        // 跌出前三：先褪成灰色
+        if (event === 'out') row.animate([{ filter: 'grayscale(1) brightness(0.8)' }, { filter: 'grayscale(1) brightness(0.8)', offset: 0.4 }, { filter: 'none' }], { duration: 1800, easing: 'ease-out' });
+    }
+    // 下克上：落定时整个列表震一下
+    if ([...events.values()].includes('upset')) {
+        list.animate([{ transform: 'none' }, { transform: 'translateX(-4px)' }, { transform: 'translateX(4px)' }, { transform: 'translateX(-2px)' }, { transform: 'translateX(2px)' }, { transform: 'none' }], { duration: 420, delay: 760, easing: 'ease-out' });
     }
 }
 
@@ -643,12 +700,14 @@ function render(board) {
     const rows = board.rows ?? [];
     const metric = view.metric;
     const fancy = metric === 'score';
-    const period = String(board.version ?? '').split('-').pop();
+    // 版本号是「数据版本-这一期」，管理员测试时后面还有「-t测试值」
+    const period = String(board.version ?? '').split('-')[1] ?? '';
     // 刚打开、换了榜、换了一期（新的一小时或一天）：直接显示，不算涨跌
     const fresh = lastValues.size === 0 || period !== lastPeriod;
     if (fresh) moveMarks.clear();
     const animate = !fresh && !calmMotion();
     const before = animate ? rowTops(popup.list) : null;
+    const events = animate ? topEvents(rows) : new Map();
     const now = Date.now();
     const values = new Map();
     const ranks = new Map();
@@ -739,9 +798,10 @@ function render(board) {
                 floatDelta(valueCell, metric, delta);
                 burst(element, delta > 0 ? 'gain' : 'loss');
             }
-            if (row.rank === 1 && previousRank !== 1) burst(element, 'crown', '👑 登顶');
-            else if (row.rank <= 3 && !(previousRank <= 3)) burst(element, 'podium', '冲进前三');
-            if (previousRank === 1 && row.rank > 1) element.classList.add('leaderboard-dethroned');
+            const event = events.get(id);
+            if (event) burst(element, event, TOP_EVENT_LABELS[event]);
+            // 被抢走名次的：头像或奖牌晃一下
+            if (event === 'displaced' || event === 'out' || (previousRank === 1 && row.rank > 1)) element.classList.add('leaderboard-dethroned');
         }
         fragment.append(element);
     }
@@ -755,7 +815,7 @@ function render(board) {
     popup.root.style.setProperty('--lb-clock', String(Math.round(performance.now())));
     popup.list.classList.toggle('leaderboard-list-score', fancy);
     popup.list.replaceChildren(fragment);
-    if (before) slideRows(popup.list, before);
+    if (before) slideRows(popup.list, before, events);
     updateHint();
     renderMe(board, animate);
     renderTest(board);

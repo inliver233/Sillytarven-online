@@ -777,6 +777,97 @@
     box-shadow: 0 0 10px rgba(227, 179, 65, 0.5);
 }
 
+/* 前三名的变动：下克上（冲击波、砸下来的字、列表一震）、互换（流光）、被顶替、跌出前三 */
+.leaderboard-flash.upset {
+    background: radial-gradient(ellipse at 8% 50%, rgba(255, 90, 60, 0.75), rgba(255, 196, 0, 0.35) 32%, transparent 72%);
+    box-shadow: 0 0 22px rgba(255, 120, 60, 0.7);
+    animation: leaderboard-crown-flash 1.8s ease-out forwards;
+}
+
+.leaderboard-flash.upset::after {
+    content: '';
+    position: absolute;
+    left: 1.3em;
+    top: 50%;
+    width: 2.6em;
+    height: 2.6em;
+    margin: -1.3em 0 0 -1.3em;
+    border: 2px solid rgba(255, 210, 90, 0.95);
+    border-radius: 50%;
+    box-shadow: 0 0 10px rgba(255, 160, 60, 0.8);
+    animation: leaderboard-shockwave 0.9s ease-out 0.55s both;
+}
+
+.leaderboard-callout.upset {
+    padding: 2px 12px;
+    font-size: 0.95em;
+    color: #fff;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.45);
+    background: linear-gradient(90deg, #ff3d3d, #ff9f1a, #ffd23f);
+    box-shadow: 0 0 16px rgba(255, 120, 60, 0.75);
+    animation: leaderboard-callout-slam 2.6s ease-out forwards;
+}
+
+.leaderboard-flash.swap {
+    background: linear-gradient(100deg, transparent 20%, rgba(129, 140, 248, 0.5), rgba(56, 189, 248, 0.5), transparent 80%) no-repeat;
+    background-size: 200% 100%;
+    animation: leaderboard-swap-flash 1.2s ease-out forwards;
+}
+
+.leaderboard-callout.swap {
+    color: #fff;
+    background: linear-gradient(90deg, #6366f1, #0ea5e9);
+    box-shadow: 0 0 12px rgba(99, 102, 241, 0.6);
+}
+
+.leaderboard-flash.displaced {
+    background-color: rgba(148, 163, 184, 0.3);
+}
+
+.leaderboard-callout.displaced,
+.leaderboard-callout.out {
+    font-weight: 700;
+    color: #e2e8f0;
+    background: rgba(71, 85, 105, 0.92);
+    box-shadow: 0 0 8px rgba(0, 0, 0, 0.35);
+    animation-name: leaderboard-callout-sink;
+}
+
+.leaderboard-flash.out {
+    background-color: rgba(100, 116, 139, 0.35);
+    animation-duration: 1.8s;
+}
+
+.leaderboard-callout.out {
+    background: rgba(51, 65, 85, 0.95);
+}
+
+@keyframes leaderboard-shockwave {
+    from { opacity: 1; transform: scale(0.2); }
+    to { opacity: 0; transform: scale(4.5); }
+}
+
+@keyframes leaderboard-callout-slam {
+    0% { opacity: 0; transform: translate(-50%, -50%) scale(2.4) rotate(-6deg); }
+    12% { opacity: 1; transform: translate(-50%, -50%) scale(0.92) rotate(-3deg); }
+    20% { transform: translate(-50%, -50%) scale(1.06) rotate(-3deg); }
+    28% { transform: translate(-50%, -50%) scale(1) rotate(-3deg); }
+    80% { opacity: 1; transform: translate(-50%, -50%) scale(1) rotate(-3deg); }
+    100% { opacity: 0; transform: translate(-50%, -70%) scale(1) rotate(-3deg); }
+}
+
+@keyframes leaderboard-swap-flash {
+    from { opacity: 1; background-position: 120% 0; }
+    to { opacity: 0; background-position: -60% 0; }
+}
+
+@keyframes leaderboard-callout-sink {
+    0% { opacity: 0; transform: translate(-50%, -85%) scale(0.9); }
+    15% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+    75% { opacity: 1; transform: translate(-50%, -50%); }
+    100% { opacity: 0; transform: translate(-50%, -15%); }
+}
+
 /* 换名次时往上走的行盖在别的行上面 */
 .leaderboard-moving-up { z-index: 2; }
 .leaderboard-moving-down { z-index: 1; }
