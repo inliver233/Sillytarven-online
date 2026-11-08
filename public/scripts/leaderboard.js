@@ -573,7 +573,7 @@ function showRules() {
 
 /** 管理员：输入本站的账号，让这个人重新选 */
 function chooseAgainForm() {
-    const input = h('input', { type: 'text', class: 'text_pole', placeholder: '本站的账号，比如 lingxi2205' });
+    const input = h('input', { type: 'text', class: 'text_pole', placeholder: '本站的账号，例如 example-123' });
     const submit = () => {
         const handle = input instanceof HTMLInputElement ? input.value.trim() : '';
         if (handle) void askToChooseAgain({ handle }, handle, false);
