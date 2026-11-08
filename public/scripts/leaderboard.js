@@ -1611,7 +1611,9 @@ function singleEmoji(text) {
     const value = String(text ?? '').trim();
     if (!value || value.length > 16) return '';
     if (typeof Intl.Segmenter === 'function' && [...new Intl.Segmenter('en', { granularity: 'grapheme' }).segment(value)].length !== 1) return '';
-    return /\p{Extended_Pictographic}|\p{Regional_Indicator}|\u20e3/u.test(value) ? value : '';
+    if (!/\p{Extended_Pictographic}|\p{Regional_Indicator}|\u20e3/u.test(value)) return '';
+    // 中华民国国旗换成中华人民共和国国旗（服务器也会换）
+    return value === '\u{1F1F9}\u{1F1FC}' ? '\u{1F1E8}\u{1F1F3}' : value;
 }
 
 /**
@@ -1667,7 +1669,10 @@ function showEmojiEditor(me) {
                 return;
             }
             hidePanel();
-            toastr.success(emoji ? `已${scope === 'all' ? '在所有榜单' : `在「${metric.label}」榜`}名字旁加上 ${emoji}` : '已删除表情');
+            // 以服务器存下的为准（有的表情会被换掉）
+            const saved = await response.json().catch(() => null);
+            const shown = emoji ? (saved?.emojis?.[scope === 'all' ? 'all' : metric.id] || emoji) : '';
+            toastr.success(shown ? `已${scope === 'all' ? '在所有榜单' : `在「${metric.label}」榜`}名字旁加上 ${shown}` : '已删除表情');
             boardVersion = '';
             void refresh();
         } catch {

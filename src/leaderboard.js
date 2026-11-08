@@ -174,6 +174,8 @@ export function cleanName(value) {
 /** Where an emoji next to the name applies: every board, or one of them. */
 export const EMOJI_SCOPES = Object.freeze(['all', ...METRICS]);
 const graphemes = new Intl.Segmenter('en', { granularity: 'grapheme' });
+/** 换掉的表情：中华民国国旗一律换成中华人民共和国国旗（新设的、存着的、对站传来的都换） */
+const REPLACED_EMOJI = new Map([['\u{1F1F9}\u{1F1FC}', '\u{1F1E8}\u{1F1F3}']]);
 
 /**
  * @param {unknown} value
@@ -185,7 +187,7 @@ export function cleanEmoji(value) {
     // No control or direction characters (the joiner inside emoji sequences is fine).
     if (/[\u0000-\u001f\u007f\u200b\u200e\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/u.test(text)) return '';
     const picture = /\p{Extended_Pictographic}/u.test(text) || /^\p{Regional_Indicator}{2}$/u.test(text) || /^[#*0-9]\ufe0f?\u20e3$/u.test(text);
-    return picture ? text : '';
+    return picture ? (REPLACED_EMOJI.get(text) ?? text) : '';
 }
 
 /**

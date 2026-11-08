@@ -666,9 +666,24 @@ test('an administrator asks someone to choose again: undone on both sites, until
     assert.equal(legacy.store.personKeyOf('nobody'), null);
 });
 
+test('the ROC flag is replaced by the PRC flag: when set, when stored before, when it comes from the other site', () => {
+    const legacy = makeStore('legacy');
+    const modern = makeStore('modern');
+    legacy.store.ensureAccount({ handle: 'flag', name: '旗', discord: '575757575757', created: NOON - 100 * 864e5 });
+    modern.store.ensureAccount({ handle: 'flag-2', name: '新站旗', discord: '575757575757', created: NOON - 10 * 864e5 });
+    assert.deepEqual(modern.store.setEmoji('flag-2', 'chat', '🇹🇼').emoji, { chat: '🇨🇳' });
+    // Stored before the replacement (or sent by a site that is not updated yet): read as the PRC flag.
+    const account = legacy.store.accounts.get('flag');
+    account.prefs = { ...account.prefs, emoji: { all: '🇹🇼' }, emojiAt: legacy.store.now() + 5 };
+    account.v = legacy.store.bump();
+    modern.store.applyPeer('https://legacy', legacy.store.exportForPeer(-1, 'none'));
+    assert.equal(modern.store.prefsOf('flag-2').emojis.all, '🇨🇳');
+});
+
 test('an emoji next to the name: one board or all, both sites, apart from the choice; administrators clear it', () => {
     for (const emoji of ['🔥', '👍🏽', '🇨🇳', '1️⃣', '👨‍👩‍👧', '❤️']) assert.equal(cleanEmoji(emoji), emoji);
     for (const text of ['a', '中', '🔥🔥', '', ' ', '<b>', 'A🔥', '\u202e🔥', '#', 42, null]) assert.equal(cleanEmoji(text), '', String(text));
+    assert.equal(cleanEmoji('🇹🇼'), '🇨🇳', 'the ROC flag becomes the PRC flag');
     assert.deepEqual(withEmoji({}, 'chat', '🔥'), { chat: '🔥' });
     assert.deepEqual(withEmoji({ chat: '🔥' }, 'all', '🌙'), { all: '🌙' }, 'all boards replace single ones');
     assert.deepEqual(withEmoji({ all: '🌙' }, 'chat', ''), { all: '🌙', chat: '' }, 'none on one board');
