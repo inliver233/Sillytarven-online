@@ -549,7 +549,8 @@ function catgirlElement(rank) {
 }
 
 /**
- * 综合榜总榜第一名（殿堂总冠军）：傲娇贵族千金（32×32）。黑长直姬发、吊梢蓝眼、白蕾丝圆领红裙，平时一脸得意。
+ * 综合榜总榜第一名（殿堂总冠军）：傲娇贵族千金（32×32）。黑长直姬发（空气刘海，两侧长发和身体之间留透明缝，不糊成一块）、
+ * 吊梢蓝眼、白蕾丝圆领红裙，平时一脸得意。
  * 小皇冠歪戴着，时不时晃一下像要掉下来：皇冠单独一层，像素图是正的、整个转过去（逐像素画歪的会糊）。
  */
 const OJOU_PIXELS = [
@@ -564,27 +565,27 @@ const OJOU_PIXELS = [
     '......OlhHHHHHHddHHHHHHhlO......',
     '......OHHlHLlHlddlHllHlHHO......',
     '....OOHhlHdlHdHddHdHHdHHhHOO....',
-    '...OhOHhHHdHHdHddHdHHdHHhHOhO...',
-    '..OhHOldhhOhhOhOOhOhhOhhdlOHhO..',
-    '.OHldOLhEESSSSSSSSSSSSEEhlOdlHO.',
-    '.OHldOLhsEEEEESSSSEEEEEshlOdlHO.',
-    '.OHLdOLhsSWeeESSSSEeeWSshlOdLHO.',
-    '.OHkdOlhsSeeneSSSSeneeSshlOdLHO.',
-    '.OHkdOlhsSniinSSSSniinSshlOdLHO.',
-    '.OHLdOlhsSSnnSSSSSSnnSSshlOdLHO.',
-    '.OHLdOHhsbBBbSSSSSSbBBbshHOdLHO.',
-    '.OHldOHhhsSSSSmSSmSSSSshhHOdlHO.',
-    '.OHldOhhhhssSSSMMSSSsshhhhOdlHO.',
-    '.OHldOhhhOOOsSSSSSSsOOOhhhOdlHO.',
-    '.OHldOhhOOOOOOttttOOOOOOhhOdlHO.',
-    '.OHldOOO.OCCCcsGGscCCCO.OOOdlHO.',
-    '.OHHdddOCCCCCCgjJgCCCCCCOdddHHO.',
-    '.OHHdddOcCCCCCgJJgCCCCCcOdddHHO.',
-    '.OhhddOxDcCCCcxGGxcCCCcDxOddhhO.',
-    '.OhhdOxDDDXDDDDDDDDDDXDDDxOdhhO.',
-    '.OhhdOxDDXDDDDDDDDDDDDXDDxOdhhO.',
-    '.OhhdOxDDXDDDDDDDDDDDDXDDxOdhhO.',
-    '.OhhdOxDDXDDDDDDDDDDDDXDDxOdhhO.',
+    '...OhOHhHHsHHsHssHsHHsHHhHOhO...',
+    '..OhHOldhhShhShSShShhShhdlOHhO..',
+    '.OlHdOLhEESSSSSSSSSSSSEEhlOdHlO.',
+    '.OLHdOLhsEEEEESSSSEEEEEshlOdHLO.',
+    '.OLHdOLhsSWeeESSSSEeeWSshlOdHLO.',
+    '.Okh.OlhsSeeneSSSSeneeSshlO.hkO.',
+    'OkLh.OlhsSniinSSSSniinSshlO.hLkO',
+    'OLh..OlhsSSnnSSSSSSnnSSshlO..hLO',
+    'OLh..OHhsbBBbSSSSSSbBBbshHO..hLO',
+    'OLh..OHhhsSSSSmSSmSSSSshhHO..hLO',
+    'Olh..OhhhhssSSSMMSSSsshhhhO..hlO',
+    'Olh..OhhhOOOsSSSSSSsOOOhhhO..hlO',
+    'Olh..OhhOOOOOOttttOOOOOOhhO..hlO',
+    'Olh..OOO.OCCCcsGGscCCCO.OOO..hlO',
+    'OHh....OCCCCCCgjJgCCCCCCO....hHO',
+    'OHh....OcCCCCCgJJgCCCCCcO....hHO',
+    'OHh...OxDcCCCcxGGxcCCCcDxO...hHO',
+    'OHh..OxDDDXDDDDDDDDDDXDDDxO..hHO',
+    'Ohh..OxDDXDDDDDDDDDDDDXDDxO..hhO',
+    'OhO..OxDDXDDDDDDDDDDDDXDDxO..OhO',
+    '.O...OxDDXDDDDDDDDDDDDXDDxO...O.',
 ];
 const OJOU_COLORS = {
     O: '#120d1c', d: '#1a1530', h: '#2b2447', H: '#433c69', l: '#6d65a3', L: '#b4b8f0', k: '#eef0ff',
