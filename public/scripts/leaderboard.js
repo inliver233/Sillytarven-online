@@ -522,12 +522,13 @@ function catgirlElement(rank) {
 
 /**
  * @param {number} rank
- * @param {boolean} fancy 综合榜：前三是像素猫娘（其他榜是奖牌）
+ * @param {boolean} fancy 综合榜：前三是像素猫娘，第四名是一张头像（静止）；其他榜是奖牌
  */
 function rankCell(rank, fancy) {
-    const mark = fancy && rank <= 3
-        ? catgirlElement(/** @type {1|2|3} */ (rank))
-        : h('span', { class: 'leaderboard-medal', text: MEDALS[rank] ?? String(rank) });
+    let mark;
+    if (fancy && rank <= 3) mark = catgirlElement(/** @type {1|2|3} */ (rank));
+    else if (fancy && rank === 4) mark = h('img', { class: 'leaderboard-fourth-face', src: '/img/leaderboard-fourth.webp', alt: '第 4 名', title: '第 4 名', draggable: 'false' });
+    else mark = h('span', { class: 'leaderboard-medal', text: MEDALS[rank] ?? String(rank) });
     return h('span', { class: 'leaderboard-rank' }, mark);
 }
 
@@ -678,7 +679,7 @@ function render(board) {
             valueText);
         const sparkles = row.rank <= 3 ? SPARKLES[fancy ? 'score' : 'other'][row.rank] ?? 0 : 0;
         const element = h('div', {
-            class: `leaderboard-row${row.rank <= 3 ? ` leaderboard-top leaderboard-top${row.rank}` : ''}${row.me ? ' leaderboard-row-me' : ''}${expandable ? ' leaderboard-row-expandable' : ''}${expanded ? ' expanded' : ''}`,
+            class: `leaderboard-row${row.rank <= 3 ? ` leaderboard-top leaderboard-top${row.rank}` : ''}${row.rank === 4 ? ' leaderboard-fourth' : ''}${row.me ? ' leaderboard-row-me' : ''}${expandable ? ' leaderboard-row-expandable' : ''}${expanded ? ' expanded' : ''}`,
             'data-key': id,
             title: breakdown || null,
         },

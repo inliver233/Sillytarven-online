@@ -364,32 +364,68 @@
 }
 
 /* 综合榜 */
+/* 综合榜：第一名炫彩，第二名冰晶蓝，第三名翡翠绿（和猫娘的眼睛颜色呼应），第四名樱花粉（静止） */
 .leaderboard-list-score .leaderboard-top3 {
     --lb-ring: 1.5px;
     --lb-spin: 6s;
     --lb-shine: 7s;
-    --lb-ring-colors: #8c5a2b, #ffcf9a, #cd7f32, #ffb366, #6b4423, #8c5a2b;
-    box-shadow: 0 0 8px rgba(205, 127, 50, 0.22);
+    --lb-ring-colors: #047857, #6ee7b7, #10b981, #d1fae5, #059669, #047857;
+    background-color: rgba(16, 185, 129, 0.12) !important;
+    box-shadow: 0 0 8px rgba(16, 185, 129, 0.25);
 }
 
 .leaderboard-list-score .leaderboard-top2 {
     --lb-ring: 2px;
     --lb-spin: 4.5s;
     --lb-shine: 5s;
-    --lb-ring-colors: #7f8c9a, #ffffff, #a9d8ff, #c0c7d0, #ffffff, #5f6b78, #7f8c9a;
-    animation: leaderboard-glow-silver 3.4s ease-in-out infinite;
+    --lb-ring-colors: #60a5fa, #e0f2fe, #7dd3fc, #ffffff, #a5b4fc, #bae6fd, #60a5fa;
+    background-color: rgba(125, 211, 252, 0.13) !important;
+    animation: leaderboard-glow-ice 3.4s ease-in-out infinite;
     animation-delay: calc(var(--lb-clock, 0) * -1ms);
 }
 
 .leaderboard-list-score .leaderboard-top1 {
     --lb-ring: 2.5px;
-    --lb-spin: 3s;
-    --lb-shine: 3.5s;
-    --lb-ring-colors: #b8860b, #ffe9a3, #ff9f5a, #ffd86b, #f3c4ff, #fff6d5, #e3b341, #b8860b;
-    background-image: linear-gradient(110deg, rgba(227, 179, 65, 0.06), rgba(255, 159, 90, 0.16), rgba(243, 196, 255, 0.10), rgba(227, 179, 65, 0.06));
+    --lb-spin: 2.6s;
+    --lb-shine: 3.2s;
+    --lb-ring-colors: #ff5f7e, #ffb35c, #ffe066, #6ee7a8, #5cc8ff, #8f7cff, #ff7ad9, #ff5f7e;
+    background-color: rgba(143, 124, 255, 0.10) !important;
+    background-image: linear-gradient(110deg, rgba(255, 95, 126, 0.14), rgba(255, 224, 102, 0.12), rgba(110, 231, 168, 0.12), rgba(92, 200, 255, 0.14), rgba(255, 122, 217, 0.14), rgba(255, 95, 126, 0.14));
     background-size: 300% 100%;
-    animation: leaderboard-glow-strong 2.6s ease-in-out infinite, leaderboard-aurora 8s ease-in-out infinite;
+    animation: leaderboard-glow-rainbow 4s linear infinite, leaderboard-aurora 6s ease-in-out infinite;
     animation-delay: calc(var(--lb-clock, 0) * -1ms);
+}
+
+/* 第四名：一张头像，静止的樱花粉边框 */
+.leaderboard-list-score .leaderboard-row.leaderboard-fourth {
+    background-color: rgba(242, 180, 195, 0.12);
+    border-color: #f2b4c3;
+    box-shadow: inset 0 0 0 1px #f2b4c3;
+}
+
+.leaderboard-fourth-face {
+    display: block;
+    width: 32px;
+    height: 32px;
+    margin: -2px auto;
+    object-fit: cover;
+    border-radius: 7px;
+    box-shadow: 0 0 0 1px #f2b4c3;
+    user-select: none;
+}
+
+@keyframes leaderboard-glow-rainbow {
+    0%, 100% { box-shadow: 0 0 14px rgba(255, 95, 126, 0.5); }
+    17% { box-shadow: 0 0 14px rgba(255, 179, 92, 0.5); }
+    33% { box-shadow: 0 0 14px rgba(255, 224, 102, 0.45); }
+    50% { box-shadow: 0 0 14px rgba(110, 231, 168, 0.45); }
+    67% { box-shadow: 0 0 14px rgba(92, 200, 255, 0.5); }
+    83% { box-shadow: 0 0 14px rgba(143, 124, 255, 0.5); }
+}
+
+@keyframes leaderboard-glow-ice {
+    0%, 100% { box-shadow: 0 0 6px rgba(125, 211, 252, 0.2); }
+    50% { box-shadow: 0 0 13px rgba(125, 211, 252, 0.42); }
 }
 
 .leaderboard-list-score .leaderboard-top2 .leaderboard-medal {
@@ -463,11 +499,11 @@
 }
 
 .leaderboard-list-score .leaderboard-top2 .leaderboard-catgirl {
-    filter: drop-shadow(0 0 3px rgba(200, 220, 240, 0.6));
+    filter: drop-shadow(0 0 3px rgba(125, 211, 252, 0.65));
 }
 
 .leaderboard-list-score .leaderboard-top3 .leaderboard-catgirl {
-    filter: drop-shadow(0 0 2px rgba(205, 127, 50, 0.55));
+    filter: drop-shadow(0 0 2px rgba(16, 185, 129, 0.6));
 }
 
 /* 被挤下第一：左右抖几下 */
@@ -522,7 +558,7 @@
     80% { transform: translateX(0); }
 }
 
-/* 综合榜前三：名字是流动的金、银、铜色字 */
+/* 综合榜前三：名字是流动的彩虹、冰蓝、翠绿色字 */
 .leaderboard-list-score .leaderboard-top .leaderboard-name-text {
     font-weight: 700;
     color: transparent;
@@ -535,20 +571,20 @@
 }
 
 .leaderboard-list-score .leaderboard-top1 .leaderboard-name-text {
-    --lb-name-colors: linear-gradient(90deg, #ffd86b, #fff2c4, #e3b341, #ffb35c, #ffd86b);
-    filter: drop-shadow(0 1px 0 rgba(0, 0, 0, 0.35)) drop-shadow(0 0 6px rgba(255, 216, 107, 0.35));
-    animation: leaderboard-name-flow 4s linear infinite;
+    --lb-name-colors: linear-gradient(90deg, #ff7a93, #ffc078, #ffe680, #7ee8b4, #74d0ff, #a294ff, #ff8fe0, #ff7a93);
+    filter: drop-shadow(0 1px 0 rgba(0, 0, 0, 0.4)) drop-shadow(0 0 6px rgba(255, 255, 255, 0.25));
+    animation: leaderboard-name-flow 3s linear infinite;
     animation-delay: calc(var(--lb-clock, 0) * -1ms);
 }
 
 .leaderboard-list-score .leaderboard-top2 .leaderboard-name-text {
-    --lb-name-colors: linear-gradient(90deg, #dfe6ee, #ffffff, #a9b6c4, #cfe8ff, #dfe6ee);
+    --lb-name-colors: linear-gradient(90deg, #e0f2fe, #ffffff, #7dd3fc, #c7d2fe, #e0f2fe);
     animation: leaderboard-name-flow 6s linear infinite;
     animation-delay: calc(var(--lb-clock, 0) * -1ms);
 }
 
 .leaderboard-list-score .leaderboard-top3 .leaderboard-name-text {
-    --lb-name-colors: linear-gradient(90deg, #f0b27a, #ffd9b0, #cd7f32, #f0b27a);
+    --lb-name-colors: linear-gradient(90deg, #a7f3d0, #34d399, #d1fae5, #10b981, #a7f3d0);
 }
 
 /* 星光：第一名身上闪，综合榜更多 */
@@ -567,17 +603,23 @@
     width: 4px;
     height: 4px;
     border-radius: 50%;
-    background: radial-gradient(circle, #fff 0 35%, rgba(255, 233, 163, 0.9) 45%, transparent 70%);
-    box-shadow: 0 0 6px rgba(255, 233, 163, 0.9);
+    background: radial-gradient(circle, #fff 0 35%, rgb(var(--spark, 255 233 163) / 0.9) 45%, transparent 70%);
+    box-shadow: 0 0 6px rgb(var(--spark, 255 233 163) / 0.9);
     opacity: 0;
     animation: leaderboard-twinkle 2.4s ease-in-out infinite;
     animation-delay: calc(var(--lb-clock, 0) * -1ms + var(--d));
 }
 
 .leaderboard-top2 .leaderboard-sparkles i {
-    background: radial-gradient(circle, #fff 0 35%, rgba(169, 216, 255, 0.9) 45%, transparent 70%);
-    box-shadow: 0 0 6px rgba(169, 216, 255, 0.9);
+    --spark: 169 216 255;
 }
+
+.leaderboard-list-score .leaderboard-top1 .leaderboard-sparkles i:nth-child(1) { --spark: 255 95 126; }
+.leaderboard-list-score .leaderboard-top1 .leaderboard-sparkles i:nth-child(2) { --spark: 255 179 92; }
+.leaderboard-list-score .leaderboard-top1 .leaderboard-sparkles i:nth-child(3) { --spark: 255 224 102; }
+.leaderboard-list-score .leaderboard-top1 .leaderboard-sparkles i:nth-child(4) { --spark: 110 231 168; }
+.leaderboard-list-score .leaderboard-top1 .leaderboard-sparkles i:nth-child(5) { --spark: 92 200 255; }
+.leaderboard-list-score .leaderboard-top1 .leaderboard-sparkles i:nth-child(6) { --spark: 143 124 255; }
 
 .leaderboard-sparkles i:nth-child(1) { left: 12%; top: 22%; --d: 0s; }
 .leaderboard-sparkles i:nth-child(2) { left: 47%; top: 68%; --d: -0.8s; }
@@ -741,16 +783,6 @@
 @keyframes leaderboard-glow {
     0%, 100% { box-shadow: 0 0 6px rgba(227, 179, 65, 0.16); }
     50% { box-shadow: 0 0 14px rgba(227, 179, 65, 0.36); }
-}
-
-@keyframes leaderboard-glow-silver {
-    0%, 100% { box-shadow: 0 0 6px rgba(200, 220, 240, 0.16); }
-    50% { box-shadow: 0 0 13px rgba(200, 220, 240, 0.34); }
-}
-
-@keyframes leaderboard-glow-strong {
-    0%, 100% { box-shadow: 0 0 8px rgba(255, 200, 90, 0.28), 0 0 2px rgba(255, 233, 163, 0.5); }
-    50% { box-shadow: 0 0 20px rgba(255, 180, 80, 0.5), 0 0 6px rgba(243, 196, 255, 0.45); }
 }
 
 @keyframes leaderboard-aurora {
