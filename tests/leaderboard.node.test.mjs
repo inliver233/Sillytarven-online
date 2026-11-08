@@ -769,6 +769,38 @@ test('administrators carry a mark on both sites, until they are no longer admini
     assert.deepEqual(marks(modern), [false, false]);
 });
 
+test('an administrator tries their own place out: only they see it, the shared board stays real', () => {
+    const { store } = makeStore();
+    for (const [handle, ai] of [['boss', 2], ['p1', 30], ['p2', 20], ['p3', 10]]) {
+        store.ensureAccount({ handle, admin: handle === 'boss' });
+        const stats = store.dayStats(store.accounts.get(handle), dayOf(NOON));
+        stats.ai += ai;
+        store.touch(store.accounts.get(handle), stats);
+    }
+    const query = { metric: 'chat', window: 'today', site: 'all' };
+    const real = store.board({ ...query, handle: 'boss' });
+    assert.equal(real.me.rank, 4);
+
+    // Second place: between the first and the second of the others.
+    const value = store.valueForRank({ ...query, handle: 'boss', rank: 2 });
+    assert.equal(value, 21);
+    const trying = store.board({ ...query, handle: 'boss', test: value });
+    assert.deepEqual(trying.rows.map(row => [row.rank, row.value, row.me]), [[1, 30, false], [2, 21, true], [3, 20, false], [4, 10, false]]);
+    assert.deepEqual([trying.me.rank, trying.me.value, trying.me.real, trying.me.testing], [2, 21, 2, true]);
+    assert.notEqual(trying.version, real.version, 'a new version, so the page shows the change');
+    // Everybody else (and the shared ranking) still sees the real numbers.
+    assert.deepEqual(store.board({ ...query, handle: 'p1' }).rows.map(row => row.value), [30, 20, 10, 2]);
+    assert.equal(store.board({ ...query, handle: 'boss' }).me.rank, 4);
+    // Not for anybody else, whatever they send.
+    assert.equal(store.board({ ...query, handle: 'p3', test: 99 }).me.rank, 3);
+
+    // First place, last place, and no room in between: shared.
+    assert.equal(store.valueForRank({ ...query, handle: 'boss', rank: 1 }), 35);
+    assert.equal(store.valueForRank({ ...query, handle: 'boss', rank: 10 }), 9);
+    const crowded = store.board({ ...query, handle: 'boss', test: 20 });
+    assert.deepEqual(crowded.rows.filter(row => row.value === 20).map(row => row.rank), [2, 2]);
+});
+
 test('saved numbers survive a restart, and recent messages are not counted again', () => {
     const { store, clock } = makeStore();
     store.ensureAccount({ handle: 'a', name: '存档', created: 5, discord: '333333333333' });

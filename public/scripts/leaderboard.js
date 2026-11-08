@@ -60,7 +60,7 @@ let lastInputAt = 0;
 let lastPingAt = 0;
 /** @type {{metric: string, window: string, site: string}} */
 let view = { metric: 'score', window: 'today', site: 'all' };
-/** @type {{root: HTMLElement, list: HTMLElement, me: HTMLElement, footer: HTMLElement, hint: HTMLElement, panel: HTMLElement} | null} */
+/** @type {{root: HTMLElement, list: HTMLElement, me: HTMLElement, test: HTMLElement, footer: HTMLElement, hint: HTMLElement, panel: HTMLElement} | null} */
 let popup = null;
 let pollTimer = null;
 let boardVersion = '';
@@ -278,6 +278,7 @@ function segment(items, current, onPick, className) {
 function buildPopup() {
     const list = h('div', { class: 'leaderboard-list', 'aria-live': 'polite' });
     const me = h('div', { class: 'leaderboard-me' });
+    const test = h('div', { class: 'leaderboard-test displayNone' });
     const footer = h('div', { class: 'leaderboard-footer' });
     const hint = h('div', { class: 'leaderboard-hint' });
     const panel = h('div', { class: 'leaderboard-panel displayNone' });
@@ -304,11 +305,12 @@ function buildPopup() {
                 segment(SITES, view.site, id => pick('site', id), 'leaderboard-sites')),
             hint,
             list,
+            test,
             me,
             footer,
             panel));
     document.body.append(root);
-    popup = { root, list, me, footer, hint, panel };
+    popup = { root, list, me, test, footer, hint, panel };
     updateControls();
     document.addEventListener('keydown', onKeydown, true);
     window.addEventListener('resize', fitNames);
@@ -752,6 +754,7 @@ function render(board) {
     if (before) slideRows(popup.list, before);
     updateHint();
     renderMe(board, animate);
+    renderTest(board);
     renderFooter(board);
     fitNames();
 }
@@ -811,8 +814,21 @@ function renderMe(board, animate) {
         me.parts ? h('div', { class: 'leaderboard-me-parts', text: formatScoreParts(me.parts, board.scoreParts) }) : null,
         // 第二行：标识在左，差距和设置在右（一行放不下名字、标识和按钮）
         h('div', { class: 'leaderboard-me-side' },
-            h('span', { class: 'leaderboard-me-tags' }, me.admin ? adminBadge() : null, ...siteBadges(me.sites)),
+            h('span', { class: 'leaderboard-me-tags' },
+                me.admin ? adminBadge() : null,
+                ...siteBadges(me.sites),
+                me.testing ? h('span', { class: 'leaderboard-testing-tag', text: '测试中', title: '只有你自己看得到这个名次' }) : null),
             gap,
+            board.admin ? h('button', {
+                type: 'button',
+                class: `leaderboard-settings leaderboard-test-toggle${testOpen ? ' active' : ''}`,
+                title: '测试我的名次（只有自己看得到）',
+                onclick: () => {
+                    testOpen = !testOpen;
+                    renderMe(board, false);
+                    renderTest(board);
+                },
+            }, h('i', { class: 'fa-solid fa-flask' })) : null,
             h('button', {
                 type: 'button',
                 class: 'leaderboard-settings',
@@ -820,6 +836,64 @@ function renderMe(board, animate) {
                 onclick: () => void openSettings(),
             }, h('i', { class: 'fa-solid fa-user-gear' }), h('span', { text: MODE_TEXT[me.mode] ?? '设置' }))),
     ].filter(Boolean));
+}
+
+// ---------- 管理员测试自己的名次（只有自己看得到，不计入数据） ----------
+
+let testOpen = false;
+/** 每点一下加减多少：[小, 大] */
+const TEST_STEPS = { score: [1, 10], words: [1000, 10000], online: [600000, 3600000], active: [1, 5], streak: [1, 5], variety: [1, 5] };
+
+function stepText(metric, step) {
+    if (metric === 'online') return step >= 3600000 ? `${step / 3600000}小时` : `${step / 60000}分钟`;
+    if (metric === 'words') return step >= 10000 ? `${step / 10000}万` : `${step / 1000}千`;
+    return String(step);
+}
+
+/**
+ * 管理员：加减自己的数值、放到某个名次、一键还原（所有榜单）。改完马上刷新，列表的特效照常播放。
+ * @param {any} board
+ */
+function renderTest(board) {
+    if (!popup) return;
+    const show = !!board?.admin && testOpen;
+    popup.test.classList.toggle('displayNone', !show);
+    if (!show) {
+        popup.test.replaceChildren();
+        return;
+    }
+    const me = board.me;
+    const [small, big] = TEST_STEPS[view.metric] ?? [1, 10];
+    const format = value => formatLeaderboardValue(view.metric, value);
+    const button = (text, body, title) => h('button', { type: 'button', class: 'leaderboard-test-button', text, title, onclick: () => void tryTest(body) });
+    popup.test.replaceChildren(
+        h('div', { class: 'leaderboard-test-head' },
+            h('i', { class: 'fa-solid fa-flask' }),
+            h('b', { text: '测试我的名次' }),
+            h('small', { text: me?.testing ? `测试值 ${format(me.value)}，真实 ${format(me.real)}` : '只有你自己看得到，不计入数据' })),
+        h('div', { class: 'leaderboard-test-actions' },
+            button(`−${stepText(view.metric, big)}`, { step: -big }),
+            button(`−${stepText(view.metric, small)}`, { step: -small }),
+            button(`+${stepText(view.metric, small)}`, { step: small }),
+            button(`+${stepText(view.metric, big)}`, { step: big }),
+            h('span', { class: 'leaderboard-test-sep' }),
+            ...[1, 2, 3, 10].map(rank => button(`第${rank}`, { rank }, `放到第 ${rank} 名`)),
+            h('span', { class: 'leaderboard-test-sep' }),
+            button('一键还原', { reset: true }, '所有榜单都回到真实数据')));
+}
+
+/**
+ * @param {{step?: number, rank?: number, reset?: boolean}} body
+ */
+async function tryTest(body) {
+    try {
+        const response = await fetch('/api/leaderboard/admin/test', { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify({ metric: view.metric, window: view.window, site: view.site, ...body }) });
+        if (!response.ok) throw new Error(String(response.status));
+        if (body.reset) toastr.success('已还原，所有榜单回到真实数据');
+        await refresh();
+    } catch {
+        toastr.error('测试操作失败，请稍后再试');
+    }
 }
 
 function renderFooter(board) {

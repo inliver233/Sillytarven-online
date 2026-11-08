@@ -340,6 +340,26 @@ function parseBans(rows) {
     return bans;
 }
 
+/**
+ * @template {{value: number, person: {key: string}}} T
+ * @param {T[]} entries
+ * @returns {T[]} Highest first (the same order on both sites for equal values)
+ */
+function sortEntries(entries) {
+    return entries.sort((a, b) => b.value - a.value || (a.person.key < b.person.key ? -1 : 1));
+}
+
+/**
+ * Competition ranking: equal values share a rank.
+ * @param {{value: number}[]} sorted
+ * @returns {number[]}
+ */
+function competitionRanks(sorted) {
+    const ranks = [];
+    for (let i = 0; i < sorted.length; i++) ranks.push(i > 0 && sorted[i].value === sorted[i - 1].value ? ranks[i - 1] : i + 1);
+    return ranks;
+}
+
 export class LeaderboardStore {
     /**
      * @param {{site: string, secret: string, now?: () => number, recomputeMs?: number}} options
@@ -1291,12 +1311,8 @@ export class LeaderboardStore {
         if (metric === 'score') {
             for (const entry of visible) entry.value = compositeScore(entry.values, best).score;
         }
-        const shown = visible.filter(entry => entry.value > 0);
-        shown.sort((a, b) => b.value - a.value || (a.person.key < b.person.key ? -1 : 1));
-        // Competition ranking: equal values share a rank.
-        const ranks = [];
-        for (let i = 0; i < shown.length; i++) ranks.push(i > 0 && shown[i].value === shown[i - 1].value ? ranks[i - 1] : i + 1);
-        const ranking = { version: this.boardVersion, computedAt: now, people, range, hourly, period, visible: shown, ranks, best };
+        const shown = sortEntries(visible.filter(entry => entry.value > 0));
+        const ranking = { version: this.boardVersion, computedAt: now, people, range, hourly, period, visible: shown, ranks: competitionRanks(shown), best };
         if (this.boardCache.size > 200) this.boardCache.clear();
         this.boardCache.set(cacheKey, ranking);
         return ranking;
@@ -1312,20 +1328,30 @@ export class LeaderboardStore {
 
     /**
      * A board as one user sees it.
-     * @param {{metric: string, window: string, site: string, handle: string}} query
+     * @param {{metric: string, window: string, site: string, handle: string, test?: number}} query test: an
+     *   administrator trying a value of their own out; only their own view of the board shows it
      */
-    board({ metric, window, site, handle }) {
+    board({ metric, window, site, handle, test }) {
         const now = this.now();
         const ranking = this.ranking(metric, window, site);
         const account = this.accounts.get(handle);
         const myKey = account ? this.personKey(account) : null;
         const isScore = metric === 'score';
         const admin = !!account?.admin;
-        const rows = ranking.visible.slice(0, MAX_ROWS).map((entry, index) => ({
+        const person = myKey ? ranking.people.get(myKey) : null;
+        const testing = !!(admin && person && Number.isFinite(test));
+        let { visible, ranks } = ranking;
+        if (testing) {
+            // Their entry with the value they try, among everybody's real ones (the shared ranking stays as it is).
+            const values = visible.find(entry => entry.person.key === myKey)?.values ?? LeaderboardStore.values(person, ranking.range, site, now, ranking.hourly);
+            visible = sortEntries([...visible.filter(entry => entry.person.key !== myKey), { person, value: test, values }].filter(entry => entry.value > 0));
+            ranks = competitionRanks(visible);
+        }
+        const rows = visible.slice(0, MAX_ROWS).map((entry, index) => ({
             ...(admin ? { id: entry.person.key } : {}),
             // Tells rows apart (two starred-out names can look alike) without saying whose they are.
             key: this.hash(`row:${entry.person.key}`).slice(0, 10),
-            rank: ranking.ranks[index],
+            rank: ranks[index],
             name: this.label(entry.person),
             anonymous: !(entry.person.prefs.mode === 'public' && entry.person.name),
             // Where what is counted here came from (someone with an unused account elsewhere: one site).
@@ -1337,15 +1363,15 @@ export class LeaderboardStore {
             me: entry.person.key === myKey,
         }));
         let me = null;
-        const person = myKey ? ranking.people.get(myKey) : null;
         if (person) {
             const values = LeaderboardStore.values(person, ranking.range, site, now, ranking.hourly);
             // Someone off the board gets the score they would have, against the same best values.
             const composite = isScore ? compositeScore(values, ranking.best) : null;
-            const value = composite ? composite.score : (values[metric] ?? 0);
+            const real = composite ? composite.score : (values[metric] ?? 0);
+            const value = testing ? test : real;
             let ahead = 0;
             let next = null;
-            for (const entry of ranking.visible) {
+            for (const entry of visible) {
                 if (entry.person.key === myKey || entry.value <= value) continue;
                 ahead++;
                 next = entry.value;
@@ -1364,10 +1390,11 @@ export class LeaderboardStore {
                 emoji: emojiFor(person.emoji, metric),
                 // All of them, for changing them.
                 emojis: person.emoji,
+                ...(testing ? { testing: true, real } : {}),
             };
         }
         return {
-            version: `${ranking.version}-${ranking.period}`,
+            version: `${ranking.version}-${ranking.period}${testing ? `-t${test}` : ''}`,
             site: this.site,
             rows,
             me,
@@ -1376,12 +1403,32 @@ export class LeaderboardStore {
                 removed: [...ranking.people.values()].filter(other => other.banned)
                     .map(other => ({ id: other.key, name: this.label(other), sites: [...other.sites].sort() })),
             } : {}),
-            participants: ranking.visible.length,
+            participants: visible.length,
             peers: [...this.peers.values()].map(peer => ({ site: peer.site, syncedAt: peer.syncedAt, error: peer.error })),
             // For the explanations: the same numbers the boards are computed with.
             scoreParts: SCORE_PARTS,
             dailyCaps: DAILY_CAPS,
         };
+    }
+
+    /**
+     * For an administrator trying the board out: a value that puts them at this place among everybody
+     * else (sharing it when there is no room between two values).
+     * @param {{metric: string, window: string, site: string, handle: string, rank: number}} query
+     * @returns {number}
+     */
+    valueForRank({ metric, window, site, handle, rank }) {
+        const account = this.accounts.get(handle);
+        const myKey = account ? this.personKey(account) : null;
+        const others = this.ranking(metric, window, site).visible.filter(entry => entry.person.key !== myKey).map(entry => entry.value);
+        const unit = metric === 'score' ? 0.1 : metric === 'online' ? 60e3 : 1;
+        const place = Math.max(1, Math.round(Number(rank) || 1));
+        if (!others.length) return 10 * unit;
+        if (place === 1) return others[0] + 5 * unit;
+        if (place > others.length) return Math.max(unit, others[others.length - 1] - unit);
+        const above = others[place - 2];
+        const below = others[place - 1];
+        return below + unit < above ? below + unit : below;
     }
 
     /**

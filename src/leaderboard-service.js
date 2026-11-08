@@ -53,6 +53,8 @@ class LeaderboardService {
         this.enabled = false;
         /** @type {LeaderboardStore|null} */
         this.store = null;
+        /** @type {Map<string, Map<string, number>>} administrators' trial values: handle → board → value */
+        this.tests = new Map();
         this.secret = '';
         /** Whether the secret is shared with the peers (from config.yaml). */
         this.shared = false;
@@ -286,6 +288,28 @@ class LeaderboardService {
             peer.nextAt = Date.now() + Math.min(PEER_MAX_BACKOFF_MS, this.syncIntervalMs * 2 ** peer.failures);
             if (peer.failures === 1 || peer.failures % 50 === 0) console.warn(`[leaderboard] ${peer.url}: ${peer.error}`);
         }
+    }
+
+    /**
+     * Administrators trying the board out: their own value on a board, which only they see. Kept in
+     * memory only (gone when the server restarts) and never sent to the other site.
+     * @param {string} handle
+     * @param {string} board metric|window|site
+     * @returns {number|undefined}
+     */
+    testValue(handle, board) {
+        return this.tests.get(handle)?.get(board);
+    }
+
+    /**
+     * @param {string} handle
+     * @param {string} board metric|window|site
+     * @param {number|null} value null: back to the real one
+     */
+    setTestValue(handle, board, value) {
+        if (!this.tests.has(handle)) this.tests.set(handle, new Map());
+        if (value === null) this.tests.get(handle).delete(board);
+        else this.tests.get(handle).set(board, value);
     }
 
     /**

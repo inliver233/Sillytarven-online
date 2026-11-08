@@ -30,7 +30,8 @@ router.get('/board', (request, response) => {
         return response.status(400).send({ error: 'bad_query' });
     }
     const handle = leaderboard.account(request.user.profile);
-    const board = leaderboard.store.board({ metric, window, site, handle });
+    const test = request.user.profile.admin ? leaderboard.testValue(handle, `${metric}|${window}|${site}`) : undefined;
+    const board = leaderboard.store.board({ metric, window, site, handle, test });
     if (request.query.v && String(request.query.v) === board.version) {
         return response.send({ unchanged: true, version: board.version });
     }
@@ -93,6 +94,40 @@ router.post('/admin/clear-emoji', requireAdminMiddleware, (request, response) =>
     leaderboard.dirty = true;
     leaderboard.save();
     return response.sendStatus(204);
+});
+
+/**
+ * An administrator tries their own place on a board out: {metric, window, site} and one of
+ * value (set it), step (add to it), rank (go to that place) or reset (all boards back to real).
+ * Only their own view of the board shows it; nothing is counted, saved or sent to the other site.
+ */
+router.post('/admin/test', requireAdminMiddleware, (request, response) => {
+    const handle = leaderboard.account(request.user.profile);
+    const body = request.body ?? {};
+    if (body.reset) {
+        leaderboard.tests.delete(handle);
+        return response.send({ value: null });
+    }
+    const metric = String(body.metric ?? '');
+    const window = String(body.window ?? '');
+    const site = String(body.site ?? '');
+    if (!METRICS.includes(metric) || !WINDOWS.includes(window) || !SITE_FILTERS.includes(site)) {
+        return response.status(400).send({ error: 'bad_query' });
+    }
+    const board = `${metric}|${window}|${site}`;
+    let value;
+    if (body.rank !== undefined) {
+        value = leaderboard.store.valueForRank({ metric, window, site, handle, rank: Number(body.rank) });
+    } else if (body.step !== undefined) {
+        const current = leaderboard.testValue(handle, board) ?? leaderboard.store.board({ metric, window, site, handle }).me?.value ?? 0;
+        value = current + Number(body.step);
+    } else {
+        value = Number(body.value);
+    }
+    if (!Number.isFinite(value)) return response.status(400).send({ error: 'bad_value' });
+    value = Math.max(0, metric === 'score' ? Math.round(value * 10) / 10 : Math.round(value));
+    leaderboard.setTestValue(handle, board, value);
+    return response.send({ value });
 });
 
 router.get('/status', requireAdminMiddleware, (_request, response) => {

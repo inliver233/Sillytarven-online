@@ -1148,6 +1148,7 @@ const STCONTROL_READ_ONLY_POST_PATHS = new Set([
     '/api/leaderboard/admin/reset-choice',
     '/api/leaderboard/me/emoji',
     '/api/leaderboard/admin/clear-emoji',
+    '/api/leaderboard/admin/test',
     // Commands to open pages are not user data either.
     '/api/live/send',
     '/api/live/cancel',
