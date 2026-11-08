@@ -546,17 +546,21 @@ function catgirlElement(rank) {
 
 /** 综合榜第四、五名的头像（静止；那一行的边框颜色在 leaderboard.css 里，取自图片） */
 const PLACE_FACES = { 4: '/img/leaderboard-fourth.webp', 5: '/img/leaderboard-fifth.webp' };
+/** 这个名次被挤下去时，那一行先换成这张哭脸 */
+const PLACE_SAD_FACES = { 4: '/img/leaderboard-fourth-sad.webp' };
 
 /**
  * @param {number} rank
  * @param {boolean} fancy 综合榜：前三是像素猫娘，第四、五名是头像；其他榜是奖牌
- * @param {string} [mood] 猫娘这会儿的表情（见 CATGIRL_FACES）
+ * @param {{mood: string, place?: number}} [mood] 这会儿的表情：猫娘的（见 CATGIRL_FACES），或被挤下去的那个名次的哭脸
  */
 function rankCell(rank, fancy, mood) {
     let mark;
-    if (fancy && rank <= 3) {
+    if (fancy && mood?.mood === 'placeSad') {
+        mark = h('img', { class: 'leaderboard-place-face leaderboard-place-sad', src: PLACE_SAD_FACES[mood.place], alt: `第 ${rank} 名`, title: `第 ${rank} 名`, draggable: 'false' });
+    } else if (fancy && rank <= 3) {
         mark = catgirlElement(/** @type {1|2|3} */ (rank));
-        if (mood) mark.classList.add(`cg-mood-${mood}`);
+        if (mood) mark.classList.add(`cg-mood-${mood.mood}`);
     } else if (fancy && PLACE_FACES[rank]) {
         mark = h('img', { class: 'leaderboard-place-face', src: PLACE_FACES[rank], alt: `第 ${rank} 名`, title: `第 ${rank} 名`, draggable: 'false' });
     } else {
@@ -677,36 +681,39 @@ function topEvents(rows) {
 }
 
 /** 表情持续多久 */
-const MOOD_MS = { excited: 3600, happy: 2400, shocked: 3000, sad: 3200 };
+const MOOD_MS = { excited: 3600, happy: 2400, shocked: 3000, sad: 3200, placeSad: 3200 };
 
 /**
  * 综合榜前三的猫娘跟着发生的事换表情：下克上、登顶得意，往上换位、冲进前三、加分开心，
- * 被顶替吃惊，名次往下掉难过；过几秒自己换回来（期间刷新也接着这个表情）。
+ * 被顶替吃惊，名次往下掉难过；第四名被挤下去时那一行先换成第四名的哭脸。过几秒自己换回来
+ * （期间刷新也接着这个表情）。
  * @param {{key?: string, name: string, rank: number, value: number}[]} rows
  * @param {Map<string, string>} events topEvents() 的结果
  * @param {number} now
  */
 function setMoods(rows, events, now) {
     for (const row of rows) {
-        if (row.rank > 3) continue;
         const id = row.key ?? row.name;
         const event = events.get(id);
         const previousRank = lastRanks.get(id);
         const previous = lastValues.get(id);
         let mood = null;
-        if (event === 'upset' || event === 'crown') mood = 'excited';
+        if (PLACE_SAD_FACES[previousRank] && row.rank > previousRank) mood = 'placeSad';
+        else if (row.rank > 3) continue;
+        else if (event === 'upset' || event === 'crown') mood = 'excited';
         else if (event === 'swap' || event === 'podium') mood = 'happy';
         else if (event === 'displaced') mood = 'shocked';
         else if (previousRank !== undefined && row.rank > previousRank) mood = 'sad';
         else if (previous !== undefined && significant(view.metric, row.value - previous) && row.value > previous) mood = 'happy';
         if (!mood) continue;
         const until = now + MOOD_MS[mood];
-        moods.set(id, { mood, until });
-        // 没有新数据就不会重画：到时间自己把表情摘掉
+        moods.set(id, { mood, place: previousRank, until });
+        // 没有新数据就不会重画：到时间把这一格名次换回平时的样子
         setTimeout(() => {
             if (moods.get(id)?.until !== until) return;
             moods.delete(id);
-            popup?.list.querySelector(`.leaderboard-row[data-key="${CSS.escape(id)}"] .leaderboard-catgirl`)?.classList.remove(`cg-mood-${mood}`);
+            const cell = popup?.list.querySelector(`.leaderboard-row[data-key="${CSS.escape(id)}"] .leaderboard-rank`);
+            if (cell && lastRanks.has(id)) cell.replaceWith(rankCell(lastRanks.get(id), view.metric === 'score'));
         }, MOOD_MS[mood]);
     }
 }
@@ -811,7 +818,7 @@ function render(board) {
             'data-key': id,
             title: breakdown || null,
         },
-        rankCell(row.rank, fancy, moods.get(id)?.until > now ? moods.get(id).mood : undefined),
+        rankCell(row.rank, fancy, moods.get(id)?.until > now ? moods.get(id) : undefined),
         h('span', { class: 'leaderboard-name' },
             h('span', { class: `leaderboard-name-text${row.anonymous ? ' leaderboard-anonymous' : ''}`, text: row.name, title: row.anonymous ? '匿名' : '' }),
             row.emoji ? h('span', { class: 'leaderboard-emoji', text: row.emoji }) : null,
