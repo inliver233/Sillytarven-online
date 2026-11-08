@@ -664,6 +664,15 @@ function burst(row, kind, label) {
     row.append(callout);
 }
 
+/** 殿堂总冠军那一行的底：星空（两层，漂移、闪烁）、流过的极光、往上飘的火星 */
+function legendBackdrop() {
+    return h('span', { class: 'leaderboard-legend-fx', 'aria-hidden': 'true' },
+        h('span', { class: 'lg-stars' }),
+        h('span', { class: 'lg-stars lg-stars-far' }),
+        h('span', { class: 'lg-aurora' }),
+        h('span', { class: 'lg-embers' }, ...Array.from({ length: 8 }, () => h('i'))));
+}
+
 /** 各行（按 key）在列表内容里的位置 */
 function rowTops(list) {
     const base = list.getBoundingClientRect().top - list.scrollTop;
@@ -865,15 +874,21 @@ function render(board) {
             mark ? h('span', { class: `leaderboard-move ${mark.kind}`, style: `animation-delay: -${now - mark.at}ms`, text: mark.text }) : null,
             valueText);
         const sparkles = row.rank <= 3 ? SPARKLES[fancy ? 'score' : 'other'][row.rank] ?? 0 : 0;
+        // 综合榜总榜的第一名：殿堂总冠军
+        const legend = fancy && view.window === 'all' && row.rank === 1;
+        const rankMark = rankCell(row.rank, fancy, moods.get(id));
+        if (legend) rankMark.classList.add('leaderboard-legend-avatar');
         const element = h('div', {
-            class: `leaderboard-row${row.rank <= 3 ? ` leaderboard-top leaderboard-top${row.rank}` : ''}${PLACE_FACES[row.rank] ? ` leaderboard-place${row.rank}` : ''}${row.me ? ' leaderboard-row-me' : ''}${expandable ? ' leaderboard-row-expandable' : ''}${expanded ? ' expanded' : ''}`,
+            class: `leaderboard-row${row.rank <= 3 ? ` leaderboard-top leaderboard-top${row.rank}` : ''}${PLACE_FACES[row.rank] ? ` leaderboard-place${row.rank}` : ''}${legend ? ` leaderboard-legend${fresh ? ' leaderboard-legend-enter' : ''}` : ''}${row.me ? ' leaderboard-row-me' : ''}${expandable ? ' leaderboard-row-expandable' : ''}${expanded ? ' expanded' : ''}`,
             'data-key': id,
             title: breakdown || null,
         },
-        rankCell(row.rank, fancy, moods.get(id)),
+        legend ? legendBackdrop() : null,
+        rankMark,
         h('span', { class: 'leaderboard-name' },
             h('span', { class: `leaderboard-name-text${row.anonymous ? ' leaderboard-anonymous' : ''}`, text: row.name, title: row.anonymous ? '匿名' : '' }),
             row.emoji ? h('span', { class: 'leaderboard-emoji', text: row.emoji }) : null,
+            legend ? h('span', { class: 'leaderboard-legend-title' }, h('i', { class: 'fa-solid fa-crown' }), h('span', { text: '总冠军' })) : null,
             row.me ? h('span', { class: 'leaderboard-you', text: '我' }) : null,
             row.admin ? adminBadge() : null,
             ...siteBadges(row.sites)),
@@ -905,7 +920,8 @@ function render(board) {
                     void setRemoved(row.id, row.name, true);
                 },
             }, h('i', { class: 'fa-solid fa-user-slash' }), h('span', { text: '移出榜单' })) : null) : null,
-        sparkles ? h('span', { class: 'leaderboard-sparkles', 'aria-hidden': 'true' }, ...Array.from({ length: sparkles }, () => h('i'))) : null);
+        sparkles ? h('span', { class: 'leaderboard-sparkles', 'aria-hidden': 'true' }, ...Array.from({ length: sparkles }, () => h('i'))) : null,
+        legend ? h('span', { class: 'leaderboard-legend-frame', 'aria-hidden': 'true' }, h('i'), h('i'), h('i'), h('i')) : null);
         if (expandable) {
             // 手机上没有悬停提示：点一下展开
             element.addEventListener('click', () => {
