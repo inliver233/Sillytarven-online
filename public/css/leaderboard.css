@@ -924,14 +924,14 @@
 
 /*
  * 头像：傲娇千金（32×32，显示成 48px），背后金色放射光和光晕。
- * 平时一脸得意，隔一阵「哼」一下；歪戴的小皇冠时不时晃一晃，「哼」的时候差点甩掉。
+ * 平时一脸得意，按 leaderboard.js 的 OJOU_ROUTINE 轮着做日常动作（瞟人、喝茶、哼、哼歌、眨眼、哈欠、打瞌睡、扇子、
+ * 瞪人、扶皇冠、撩头发、害羞），那条时间线的动画由 leaderboard.js 生成（ojouRoutineCss）。
  * 有事时：吃惊皇冠弹起来摆正，难过皇冠滑下去一截，开心、得意跟着蹦、晃得更欢。
  */
 .leaderboard-ojou {
     --cg-breathe: 3.2s;
     --cg-blink: 4.8s;
     --cg-glint: 4.4s;
-    --cg-smile: 9.6s;
     --cg-shift: 0s;
 }
 
@@ -943,22 +943,15 @@
     animation: none;
 }
 
-/* 猫娘那套「隔一阵笑一下」换成「哼」 */
+/* 猫娘那套「隔一阵笑一下」不用 */
 .leaderboard-ojou .cg-face-happy {
     animation: none;
 }
 
-.leaderboard-ojou .cg-face-hmph {
-    animation: leaderboard-cg-face-smile var(--cg-smile) steps(1, end) infinite;
-    animation-delay: calc(var(--cg-t) + var(--cg-shift) - 2s);
-}
-
-/* 皇冠绕底边中点转（和 leaderboard.js 的 OJOU_CROWN_AT 一致），和「哼」同一个周期 */
+/* 皇冠绕底边中点转（和 leaderboard.js 的 OJOU_CROWN_AT 一致） */
 .leaderboard-ojou .oj-crown-tilt {
     transform-origin: 20.5px 7.4px;
     transform: rotate(22deg);
-    animation: leaderboard-oj-crown var(--cg-smile) ease-in-out infinite;
-    animation-delay: calc(var(--cg-t) + var(--cg-shift) - 2s);
 }
 
 .leaderboard-ojou[class*='cg-mood-'] .oj-crown-tilt {
@@ -987,16 +980,65 @@
     transform: translate(1px, 1px);
 }
 
-@keyframes leaderboard-oj-crown {
-    0%, 30%, 82%, 100% { transform: rotate(22deg); }
-    34% { transform: rotate(30deg); }
-    38% { transform: rotate(16deg); }
-    42% { transform: rotate(25deg); }
-    46% { transform: rotate(21deg); }
-    89% { transform: rotate(38deg); }
-    92% { transform: rotate(31deg); }
-    95% { transform: rotate(40deg); }
-    98% { transform: rotate(17deg); }
+/* 日常动作里的小道具，整格跳：热气一左一右、Z 和音符往上飘、爱心、扇子和怒气一上一下、星星一闪一闪 */
+.leaderboard-ojou .oj-steam-a {
+    animation: leaderboard-oj-frame-a 0.8s steps(1, end) infinite;
+}
+
+.leaderboard-ojou .oj-steam-b {
+    animation: leaderboard-oj-frame-b 0.8s steps(1, end) infinite;
+}
+
+.leaderboard-ojou .oj-z1,
+.leaderboard-ojou .oj-z2,
+.leaderboard-ojou .oj-note1,
+.leaderboard-ojou .oj-note2 {
+    animation: leaderboard-oj-rise 1.6s steps(4, end) infinite;
+}
+
+.leaderboard-ojou .oj-z2,
+.leaderboard-ojou .oj-note2 {
+    animation-delay: -0.8s;
+}
+
+.leaderboard-ojou .oj-heart,
+.leaderboard-ojou .oj-fan,
+.leaderboard-ojou .oj-anger {
+    animation: leaderboard-oj-bob 0.6s steps(1, end) infinite;
+}
+
+.leaderboard-ojou .oj-fan,
+.leaderboard-ojou .oj-anger {
+    animation-duration: 0.3s;
+}
+
+.leaderboard-ojou .oj-twinkle {
+    animation: leaderboard-oj-pulse 0.5s steps(1, end) infinite;
+}
+
+@keyframes leaderboard-oj-frame-a {
+    0% { opacity: 1; }
+    50% { opacity: 0; }
+}
+
+@keyframes leaderboard-oj-frame-b {
+    0% { opacity: 0; }
+    50% { opacity: 1; }
+}
+
+@keyframes leaderboard-oj-pulse {
+    0% { opacity: 1; }
+    50% { opacity: 0.3; }
+}
+
+@keyframes leaderboard-oj-rise {
+    0% { transform: translateY(1px); opacity: 1; }
+    100% { transform: translateY(-3px); opacity: 0.3; }
+}
+
+@keyframes leaderboard-oj-bob {
+    0% { transform: translateY(0); }
+    50% { transform: translateY(-1px); }
 }
 
 @keyframes leaderboard-oj-crown-cheer {

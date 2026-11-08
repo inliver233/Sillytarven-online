@@ -592,7 +592,7 @@ const OJOU_COLORS = {
     S: '#ffe9de', s: '#f5cbbd', t: '#e7aea0', E: '#26162e', e: '#2b4fb8', n: '#4a78e6', i: '#a3c6ff', W: '#ffffff',
     B: '#ff9db0', b: '#ffc4ce', M: '#b5404f', m: '#d9788a', P: '#ff8aa0', q: '#9fd8ff', Q: '#5fb8f0',
     C: '#ffffff', c: '#ddd3ea', D: '#a51d3e', x: '#6e1129', X: '#cc3358',
-    G: '#ffd34d', g: '#c48a12', Y: '#fff6c8', K: '#ffe58a', J: '#e11d48', j: '#ff8fae',
+    G: '#ffd34d', g: '#c48a12', Y: '#fff6c8', K: '#ffe58a', J: '#e11d48', j: '#ff8fae', v: 'rgba(255, 255, 255, 0.75)',
 };
 
 /**
@@ -611,23 +611,151 @@ const OJOU_MOUTH = [[14, 20, 'm'], [15, 21, 'M'], [16, 21, 'M'], [17, 20, 'm']];
 const OJOU_CLOSED_EYES = bothSides([[8, 14, 'E'], [9, 15, 'E'], [10, 16, 'E'], [11, 16, 'E'], [12, 16, 'E'], [13, 16, 'E']]);
 const OJOU_SMILE_EYES = bothSides([[8, 14, 'E'], [9, 17, 'E'], [10, 16, 'E'], [11, 15, 'E'], [12, 15, 'E'], [13, 16, 'E']]);
 const OJOU_POUT = [[14, 21, 'M'], [15, 20, 'M'], [16, 20, 'M'], [17, 21, 'M']];
+const OJOU_SMILE = [[14, 20, 'M'], [15, 21, 'M'], [16, 21, 'M'], [17, 20, 'M']];
+const OJOU_FLAT = [[15, 21, 'M'], [16, 21, 'M']];
+const OJOU_SMALL_O = [[15, 20, 'M'], [16, 20, 'M'], ...OJOU_FLAT];
+const OJOU_WAVY = [[14, 21, 'M'], [15, 20, 'M'], [16, 21, 'M'], [17, 20, 'M']];
+const OJOU_WIDE_EYES = bothSides([[9, 13, 'E'], [10, 13, 'E'], [11, 13, 'E'], [12, 13, 'E'], [13, 13, 'E'], [10, 14, 'W'], [11, 14, 'W'], [12, 14, 'W'], [13, 14, 'W'],
+    [10, 15, 'W'], [11, 15, 'E'], [12, 15, 'E'], [13, 15, 'W'], [10, 16, 'W'], [11, 16, 'E'], [12, 16, 'E'], [13, 16, 'W'], [10, 17, 'W'], [11, 17, 'W'], [12, 17, 'W'], [13, 17, 'W']]);
+const OJOU_NO_BLUSH = bothSides([[9, 19, 'S'], [10, 19, 'S'], [11, 19, 'S'], [12, 19, 'S']]);
+const OJOU_BIG_BLUSH = bothSides([[8, 19, 'B'], [9, 19, 'B'], [10, 19, 'B'], [11, 19, 'P'], [12, 19, 'B'], [13, 19, 'b'], [9, 18, 'b'], [10, 18, 'P'], [12, 18, 'P'], [9, 20, 'P']]);
+const OJOU_SWEAT = [[24, 9, 'q'], [23, 10, 'q'], [24, 10, 'q'], [23, 11, 'Q'], [24, 11, 'Q']];
+
 /**
- * 表情（盖在脸上）：哼（傲娇：闭眼撇嘴、脸更红、哼出一口气，平时隔一阵来一下）、开心（笑眼）、
+ * 一小块像素图：从 (x0, y0) 起一行一行写，'.' 跳过。
+ * @param {number} x0
+ * @param {number} y0
+ * @param {string[]} rows
+ * @returns {[number, number, string][]}
+ */
+function pixelArt(x0, y0, rows) {
+    return rows.flatMap((row, dy) => [...row].flatMap((letter, dx) => letter === '.' ? [] : [[x0 + dx, y0 + dy, letter]]));
+}
+
+/**
+ * 半眯的眼：-1 往左瞟、1 往右瞟（另一边露出眼白），0 正眼瞪人。
+ * @param {-1|0|1} look
+ */
+function ojouLiddedEyes(look) {
+    const eye = x0 => [0, 1, 2, 3].flatMap(dx => {
+        const x = x0 + dx;
+        if (look && (look < 0) !== (dx < 2)) return [[x, 16, 'W'], [x, 17, 'W']];
+        return [[x, 16, 'e'], [x, 17, !look && (dx === 1 || dx === 2) ? 'i' : 'n']];
+    });
+    return [...bothSides([[8, 14, 'E'], [9, 15, 'E'], [10, 15, 'E'], [11, 15, 'E'], [12, 15, 'E'], [13, 15, 'E']]), ...eye(10), ...eye(18)];
+}
+
+/** 一颗小星星（闪光） */
+function ojouStar(x, y) {
+    return [[x, y - 1, 'Y'], [x - 1, y, 'Y'], [x, y, 'W'], [x + 1, y, 'Y'], [x, y + 1, 'Y']];
+}
+
+/**
+ * 表情（盖在脸上）：哼（傲娇：闭眼撇嘴、脸更红、哼出一口气）、开心（笑眼）、
  * 得意（哦呵呵大笑、闪光）、吃惊（瞪眼、o 嘴、冷汗、脸不红了）、难过（泪汪汪、撇嘴）。
  */
 const OJOU_FACES = {
     hmph: [...OJOU_CLOSED_EYES, ...OJOU_POUT, ...bothSides([[9, 18, 'B'], [13, 19, 'b']]), [24, 22, 'W'], [25, 21, 'W'], [26, 22, 'W'], [27, 21, 'W']],
-    happy: [...OJOU_SMILE_EYES, [14, 20, 'M'], [15, 21, 'M'], [16, 21, 'M'], [17, 20, 'M']],
+    happy: [...OJOU_SMILE_EYES, ...OJOU_SMILE],
     excited: [...OJOU_SMILE_EYES, [14, 20, 'M'], [15, 20, 'M'], [16, 20, 'M'], [17, 20, 'M'], [14, 21, 'M'], [15, 21, 'P'], [16, 21, 'P'], [17, 21, 'M'], [15, 22, 'M'], [16, 22, 'M'],
-        [2, 3, 'Y'], [1, 4, 'Y'], [2, 4, 'W'], [3, 4, 'Y'], [2, 5, 'Y'], [28, 9, 'Y'], [27, 10, 'Y'], [28, 10, 'W'], [29, 10, 'Y'], [28, 11, 'Y'], [5, 7, 'K'], [26, 5, 'K']],
-    shocked: [...bothSides([[9, 13, 'E'], [10, 13, 'E'], [11, 13, 'E'], [12, 13, 'E'], [13, 13, 'E'], [10, 14, 'W'], [11, 14, 'W'], [12, 14, 'W'], [13, 14, 'W'],
-        [10, 15, 'W'], [11, 15, 'E'], [12, 15, 'E'], [13, 15, 'W'], [10, 16, 'W'], [11, 16, 'E'], [12, 16, 'E'], [13, 16, 'W'], [10, 17, 'W'], [11, 17, 'W'], [12, 17, 'W'], [13, 17, 'W'],
-        [9, 19, 'S'], [10, 19, 'S'], [11, 19, 'S'], [12, 19, 'S']]),
-    [15, 20, 'M'], [16, 20, 'M'], [15, 21, 'M'], [16, 21, 'M'], [24, 9, 'q'], [23, 10, 'q'], [24, 10, 'q'], [23, 11, 'Q'], [24, 11, 'Q']],
+        ...ojouStar(2, 4), ...ojouStar(28, 10), [5, 7, 'K'], [26, 5, 'K']],
+    shocked: [...OJOU_WIDE_EYES, ...OJOU_NO_BLUSH, ...OJOU_SMALL_O, ...OJOU_SWEAT],
     sad: [...bothSides([[8, 13, 'E'], [9, 13, 'E'], [9, 14, 'E'], [10, 14, 'E'], [11, 14, 'E'], [12, 14, 'E'], [13, 14, 'E'],
         [10, 15, 'W'], [11, 15, 'e'], [12, 15, 'W'], [13, 15, 'E'], [10, 16, 'e'], [11, 16, 'n'], [12, 16, 'n'], [13, 16, 'e'],
         [10, 17, 'q'], [11, 17, 'W'], [12, 17, 'q'], [13, 17, 'q'], [10, 18, 'q'], [11, 18, 'q'], [12, 18, 'q'], [10, 19, 'q'], [10, 20, 'Q']]), ...OJOU_POUT],
 };
+
+const ojouZ = (x0, y0) => pixelArt(x0, y0, ['qqqq', '..q.', '.q..', 'qqqq']);
+const ojouNote = (x0, y0) => pixelArt(x0, y0, ['..YY', '..YK', '..Y.', 'YYY.', 'YYY.']);
+/**
+ * 日常动作的脸（face）和小道具（props：class → 像素，各自有小动画，见 leaderboard.css）：
+ * 往左/右瞟、瞪人冒 💢、眨眼放电、喝红茶（冒热气）、扇子挡嘴「哦呵呵」、打哈欠、犯困/睡着（冒 Z）/惊醒/嘴硬脸红、
+ * 哼歌（音符）、害羞（爱心）、抬眼看皇冠、闭眼得意、撩头发。
+ */
+const OJOU_ACTIONS = {
+    'look-left': { face: [...ojouLiddedEyes(-1), ...OJOU_FLAT] },
+    'look-right': { face: [...ojouLiddedEyes(1), ...OJOU_FLAT] },
+    glare: { face: [...ojouLiddedEyes(0), ...OJOU_POUT], props: { 'oj-anger': pixelArt(8, 3, ['.J.J.', 'JJ.JJ', '.....', 'JJ.JJ', '.J.J.']) } },
+    wink: { face: [...OJOU_EYES.filter(([x]) => x < 16), ...OJOU_SMILE_EYES.filter(([x]) => x > 15), ...OJOU_SMILE, [16, 22, 'P']], props: { 'oj-twinkle': ojouStar(27, 12) } },
+    tea: {
+        face: [...OJOU_CLOSED_EYES, ...OJOU_SMILE, ...bothSides([[8, 19, 'b'], [13, 19, 'b']]),
+            ...pixelArt(19, 20, ['..YGGGGY..', '.OCWWWWCC.', '.OCWJWWC.C', '.OCWWWWCC.', '..OCWWC...', 'OcCCCCCCcO', '.OOOOOOOO.'])],
+        props: {
+            'oj-steam-a': [[23, 19, 'v'], [24, 18, 'v'], [24, 17, 'v'], [23, 16, 'v'], [25, 19, 'v'], [26, 18, 'v'], [26, 17, 'v']],
+            'oj-steam-b': [[24, 19, 'v'], [23, 18, 'v'], [23, 17, 'v'], [24, 16, 'v'], [26, 19, 'v'], [25, 18, 'v'], [25, 16, 'v']],
+        },
+    },
+    fan: {
+        face: OJOU_SMILE_EYES,
+        props: {
+            'oj-fan': pixelArt(10, 17, ['...GGGGGG...', '.GGXXPPXXGG.', 'GXXPPXXPPXXG', 'OXXPPXXPPXXO', '.OXPPXXPPXO.', '..OPPXXPPO..', '...OOggOO...']),
+            'oj-twinkle': [...ojouStar(2, 4), ...ojouStar(28, 10)],
+        },
+    },
+    yawn: { face: [...OJOU_CLOSED_EYES, ...pixelArt(14, 19, ['.MM.', 'MPPM', 'MPPM', '.MM.']), [8, 16, 'q'], [8, 17, 'Q'], [23, 16, 'q'], [23, 17, 'Q']] },
+    sleepy: { face: [...bothSides([[8, 15, 'E'], [9, 16, 'E'], [10, 16, 'E'], [11, 16, 'E'], [12, 16, 'E'], [13, 16, 'E'], [10, 17, 'e'], [11, 17, 'n'], [12, 17, 'n'], [13, 17, 'e']]), ...OJOU_FLAT] },
+    asleep: {
+        face: [...bothSides([[8, 15, 'E'], [9, 16, 'E'], [10, 17, 'E'], [11, 17, 'E'], [12, 17, 'E'], [13, 16, 'E']]), ...OJOU_FLAT, [17, 22, 'q']],
+        props: { 'oj-z1': ojouZ(24, 7), 'oj-z2': ojouZ(28, 2) },
+    },
+    startled: { face: [...OJOU_WIDE_EYES, ...OJOU_NO_BLUSH, ...OJOU_SMALL_O, ...OJOU_SWEAT] },
+    flustered: { face: [...ojouLiddedEyes(1), ...OJOU_WAVY, ...OJOU_BIG_BLUSH, ...OJOU_SWEAT] },
+    hum: { face: [...OJOU_SMILE_EYES, ...OJOU_SMALL_O], props: { 'oj-note1': ojouNote(0, 7), 'oj-note2': ojouNote(28, 5) } },
+    shy: { face: [...ojouLiddedEyes(-1), ...OJOU_WAVY, ...OJOU_BIG_BLUSH], props: { 'oj-heart': pixelArt(1, 6, ['.J.J.', 'JjJJJ', '.JJJ.', '..J..']) } },
+    'look-up': {
+        face: [...bothSides([[8, 13, 'E'], [9, 13, 'E'], [9, 14, 'E'], [10, 14, 'E'], [11, 14, 'E'], [12, 14, 'E'], [13, 14, 'E'],
+            [10, 15, 'e'], [11, 15, 'e'], [12, 15, 'e'], [13, 15, 'E'], [10, 16, 'n'], [11, 16, 'i'], [12, 16, 'i'], [13, 16, 'n'],
+            [10, 17, 'W'], [11, 17, 'W'], [12, 17, 'W'], [13, 17, 'W'], [11, 18, 'W'], [12, 18, 'W']]), ...OJOU_FLAT, ...OJOU_SWEAT],
+    },
+    smug: { face: [...OJOU_CLOSED_EYES, ...OJOU_MOUTH] },
+    flip: { face: [...OJOU_CLOSED_EYES, ...OJOU_MOUTH, [5, 7, 'K'], [26, 5, 'K']], props: { 'oj-twinkle': ojouStar(29, 13) } },
+};
+
+/**
+ * 千金的日常，按顺序一圈一圈轮（约 79 秒）。每段 ms 是多长；faces 是这段里依次换的脸 [名字, 毫秒]（没有就是平时的脸）；
+ * crown 是皇冠 [这段里第几毫秒, 角度, 往下几格]（中间平滑过去，前后回到 22°）；move 是整个人、lock 是右边那缕长发
+ * [毫秒, transform]（整格跳）。
+ * @type {{ms: number, faces?: [string, number][], crown?: [number, number, number?][], move?: [number, string][], lock?: [number, string][]}[]}
+ */
+const OJOU_ROUTINE = [
+    { ms: 4000, crown: [[2600, 29], [2900, 17], [3200, 25], [3500, 22]] },
+    { ms: 2600, faces: [['look-left', 1300], ['look-right', 1300]] },
+    { ms: 3500 },
+    { ms: 4800, faces: [['tea', 4800]] },
+    { ms: 3500 },
+    { ms: 1400, faces: [['hmph', 1400]], crown: [[100, 38], [400, 31], [700, 40], [1100, 17]], move: [[0, 'translateY(-1px)'], [250, 'none']] },
+    { ms: 4500, crown: [[3000, 27], [3300, 18], [3600, 23]] },
+    {
+        ms: 3600, faces: [['hum', 3600]],
+        crown: [[450, 26], [900, 19], [1350, 25], [1800, 20], [2250, 24], [2700, 20], [3150, 23]],
+        move: [[450, 'translateY(1px)'], [900, 'none'], [1350, 'translateY(1px)'], [1800, 'none'], [2250, 'translateY(1px)'], [2700, 'none'], [3150, 'translateY(1px)']],
+    },
+    { ms: 3500 },
+    { ms: 1400, faces: [['wink', 1400]] },
+    { ms: 4000, crown: [[2000, 28], [2300, 18], [2600, 22]] },
+    { ms: 2400, faces: [['yawn', 2400]], move: [[200, 'translateY(-1px)'], [1700, 'none']] },
+    {
+        ms: 6200, faces: [['sleepy', 1300], ['asleep', 2900], ['startled', 700], ['flustered', 1300]],
+        crown: [[1300, 26], [2400, 33], [3600, 40, 1], [4200, 40, 1], [4300, 4, -3], [4600, 10, -1], [5000, 24], [5400, 20]],
+        move: [[1300, 'translateY(1px)'], [1900, 'none'], [2500, 'translateY(1px)'], [3100, 'none'], [3700, 'translateY(1px)'], [4200, 'translateY(-2px)'], [4400, 'translateY(-1px)'], [4600, 'none']],
+    },
+    { ms: 4000 },
+    { ms: 3400, faces: [['fan', 3400]], crown: [[600, 26], [1200, 19], [1800, 25], [2400, 20]] },
+    { ms: 3500 },
+    { ms: 1800, faces: [['glare', 1800]], move: [[0, 'translateX(-1px)'], [120, 'translateX(1px)'], [240, 'none']] },
+    { ms: 4000 },
+    {
+        ms: 2600, faces: [['look-up', 1100], ['smug', 1500]],
+        crown: [[300, 32], [700, 42, 1], [1100, 44, 1], [1150, 0, -1], [1400, 0], [2000, 8]],
+        move: [[1100, 'translateY(-1px)'], [1300, 'none']],
+    },
+    { ms: 3500 },
+    { ms: 1800, faces: [['flip', 1800]], crown: [[200, 30], [500, 17], [800, 23]], lock: [[100, 'translate(1px, -1px)'], [350, 'translate(2px, -1px)'], [600, 'translate(1px, 0)'], [850, 'none']] },
+    { ms: 3500 },
+    { ms: 2800, faces: [['shy', 2800]] },
+    { ms: 2000 },
+];
+
 /** 皇冠（正的）；底边中点在 OJOU_CROWN_AT，CSS 绕这一点转（leaderboard.css 的 transform-origin 要一致） */
 const OJOU_CROWN = [
     'Y...Y...Y',
@@ -640,7 +768,8 @@ const OJOU_CROWN = [
 const OJOU_CROWN_AT = [20.5, 7.4];
 
 /**
- * 千金（SVG）：分层同猫娘（眨眼、表情、呼吸共用那套动画），外加皇冠一层（歪着、会晃，尖上的珍珠一闪一闪）。
+ * 千金（SVG）：分层同猫娘（眨眼、表情、呼吸共用那套动画），外加日常动作的脸和道具、整个人一层（点头、蹦）、
+ * 右边长发一层（撩头发）、皇冠一层（歪着、会晃，尖上的珍珠一闪一闪）。
  * @returns {string}
  */
 function ojouSvg() {
@@ -648,9 +777,12 @@ function ojouSvg() {
     const face = new Set([...OJOU_EYES, ...OJOU_MOUTH].map(([x, y]) => `${x},${y}`));
     /** @type {[number, number, string][]} */
     const body = [];
+    /** @type {[number, number, string][]} 右边那缕长发的下半截（撩头发时会动） */
+    const lock = [];
     OJOU_PIXELS.forEach((row, y) => [...row].forEach((letter, column) => {
         const x = column - 1;
-        if (letter !== '.') body.push([x, y, face.has(`${x},${y}`) ? 'S' : letter]);
+        if (letter === '.') return;
+        (x >= 28 && y >= 16 ? lock : body).push([x, y, face.has(`${x},${y}`) ? 'S' : letter]);
     }));
     const left = OJOU_CROWN_AT[0] - OJOU_CROWN[0].length / 2;
     const top = OJOU_CROWN_AT[1] - OJOU_CROWN.length;
@@ -663,21 +795,68 @@ function ojouSvg() {
     const crown = `<path fill="${colors.G}" d="${Object.values(paths).flat().join('')}"/>`
         + Object.entries(paths).map(([letter, d]) => `<path fill="${colors[letter]}" d="${d.join('')}"/>`).join('');
     const glints = [0, 4, 8].map(x => `<rect x="${left + x}" y="${top}" width="1" height="1" fill="#ffffff"/>`).join('');
-    return '<svg class="leaderboard-catgirl leaderboard-ojou" viewBox="0 0 32 32" shape-rendering="crispEdges" role="img" aria-label="总冠军"><title>总冠军</title><g class="cg-all">'
-        + `<g class="cg-body">${pixelRects(body, colors)}</g>`
+    const actions = Object.entries(OJOU_ACTIONS).map(([name, action]) => `<g class="cg-face cg-face-${name}">${pixelRects(action.face, colors)}`
+        + Object.entries(action.props ?? {}).map(([prop, pixels]) => `<g class="${prop}">${pixelRects(pixels, colors)}</g>`).join('') + '</g>').join('');
+    return '<svg class="leaderboard-catgirl leaderboard-ojou" viewBox="0 0 32 32" shape-rendering="crispEdges" role="img" aria-label="总冠军"><title>总冠军</title><g class="cg-all"><g class="oj-act">'
+        + `<g class="cg-body">${pixelRects(body, colors)}</g><g class="oj-lock">${pixelRects(lock, colors)}</g>`
         + `<g class="cg-normal"><g class="cg-eyes">${pixelRects(OJOU_EYES, colors)}</g><g class="cg-blink">${pixelRects(OJOU_CLOSED_EYES, colors)}</g><g class="cg-mouth">${pixelRects(OJOU_MOUTH, colors)}</g></g>`
         + Object.entries(OJOU_FACES).map(([mood, pixels]) => `<g class="cg-face cg-face-${mood}">${pixelRects(pixels, colors)}</g>`).join('')
-        + `<g class="oj-crown"><g class="oj-crown-tilt" shape-rendering="geometricPrecision">${crown}<g class="cg-glint">${glints}</g></g></g></g></svg>`;
+        + actions
+        + `<g class="oj-crown"><g class="oj-crown-tilt" shape-rendering="geometricPrecision">${crown}<g class="cg-glint">${glints}</g></g></g></g></g></svg>`;
 }
 
 /** @type {HTMLTemplateElement|null} */
 let ojouTemplate = null;
+
+/**
+ * 把 OJOU_ROUTINE 排成一条时间线的 CSS 动画：各张脸什么时候露出来、平时的脸什么时候藏起来、皇冠/整个人/长发怎么动。
+ * 和别的动画一样按 --lb-clock 对齐（重建这一行不会从头演）；有表情（cg-mood-*）时整条时间线停下。
+ * @returns {string}
+ */
+function ojouRoutineCss() {
+    const total = OJOU_ROUTINE.reduce((sum, step) => sum + step.ms, 0);
+    const pct = ms => `${Math.round(ms / total * 1e5) / 1e3}%`;
+    /** @type {Map<string, [number, number][]>} */
+    const shown = new Map();
+    /** @type {[number, number][]} */
+    const busy = [];
+    const crown = [[0, 'translateY(0px) rotate(22deg)']];
+    const move = [[0, 'none']];
+    const lock = [[0, 'none']];
+    let start = 0;
+    for (const step of OJOU_ROUTINE) {
+        let at = start;
+        for (const [face, ms] of step.faces ?? []) {
+            if (!shown.has(face)) shown.set(face, []);
+            shown.get(face).push([at, at + ms]);
+            at += ms;
+        }
+        if (step.faces) busy.push([start, start + step.ms]);
+        if (step.crown) {
+            crown.push([start, 'translateY(0px) rotate(22deg)'], ...step.crown.map(([ms, deg, down = 0]) => [start + ms, `translateY(${down}px) rotate(${deg}deg)`]), [start + step.ms, 'translateY(0px) rotate(22deg)']);
+        }
+        if (step.move) move.push(...step.move.map(([ms, value]) => [start + ms, value]), [start + step.ms, 'none']);
+        if (step.lock) lock.push(...step.lock.map(([ms, value]) => [start + ms, value]), [start + step.ms, 'none']);
+        start += step.ms;
+    }
+    crown.push([total, 'translateY(0px) rotate(22deg)']);
+    const spans = (list, on, off) => `0% { opacity: ${off}; } ${list.map(([from, to]) => `${pct(from)} { opacity: ${on}; } ${pct(to)} { opacity: ${off}; }`).join(' ')}`;
+    const points = list => list.map(([ms, value]) => `${pct(ms)} { transform: ${value}; }`).join(' ');
+    const rule = (target, name, frames, easing) => `@keyframes ${name} { ${frames} }\n`
+        + `.leaderboard-ojou:not([class*='cg-mood-']) ${target} { animation: ${name} ${total}ms ${easing} infinite; animation-delay: calc(var(--cg-t) + var(--cg-shift)); }\n`;
+    return rule('.cg-normal', 'leaderboard-oj-normal', spans(busy, 0, 1), 'steps(1, end)')
+        + [...shown].map(([face, list]) => rule(`.cg-face-${face}`, `leaderboard-oj-${face}`, spans(list, 1, 0), 'steps(1, end)')).join('')
+        + rule('.oj-crown-tilt', 'leaderboard-oj-crown', points(crown), 'ease-in-out')
+        + rule('.oj-act', 'leaderboard-oj-move', points(move), 'steps(1, end)')
+        + rule('.oj-lock', 'leaderboard-oj-lock', points(lock), 'steps(1, end)');
+}
 
 /** @returns {Element} */
 function ojouElement() {
     if (!ojouTemplate) {
         ojouTemplate = document.createElement('template');
         ojouTemplate.innerHTML = ojouSvg();
+        document.head.append(h('style', { id: 'leaderboard-ojou-routine', text: ojouRoutineCss() }));
     }
     return ojouTemplate.content.firstElementChild.cloneNode(true);
 }
