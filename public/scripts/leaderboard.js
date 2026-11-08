@@ -404,19 +404,129 @@ const MEDALS = { 1: '🥇', 2: '🥈', 3: '🥉' };
 /** 前三名身上的星光：综合榜更多，第一名最多 */
 const SPARKLES = { score: { 1: 6, 2: 3 }, other: { 1: 3 } };
 
-/** 系统开了「减少动态效果」：不滚数字、不滑动、不浮出涨跌 */
+/** 系统或酒馆设置里开了「减少动画」：不滚数字、不滑动、不浮出涨跌（CSS 动画由酒馆统一关掉） */
 function calmMotion() {
-    return !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    return document.body.classList.contains('reduced-motion') || !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+}
+
+/**
+ * 综合榜前三的像素猫娘（16×16）：金、银、铜三色头发和铃铛，第一名戴王冠、第二名星星发夹、第三名蝴蝶结。
+ * '.' 是透明，其他字母是这一名的颜色。
+ */
+const CATGIRL_PIXELS = [
+    '..O..........O..',
+    '.OHO........OHO.',
+    '.OPHO......OHPO.',
+    '.OPPHOOOOOOHPPO.',
+    '.OHHHHHHHHHHHHO.',
+    'OHHLHHHHHHHHLHHO',
+    'OHHHHHHHHHHHHHHO',
+    'OHHHSHHSSHHSHHHO',
+    'OHHSOOSSSSOOSHHO',
+    'OHHSWeSSSSWeSHHO',
+    'OHHSeESSSSeESHHO',
+    'OHHSBBSMMSBBSHHO',
+    'OhHOSSSSSSSSOHhO',
+    'OhhhOORRRROOhhhO',
+    '.OOOOOOwGOOOOOO.',
+    '......OggO......',
+];
+/** 名次 → 叠在上面的配饰 [x, y, 颜色] */
+const CATGIRL_EXTRAS = {
+    1: [[5, 0, 'O'], [7, 0, 'O'], [8, 0, 'O'], [10, 0, 'O'], [5, 1, 'G'], [7, 1, 'w'], [8, 1, 'G'], [10, 1, 'G'], [5, 2, 'G'], [6, 2, 'G'], [7, 2, 'J'], [8, 2, 'J'], [9, 2, 'G'], [10, 2, 'G'], [5, 3, 'g'], [6, 3, 'g'], [7, 3, 'g'], [8, 3, 'g'], [9, 3, 'g'], [10, 3, 'g']],
+    2: [[12, 4, 'w'], [11, 5, 'w'], [12, 5, 'K'], [13, 5, 'w'], [12, 6, 'g']],
+    3: [[2, 4, 'K'], [4, 4, 'K'], [2, 5, 'K'], [3, 5, 'k'], [4, 5, 'K']],
+};
+const CATGIRL_COMMON = { P: '#ff9ab3', S: '#ffe3d1', W: '#ffffff', B: '#ff8fa3', M: '#9a3412', R: '#d6334f', J: '#e11d48' };
+const CATGIRL_COLORS = {
+    1: { O: '#3b2410', H: '#f8c537', h: '#c98f12', L: '#fff1a8', E: '#3b2410', e: '#e11d48', G: '#ffd34d', g: '#b8860b', w: '#fff6c8' },
+    2: { O: '#2b3442', H: '#e6ecf3', h: '#9fadbe', L: '#ffffff', E: '#2b3442', e: '#3b82f6', G: '#dfe6ee', g: '#8592a3', w: '#ffffff', K: '#60a5fa' },
+    3: { O: '#3a1f0d', H: '#c77d3e', h: '#8c5224', L: '#f2c08f', E: '#3a1f0d', e: '#16a34a', G: '#e09a5b', g: '#8c5a2b', w: '#ffe0bf', K: '#f472b6', k: '#be185d' },
+};
+
+/** 睁眼的像素：闭眼时这几格是皮肤，中间一行画一道线 */
+const CATGIRL_EYES = [[4, 8], [5, 8], [4, 9], [5, 9], [4, 10], [5, 10], [10, 8], [11, 8], [10, 9], [11, 9], [10, 10], [11, 10]];
+const CATGIRL_CLOSED_EYES = [[4, 9, 'E'], [5, 9, 'E'], [10, 9, 'E'], [11, 9, 'E']];
+/** 一闪一闪的像素：第一名王冠尖上的光，第二名星星发夹的光 */
+const CATGIRL_GLINTS = { 1: [[5, 1], [8, 1], [10, 1]], 2: [[12, 5]], 3: [] };
+
+/**
+ * @param {[number, number, string][]} pixels
+ * @param {Record<string, string>} colors
+ * @returns {string} 每一段同一行、同色、相连的像素一个矩形
+ */
+function pixelRects(pixels, colors) {
+    const sorted = [...pixels].sort((a, b) => a[1] - b[1] || a[0] - b[0]);
+    let out = '';
+    for (let i = 0; i < sorted.length;) {
+        const [x, y, letter] = sorted[i];
+        let end = i + 1;
+        while (end < sorted.length && sorted[end][1] === y && sorted[end][2] === letter && sorted[end][0] === x + (end - i)) end++;
+        out += `<rect x="${x}" y="${y}" width="${end - i}" height="1" fill="${colors[letter]}"/>`;
+        i = end;
+    }
+    return out;
+}
+
+/**
+ * 一只猫娘（SVG），分成会动的几层：耳朵（抖）、眼睛（眨）、闪光，整只一起呼吸；动画在 leaderboard.css。
+ * @param {1|2|3} rank
+ * @returns {string}
+ */
+function catgirlSvg(rank) {
+    const colors = { ...CATGIRL_COMMON, ...CATGIRL_COLORS[rank] };
+    const extras = new Map(CATGIRL_EXTRAS[rank].map(([x, y, letter]) => [`${x},${y}`, letter]));
+    const eyes = new Set(CATGIRL_EYES.map(([x, y]) => `${x},${y}`));
+    /** @type {Record<string, [number, number, string][]>} */
+    const layers = { earLeft: [], earRight: [], body: [], eyes: [], extras: [] };
+    CATGIRL_PIXELS.forEach((row, y) => [...row].forEach((letter, x) => {
+        const key = `${x},${y}`;
+        if (extras.has(key)) layers.extras.push([x, y, extras.get(key)]);
+        if (letter === '.' || extras.has(key)) return;
+        if (eyes.has(key)) {
+            layers.eyes.push([x, y, letter]);
+            layers.body.push([x, y, 'S']);
+        } else if (y <= 3 && x <= 4) {
+            layers.earLeft.push([x, y, letter]);
+        } else if (y <= 3 && x >= 11) {
+            layers.earRight.push([x, y, letter]);
+        } else {
+            layers.body.push([x, y, letter]);
+        }
+    }));
+    const glints = CATGIRL_GLINTS[rank].map(([x, y]) => `<rect x="${x}" y="${y}" width="1" height="1" fill="#ffffff"/>`).join('');
+    return `<svg class="leaderboard-catgirl leaderboard-catgirl-${rank}" viewBox="0 0 16 16" shape-rendering="crispEdges" role="img" aria-label="第 ${rank} 名"><title>第 ${rank} 名</title><g class="cg-all">`
+        + `<g class="cg-ear-left">${pixelRects(layers.earLeft, colors)}</g><g class="cg-ear-right">${pixelRects(layers.earRight, colors)}</g>`
+        + `<g class="cg-body">${pixelRects(layers.body, colors)}</g>`
+        + `<g class="cg-eyes">${pixelRects(layers.eyes, colors)}</g><g class="cg-blink">${pixelRects(CATGIRL_CLOSED_EYES, colors)}</g>`
+        + `<g class="cg-extras">${pixelRects(layers.extras, colors)}</g>${glints ? `<g class="cg-glint">${glints}</g>` : ''}</g></svg>`;
+}
+
+/** 每只猫娘解析一次，之后每次显示复制一份 */
+const catgirlTemplates = {};
+
+/**
+ * @param {1|2|3} rank
+ * @returns {Element}
+ */
+function catgirlElement(rank) {
+    if (!catgirlTemplates[rank]) {
+        const template = document.createElement('template');
+        template.innerHTML = catgirlSvg(rank);
+        catgirlTemplates[rank] = template;
+    }
+    return catgirlTemplates[rank].content.firstElementChild.cloneNode(true);
 }
 
 /**
  * @param {number} rank
- * @param {boolean} fancy 综合榜（第一名戴王冠）
+ * @param {boolean} fancy 综合榜：前三是像素猫娘（其他榜是奖牌）
  */
 function rankCell(rank, fancy) {
-    const cell = h('span', { class: 'leaderboard-rank' }, h('span', { class: 'leaderboard-medal', text: MEDALS[rank] ?? String(rank) }));
-    if (fancy && rank === 1) cell.append(h('i', { class: 'fa-solid fa-crown leaderboard-crown', 'aria-hidden': 'true' }));
-    return cell;
+    const mark = fancy && rank <= 3
+        ? catgirlElement(/** @type {1|2|3} */ (rank))
+        : h('span', { class: 'leaderboard-medal', text: MEDALS[rank] ?? String(rank) });
+    return h('span', { class: 'leaderboard-rank' }, mark);
 }
 
 function adminBadge() {

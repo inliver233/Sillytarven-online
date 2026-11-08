@@ -400,23 +400,129 @@
     filter: drop-shadow(0 0 3px rgba(205, 127, 50, 0.65));
 }
 
-.leaderboard-crown {
-    position: absolute;
-    top: -0.42em;
-    left: 50%;
-    font-size: 0.62em;
-    color: #ffd86b;
-    filter: drop-shadow(0 0 3px rgba(255, 216, 107, 0.95)) drop-shadow(0 1px 0 rgba(0, 0, 0, 0.4));
-    transform: translateX(-50%) rotate(-10deg);
-    animation: leaderboard-crown 2.4s ease-in-out infinite;
+/*
+ * 综合榜前三：像素猫娘。动作都是整像素跳帧（像素游戏角色的待机动作）：呼吸、眨眼、抖耳朵；
+ * 第一名不时蹦一下、王冠尖上闪光，第二名发夹闪光。三只节奏不同，不会同时眨眼。
+ * SVG 里 1px 是一个像素格（显示成 2px）。
+ */
+.leaderboard-catgirl {
+    --cg-t: calc(var(--lb-clock, 0) * -1ms);
+    display: block;
+    width: 32px;
+    height: 32px;
+    margin: -2px auto;
+    overflow: visible;
+}
+
+.leaderboard-catgirl-1 { --cg-breathe: 2.6s; --cg-blink: 4.2s; --cg-ear: 6.2s; --cg-glint: 3.6s; --cg-shift: 0s; }
+.leaderboard-catgirl-2 { --cg-breathe: 3.1s; --cg-blink: 5.1s; --cg-ear: 7.7s; --cg-glint: 4.8s; --cg-shift: -1.7s; }
+.leaderboard-catgirl-3 { --cg-breathe: 3.5s; --cg-blink: 5.9s; --cg-ear: 9.3s; --cg-glint: 4s; --cg-shift: -3.1s; }
+
+.leaderboard-catgirl .cg-all {
+    animation: leaderboard-cg-breathe var(--cg-breathe) steps(1, end) infinite;
+    animation-delay: calc(var(--cg-t) + var(--cg-shift));
+}
+
+.leaderboard-catgirl .cg-eyes {
+    animation: leaderboard-cg-eyes var(--cg-blink) steps(1, end) infinite;
+    animation-delay: calc(var(--cg-t) + var(--cg-shift));
+}
+
+.leaderboard-catgirl .cg-blink {
+    opacity: 0;
+    animation: leaderboard-cg-blink var(--cg-blink) steps(1, end) infinite;
+    animation-delay: calc(var(--cg-t) + var(--cg-shift));
+}
+
+.leaderboard-catgirl .cg-ear-left {
+    animation: leaderboard-cg-ear var(--cg-ear) steps(1, end) infinite;
+    animation-delay: calc(var(--cg-t) + var(--cg-shift));
+}
+
+/* 另一只耳朵隔半个周期 */
+.leaderboard-catgirl .cg-ear-right {
+    animation: leaderboard-cg-ear var(--cg-ear) steps(1, end) infinite;
+    animation-delay: calc(var(--cg-t) + var(--cg-shift) - var(--cg-ear) / 2);
+}
+
+.leaderboard-catgirl .cg-glint rect {
+    --cg-glint-at: 0s;
+    opacity: 0;
+    animation: leaderboard-cg-glint var(--cg-glint) steps(1, end) infinite;
+    animation-delay: calc(var(--cg-t) + var(--cg-shift) + var(--cg-glint-at));
+}
+
+/* 王冠的三个尖依次闪过去 */
+.leaderboard-catgirl .cg-glint rect:nth-child(2) { --cg-glint-at: 0.16s; }
+.leaderboard-catgirl .cg-glint rect:nth-child(3) { --cg-glint-at: 0.32s; }
+
+.leaderboard-list-score .leaderboard-top1 .leaderboard-catgirl {
+    filter: drop-shadow(0 0 4px rgba(255, 216, 107, 0.75));
+    animation: leaderboard-cg-hop 5.2s steps(1, end) infinite;
     animation-delay: calc(var(--lb-clock, 0) * -1ms);
 }
 
-/* 综合榜前三：奖牌更大，名字是流动的金、银、铜色字 */
-.leaderboard-list-score .leaderboard-top .leaderboard-rank {
-    font-size: 1.4em;
+.leaderboard-list-score .leaderboard-top2 .leaderboard-catgirl {
+    filter: drop-shadow(0 0 3px rgba(200, 220, 240, 0.6));
 }
 
+.leaderboard-list-score .leaderboard-top3 .leaderboard-catgirl {
+    filter: drop-shadow(0 0 2px rgba(205, 127, 50, 0.55));
+}
+
+/* 被挤下第一：左右抖几下 */
+.leaderboard-list-score .leaderboard-dethroned .leaderboard-catgirl {
+    animation: leaderboard-cg-shake 0.6s steps(1, end);
+}
+
+@keyframes leaderboard-cg-breathe {
+    0% { transform: translateY(0); }
+    55% { transform: translateY(1px); }
+}
+
+@keyframes leaderboard-cg-eyes {
+    0% { opacity: 1; }
+    93% { opacity: 0; }
+    96% { opacity: 1; }
+}
+
+@keyframes leaderboard-cg-blink {
+    0% { opacity: 0; }
+    93% { opacity: 1; }
+    96% { opacity: 0; }
+}
+
+/* 连抖两下 */
+@keyframes leaderboard-cg-ear {
+    0% { transform: translateY(0); }
+    88% { transform: translateY(1px); }
+    90% { transform: translateY(0); }
+    92% { transform: translateY(1px); }
+    94% { transform: translateY(0); }
+}
+
+@keyframes leaderboard-cg-glint {
+    0% { opacity: 0; }
+    90% { opacity: 1; }
+    95% { opacity: 0; }
+}
+
+@keyframes leaderboard-cg-hop {
+    0% { transform: translateY(0); }
+    86% { transform: translateY(-4px); }
+    90% { transform: translateY(-2px); }
+    92% { transform: translateY(0); }
+}
+
+@keyframes leaderboard-cg-shake {
+    0% { transform: translateX(-2px); }
+    20% { transform: translateX(2px); }
+    40% { transform: translateX(-2px); }
+    60% { transform: translateX(2px); }
+    80% { transform: translateX(0); }
+}
+
+/* 综合榜前三：名字是流动的金、银、铜色字 */
 .leaderboard-list-score .leaderboard-top .leaderboard-name-text {
     font-weight: 700;
     color: transparent;
@@ -655,11 +761,6 @@
 @keyframes leaderboard-bob {
     0%, 100% { transform: translateY(0); }
     50% { transform: translateY(-2px); }
-}
-
-@keyframes leaderboard-crown {
-    0%, 100% { transform: translateX(-50%) rotate(-10deg) translateY(0); }
-    50% { transform: translateX(-50%) rotate(-4deg) translateY(-2px); }
 }
 
 @keyframes leaderboard-name-flow {
@@ -1305,6 +1406,11 @@
 
     .leaderboard-value {
         gap: 4px;
+    }
+
+    /* 综合榜的猫娘有 32px 宽 */
+    .leaderboard-list-score .leaderboard-row {
+        grid-template-columns: 32px minmax(0, 1fr) auto;
     }
 
     /* 表情面板：「取消」「保存」在上，「删除」单独一行 */
