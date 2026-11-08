@@ -62,13 +62,34 @@ router.post('/admin/ban', requireAdminMiddleware, (request, response) => {
     return response.sendStatus(204);
 });
 
-/** An administrator asks someone (by row, or by account name on this site) to choose again. */
+/**
+ * An administrator asks someone (by row, or by account name on this site) to choose again. Their
+ * open pages are told at once; on the other site, once it has synced.
+ */
 router.post('/admin/reset-choice', requireAdminMiddleware, (request, response) => {
     const handle = typeof request.body?.handle === 'string' ? request.body.handle.trim() : '';
     const key = handle ? leaderboard.store.personKeyOf(handle) : String(request.body?.id ?? '');
     if (!key || !leaderboard.store.resetChoice(key)) {
         return response.status(404).send({ error: handle ? 'no_such_account' : 'not_on_this_site' });
     }
+    leaderboard.dirty = true;
+    leaderboard.save();
+    return response.send({ pages: leaderboard.askToChoose(key) });
+});
+
+/** The emoji next to the user's own name: {scope: 'all' or a metric, emoji: '' to remove}. */
+router.post('/me/emoji', (request, response) => {
+    const handle = leaderboard.account(request.user.profile);
+    const result = leaderboard.store.setEmoji(handle, request.body?.scope, request.body?.emoji);
+    if (result.error) return response.status(400).send({ error: result.error });
+    leaderboard.dirty = true;
+    leaderboard.save();
+    return response.send(leaderboard.store.prefsOf(handle));
+});
+
+/** An administrator removes someone's emoji (all boards). */
+router.post('/admin/clear-emoji', requireAdminMiddleware, (request, response) => {
+    if (!leaderboard.store.clearEmoji(String(request.body?.id ?? ''))) return response.status(404).send({ error: 'not_on_this_site' });
     leaderboard.dirty = true;
     leaderboard.save();
     return response.sendStatus(204);

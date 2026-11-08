@@ -171,6 +171,67 @@ export function cleanName(value) {
         .trim();
 }
 
+/** Where an emoji next to the name applies: every board, or one of them. */
+export const EMOJI_SCOPES = Object.freeze(['all', ...METRICS]);
+const graphemes = new Intl.Segmenter('en', { granularity: 'grapheme' });
+
+/**
+ * @param {unknown} value
+ * @returns {string} One emoji (a single picture, flag or keycap, with its modifiers), or ''
+ */
+export function cleanEmoji(value) {
+    const text = String(value ?? '').trim();
+    if (!text || text.length > 16 || [...graphemes.segment(text)].length !== 1) return '';
+    // No control or direction characters (the joiner inside emoji sequences is fine).
+    if (/[\u0000-\u001f\u007f\u200b\u200e\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/u.test(text)) return '';
+    const picture = /\p{Extended_Pictographic}/u.test(text) || /^\p{Regional_Indicator}{2}$/u.test(text) || /^[#*0-9]\ufe0f?\u20e3$/u.test(text);
+    return picture ? text : '';
+}
+
+/**
+ * @param {unknown} value {all?: emoji, [metric]?: emoji or '' (none on that board)}
+ * @returns {Record<string, string>}
+ */
+function cleanEmojiMap(value) {
+    const map = {};
+    if (!value || typeof value !== 'object') return map;
+    for (const scope of EMOJI_SCOPES) {
+        if (!Object.hasOwn(value, scope)) continue;
+        const emoji = cleanEmoji(value[scope]);
+        // '' on one board: none there, whatever the one for all boards is.
+        if (emoji || (scope !== 'all' && value[scope] === '')) map[scope] = emoji;
+    }
+    return map;
+}
+
+/**
+ * @param {Record<string, string>} map
+ * @param {string} metric
+ * @returns {string} The emoji shown on this board ('' for none)
+ */
+function emojiFor(map, metric) {
+    return Object.hasOwn(map ?? {}, metric) ? map[metric] : (map?.all ?? '');
+}
+
+/**
+ * Sets or removes the emoji of one board, or of all boards.
+ * @param {Record<string, string>} map
+ * @param {string} scope 'all' or a metric
+ * @param {string} emoji '' removes it
+ * @returns {Record<string, string>}
+ */
+export function withEmoji(map, scope, emoji) {
+    // For all boards: replaces what single boards had; removing it removes them all.
+    if (scope === 'all') return emoji ? { all: emoji } : {};
+    const next = { ...map };
+    if (emoji && emoji !== next.all) next[scope] = emoji;
+    else if (emoji) delete next[scope];
+    // Removed from one board: none there even though all boards have one.
+    else if (next.all) next[scope] = '';
+    else delete next[scope];
+    return next;
+}
+
 /**
  * How someone is shown on the board.
  * @param {{mode: string}} prefs
@@ -185,7 +246,7 @@ export function numberedName(prefs, name, number) {
 
 /**
  * @typedef {{ai: number, chars: number, user: number, night: number, group: number, online: number, cset: string[], v: number}} DayStats
- * @typedef {{mode: string, nickname: string, explicit: boolean, updatedAt: number}} Prefs
+ * @typedef {{mode: string, nickname: string, explicit: boolean, updatedAt: number, emoji: Record<string, string>, emojiAt: number}} Prefs (the emoji have their own time: changing them is not a choice of real name or anonymous)
  * @typedef {{handle: string, name: string, number: number, created: number, discord: string|null, admin: boolean, prefs: Prefs, days: Map<number, DayStats>, hours: Map<number, DayStats>, v: number}} Account
  * @typedef {{key: string, number: number|null, name: string, created: number, admin: boolean, prefs: Prefs, days: Map<number, DayStats>, hours: Map<number, DayStats>}} RemoteAccount
  * @typedef {{site: string, epoch: string, version: number, accounts: Map<string, RemoteAccount>, syncedAt: number, error: string}} Peer
@@ -194,7 +255,7 @@ export function numberedName(prefs, name, number) {
  */
 
 const newDay = () => ({ ai: 0, chars: 0, user: 0, night: 0, group: 0, online: 0, cset: [], v: 0 });
-const defaultPrefs = () => ({ mode: 'anon', nickname: '', explicit: false, updatedAt: 0 });
+const defaultPrefs = () => ({ mode: 'anon', nickname: '', explicit: false, updatedAt: 0, emoji: {}, emojiAt: 0 });
 const tailOf = text => text.slice(-40);
 const clampChars = length => Math.min(length, MAX_REPLY_CHARS);
 const isActiveDay = stats => stats.ai + stats.user > 0;
@@ -263,6 +324,8 @@ const cleanPrefs = prefs => ({
     nickname: '',
     explicit: !!prefs?.explicit,
     updatedAt: Number(prefs?.updatedAt) || 0,
+    emoji: cleanEmojiMap(prefs?.emoji),
+    emojiAt: Number(prefs?.emojiAt) || 0,
 });
 
 /**
@@ -314,6 +377,8 @@ export class LeaderboardStore {
         this.boardCache = new Map();
         this.recomputeMs = recomputeMs;
         this.peopleCache = null;
+        /** People of this site whose choice an administrator of the other site undid (see applyPeer). */
+        this.choiceResets = new Set();
     }
 
     /** @param {string} value @returns {string} */
@@ -729,7 +794,7 @@ export class LeaderboardStore {
         if (!MODES.includes(String(mode))) return { error: 'bad_mode' };
         // Later than any choice this person made on either site, whatever the two clocks say.
         const latest = this.people().get(this.personKey(account))?.prefs.updatedAt ?? 0;
-        account.prefs = { mode: String(mode), nickname: '', explicit: true, updatedAt: Math.max(this.now(), account.prefs.updatedAt + 1, latest + 1) };
+        account.prefs = { ...account.prefs, mode: String(mode), nickname: '', explicit: true, updatedAt: Math.max(this.now(), account.prefs.updatedAt + 1, latest + 1) };
         account.v = this.bump();
         // The user looks at the board right after: show the change at once.
         this.boardCache.clear();
@@ -756,12 +821,59 @@ export class LeaderboardStore {
         let reset = 0;
         for (const account of this.accounts.values()) {
             if (this.personKey(account) !== key) continue;
-            account.prefs = { ...defaultPrefs(), updatedAt: Math.max(this.now(), account.prefs.updatedAt + 1, latest + 1) };
+            account.prefs = { ...defaultPrefs(), emoji: account.prefs.emoji, emojiAt: account.prefs.emojiAt, updatedAt: Math.max(this.now(), account.prefs.updatedAt + 1, latest + 1) };
             account.v = this.bump();
             reset++;
         }
         if (reset) this.boardCache.clear();
         return reset;
+    }
+
+    /**
+     * The emoji next to someone's name: on one board or on all of them (both sites; the latest change counts).
+     * @param {string} handle
+     * @param {unknown} scope 'all' or a metric
+     * @param {unknown} emoji '' removes it
+     * @returns {{emoji?: Record<string, string>, error?: string}}
+     */
+    setEmoji(handle, scope, emoji) {
+        const account = this.accounts.get(handle);
+        if (!account) return { error: 'unknown_account' };
+        if (!EMOJI_SCOPES.includes(String(scope))) return { error: 'bad_scope' };
+        const clean = cleanEmoji(emoji);
+        if (String(emoji ?? '').trim() && !clean) return { error: 'bad_emoji' };
+        const person = this.people().get(this.personKey(account));
+        const current = person?.emojiAt ? person.emoji : account.prefs.emoji;
+        const latest = Math.max(person?.emojiAt ?? 0, account.prefs.emojiAt);
+        account.prefs = { ...account.prefs, emoji: withEmoji(current, String(scope), clean), emojiAt: Math.max(this.now(), latest + 1) };
+        account.v = this.bump();
+        this.boardCache.clear();
+        return { emoji: account.prefs.emoji };
+    }
+
+    /**
+     * An administrator removes someone's emoji (all boards, both sites).
+     * @param {string} key Person key
+     * @returns {number} Accounts of this site that were changed (0: not someone with an account here)
+     */
+    clearEmoji(key) {
+        const latest = this.people().get(key)?.emojiAt ?? 0;
+        let cleared = 0;
+        for (const account of this.accounts.values()) {
+            if (this.personKey(account) !== key) continue;
+            account.prefs = { ...account.prefs, emoji: {}, emojiAt: Math.max(this.now(), account.prefs.emojiAt + 1, latest + 1) };
+            account.v = this.bump();
+            cleared++;
+        }
+        if (cleared) this.boardCache.clear();
+        return cleared;
+    }
+
+    /** @returns {string[]} People whose choice was undone on the other site since the last call */
+    takeChoiceResets() {
+        const keys = [...this.choiceResets];
+        this.choiceResets.clear();
+        return keys;
     }
 
     /**
@@ -932,7 +1044,7 @@ export class LeaderboardStore {
                 n: account.number,
                 c: account.created,
                 ...(account.admin ? { a: 1 } : {}),
-                p: { mode: prefs.mode, nickname: prefs.mode === 'public' ? prefs.nickname : '', explicit: prefs.explicit, updatedAt: prefs.updatedAt },
+                p: { mode: prefs.mode, nickname: prefs.mode === 'public' ? prefs.nickname : '', explicit: prefs.explicit, updatedAt: prefs.updatedAt, ...(prefs.emojiAt ? { emoji: prefs.emoji, emojiAt: prefs.emojiAt } : {}) },
                 // The display name leaves the site only for someone who chose real name here.
                 ...(prefs.mode === 'public' ? { nm: account.name } : {}),
                 days,
@@ -952,7 +1064,20 @@ export class LeaderboardStore {
      */
     applyPeer(peerId, payload) {
         if (!payload || !SITES.includes(payload.site) || typeof payload.epoch !== 'string') return false;
-        let peer = this.peers.get(peerId);
+        // People of this site who had chosen and whose choice is undone over there (newer and not a
+        // choice): an administrator asked them to choose again; their pages here are told at once.
+        const known = this.peers.get(peerId);
+        const undone = new Set();
+        const unchosen = (Array.isArray(payload.accounts) ? payload.accounts : [])
+            .filter(row => row?.k && !row.p?.explicit && Number(row.p?.updatedAt) > (known?.accounts.get(String(row.k))?.prefs.updatedAt ?? 0));
+        if (unchosen.length) {
+            const before = this.people();
+            for (const row of unchosen) {
+                const person = before.get(String(row.k));
+                if (person?.handles.length && person.prefs.explicit && Number(row.p.updatedAt) > person.prefs.updatedAt) undone.add(person.key);
+            }
+        }
+        let peer = known;
         if (!peer || payload.full || peer.epoch !== payload.epoch) {
             if (!payload.full && peer) return false;
             peer = { site: payload.site, epoch: payload.epoch, version: 0, accounts: new Map(), bans: new Map(), syncedAt: 0, error: '' };
@@ -989,6 +1114,9 @@ export class LeaderboardStore {
         peer.syncedAt = this.now();
         peer.error = '';
         if (changed) this.changed();
+        for (const key of undone) {
+            if (!this.people().get(key)?.prefs.explicit) this.choiceResets.add(key);
+        }
         return true;
     }
 
@@ -999,11 +1127,19 @@ export class LeaderboardStore {
     people() {
         if (this.peopleCache?.version === this.boardVersion) return this.peopleCache.people;
         const people = new Map();
-        const add = (key, site, created, prefs, days, hours, number, name, admin) => {
+        const add = (key, site, created, prefs, days, hours, number, name, admin, handle = null) => {
             let person = people.get(key);
             if (!person) {
-                person = { key, sites: new Set(), created: Infinity, prefs: defaultPrefs(), prefsSite: '', parts: [], number: null, numberFrom: null, name: '', admin: false };
+                person = { key, sites: new Set(), created: Infinity, prefs: defaultPrefs(), prefsSite: '', parts: [], number: null, numberFrom: null, name: '', admin: false, handles: [], emoji: {}, emojiAt: 0, emojiSite: '' };
                 people.set(key, person);
+            }
+            // Their accounts on this site (whose pages can be told things).
+            if (handle) person.handles.push(handle);
+            // The emoji: the latest change on either site, apart from the choice below.
+            if (prefs.emojiAt > person.emojiAt || (prefs.emojiAt > 0 && prefs.emojiAt === person.emojiAt && site > person.emojiSite)) {
+                person.emoji = prefs.emoji;
+                person.emojiAt = prefs.emojiAt;
+                person.emojiSite = site;
             }
             person.sites.add(site);
             // An administrator on either site.
@@ -1028,7 +1164,7 @@ export class LeaderboardStore {
             }
         };
         for (const account of this.accounts.values()) {
-            add(this.personKey(account), this.site, account.created, account.prefs, account.days, account.hours, account.number, account.name, account.admin);
+            add(this.personKey(account), this.site, account.created, account.prefs, account.days, account.hours, account.number, account.name, account.admin, account.handle);
         }
         for (const peer of this.peers.values()) {
             for (const account of peer.accounts.values()) add(account.key, peer.site, account.created, account.prefs, account.days, account.hours, account.number, account.name, account.admin);
@@ -1197,6 +1333,7 @@ export class LeaderboardStore {
             value: entry.value,
             ...(isScore ? { parts: compositeScore(entry.values, ranking.best).parts } : {}),
             ...(entry.person.admin ? { admin: true } : {}),
+            ...(emojiFor(entry.person.emoji, metric) ? { emoji: emojiFor(entry.person.emoji, metric) } : {}),
             me: entry.person.key === myKey,
         }));
         let me = null;
@@ -1224,6 +1361,9 @@ export class LeaderboardStore {
                 explicit: person.prefs.explicit,
                 sites: values.sites.length ? values.sites : [...person.sites].sort(),
                 admin: !!person.admin,
+                emoji: emojiFor(person.emoji, metric),
+                // All of them, for changing them.
+                emojis: person.emoji,
             };
         }
         return {
@@ -1263,6 +1403,7 @@ export class LeaderboardStore {
             publicName: numberedName({ mode: 'public' }, account.name || ANONYMOUS_NAME, number),
             sites: [...(person?.sites ?? [this.site])].sort(),
             admin: account.admin,
+            emojis: person?.emojiAt ? person.emoji : account.prefs.emoji,
         };
     }
 }

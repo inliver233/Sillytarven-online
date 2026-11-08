@@ -9,6 +9,7 @@ import { getConfigValue } from './util.js';
 import { canPersistSharedState, onActivate, onDrain } from './process-lifecycle.js';
 import { getAllEnabledUsers, getUserDirectories } from './users.js';
 import { LeaderboardStore, SITES, discordIdOf, signPeerRequest, verifyPeerRequest } from './leaderboard.js';
+import { live } from './live.js';
 
 /**
  * The leaderboard of this server: the counting (see leaderboard.js), kept on disk across
@@ -273,6 +274,8 @@ class LeaderboardService {
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
             const payload = await response.json();
             if (!this.store?.applyPeer(peer.id, payload)) throw new Error('unexpected answer');
+            // An administrator over there asked someone to choose again: their pages here too.
+            for (const key of this.store.takeChoiceResets()) this.askToChoose(key);
             peer.failures = 0;
             peer.syncedAt = Date.now();
             peer.error = '';
@@ -283,6 +286,17 @@ class LeaderboardService {
             peer.nextAt = Date.now() + Math.min(PEER_MAX_BACKOFF_MS, this.syncIntervalMs * 2 ** peer.failures);
             if (peer.failures === 1 || peer.failures % 50 === 0) console.warn(`[leaderboard] ${peer.url}: ${peer.error}`);
         }
+    }
+
+    /**
+     * The open pages of this person on this site show the launch notice again at once (live channel;
+     * pages without it find out when they next report being used).
+     * @param {string} key Person key
+     * @returns {number} Pages told
+     */
+    askToChoose(key) {
+        const handles = this.store?.people().get(key)?.handles ?? [];
+        return handles.length ? live.send({ handles }, 'leaderboard-choose') : 0;
     }
 
     /**

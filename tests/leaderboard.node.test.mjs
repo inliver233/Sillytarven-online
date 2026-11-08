@@ -10,6 +10,7 @@ import {
     LIMITS,
     LeaderboardStore,
     SCORE_PARTS,
+    cleanEmoji,
     compositeScore,
     cleanName,
     dayOf,
@@ -20,6 +21,7 @@ import {
     signPeerRequest,
     verifyPeerRequest,
     windowDays,
+    withEmoji,
 } from '../src/leaderboard.js';
 
 const SECRET = 'test-secret-shared-by-both-sites';
@@ -645,6 +647,13 @@ test('an administrator asks someone to choose again: undone on both sites, until
     for (const [store, handle] of [[legacy.store, 'sample-1'], [modern.store, 'sample-2']]) {
         assert.deepEqual([store.prefsOf(handle).explicit, store.prefsOf(handle).mode], [false, 'anon']);
     }
+    // The new site notices it was undone over there and can tell their pages there at once.
+    assert.deepEqual(modern.store.takeChoiceResets(), [key]);
+    assert.deepEqual(modern.store.people().get(key).handles, ['sample-2']);
+    assert.deepEqual(legacy.store.takeChoiceResets(), [], 'undone here: told by the request itself');
+    // Asking for everything again is no news.
+    modern.store.applyPeer('https://legacy', legacy.store.exportForPeer(-1, 'other-epoch'));
+    assert.deepEqual(modern.store.takeChoiceResets(), []);
     // They choose again (on either site): asked no more.
     modern.clock.now = NOON + 2 * MINUTE;
     assert.ok(modern.store.setPrefs('sample-2', { mode: 'anon' }).prefs);
@@ -655,6 +664,75 @@ test('an administrator asks someone to choose again: undone on both sites, until
     // Someone with no account on this site cannot be reset from here; unknown accounts neither.
     assert.equal(legacy.store.resetChoice(modern.store.personKeyOf('only-modern')), 0);
     assert.equal(legacy.store.personKeyOf('nobody'), null);
+});
+
+test('an emoji next to the name: one board or all, both sites, apart from the choice; administrators clear it', () => {
+    for (const emoji of ['🔥', '👍🏽', '🇨🇳', '1️⃣', '👨‍👩‍👧', '❤️']) assert.equal(cleanEmoji(emoji), emoji);
+    for (const text of ['a', '中', '🔥🔥', '', ' ', '<b>', 'A🔥', '\u202e🔥', '#', 42, null]) assert.equal(cleanEmoji(text), '', String(text));
+    assert.deepEqual(withEmoji({}, 'chat', '🔥'), { chat: '🔥' });
+    assert.deepEqual(withEmoji({ chat: '🔥' }, 'all', '🌙'), { all: '🌙' }, 'all boards replace single ones');
+    assert.deepEqual(withEmoji({ all: '🌙' }, 'chat', ''), { all: '🌙', chat: '' }, 'none on one board');
+    assert.deepEqual(withEmoji({ all: '🌙', chat: '' }, 'chat', '🌙'), { all: '🌙' });
+    assert.deepEqual(withEmoji({ chat: '🔥' }, 'chat', ''), {});
+    assert.deepEqual(withEmoji({ all: '🌙', chat: '🔥' }, 'all', ''), {});
+
+    const legacy = makeStore('legacy');
+    const modern = makeStore('modern');
+    legacy.store.ensureAccount({ handle: 'fan', name: '粉丝', discord: '565656565656', created: NOON - 100 * 864e5 });
+    modern.store.ensureAccount({ handle: 'fan-2', name: '新站粉丝', discord: '565656565656', created: NOON - 10 * 864e5 });
+    const fan = legacy.store.accounts.get('fan');
+    const stats = legacy.store.dayStats(fan, dayOf(NOON));
+    stats.ai += 3;
+    stats.chars += 300;
+    legacy.store.touch(fan, stats);
+    const sync = () => {
+        modern.store.applyPeer('https://legacy', legacy.store.exportForPeer(-1, 'none'));
+        legacy.store.applyPeer('https://modern', modern.store.exportForPeer(-1, 'none'));
+    };
+    const row = (store, handle, metric) => store.board({ metric, window: 'today', site: 'all', handle }).rows[0];
+    const everywhere = check => {
+        for (const [store, handle] of [[legacy.store, 'fan'], [modern.store, 'fan-2']]) check(store, handle);
+    };
+    // Real name, chosen on the old site.
+    legacy.store.setPrefs('fan', { mode: 'public' });
+    sync();
+
+    // An emoji on one board, set on the new site.
+    assert.deepEqual(modern.store.setEmoji('fan-2', 'chat', '🔥').emoji, { chat: '🔥' });
+    assert.equal(modern.store.setEmoji('fan-2', 'chat', 'no').error, 'bad_emoji');
+    assert.equal(modern.store.setEmoji('fan-2', 'nope', '🔥').error, 'bad_scope');
+    sync();
+    everywhere((store, handle) => {
+        assert.equal(row(store, handle, 'chat').emoji, '🔥');
+        assert.equal(row(store, handle, 'words').emoji, undefined);
+        // Changing the emoji over there does not make it the account the name comes from.
+        assert.equal(row(store, handle, 'chat').name, '粉丝#1');
+    });
+    // All boards; then none on one of them.
+    legacy.store.setEmoji('fan', 'all', '🌙');
+    sync();
+    everywhere((store, handle) => assert.deepEqual([row(store, handle, 'chat').emoji, row(store, handle, 'words').emoji], ['🌙', '🌙']));
+    legacy.store.setEmoji('fan', 'words', '');
+    sync();
+    everywhere((store, handle) => {
+        assert.deepEqual([row(store, handle, 'chat').emoji, row(store, handle, 'words').emoji], ['🌙', undefined]);
+        assert.deepEqual(store.prefsOf(handle).emojis, { all: '🌙', words: '' });
+        assert.equal(store.board({ metric: 'words', window: 'today', site: 'all', handle }).me.emoji, '');
+    });
+    // Asked to choose again: the emoji stays.
+    const key = legacy.store.personKeyOf('fan');
+    legacy.store.resetChoice(key);
+    sync();
+    everywhere((store, handle) => assert.equal(row(store, handle, 'chat').emoji, '🌙'));
+    // Saved and loaded again.
+    const restored = makeStore('legacy').store;
+    assert.ok(restored.importState(JSON.parse(JSON.stringify(legacy.store.exportState()))));
+    assert.deepEqual(restored.accounts.get('fan').prefs.emoji, { all: '🌙', words: '' });
+    // An administrator of the new site clears it: gone on both.
+    assert.equal(modern.store.clearEmoji(key), 1);
+    assert.equal(modern.store.clearEmoji('nobody'), 0);
+    sync();
+    everywhere((store, handle) => assert.equal(row(store, handle, 'chat').emoji, undefined));
 });
 
 test('administrators are counted, ranked and sent to the other site like everybody', () => {

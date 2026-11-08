@@ -1,6 +1,7 @@
 // 排行榜：两个站一起排，默认匿名参加，打开时每 3 秒刷新
 import { getRequestHeaders } from '../script.js';
 import { eventSource, event_types } from './events.js';
+import { onLive } from './live.js';
 import { callGenericPopup, POPUP_TYPE } from './popup.js';
 import { accountStorage } from './util/AccountStorage.js';
 
@@ -572,6 +573,7 @@ function render(board) {
         rankCell(row.rank, fancy),
         h('span', { class: 'leaderboard-name' },
             h('span', { class: `leaderboard-name-text${row.anonymous ? ' leaderboard-anonymous' : ''}`, text: row.name, title: row.anonymous ? '匿名' : '' }),
+            row.emoji ? h('span', { class: 'leaderboard-emoji', text: row.emoji }) : null,
             row.me ? h('span', { class: 'leaderboard-you', text: '我' }) : null,
             row.admin ? adminBadge() : null,
             ...siteBadges(row.sites)),
@@ -587,6 +589,14 @@ function render(board) {
                     void askToChooseAgain({ id: row.id }, row.name);
                 },
             }, h('i', { class: 'fa-solid fa-rotate-left' }), h('span', { text: '让 TA 重新选' })) : null,
+            canRemove && row.emoji ? h('button', {
+                type: 'button',
+                class: 'leaderboard-admin-action',
+                onclick: event => {
+                    event.stopPropagation();
+                    void clearEmoji(row.id, row.name);
+                },
+            }, h('i', { class: 'fa-solid fa-face-meh-blank' }), h('span', { text: '清除表情' })) : null,
             canRemove ? h('button', {
                 type: 'button',
                 class: 'leaderboard-remove',
@@ -678,6 +688,12 @@ function renderMe(board, animate) {
             h('span', { class: 'leaderboard-me-rank', text: status }),
             h('span', { class: 'leaderboard-me-name' },
                 h('span', { class: `leaderboard-me-name-text${me.mode === 'public' ? '' : ' leaderboard-anonymous'}`, text: me.name }),
+                h('button', {
+                    type: 'button',
+                    class: `leaderboard-emoji-button${me.emoji ? '' : ' empty'}`,
+                    title: me.emoji ? '更换或删除名字旁的表情' : '在名字旁加一个表情',
+                    onclick: () => showEmojiEditor(me),
+                }, me.emoji || h('i', { class: 'fa-regular fa-face-smile' })),
                 me.admin ? adminBadge() : null,
                 ...siteBadges(me.sites)),
             valueCell),
@@ -748,7 +764,7 @@ function showRules() {
         definitions([
             ['时间', '北京时间。本小时、今日分别在整点、零点重置，本周自周一起。'],
             ['两站', '同一 Discord 账号合并为一人；名字后的标记表示数据来源站点。'],
-            ['名称', '实名显示「昵称#编号」，匿名显示「匿名用户#编号」，编号终身不变。'],
+            ['名称', '实名显示「昵称#编号」，匿名显示「匿名用户#编号」，编号终身不变；名字旁可加一个表情。'],
             ['计入', '仅统计真实生成的回复；导入、复制的聊天不计入，刷榜者会被移出榜单。'],
             ['上限', `每人每日最多计入 AI 回复 ${caps.ai} 条、消息 ${caps.user} 条、字数 ${caps.chars / 10000} 万、时长 16 小时。`],
             ['历史', since ? `${since} 前的数据按现有聊天记录补算；时长和本小时榜自该日起统计。` : '上线前的数据按现有聊天记录补算；时长和本小时榜自上线起统计。'],
@@ -781,13 +797,14 @@ function chooseAgainForm() {
 }
 
 /**
- * 管理员让某人重新选实名/匿名：撤回 TA 的选择，下次在线上报（或打开页面）时公告再弹出来
+ * 管理员让某人重新选实名/匿名：撤回 TA 的选择，TA 打开着的页面立即弹出公告（实时推送；另一个站的
+ * 页面在两站同步后，几秒内）
  * @param {{id?: string, handle?: string}} who
  * @param {string} name
  * @param {boolean} [confirm] 先问一下
  */
 async function askToChooseAgain(who, name, confirm = true) {
-    if (confirm && !await callGenericPopup(`让「${name}」重新选实名还是匿名？TA 页面开着的话一分钟内会弹出上线公告（没选之前按匿名显示）。`, POPUP_TYPE.CONFIRM)) {
+    if (confirm && !await callGenericPopup(`让「${name}」重新选实名还是匿名？TA 打开着的页面会立即弹出上线公告（没选之前按匿名显示）。`, POPUP_TYPE.CONFIRM)) {
         return;
     }
     try {
@@ -797,7 +814,10 @@ async function askToChooseAgain(who, name, confirm = true) {
             return;
         }
         if (!response.ok) throw new Error(String(response.status));
-        toastr.success(`「${name}」下次在线时会重新弹出选择`);
+        const { pages = 0 } = await response.json().catch(() => ({}));
+        toastr.success(pages
+            ? `「${name}」打开着的 ${pages} 个页面正在弹出选择；另一个站的页面几秒内弹出`
+            : `「${name}」在本站没有打开着的页面，下次打开时弹出；另一个站的页面几秒内弹出`);
         boardVersion = '';
         await refresh();
     } catch {
@@ -825,6 +845,120 @@ async function setRemoved(id, name, banned) {
     } catch {
         toastr.error('操作失败，请稍后再试');
     }
+}
+
+/**
+ * 管理员清除某人名字旁的表情（所有榜单、两个站）
+ * @param {string} id
+ * @param {string} name
+ */
+async function clearEmoji(id, name) {
+    if (!await callGenericPopup(`清除「${name}」名字旁的表情？所有榜单、两个站都会去掉，TA 之后还能重新设置。`, POPUP_TYPE.CONFIRM)) return;
+    try {
+        const response = await fetch('/api/leaderboard/admin/clear-emoji', { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify({ id }) });
+        if (response.status === 404) {
+            toastr.warning('这个人的账号不在本站，请到另一个站操作');
+            return;
+        }
+        if (!response.ok) throw new Error(String(response.status));
+        toastr.success(`已清除「${name}」的表情`);
+        boardVersion = '';
+        await refresh();
+    } catch {
+        toastr.error('操作失败，请稍后再试');
+    }
+}
+
+/** 选表情时的常用表情（老设备也能显示的） */
+const EMOJI_CHOICES = ['🔥', '⭐', '🌙', '☀️', '❄️', '⚡', '🌈', '🌸', '🍀', '🍁', '🌻', '🌊', '💖', '💎', '👑', '🏆', '🎯', '🚀', '🎮', '🎵', '🎨', '📚', '☕', '🍰', '🍓', '🍜', '🐱', '🐶', '🦊', '🐼', '🐰', '🐧', '🦄', '🐉', '😎', '🤖', '👻', '✨', '💤', '🌟'];
+
+/**
+ * @param {string} text
+ * @returns {string} 正好一个表情，否则 ''（服务器还会再查一遍）
+ */
+function singleEmoji(text) {
+    const value = String(text ?? '').trim();
+    if (!value || value.length > 16) return '';
+    if (typeof Intl.Segmenter === 'function' && [...new Intl.Segmenter('en', { granularity: 'grapheme' }).segment(value)].length !== 1) return '';
+    return /\p{Extended_Pictographic}|\p{Regional_Indicator}|\u20e3/u.test(value) ? value : '';
+}
+
+/**
+ * 名字旁的表情：只用在这个榜，或者所有榜单；可换可删。
+ * @param {{name: string, emoji?: string, emojis?: Record<string, string>}} me
+ */
+function showEmojiEditor(me) {
+    if (!popup) return;
+    const metric = metricOf(view.metric);
+    const emojis = me.emojis ?? {};
+    const ownHere = Object.hasOwn(emojis, metric.id);
+    let scope = !ownHere && emojis.all ? 'all' : 'board';
+    let selected = me.emoji ?? '';
+    const preview = h('span', { class: 'leaderboard-emoji-preview' });
+    const error = h('div', { class: 'leaderboard-error' });
+    const input = h('input', { type: 'text', class: 'text_pole leaderboard-emoji-input', placeholder: '或者输入、粘贴任意一个表情', maxlength: '16' });
+    const grid = h('div', { class: 'leaderboard-emoji-grid' }, ...EMOJI_CHOICES.map(emoji => h('button', {
+        type: 'button',
+        class: 'leaderboard-emoji-choice',
+        'data-emoji': emoji,
+        text: emoji,
+        onclick: () => {
+            if (input instanceof HTMLInputElement) input.value = '';
+            pick(emoji);
+        },
+    })));
+    const scopes = h('div', { class: 'leaderboard-emoji-scopes' });
+    const remove = h('button', { type: 'button', class: 'menu_button leaderboard-emoji-remove', onclick: () => void save('') });
+    const saveButton = h('button', { type: 'button', class: 'menu_button leaderboard-primary', text: '保存', onclick: () => void save(selected) });
+    function pick(emoji) {
+        selected = emoji;
+        error.textContent = '';
+        preview.replaceChildren(h('span', { class: 'leaderboard-emoji-preview-name', text: me.name }), emoji ? h('span', { class: 'leaderboard-emoji', text: emoji }) : h('small', { class: 'leaderboard-note', text: '（没有表情）' }));
+        grid.querySelectorAll('.leaderboard-emoji-choice').forEach(button => button.classList.toggle('selected', button.getAttribute('data-emoji') === emoji));
+        if (saveButton instanceof HTMLButtonElement) saveButton.disabled = !emoji;
+    }
+    function setScope(value) {
+        scope = value;
+        scopes.replaceChildren(segment([{ id: 'board', label: `仅「${metric.label}」榜` }, { id: 'all', label: '所有榜单' }], scope, setScope, 'leaderboard-emoji-scope'));
+        remove.replaceChildren(h('i', { class: 'fa-solid fa-trash-can' }), h('span', { text: scope === 'all' ? '删除所有榜单的表情' : `删除「${metric.label}」榜的表情` }));
+    }
+    input.addEventListener('input', () => {
+        const value = input instanceof HTMLInputElement ? input.value : '';
+        const emoji = singleEmoji(value);
+        if (emoji) pick(emoji);
+        else if (value.trim()) error.textContent = '只能是一个表情';
+    });
+    async function save(emoji) {
+        try {
+            const response = await fetch('/api/leaderboard/me/emoji', { method: 'POST', headers: getRequestHeaders(), body: JSON.stringify({ scope: scope === 'all' ? 'all' : metric.id, emoji }) });
+            if (!response.ok) {
+                error.textContent = response.status === 400 ? '只能是一个表情' : '保存失败，请稍后再试';
+                return;
+            }
+            hidePanel();
+            toastr.success(emoji ? `已${scope === 'all' ? '在所有榜单' : `在「${metric.label}」榜`}名字旁加上 ${emoji}` : '已删除表情');
+            boardVersion = '';
+            void refresh();
+        } catch {
+            error.textContent = '保存失败，请稍后再试';
+        }
+    }
+    setScope(scope);
+    popup.panel.replaceChildren(h('div', { class: 'leaderboard-card leaderboard-emoji-editor' },
+        h('h3', { text: '名字旁的表情' }),
+        preview,
+        scopes,
+        grid,
+        input,
+        error,
+        h('small', { class: 'leaderboard-note', text: '每个榜可以用不同的表情；设为「所有榜单」会替换各榜单独设的。两个站一起生效。' }),
+        h('div', { class: 'leaderboard-card-actions' },
+            remove,
+            h('span', { class: 'leaderboard-spacer' }),
+            h('button', { type: 'button', class: 'menu_button', text: '取消', onclick: hidePanel }),
+            saveButton)));
+    pick(selected);
+    popup.panel.classList.remove('displayNone');
 }
 
 async function openSettings() {
@@ -904,6 +1038,12 @@ let noticeSkipped = false;
 function screenIsBusy() {
     return !!(document.getElementById('announcementsPopup') || document.querySelector('dialog.popup[open]') || popup);
 }
+
+// 管理员让我重新选（实时推送）：马上弹出，「先跳过」过也重新问
+onLive('leaderboard-choose', () => {
+    noticeSkipped = false;
+    void maybeShowLaunchNotice();
+});
 
 async function maybeShowLaunchNotice() {
     if (noticeChecking || noticeSkipped || document.getElementById('leaderboardNotice')) return;
