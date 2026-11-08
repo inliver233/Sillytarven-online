@@ -711,8 +711,8 @@ const CRY_MS = 1800;
 /**
  * 名次那一格跟着发生的事换表情，过几秒自己换回来（期间刷新也接着播）：
  * - 前三之内：下克上、登顶得意，往上换位、冲进前三、加分开心，被顶替吃惊，名次往下掉难过。
- * - 从有脸的名次（前五）掉到前三以外：原来的脸先哭（前三是那只猫娘），再换新名次的哭脸
- *   （第四、五名有），然后才是新名次平时的样子。
+ * - 猫娘掉出前三：猫娘先哭，掉到第四、五名的再换那个名次的哭脸，然后才是新名次平时的样子。
+ * - 第四、五名往下掉：只有原来那个名次的哭脸，然后是新名次平时的样子。
  * @param {{key?: string, name: string, rank: number, value: number}[]} rows
  * @param {Map<string, string>} events topEvents() 的结果
  * @param {number} now
@@ -726,9 +726,14 @@ function setMoods(rows, events, now) {
         /** @type {{ms: number, catgirl?: number, face?: string, place?: number}[]} */
         const phases = [];
         if (previousRank !== undefined && row.rank > previousRank && previousRank <= 5 && row.rank > 3) {
-            if (previousRank <= 3) phases.push({ catgirl: previousRank, face: 'sad', ms: PLACE_SAD_FACES[row.rank] ? CRY_MS : MOOD_MS.sad });
-            else if (PLACE_SAD_FACES[previousRank]) phases.push({ place: previousRank, ms: CRY_MS });
-            if (PLACE_SAD_FACES[row.rank]) phases.push({ place: row.rank, ms: CRY_MS });
+            if (previousRank <= 3) {
+                // 猫娘掉出前三：猫娘先哭，掉到第四、五名的再换那个名次的哭脸
+                phases.push({ catgirl: previousRank, face: 'sad', ms: PLACE_SAD_FACES[row.rank] ? CRY_MS : MOOD_MS.sad });
+                if (PLACE_SAD_FACES[row.rank]) phases.push({ place: row.rank, ms: CRY_MS });
+            } else if (PLACE_SAD_FACES[previousRank]) {
+                // 第四、五名往下掉：只有原来那个名次哭
+                phases.push({ place: previousRank, ms: MOOD_MS.sad });
+            }
         } else if (row.rank <= 3) {
             let face = null;
             if (event === 'upset' || event === 'crown') face = 'excited';
