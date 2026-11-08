@@ -76,7 +76,10 @@ let lastPeriod = '';
 let lastMeValue = null;
 /** 名次变化的标记（▲2、▼1、NEW）显示一会儿，刷新后接着显示：key → {kind, text, at} */
 const moveMarks = new Map();
-/** 猫娘的表情，跟着发生的事换几秒：key → {mood, until} */
+/**
+ * 名次那一格跟着发生的事换几秒表情，可以按顺序播几段（比如原来的猫娘哭完，再换第四名的哭脸）：
+ * key → {start, until, phases: [{ms, catgirl?: 名次, face?: 表情, place?: 哪个名次的哭脸}]}
+ */
 const moods = new Map();
 const MOVE_MARK_MS = 8000;
 let requestSerial = 0;
@@ -550,17 +553,36 @@ const PLACE_FACES = { 4: '/img/leaderboard-fourth.webp', 5: '/img/leaderboard-fi
 const PLACE_SAD_FACES = { 4: '/img/leaderboard-fourth-sad.webp', 5: '/img/leaderboard-fifth-sad.webp' };
 
 /**
+ * @param {{start: number, until: number, phases: {ms: number, catgirl?: number, face?: string, place?: number}[]}} [mood]
+ * @param {number} now
+ * @returns {{ms: number, catgirl?: number, face?: string, place?: number}|null} 这会儿播的那一段
+ */
+function currentPhase(mood, now) {
+    if (!mood || now >= mood.until) return null;
+    let end = mood.start;
+    for (const phase of mood.phases) {
+        end += phase.ms;
+        if (now < end) return phase;
+    }
+    return null;
+}
+
+/**
  * @param {number} rank
  * @param {boolean} fancy 综合榜：前三是像素猫娘，第四、五名是头像；其他榜是奖牌
- * @param {{mood: string, place?: number}} [mood] 这会儿的表情：猫娘的（见 CATGIRL_FACES），或被挤下去的那个名次的哭脸
+ * @param {any} [mood] 这一行的表情（见 moods）
  */
 function rankCell(rank, fancy, mood) {
+    const phase = fancy ? currentPhase(mood, Date.now()) : null;
     let mark;
-    if (fancy && mood?.mood === 'placeSad') {
-        mark = h('img', { class: `leaderboard-place-face leaderboard-place-sad${mood.place}`, src: PLACE_SAD_FACES[mood.place], alt: `第 ${rank} 名`, title: `第 ${rank} 名`, draggable: 'false' });
+    if (phase?.place) {
+        mark = h('img', { class: `leaderboard-place-face leaderboard-place-sad${phase.place}`, src: PLACE_SAD_FACES[phase.place], alt: `第 ${rank} 名`, title: `第 ${rank} 名`, draggable: 'false' });
+    } else if (phase?.catgirl) {
+        // 可能是原来那个名次的猫娘（刚被挤下去，还在哭）
+        mark = catgirlElement(/** @type {1|2|3} */ (phase.catgirl));
+        mark.classList.add(`cg-mood-${phase.face}`);
     } else if (fancy && rank <= 3) {
         mark = catgirlElement(/** @type {1|2|3} */ (rank));
-        if (mood) mark.classList.add(`cg-mood-${mood.mood}`);
     } else if (fancy && PLACE_FACES[rank]) {
         mark = h('img', { class: 'leaderboard-place-face', src: PLACE_FACES[rank], alt: `第 ${rank} 名`, title: `第 ${rank} 名`, draggable: 'false' });
     } else {
@@ -681,12 +703,15 @@ function topEvents(rows) {
 }
 
 /** 表情持续多久 */
-const MOOD_MS = { excited: 3600, happy: 2400, shocked: 3000, sad: 3200, placeSad: 3200 };
+const MOOD_MS = { excited: 3600, happy: 2400, shocked: 3000, sad: 3200 };
+/** 被挤下去时，原来的脸和新名次的脸各哭多久 */
+const CRY_MS = 1800;
 
 /**
- * 综合榜前三的猫娘跟着发生的事换表情：下克上、登顶得意，往上换位、冲进前三、加分开心，
- * 被顶替吃惊，名次往下掉难过；第四、五名被挤下去时那一行先换成那个名次的哭脸。过几秒自己换回来
- * （期间刷新也接着这个表情）。
+ * 名次那一格跟着发生的事换表情，过几秒自己换回来（期间刷新也接着播）：
+ * - 前三之内：下克上、登顶得意，往上换位、冲进前三、加分开心，被顶替吃惊，名次往下掉难过。
+ * - 从有脸的名次（前五）掉到前三以外：原来的脸先哭（前三是那只猫娘），再换新名次的哭脸
+ *   （第四、五名有），然后才是新名次平时的样子。
  * @param {{key?: string, name: string, rank: number, value: number}[]} rows
  * @param {Map<string, string>} events topEvents() 的结果
  * @param {number} now
@@ -697,25 +722,42 @@ function setMoods(rows, events, now) {
         const event = events.get(id);
         const previousRank = lastRanks.get(id);
         const previous = lastValues.get(id);
-        let mood = null;
-        if (PLACE_SAD_FACES[previousRank] && row.rank > previousRank) mood = 'placeSad';
-        else if (row.rank > 3) continue;
-        else if (event === 'upset' || event === 'crown') mood = 'excited';
-        else if (event === 'swap' || event === 'podium') mood = 'happy';
-        else if (event === 'displaced') mood = 'shocked';
-        else if (previousRank !== undefined && row.rank > previousRank) mood = 'sad';
-        else if (previous !== undefined && significant(view.metric, row.value - previous) && row.value > previous) mood = 'happy';
-        if (!mood) continue;
-        const until = now + MOOD_MS[mood];
-        moods.set(id, { mood, place: previousRank, until });
-        // 没有新数据就不会重画：到时间把这一格名次换回平时的样子
-        setTimeout(() => {
-            if (moods.get(id)?.until !== until) return;
-            moods.delete(id);
-            const cell = popup?.list.querySelector(`.leaderboard-row[data-key="${CSS.escape(id)}"] .leaderboard-rank`);
-            if (cell && lastRanks.has(id)) cell.replaceWith(rankCell(lastRanks.get(id), view.metric === 'score'));
-        }, MOOD_MS[mood]);
+        /** @type {{ms: number, catgirl?: number, face?: string, place?: number}[]} */
+        const phases = [];
+        if (previousRank !== undefined && row.rank > previousRank && previousRank <= 5 && row.rank > 3) {
+            if (previousRank <= 3) phases.push({ catgirl: previousRank, face: 'sad', ms: PLACE_SAD_FACES[row.rank] ? CRY_MS : MOOD_MS.sad });
+            else if (PLACE_SAD_FACES[previousRank]) phases.push({ place: previousRank, ms: CRY_MS });
+            if (PLACE_SAD_FACES[row.rank]) phases.push({ place: row.rank, ms: CRY_MS });
+        } else if (row.rank <= 3) {
+            let face = null;
+            if (event === 'upset' || event === 'crown') face = 'excited';
+            else if (event === 'swap' || event === 'podium') face = 'happy';
+            else if (event === 'displaced') face = 'shocked';
+            else if (previousRank !== undefined && row.rank > previousRank) face = 'sad';
+            else if (previous !== undefined && significant(view.metric, row.value - previous) && row.value > previous) face = 'happy';
+            if (face) phases.push({ catgirl: row.rank, face, ms: MOOD_MS[face] });
+        }
+        if (!phases.length) continue;
+        const until = now + phases.reduce((sum, phase) => sum + phase.ms, 0);
+        moods.set(id, { start: now, until, phases });
+        // 没有新数据就不会重画：每换一段、播完时把这一格重画一次
+        let at = 0;
+        for (const phase of phases) {
+            at += phase.ms;
+            setTimeout(() => redrawRankCell(id, until), at + 30);
+        }
     }
+}
+
+/**
+ * @param {string} id 行的 key
+ * @param {number} until 是哪一次的表情（期间又有新的表情就不管）
+ */
+function redrawRankCell(id, until) {
+    if (moods.get(id)?.until !== until) return;
+    if (Date.now() >= until) moods.delete(id);
+    const cell = popup?.list.querySelector(`.leaderboard-row[data-key="${CSS.escape(id)}"] .leaderboard-rank`);
+    if (cell && lastRanks.has(id)) cell.replaceWith(rankCell(lastRanks.get(id), view.metric === 'score', moods.get(id)));
 }
 
 /**
@@ -758,8 +800,12 @@ function slideRows(list, before, events) {
         const done = () => row.classList.remove('leaderboard-moving-up', 'leaderboard-moving-down');
         animation.addEventListener('finish', done);
         animation.addEventListener('cancel', done);
-        // 跌出前三：先褪成灰色
-        if (event === 'out') row.animate([{ filter: 'grayscale(1) brightness(0.8)' }, { filter: 'grayscale(1) brightness(0.8)', offset: 0.4 }, { filter: 'none' }], { duration: 1800, easing: 'ease-out' });
+        // 跌出前三：名字和分数先褪成灰色（名次那一格不褪：那里的猫娘在哭）
+        if (event === 'out') {
+            for (const cell of row.querySelectorAll('.leaderboard-name, .leaderboard-value')) {
+                cell.animate([{ filter: 'grayscale(1) brightness(0.75)' }, { filter: 'grayscale(1) brightness(0.75)', offset: 0.4 }, { filter: 'none' }], { duration: 1800, easing: 'ease-out' });
+            }
+        }
     }
     // 下克上：落定时整个列表震一下
     if ([...events.values()].includes('upset')) {
@@ -818,7 +864,7 @@ function render(board) {
             'data-key': id,
             title: breakdown || null,
         },
-        rankCell(row.rank, fancy, moods.get(id)?.until > now ? moods.get(id) : undefined),
+        rankCell(row.rank, fancy, moods.get(id)),
         h('span', { class: 'leaderboard-name' },
             h('span', { class: `leaderboard-name-text${row.anonymous ? ' leaderboard-anonymous' : ''}`, text: row.name, title: row.anonymous ? '匿名' : '' }),
             row.emoji ? h('span', { class: 'leaderboard-emoji', text: row.emoji }) : null,
