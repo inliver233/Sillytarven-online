@@ -403,13 +403,14 @@
     box-shadow: inset 0 0 0 1px #f2b4c3;
 }
 
+/* 猫娘四周有透明的边，这张图是满的：小一点才一样大 */
 .leaderboard-fourth-face {
     display: block;
-    width: 32px;
-    height: 32px;
-    margin: -2px auto;
+    width: 26px;
+    height: 26px;
+    margin: 0 auto;
     object-fit: cover;
-    border-radius: 7px;
+    border-radius: 6px;
     box-shadow: 0 0 0 1px #f2b4c3;
     user-select: none;
 }
