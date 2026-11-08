@@ -924,7 +924,7 @@
 
 /*
  * 头像：傲娇千金（32×32，显示成 48px），背后金色放射光和光晕。
- * 平时一脸得意，按 leaderboard.js 的 OJOU_ROUTINE 轮着做日常动作（瞟人、喝茶、哼、哼歌、眨眼、哈欠、打瞌睡、扇子、
+ * 平时一脸得意，按 leaderboard.js 的 OJOU_ROUTINE 轮着做日常动作（瞟人、喝茶、哼、哼歌、眨眼、哈欠、打瞌睡、扇扇子、
  * 瞪人、扶皇冠、撩头发、害羞），那条时间线的动画由 leaderboard.js 生成（ojouRoutineCss）。
  * 有事时：吃惊皇冠弹起来摆正，难过皇冠滑下去一截，开心、得意跟着蹦、晃得更欢。
  */
@@ -980,7 +980,7 @@
     transform: translate(1px, 1px);
 }
 
-/* 日常动作里的小道具，整格跳：热气一左一右、Z 和音符往上飘、爱心、扇子和怒气一上一下、星星一闪一闪 */
+/* 日常动作里的小道具，整格跳：热气一左一右、Z 和音符往上飘、爱心和怒气一上一下、星星一闪一闪 */
 .leaderboard-ojou .oj-steam-a {
     animation: leaderboard-oj-frame-a 0.8s steps(1, end) infinite;
 }
@@ -1002,14 +1002,24 @@
 }
 
 .leaderboard-ojou .oj-heart,
-.leaderboard-ojou .oj-fan,
 .leaderboard-ojou .oj-anger {
     animation: leaderboard-oj-bob 0.6s steps(1, end) infinite;
 }
 
-.leaderboard-ojou .oj-fan,
 .leaderboard-ojou .oj-anger {
     animation-duration: 0.3s;
+}
+
+/* 扇子在左肩旁斜着来回扇（绕扇轴转，和 leaderboard.js 的 OJOU_FAN_AT 一致） */
+.leaderboard-ojou .oj-fan {
+    transform-origin: 8px 27px;
+    transform: rotate(-40deg);
+    animation: leaderboard-oj-fanning 0.45s ease-in-out infinite alternate;
+}
+
+@keyframes leaderboard-oj-fanning {
+    from { transform: rotate(-50deg); }
+    to { transform: rotate(-28deg); }
 }
 
 .leaderboard-ojou .oj-twinkle {

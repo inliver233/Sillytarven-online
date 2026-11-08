@@ -615,6 +615,7 @@ const OJOU_SMILE = [[14, 20, 'M'], [15, 21, 'M'], [16, 21, 'M'], [17, 20, 'M']];
 const OJOU_FLAT = [[15, 21, 'M'], [16, 21, 'M']];
 const OJOU_SMALL_O = [[15, 20, 'M'], [16, 20, 'M'], ...OJOU_FLAT];
 const OJOU_WAVY = [[14, 21, 'M'], [15, 20, 'M'], [16, 21, 'M'], [17, 20, 'M']];
+const OJOU_LAUGH = [[14, 20, 'M'], [15, 20, 'M'], [16, 20, 'M'], [17, 20, 'M'], [14, 21, 'M'], [15, 21, 'P'], [16, 21, 'P'], [17, 21, 'M'], [15, 22, 'M'], [16, 22, 'M']];
 const OJOU_WIDE_EYES = bothSides([[9, 13, 'E'], [10, 13, 'E'], [11, 13, 'E'], [12, 13, 'E'], [13, 13, 'E'], [10, 14, 'W'], [11, 14, 'W'], [12, 14, 'W'], [13, 14, 'W'],
     [10, 15, 'W'], [11, 15, 'E'], [12, 15, 'E'], [13, 15, 'W'], [10, 16, 'W'], [11, 16, 'E'], [12, 16, 'E'], [13, 16, 'W'], [10, 17, 'W'], [11, 17, 'W'], [12, 17, 'W'], [13, 17, 'W']]);
 const OJOU_NO_BLUSH = bothSides([[9, 19, 'S'], [10, 19, 'S'], [11, 19, 'S'], [12, 19, 'S']]);
@@ -657,8 +658,7 @@ function ojouStar(x, y) {
 const OJOU_FACES = {
     hmph: [...OJOU_CLOSED_EYES, ...OJOU_POUT, ...bothSides([[9, 18, 'B'], [13, 19, 'b']]), [24, 22, 'W'], [25, 21, 'W'], [26, 22, 'W'], [27, 21, 'W']],
     happy: [...OJOU_SMILE_EYES, ...OJOU_SMILE],
-    excited: [...OJOU_SMILE_EYES, [14, 20, 'M'], [15, 20, 'M'], [16, 20, 'M'], [17, 20, 'M'], [14, 21, 'M'], [15, 21, 'P'], [16, 21, 'P'], [17, 21, 'M'], [15, 22, 'M'], [16, 22, 'M'],
-        ...ojouStar(2, 4), ...ojouStar(28, 10), [5, 7, 'K'], [26, 5, 'K']],
+    excited: [...OJOU_SMILE_EYES, ...OJOU_LAUGH, ...ojouStar(2, 4), ...ojouStar(28, 10), [5, 7, 'K'], [26, 5, 'K']],
     shocked: [...OJOU_WIDE_EYES, ...OJOU_NO_BLUSH, ...OJOU_SMALL_O, ...OJOU_SWEAT],
     sad: [...bothSides([[8, 13, 'E'], [9, 13, 'E'], [9, 14, 'E'], [10, 14, 'E'], [11, 14, 'E'], [12, 14, 'E'], [13, 14, 'E'],
         [10, 15, 'W'], [11, 15, 'e'], [12, 15, 'W'], [13, 15, 'E'], [10, 16, 'e'], [11, 16, 'n'], [12, 16, 'n'], [13, 16, 'e'],
@@ -669,7 +669,7 @@ const ojouZ = (x0, y0) => pixelArt(x0, y0, ['qqqq', '..q.', '.q..', 'qqqq']);
 const ojouNote = (x0, y0) => pixelArt(x0, y0, ['..YY', '..YK', '..Y.', 'YYY.', 'YYY.']);
 /**
  * 日常动作的脸（face）和小道具（props：class → 像素，各自有小动画，见 leaderboard.css）：
- * 往左/右瞟、瞪人冒 💢、眨眼放电、喝红茶（冒热气）、扇子挡嘴「哦呵呵」、打哈欠、犯困/睡着（冒 Z）/惊醒/嘴硬脸红、
+ * 往左/右瞟、瞪人冒 💢、眨眼放电、喝红茶（冒热气）、肩膀旁扇扇子「哦呵呵」、打哈欠、犯困/睡着（冒 Z）/惊醒/嘴硬脸红、
  * 哼歌（音符）、害羞（爱心）、抬眼看皇冠、闭眼得意、撩头发。
  */
 const OJOU_ACTIONS = {
@@ -685,13 +685,7 @@ const OJOU_ACTIONS = {
             'oj-steam-b': [[24, 19, 'v'], [23, 18, 'v'], [23, 17, 'v'], [24, 16, 'v'], [26, 19, 'v'], [25, 18, 'v'], [25, 16, 'v']],
         },
     },
-    fan: {
-        face: OJOU_SMILE_EYES,
-        props: {
-            'oj-fan': pixelArt(10, 17, ['...GGGGGG...', '.GGXXPPXXGG.', 'GXXPPXXPPXXG', 'OXXPPXXPPXXO', '.OXPPXXPPXO.', '..OPPXXPPO..', '...OOggOO...']),
-            'oj-twinkle': [...ojouStar(2, 4), ...ojouStar(28, 10)],
-        },
-    },
+    fan: { face: [...OJOU_SMILE_EYES, ...OJOU_LAUGH], props: { 'oj-twinkle': [...ojouStar(2, 4), ...ojouStar(28, 10)] }, fan: true },
     yawn: { face: [...OJOU_CLOSED_EYES, ...pixelArt(14, 19, ['.MM.', 'MPPM', 'MPPM', '.MM.']), [8, 16, 'q'], [8, 17, 'Q'], [23, 16, 'q'], [23, 17, 'Q']] },
     sleepy: { face: [...bothSides([[8, 15, 'E'], [9, 16, 'E'], [10, 16, 'E'], [11, 16, 'E'], [12, 16, 'E'], [13, 16, 'E'], [10, 17, 'e'], [11, 17, 'n'], [12, 17, 'n'], [13, 17, 'e']]), ...OJOU_FLAT] },
     asleep: {
@@ -766,6 +760,35 @@ const OJOU_CROWN = [
     'ggggggggg',
 ];
 const OJOU_CROWN_AT = [20.5, 7.4];
+/** 折扇（正的，扇轴在底边中点）；扇轴放在 OJOU_FAN_AT（左肩旁），CSS 绕这一点斜着来回扇 */
+const OJOU_FAN = [
+    '...GGGGGG...',
+    '.GGXXPPXXGG.',
+    'GXXPPXXPPXXG',
+    'OXXPPXXPPXXO',
+    '.OXPPXXPPXO.',
+    '..OPPXXPPO..',
+    '...OOggOO...',
+];
+const OJOU_FAN_AT = [8, 27];
+
+/**
+ * 会整个转动的像素图（皇冠、扇子）：每种颜色一条路径，底下先铺一层底色，转过去以后色块之间不透缝。
+ * @param {string[]} rows
+ * @param {number} left
+ * @param {number} top
+ * @param {string} under 底色
+ * @returns {string}
+ */
+function turnablePixels(rows, left, top, under) {
+    /** @type {Record<string, string[]>} */
+    const paths = {};
+    rows.forEach((row, y) => [...row].forEach((letter, x) => {
+        if (letter !== '.') (paths[letter] ??= []).push(`M${left + x} ${top + y}h1v1h-1z`);
+    }));
+    return `<path fill="${OJOU_COLORS[under]}" d="${Object.values(paths).flat().join('')}"/>`
+        + Object.entries(paths).map(([letter, d]) => `<path fill="${OJOU_COLORS[letter]}" d="${d.join('')}"/>`).join('');
+}
 
 /**
  * 千金（SVG）：分层同猫娘（眨眼、表情、呼吸共用那套动画），外加日常动作的脸和道具、整个人一层（点头、蹦）、
@@ -786,17 +809,12 @@ function ojouSvg() {
     }));
     const left = OJOU_CROWN_AT[0] - OJOU_CROWN[0].length / 2;
     const top = OJOU_CROWN_AT[1] - OJOU_CROWN.length;
-    /** @type {Record<string, string[]>} */
-    const paths = {};
-    OJOU_CROWN.forEach((row, y) => [...row].forEach((letter, x) => {
-        if (letter !== '.') (paths[letter] ??= []).push(`M${left + x} ${top + y}h1v1h-1z`);
-    }));
-    // 每种颜色一条路径、底下先铺一层金色：转过去以后不会透出缝
-    const crown = `<path fill="${colors.G}" d="${Object.values(paths).flat().join('')}"/>`
-        + Object.entries(paths).map(([letter, d]) => `<path fill="${colors[letter]}" d="${d.join('')}"/>`).join('');
+    const crown = turnablePixels(OJOU_CROWN, left, top, 'G');
+    const fan = `<g class="oj-fan" shape-rendering="geometricPrecision">${turnablePixels(OJOU_FAN, OJOU_FAN_AT[0] - OJOU_FAN[0].length / 2, OJOU_FAN_AT[1] - OJOU_FAN.length, 'X')}</g>`;
     const glints = [0, 4, 8].map(x => `<rect x="${left + x}" y="${top}" width="1" height="1" fill="#ffffff"/>`).join('');
     const actions = Object.entries(OJOU_ACTIONS).map(([name, action]) => `<g class="cg-face cg-face-${name}">${pixelRects(action.face, colors)}`
-        + Object.entries(action.props ?? {}).map(([prop, pixels]) => `<g class="${prop}">${pixelRects(pixels, colors)}</g>`).join('') + '</g>').join('');
+        + Object.entries(action.props ?? {}).map(([prop, pixels]) => `<g class="${prop}">${pixelRects(pixels, colors)}</g>`).join('')
+        + (action.fan ? fan : '') + '</g>').join('');
     return '<svg class="leaderboard-catgirl leaderboard-ojou" viewBox="0 0 32 32" shape-rendering="crispEdges" role="img" aria-label="总冠军"><title>总冠军</title><g class="cg-all"><g class="oj-act">'
         + `<g class="cg-body">${pixelRects(body, colors)}</g><g class="oj-lock">${pixelRects(lock, colors)}</g>`
         + `<g class="cg-normal"><g class="cg-eyes">${pixelRects(OJOU_EYES, colors)}</g><g class="cg-blink">${pixelRects(OJOU_CLOSED_EYES, colors)}</g><g class="cg-mouth">${pixelRects(OJOU_MOUTH, colors)}</g></g>`
@@ -1034,6 +1052,8 @@ function topEvents(rows) {
 const MOOD_MS = { excited: 3600, happy: 2400, shocked: 3000, sad: 3200 };
 /** 被挤下去时，原来的脸和新名次的脸各哭多久 */
 const CRY_MS = 1800;
+/** 名次被人直接抢走时先愣多久，再哭 */
+const STUNNED_MS = 900;
 
 /**
  * 名次那一格跟着发生的事换表情，过几秒自己换回来（期间刷新也接着播）：
@@ -1061,12 +1081,14 @@ function setMoods(rows, events, now) {
                 // 第四、五名往下掉：只有原来那个名次哭
                 phases.push({ place: previousRank, ms: MOOD_MS.sad });
             }
+        } else if (row.rank <= 3 && previousRank !== undefined && row.rank > previousRank) {
+            // 在前三里往下掉：哭的是原来那个名次的（总榜第一是千金），名次被人直接抢走的先愣一下；哭完换成新名次的
+            if (event === 'displaced') phases.push({ catgirl: previousRank, face: 'shocked', ms: STUNNED_MS });
+            phases.push({ catgirl: previousRank, face: 'sad', ms: MOOD_MS.sad });
         } else if (row.rank <= 3) {
             let face = null;
             if (event === 'upset' || event === 'crown') face = 'excited';
             else if (event === 'swap' || event === 'podium') face = 'happy';
-            else if (event === 'displaced') face = 'shocked';
-            else if (previousRank !== undefined && row.rank > previousRank) face = 'sad';
             else if (previous !== undefined && significant(view.metric, row.value - previous) && row.value > previous) face = 'happy';
             if (face) phases.push({ catgirl: row.rank, face, ms: MOOD_MS[face] });
         }
