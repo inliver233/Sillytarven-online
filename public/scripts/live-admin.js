@@ -23,7 +23,10 @@ const FORMS = Object.freeze({
 });
 
 const KEEP_OPTIONS = Object.freeze([[0, '不保留'], [60, '1 分钟'], [600, '10 分钟'], [3600, '1 小时'], [86400, '24 小时']]);
-const ERRORS = Object.freeze({ unknown_type: '服务器不认识这种指令', bad_target: '没有填写账号', bad_data: '内容不完整', unknown_command: '这条指令已经过期或撤销', disabled: '本站没有开启实时推送' });
+/** 上线后补发的保留时间 */
+const LATE_KEEP_OPTIONS = Object.freeze([[86400, '1 天'], [3 * 86400, '3 天'], [7 * 86400, '7 天'], [30 * 86400, '30 天']]);
+const LATE_KEEP_DEFAULT = 7 * 86400;
+const ERRORS = Object.freeze({ unknown_type: '服务器不认识这种指令', bad_target: '没有填写账号', bad_data: '内容不完整', not_late: '这种指令不能上线后补发', unknown_command: '这条指令已经过期或撤销', disabled: '本站没有开启实时推送' });
 const REFRESH_MS = 10_000;
 
 function element(tag, className, text) {
@@ -48,7 +51,26 @@ async function request(path, body) {
 
 function formatTime(at) {
     const date = new Date(at);
-    return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+    const time = `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+    return date.toDateString() === new Date().toDateString() ? time : `${date.getMonth() + 1}-${date.getDate()} ${time}`;
+}
+
+/**
+ * @param {string[]} handles
+ * @param {number} [max]
+ */
+function listHandles(handles, max = 8) {
+    return handles.length > max ? `${handles.slice(0, max).join('、')} 等 ${handles.length} 个` : handles.join('、');
+}
+
+/** 补发消息的送达情况 */
+function describeSeen(command) {
+    if (!command.late) return '';
+    if (!command.target?.handles) return command.seenCount ? `已有 ${command.seenCount} 个账号看到` : '还没有人看到';
+    const seen = command.seen ?? [];
+    const waiting = command.target.handles.filter(handle => !seen.includes(handle));
+    if (!waiting.length) return '全部已看到';
+    return [seen.length ? `已看到：${listHandles(seen)}` : '', `还没看到：${listHandles(waiting)}`].filter(Boolean).join(' · ');
 }
 
 function describeTarget(target) {
@@ -105,7 +127,7 @@ function buildView(block) {
     const header = element('header', 'liveAdmin-header');
     header.append(
         element('h3', '', '实时推送'),
-        element('p', 'liveAdmin-muted', '向打开着的页面立即发送指令。设置保留时间后，期间重新连上的页面（如休眠后恢复、服务器重启后重连）也会收到；之后打开的页面不受影响。'),
+        element('p', 'liveAdmin-muted', '向打开着的页面立即发送指令。设置保留时间后，期间重新连上的页面（如休眠后恢复、服务器重启后重连）也会收到；之后打开的页面不受影响。消息可以选「上线后补发」：不在线的人在保留期内打开网页时也会收到，每个账号看到一次。'),
     );
 
     const online = element('section', 'liveAdmin-section');
@@ -128,6 +150,11 @@ function buildView(block) {
     handles.hidden = true;
     targetRow.append(element('span', 'liveAdmin-label', '发给'), radioGroup('liveAdminTarget', [['all', '所有页面'], ['admins', '仅管理员'], ['handles', '指定账号']], 'all'), handles);
     const fields = element('div', 'liveAdmin-fields');
+    const lateRow = element('label', 'liveAdmin-field is-checkbox');
+    const late = element('input');
+    late.type = 'checkbox';
+    lateRow.append(late, element('span', '', '不在线的话，上线后补发（保留期内打开网页就会收到，每个账号看到一次，关掉才算看到）'));
+    lateRow.hidden = true;
     const keepRow = element('label', 'liveAdmin-field');
     const keep = element('select', 'text_pole liveAdmin-keep');
     for (const [value, label] of KEEP_OPTIONS) keep.append(Object.assign(element('option', '', label), { value: String(value) }));
@@ -139,17 +166,17 @@ function buildView(block) {
     submit.type = 'button';
     submit.append(element('i', 'fa-fw fa-solid fa-paper-plane'), element('span', '', '发送'));
     actions.append(status, submit);
-    send.append(element('h4', '', '发送'), typeRow, targetRow, fields, keepRow, actions);
+    send.append(element('h4', '', '发送'), typeRow, targetRow, fields, lateRow, keepRow, actions);
 
     const kept = element('section', 'liveAdmin-section');
     kept.append(element('h4', '', '保留中的指令'), element('div', 'liveAdmin-kept'));
     kept.hidden = true;
 
-    const note = element('p', 'liveAdmin-muted liveAdmin-note', '服务器上也可以放指令文件触发（如部署脚本）：数据目录下 _global/live/outbox/*.json，内容同 POST /api/live/send，例如 {"type":"reload","data":{"delay":10},"keep":3600}。');
+    const note = element('p', 'liveAdmin-muted liveAdmin-note', '服务器上也可以放指令文件触发（如部署脚本）：数据目录下 _global/live/outbox/*.json，内容同 POST /api/live/send，例如 {"type":"reload","data":{"delay":10},"keep":3600}；上线后补发的消息加 "late": true，keep 最长 30 天。');
 
     root.append(header, online, send, kept, note);
     block.replaceChildren(root);
-    return { root, refresh, tiles, users, typeRow, targetRow, handles, fields, keep, status, submit, kept, commands: [] };
+    return { root, refresh, tiles, users, typeRow, targetRow, handles, fields, lateRow, late, keep, status, submit, kept, commands: [] };
 }
 
 function setStatus(view, text, state = '') {
@@ -176,9 +203,24 @@ function renderFields(view) {
         view.fields.replaceChildren(json);
     }
     const command = view.commands.find(item => item.type === type);
-    const keep = String(command?.keep ?? 0);
-    if (![...view.keep.options].some(option => option.value === keep)) view.keep.append(Object.assign(element('option', '', `${keep} 秒`), { value: keep }));
+    view.lateRow.hidden = !command?.late;
+    view.late.checked = false;
+    fillKeep(view);
+}
+
+/** 保留时间的选项：上线后补发按天，其他按分钟、小时 */
+function fillKeep(view) {
+    const late = isLate(view);
+    const command = view.commands.find(item => item.type === selectedType(view));
+    const keep = String(late ? LATE_KEEP_DEFAULT : command?.keep ?? 0);
+    const options = (late ? LATE_KEEP_OPTIONS : KEEP_OPTIONS).map(([value, label]) => [String(value), label]);
+    if (!options.some(([value]) => value === keep)) options.push([keep, `${keep} 秒`]);
+    view.keep.replaceChildren(...options.map(([value, label]) => Object.assign(element('option', '', label), { value })));
     view.keep.value = keep;
+}
+
+function isLate(view) {
+    return !view.lateRow.hidden && view.late.checked;
 }
 
 function renderCommands(view, commands) {
@@ -218,8 +260,13 @@ function renderStatus(view, data) {
     view.kept.hidden = data.kept.length === 0;
     keptList.replaceChildren(...data.kept.slice().reverse().map(command => {
         const row = element('div', 'liveAdmin-keptRow');
-        const text = element('span', '', `${FORMS[command.type]?.label ?? command.type} · ${describeTarget(command.target)} · ${formatTime(command.at)} 发出，保留到 ${formatTime(command.until)}`);
-        const cancel = element('button', 'menu_button liveAdmin-small', '撤销');
+        const text = element('div', 'liveAdmin-keptText');
+        const snippet = command.type === 'notice' ? String(command.data?.title || command.data?.text || '').replace(/\s+/g, ' ').slice(0, 24) : '';
+        const parts = [FORMS[command.type]?.label ?? command.type, snippet && `「${snippet}」`, command.late && '上线后补发', describeTarget(command.target), `${formatTime(command.at)} 发出，保留到 ${formatTime(command.until)}`];
+        text.append(element('span', '', parts.filter(Boolean).join(' · ')));
+        const seen = describeSeen(command);
+        if (seen) text.append(element('span', 'liveAdmin-keptSeen', seen));
+        const cancel = element('button', 'menu_button liveAdmin-small', seen === '全部已看到' ? '移除' : '撤销');
         cancel.type = 'button';
         cancel.dataset.cancel = command.id;
         row.append(text, cancel);
@@ -269,6 +316,7 @@ async function submit(view) {
     let body;
     try {
         body = { type: selectedType(view), target: readTarget(view), data: readData(view), keep: Number(view.keep.value) };
+        if (isLate(view)) body.late = true;
     } catch (error) {
         setStatus(view, error.message, 'error');
         return;
@@ -276,8 +324,8 @@ async function submit(view) {
     const label = view.submit.querySelector('span');
     if (body.target.all && Date.now() > confirmUntil) {
         confirmUntil = Date.now() + 4000;
-        label.textContent = '确认发给所有页面';
-        setStatus(view, '将发给所有打开着的页面，再点一次确认', 'dirty');
+        label.textContent = body.late ? '确认发给所有人' : '确认发给所有页面';
+        setStatus(view, body.late ? '将发给所有账号（在线的马上收到，其他人保留期内上线时收到），再点一次确认' : '将发给所有打开着的页面，再点一次确认', 'dirty');
         setTimeout(() => {
             if (Date.now() >= confirmUntil) label.textContent = '发送';
         }, 4100);
@@ -289,7 +337,8 @@ async function submit(view) {
     setStatus(view, '正在发送…');
     try {
         const result = await request('send', body);
-        setStatus(view, `已发送到 ${result.pages} 个页面${result.kept ? '，保留期内重连的页面也会收到' : ''}`, 'ok');
+        const after = result.late ? '；不在线的账号保留期内打开网页时也会收到' : result.kept ? '，保留期内重连的页面也会收到' : '';
+        setStatus(view, `已发送到 ${result.pages} 个页面${after}`, 'ok');
         await load(view);
     } catch (error) {
         setStatus(view, error.message, 'error');
@@ -318,6 +367,12 @@ export async function openLiveAdmin(block) {
         block.__liveAdminView = view;
         view.refresh.addEventListener('click', () => load(view).catch(error => setStatus(view, error.message, 'error')));
         view.typeRow.addEventListener('change', () => renderFields(view));
+        view.late.addEventListener('change', () => {
+            fillKeep(view);
+            // 补发的消息默认一直显示到对方关掉
+            const timeout = view.fields.querySelector('[data-key="timeout"]');
+            if (timeout && view.late.checked) timeout.value = '0';
+        });
         view.targetRow.addEventListener('change', event => {
             if (event.target === view.handles) return;
             view.handles.hidden = selectedTarget(view) !== 'handles';
@@ -336,7 +391,7 @@ export async function openLiveAdmin(block) {
             if (!id) return;
             try {
                 await request('cancel', { id });
-                setStatus(view, '已撤销，之后重连的页面不会再收到', 'ok');
+                setStatus(view, '已撤销，之后连上的页面不会再收到', 'ok');
             } catch (error) {
                 setStatus(view, error.message, 'error');
             }

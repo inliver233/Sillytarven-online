@@ -29,13 +29,18 @@ import { getCookieSecret, requireAdminMiddleware } from './users.js';
  *   live.send(target, type, data)       push to open pages; target {all: true} | {admins: true} | {handles: [...]}
  *   live.on(type, (client, data) => …)  handle a message pages send (client.send(type, data) answers)
  *   live.onConnect(client => …)         a page connected
- *   live.command(type, normalize, {keep})
+ *   live.command(type, normalize, {keep, late})
  *                                       let administrators send `type`: from the admin panel,
  *                                       POST /api/live/send, or a file in <data>/_global/live/outbox/
  *                                       ({"type": …, "data": {…}, "target": {…}, "keep": seconds}).
  *                                       With `keep`, pages that were already open but not connected
  *                                       (asleep, or reconnecting after a restart) still get it when
  *                                       they connect within that many seconds.
+ *                                       Types registered with `late` can also be sent with
+ *                                       "late": true: people who are not online get it when they
+ *                                       open the site within `keep` (up to 30 days), each account
+ *                                       until one of its pages answers {t: 'seen', d: {id}}; its
+ *                                       other pages then get {t: 'seen', d: {id}} to take it down.
  * and on the page (public/scripts/live.js): onLive(type, handler), sendLive(type, data), or
  * eventSource.on('live:<type>', handler) without importing anything.
  */
@@ -48,13 +53,15 @@ const MAX_MESSAGE_BYTES = 16 * 1024;
 const MAX_PAGES_PER_USER = 20;
 const MAX_TARGET_HANDLES = 500;
 const MAX_KEEP_S = 24 * 3600;
-const MAX_KEPT = 50;
+const MAX_LATE_KEEP_S = 30 * 24 * 3600;
+const DEFAULT_LATE_KEEP_S = 7 * 24 * 3600;
+const MAX_KEPT = 100;
 const MAX_PAGE_AGE_MS = 30 * 24 * 3600e3;
 const OUTBOX_POLL_MS = 2000;
 
 /**
  * @typedef {{all: true} | {admins: true} | {handles: string[]}} LiveTarget
- * @typedef {{id: string, type: string, data: any, target: LiveTarget, at: number, until: number}} KeptCommand
+ * @typedef {{id: string, type: string, data: any, target: LiveTarget, at: number, until: number, late?: boolean, seen?: string[]}} KeptCommand
  * @typedef {{handle: string, admin: boolean}} LiveUser
  * @typedef {object} LiveClient
  * @property {import('ws').WebSocket} ws
@@ -164,7 +171,7 @@ export class LiveHub {
         this.clients = new Set();
         /** @type {Map<string, (client: LiveClient, data: any) => void>} */
         this.handlers = new Map();
-        /** @type {Map<string, {normalize: (data: any) => any, keep: number}>} */
+        /** @type {Map<string, {normalize: (data: any) => any, keep: number, late: boolean}>} */
         this.commands = new Map();
         /** @type {Array<(client: LiveClient) => void>} */
         this.connectHooks = [];
@@ -177,7 +184,8 @@ export class LiveHub {
         /** @type {Buffer|null} */
         this.key = null;
         this.command('reload', normalizeReload, { keep: 3600 });
-        this.command('notice', normalizeNotice);
+        this.command('notice', normalizeNotice, { late: true });
+        this.on('seen', (client, data) => this.markSeen(client, data?.id));
     }
 
     get folder() {
@@ -292,11 +300,17 @@ export class LiveHub {
         ws.on('close', () => this.clients.delete(client));
         ws.on('error', () => this.clients.delete(client));
         client.send('hello', { heartbeat: HEARTBEAT_MS });
-        // Commands this page missed: sent after it was loaded, while it was not connected.
+        // Commands this page missed: sent after it was loaded, while it was not connected; and the
+        // late ones its account has not seen yet (those it has: take them down, if still showing).
         const now = Date.now();
         for (const command of this.kept) {
-            if (command.until > now && command.at > loadedAt && targets(command.target, client)) {
-                this.deliver(client, command.type, command.data, command.id);
+            if (command.until <= now || !targets(command.target, client)) continue;
+            if (!command.late) {
+                if (command.at > loadedAt) this.deliver(client, command.type, command.data, command.id);
+            } else if (command.seen?.includes(client.handle)) {
+                client.send('seen', { id: command.id });
+            } else {
+                this.deliver(client, command.type, command.data, command.id, true);
             }
         }
         for (const hook of this.connectHooks) {
@@ -348,14 +362,16 @@ export class LiveHub {
      * @param {string} type
      * @param {unknown} [data]
      * @param {string} [id]
+     * @param {boolean} [late] A late command: the page answers 'seen' once it has been seen
      * @returns {boolean} Whether it went out
      */
-    deliver(client, type, data, id) {
+    deliver(client, type, data, id, late) {
         if (client.ws.readyState !== client.ws.OPEN) return false;
-        /** @type {{t: string, d?: unknown, id?: string}} */
+        /** @type {{t: string, d?: unknown, id?: string, late?: true}} */
         const message = { t: type };
         if (data !== undefined) message.d = data;
         if (id) message.id = id;
+        if (late) message.late = true;
         client.ws.send(JSON.stringify(message));
         return true;
     }
@@ -396,16 +412,18 @@ export class LiveHub {
      * Lets administrators send this type.
      * @param {string} type
      * @param {(data: any) => any} normalize Checks and cleans the data; a falsy result refuses it
-     * @param {{keep?: number}} [options] keep: seconds pages that connect later still get it (default)
+     * @param {{keep?: number, late?: boolean}} [options] keep: seconds pages that connect later still
+     *     get it (default); late: it may also be sent to people who are not online (see above)
      */
-    command(type, normalize, { keep = 0 } = {}) {
-        this.commands.set(type, { normalize, keep: clampInteger(keep, 0, MAX_KEEP_S, 0) });
+    command(type, normalize, { keep = 0, late = false } = {}) {
+        this.commands.set(type, { normalize, keep: clampInteger(keep, 0, MAX_KEEP_S, 0), late: !!late });
     }
 
     /**
      * An administrator's command.
-     * @param {any} request {type, data, target (default all pages), keep (seconds, default per type)}
-     * @returns {{id?: string, pages?: number, kept?: boolean, error?: string}}
+     * @param {any} request {type, data, target (default all pages), keep (seconds, default per type),
+     *     late (also for people not online: keep defaults to 7 days, at most 30)}
+     * @returns {{id?: string, pages?: number, kept?: boolean, late?: boolean, error?: string}}
      */
     dispatch(request) {
         const command = this.commands.get(request?.type);
@@ -414,14 +432,39 @@ export class LiveHub {
         if (!target) return { error: 'bad_target' };
         const data = command.normalize(request.data ?? {});
         if (!data) return { error: 'bad_data' };
-        const keep = clampInteger(request.keep, 0, MAX_KEEP_S, command.keep);
+        const late = request.late === true;
+        if (late && !command.late) return { error: 'not_late' };
+        const keep = late ? clampInteger(request.keep || undefined, 60, MAX_LATE_KEEP_S, DEFAULT_LATE_KEEP_S) : clampInteger(request.keep, 0, MAX_KEEP_S, command.keep);
         const at = Date.now();
         const id = `${at.toString(36)}-${crypto.randomBytes(4).toString('hex')}`;
         if (keep > 0) {
-            this.kept.push({ id, type: request.type, data, target, at, until: at + keep * 1000 });
+            this.kept.push({ id, type: request.type, data, target, at, until: at + keep * 1000, ...(late ? { late: true, seen: [] } : {}) });
             this.saveKept();
         }
-        return { id, pages: this.send(target, request.type, data, id), kept: keep > 0 };
+        if (!late) return { id, pages: this.send(target, request.type, data, id), kept: keep > 0 };
+        let pages = 0;
+        for (const client of this.clients) {
+            if (targets(target, client) && this.deliver(client, request.type, data, id, true)) pages++;
+        }
+        return { id, pages, kept: true, late: true };
+    }
+
+    /**
+     * A page says its account has seen a late command (for a notice: it was closed).
+     * @param {LiveClient} client
+     * @param {unknown} id
+     * @returns {boolean} Whether this is news
+     */
+    markSeen(client, id) {
+        const command = this.kept.find(item => item.id === id);
+        if (!command?.late || !command.seen || !targets(command.target, client) || command.seen.includes(client.handle)) return false;
+        command.seen.push(client.handle);
+        this.saveKept();
+        // The account's other open pages take it down too.
+        for (const other of this.clients) {
+            if (other !== client && other.handle === client.handle) other.send('seen', { id: command.id });
+        }
+        return true;
     }
 
     /**
@@ -441,7 +484,10 @@ export class LiveHub {
     loadKept() {
         try {
             const kept = JSON.parse(fs.readFileSync(path.join(this.folder, 'kept.json'), 'utf8'));
-            return Array.isArray(kept) ? kept.filter(command => command?.until > Date.now() && normalizeTarget(command.target)) : [];
+            if (!Array.isArray(kept)) return [];
+            return kept
+                .filter(command => command?.until > Date.now() && normalizeTarget(command.target))
+                .map(command => (command.late ? { ...command, late: true, seen: Array.isArray(command.seen) ? command.seen.filter(handle => typeof handle === 'string') : [] } : command));
         } catch {
             return [];
         }
@@ -499,8 +545,12 @@ export class LiveHub {
             pages: this.clients.size,
             admins,
             users: [...users].map(([handle, pages]) => ({ handle, pages })).sort((a, b) => a.handle.localeCompare(b.handle)),
-            commands: [...this.commands].map(([type, command]) => ({ type, keep: command.keep })),
-            kept: this.kept.filter(command => command.until > now),
+            commands: [...this.commands].map(([type, command]) => ({ type, keep: command.keep, ...(command.late ? { late: true } : {}) })),
+            // Late commands: how many accounts have seen it, and which when it went to named accounts.
+            kept: this.kept.filter(command => command.until > now).map(({ seen, ...command }) => {
+                if (!command.late) return command;
+                return { ...command, seenCount: seen?.length ?? 0, ...('handles' in command.target ? { seen: seen ?? [] } : {}) };
+            }),
         };
     }
 }

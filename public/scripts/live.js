@@ -15,7 +15,7 @@ const LOGGED_OUT_RETRY_MS = 5 * 60e3;
 /** 服务器热重载后所有页面一起重连，分散到这段时间里。 */
 const RESTART_SPREAD_MS = 10e3;
 
-/** @type {Map<string, Set<(data: any, message: {t: string, d?: any, id?: string}) => unknown>>} */
+/** @type {Map<string, Set<(data: any, message: {t: string, d?: any, id?: string, late?: boolean}) => unknown>>} */
 const handlers = new Map();
 /** 已处理过的指令：页面重连后，服务器会再补发一次它当时可能没收到的指令。 */
 const handled = new Set();
@@ -164,6 +164,7 @@ function receive(raw) {
     if (message.t === 'hello') {
         heartbeatMs = Number(message.d?.heartbeat) || heartbeatMs;
         heard();
+        sendPendingSeen();
     }
     if (message.id) {
         if (handled.has(message.id)) return;
@@ -245,18 +246,66 @@ async function reloadPage({ delay = 5, message = '', wait = true } = {}) {
 onLive('reload', data => reloadPage(data));
 
 // ---- 内置：显示消息 ----
+// 「上线后补发」的消息（带 late）：等页面在前台才显示，关掉才算这个账号看到了，告诉服务器（'seen'），
+// 之后再打开网页不会再收到；这个账号别的页面上还显示着的，服务器会让它们一起收起来。
 
-onLive('notice', ({ text = '', title = '', level = 'info', timeout = 15 } = {}) => {
+/** 显示着的补发消息：id → 提示 @type {Map<string, JQuery<HTMLElement>>} */
+const lateNotices = new Map();
+/** 这个账号已经看过的补发消息（可能是在别的页面上） */
+const seenLate = new Set();
+/** 关掉了、还没能告诉服务器的（当时正好断线） */
+const pendingSeen = new Set();
+
+function sendPendingSeen() {
+    for (const id of pendingSeen) {
+        if (sendLive('seen', { id })) pendingSeen.delete(id);
+    }
+}
+
+function whenVisible() {
+    if (!document.hidden) return Promise.resolve();
+    return new Promise(resolve => {
+        const check = () => {
+            if (document.hidden) return;
+            document.removeEventListener('visibilitychange', check);
+            resolve();
+        };
+        document.addEventListener('visibilitychange', check);
+    });
+}
+
+onLive('notice', async ({ text = '', title = '', level = 'info', timeout = 15 } = {}, message) => {
+    const late = message?.late === true && typeof message.id === 'string';
+    if (late) {
+        await whenVisible();
+        if (seenLate.has(message.id)) return;
+    }
     const show = toastr[level] ?? toastr.info;
     const ms = Math.max(0, Number(timeout) || 0) * 1000;
-    show(text, title, {
+    const toast = show(text, title, {
         timeOut: ms,
         extendedTimeOut: ms ? 5000 : 0,
         tapToDismiss: ms > 0,
         closeButton: true,
         escapeHtml: true,
         messageClass: 'toast-message live-notice-message',
+        onHidden: late ? () => {
+            lateNotices.delete(message.id);
+            if (seenLate.has(message.id)) return;
+            seenLate.add(message.id);
+            pendingSeen.add(message.id);
+            sendPendingSeen();
+        } : undefined,
     });
+    if (late) lateNotices.set(message.id, toast);
+});
+
+onLive('seen', ({ id } = {}) => {
+    if (typeof id !== 'string') return;
+    seenLate.add(id);
+    pendingSeen.delete(id);
+    const toast = lateNotices.get(id);
+    if (toast) toastr.clear(toast, { force: true });
 });
 
 // ---- 启动 ----

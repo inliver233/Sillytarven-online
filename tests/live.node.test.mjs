@@ -201,6 +201,61 @@ test('a kept command reaches pages that were open but not connected, once', asyn
     assert.deepEqual(hub.dispatch({ type: 'notice', data: { text: '' } }), { error: 'bad_data' });
 });
 
+test('a late notice also reaches people who come online later, until each account has seen it', async t => {
+    const { hub, connect } = await setup(t);
+    hub.on('echo', (client, data) => client.send('echo', data));
+    const alice = await connect({ handle: 'alice' });
+    await alice.next('hello');
+    const result = hub.dispatch({ type: 'notice', data: { text: '空间已提到 5 GB', timeout: 0 }, target: { handles: ['alice', 'bob'] }, late: true });
+    assert.equal(result.pages, 1);
+    assert.equal(result.kept, true);
+    assert.equal(result.late, true);
+    assert.deepEqual(await alice.next('notice'), { t: 'notice', d: { text: '空间已提到 5 GB', title: '', level: 'info', timeout: 0 }, id: result.id, late: true });
+
+    // bob was not online: a page he opens later gets it.
+    const bob = await connect({ handle: 'bob' }, { age: 0 });
+    await bob.next('hello');
+    assert.equal((await bob.next('notice')).id, result.id);
+    // So does another page of alice's, as long as she has not closed it anywhere.
+    const alice2 = await connect({ handle: 'alice' }, { age: 0 });
+    await alice2.next('hello');
+    assert.equal((await alice2.next('notice')).id, result.id);
+
+    // alice closes it: her other page takes it down, her pages opened later do not get it.
+    alice.ws.send(JSON.stringify({ t: 'seen', d: { id: result.id } }));
+    assert.deepEqual(await alice2.next('seen'), { t: 'seen', d: { id: result.id } });
+    const alice3 = await connect({ handle: 'alice' }, { age: 0 });
+    await alice3.next('hello');
+    assert.deepEqual(await alice3.next('seen'), { t: 'seen', d: { id: result.id } });
+    hub.send({ all: true }, 'marker');
+    await alice3.next('marker');
+    await alice.next('marker');
+
+    // Not for others; their "seen" counts for nothing.
+    const carol = await connect({ handle: 'carol' }, { age: 0 });
+    await carol.next('hello');
+    carol.ws.send(JSON.stringify({ t: 'seen', d: { id: result.id } }));
+    carol.ws.send(JSON.stringify({ t: 'echo', d: 1 }));
+    await carol.next('echo');
+    alice.ws.send(JSON.stringify({ t: 'seen', d: { id: result.id } }));
+    alice.ws.send(JSON.stringify({ t: 'echo', d: 1 }));
+    await alice.next('echo');
+    const [kept] = hub.status().kept;
+    assert.deepEqual([kept.seen, kept.seenCount, kept.late], [['alice'], 1, true]);
+
+    // On disk for the process taking over, with who has seen it.
+    const reloaded = new LiveHub().loadKept().find(command => command.id === result.id);
+    assert.deepEqual([reloaded.late, reloaded.seen], [true, ['alice']]);
+
+    // Kept 7 days unless told otherwise, 30 at most; a reload cannot be sent late.
+    const days = command => Math.round((command.until - command.at) / 86400e3);
+    assert.equal(days(hub.kept.find(command => command.id === result.id)), 7);
+    const long = hub.dispatch({ type: 'notice', data: { text: 'x' }, target: { all: true }, late: true, keep: 999 * 86400 });
+    assert.equal(days(hub.kept.find(command => command.id === long.id)), 30);
+    assert.equal(hub.status().kept.find(command => command.id === long.id).seen, undefined);
+    assert.deepEqual(hub.dispatch({ type: 'reload', late: true }), { error: 'not_late' });
+});
+
 test('command files in the outbox are sent and removed', async t => {
     const { hub, connect } = await setup(t);
     const page = await connect({ handle: 'alice' });
@@ -263,7 +318,7 @@ test('tickets for everybody, commands for administrators', async t => {
     assert.equal((await post('send', { type: 'nope' }, true)).status, 400);
     assert.equal((await post('cancel', { id: 'nope' }, true)).status, 404);
     const status = await (await fetch(`${base}/status`, { headers: { 'x-test-admin': '1' } })).json();
-    assert.deepEqual(status.commands, [{ type: 'reload', keep: 3600 }, { type: 'notice', keep: 0 }]);
+    assert.deepEqual(status.commands, [{ type: 'reload', keep: 3600 }, { type: 'notice', keep: 0, late: true }]);
 
     live.enabled = false;
     assert.equal((await fetch(`${base}/ticket`)).status, 404);
