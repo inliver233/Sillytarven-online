@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import git from 'isomorphic-git';
-import { PROVIDERS, detectProvider, explainNetworkError, fetchRemote, listRemoteBranches, pushRemote } from '../remotes.js';
+import { PROVIDERS, detectProvider, explainNetworkError, fetchRemote, listRemoteBranches, pushBranch, pushRemote } from '../remotes.js';
 import { normalizeRemoteUrl } from '../remote-http.js';
 import { applyCommitToWorkTree, createSafetyPoint, currentBranch, ensureRepo, headOid, readSettings, writeSettings } from '../repo.js';
 import { readCredentials, writeCredentials } from '../router.js';
@@ -124,7 +124,8 @@ export default {
             const branch = String(request.body?.branch || await currentBranch(ctx) || '');
             if (!branch || !(await headOid(ctx))) throw api.userError(409, '还没有可以推送的提交');
             const remoteBranch = String(request.body?.remoteBranch || branch);
-            await network(api, () => pushRemote(ctx, name, access, api.policy(), { ref: branch, remoteRef: remoteBranch, force: Boolean(request.body?.force) }));
+            const { replacedStarter } = await network(api, () => pushBranch(ctx, name, access, api.policy(), { ref: branch, remoteRef: remoteBranch, force: Boolean(request.body?.force) }));
+            if (replacedStarter) console.info(`[git-sync] ${ctx.handle}: pushed over the starter commit of ${name}/${remoteBranch}`);
             await git.setConfig({ fs, gitdir: ctx.gitdir, path: `branch.${branch}.remote`, value: name });
             await git.setConfig({ fs, gitdir: ctx.gitdir, path: `branch.${branch}.merge`, value: `refs/heads/${remoteBranch}` });
             const pushedTags = [];
@@ -134,7 +135,7 @@ export default {
                     pushedTags.push(tag);
                 }
             }
-            return { remote: name, branch, remoteBranch, pushedTags };
+            return { remote: name, branch, remoteBranch, pushedTags, replacedStarter };
         }));
 
         /** Deletes a branch on the remote. */

@@ -159,3 +159,90 @@ test('isomorphic-git keeps working on repositories packed by native git', async 
     assert.equal(Buffer.from(again.blob).toString('utf8'), `${versions[1].content}{"mes":"after packing"}\n`);
     execFileSync('git', ['--git-dir', ctx.gitdir, 'fsck', '--no-progress'], { stdio: 'ignore' });
 });
+
+test('a push over the README commit a host made goes through; over anything else it is refused', async t => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tavern-git-starter-'));
+    roots.push(root);
+    globalThis.DATA_ROOT = root;
+    const { execFileSync, spawn } = await import('node:child_process');
+    const http = await import('node:http');
+    const { getRepoContext, ensureRepo, commitAll, readSettings } = await import('../src/git-sync/repo.js');
+    const { pushBranch } = await import('../src/git-sync/remotes.js');
+
+    // Repositories served over smart HTTP like GitHub's, by native git.
+    const served = path.join(root, 'served');
+    const identity = { GIT_AUTHOR_NAME: 'host', GIT_AUTHOR_EMAIL: 'host@example.com', GIT_COMMITTER_NAME: 'host', GIT_COMMITTER_EMAIL: 'host@example.com' };
+    const run = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', env: { ...process.env, ...identity } });
+    const makeRemote = (name, files) => {
+        const work = path.join(root, `work-${name}`);
+        for (const [file, content] of Object.entries(files)) {
+            fs.mkdirSync(path.dirname(path.join(work, file)), { recursive: true });
+            fs.writeFileSync(path.join(work, file), content);
+        }
+        run('-C', work, 'init', '-q', '-b', 'main');
+        run('-C', work, 'add', '-A');
+        run('-C', work, 'commit', '-q', '-m', 'Initial commit');
+        run('clone', '-q', '--bare', work, path.join(served, `${name}.git`));
+    };
+    makeRemote('starter', { 'README.md': '# backup\n', LICENSE: 'MIT\n', '.gitignore': 'node_modules\n' });
+    makeRemote('used', { 'README.md': '# backup\n', 'chats/A/old.jsonl': '{}\n' });
+    const remoteHead = name => run('--git-dir', path.join(served, `${name}.git`), 'rev-parse', 'main').trim();
+
+    const server = http.createServer((request, response) => {
+        const url = new URL(request.url, 'http://localhost');
+        const backend = spawn('git', ['http-backend'], {
+            env: {
+                ...process.env, GIT_PROJECT_ROOT: served, GIT_HTTP_EXPORT_ALL: '1', REMOTE_USER: 'tester',
+                REQUEST_METHOD: request.method, PATH_INFO: url.pathname, QUERY_STRING: url.search.slice(1),
+                CONTENT_TYPE: request.headers['content-type'] ?? '',
+            },
+        });
+        request.pipe(backend.stdin);
+        let head = Buffer.alloc(0);
+        let streaming = false;
+        backend.stdout.on('data', chunk => {
+            if (streaming) return void response.write(chunk);
+            head = Buffer.concat([head, chunk]);
+            const end = head.indexOf('\r\n\r\n');
+            if (end < 0) return;
+            streaming = true;
+            let status = 200;
+            for (const line of head.subarray(0, end).toString().split('\r\n')) {
+                const at = line.indexOf(':');
+                const [key, value] = [line.slice(0, at).trim(), line.slice(at + 1).trim()];
+                if (/^status$/i.test(key)) status = parseInt(value, 10);
+                else response.setHeader(key, value);
+            }
+            response.writeHead(status);
+            response.write(head.subarray(end + 4));
+        });
+        backend.stdout.on('end', () => response.end());
+    });
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    t.after(() => new Promise(resolve => server.close(resolve)));
+    const policy = { allowPrivateNetworks: true, allowHttp: true };
+    const access = name => ({ url: `http://127.0.0.1:${server.address().port}/${name}.git`, provider: 'custom', username: '', token: '' });
+
+    const dir = path.join(root, 'pusher');
+    fs.mkdirSync(path.join(dir, 'chats', 'A'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'chats', 'A', 'mine.jsonl'), '{"mes":"mine"}\n');
+    const ctx = getRepoContext('pusher', dir);
+    await ensureRepo(ctx);
+    const settings = readSettings(ctx);
+    const author = { name: 't', email: 't@t' };
+    const first = (await commitAll(ctx, settings, { author })).oid;
+
+    // Only the README, licence and .gitignore the host made: pushed over.
+    assert.deepEqual(await pushBranch(ctx, 'starter', access('starter'), policy, { ref: 'main' }), { replacedStarter: true });
+    assert.equal(remoteHead('starter'), first);
+    // From then on an ordinary push.
+    fs.appendFileSync(path.join(dir, 'chats', 'A', 'mine.jsonl'), '{"mes":"more"}\n');
+    const second = (await commitAll(ctx, settings, { author })).oid;
+    assert.deepEqual(await pushBranch(ctx, 'starter', access('starter'), policy, { ref: 'main' }), { replacedStarter: false });
+    assert.equal(remoteHead('starter'), second);
+
+    // Anything else there (here a chat): refused as before, nothing overwritten.
+    const used = remoteHead('used');
+    await assert.rejects(pushBranch(ctx, 'used', access('used'), policy, { ref: 'main' }), { code: 'PushRejectedError' });
+    assert.equal(remoteHead('used'), used);
+});

@@ -141,3 +141,46 @@ export async function pushRemote(ctx, remoteName, access, policy, target, onProg
     }
     return result;
 }
+
+/** What a host puts in a repository it creates with "add a README" (or a licence, a .gitignore). */
+const STARTER_FILE = /^(readme|licen[cs]e|copying)(\.[\w.-]+)?$|^\.git(ignore|attributes)$/i;
+
+/**
+ * Whether a commit is such a host's starter: no parent, nothing but a README, a licence or a .gitignore.
+ * @param {import('./repo.js').RepoContext} ctx
+ * @param {string} oid
+ */
+export async function isStarterCommit(ctx, oid) {
+    const { commit } = await git.readCommit({ fs, gitdir: ctx.gitdir, oid, cache: ctx.cache });
+    if (commit.parent.length) return false;
+    const files = await git.listFiles({ fs, gitdir: ctx.gitdir, ref: oid, cache: ctx.cache });
+    return files.length > 0 && files.every(file => STARTER_FILE.test(file));
+}
+
+/**
+ * Pushes a branch. A repository just created on GitHub & co. with "add a README" already holds a
+ * commit of its own, so a plain push is refused although nothing is there to lose: when the remote
+ * branch is only that commit, it is pushed over.
+ * @param {import('./repo.js').RepoContext} ctx
+ * @param {string} remoteName
+ * @param {RemoteAccess} access
+ * @param {object} policy
+ * @param {{ ref: string, remoteRef?: string, force?: boolean }} target
+ * @returns {Promise<{ replacedStarter: boolean }>}
+ */
+export async function pushBranch(ctx, remoteName, access, policy, target) {
+    try {
+        await pushRemote(ctx, remoteName, access, policy, target);
+        return { replacedStarter: false };
+    } catch (error) {
+        if (target.force || error?.code !== 'PushRejectedError') throw error;
+        const remoteBranch = String(target.remoteRef ?? target.ref).replace(/^refs\/heads\//, '');
+        // A starter commit is a few KiB; anything bigger is not one.
+        const tip = await fetchRemote(ctx, remoteName, access, { ...policy, maxResponseBytes: 1024 ** 2 })
+            .then(() => git.resolveRef({ fs, gitdir: ctx.gitdir, ref: `refs/remotes/${remoteName}/${remoteBranch}` }))
+            .catch(() => null);
+        if (!tip || !(await isStarterCommit(ctx, tip).catch(() => false))) throw error;
+        await pushRemote(ctx, remoteName, access, policy, { ...target, force: true });
+        return { replacedStarter: true };
+    }
+}

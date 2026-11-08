@@ -3,7 +3,7 @@ import path from 'node:path';
 import storage from 'node-persist';
 import { getUserDirectories, toKey } from '../../users.js';
 import { authorOf, commitAll, CommitTooLargeError, currentBranch, getRepoContext, readSettings, repoExists, withRepoLock, writeSettings } from '../repo.js';
-import { explainNetworkError, pushRemote } from '../remotes.js';
+import { explainNetworkError, pushBranch } from '../remotes.js';
 import { commitTooLargeMessage, remoteAccessFor, storageRoom, userError } from '../router.js';
 import { cloudIsBehind, hideHostedAddress, MIRROR_SOON_MS, scheduleMirror } from './hosted.js';
 
@@ -39,7 +39,7 @@ async function runBackup(handle, api, force = false) {
             const branch = schedule.branch || await currentBranch(ctx);
             if (schedule.push && remote && branch) {
                 const access = await remoteAccessFor(ctx, schedule.remote);
-                await pushRemote(ctx, schedule.remote, access, api.policy(), { ref: branch });
+                await pushBranch(ctx, schedule.remote, access, api.policy(), { ref: branch });
                 result.pushed = true;
             }
         } catch (error) {
