@@ -550,42 +550,42 @@ function catgirlElement(rank) {
 
 /**
  * 综合榜总榜第一名（殿堂总冠军）：傲娇贵族千金（32×32）。黑长直姬发（空气刘海，两侧长发和身体之间留透明缝，不糊成一块）、
- * 吊梢蓝眼、白蕾丝圆领红裙，平时一脸得意。
+ * 吊梢蓝眼、白蕾丝圆领红裙，平时一脸得意。每行 34 格：长发左右各多画一格到框外，第一格是 x = -1。
  * 小皇冠歪戴着，时不时晃一下像要掉下来：皇冠单独一层，像素图是正的、整个转过去（逐像素画歪的会糊）。
  */
 const OJOU_PIXELS = [
-    '................................',
-    '................................',
-    '................................',
-    '............OOOOOOOO............',
-    '..........OOHHHhhHHHOO..........',
-    '.........OHLLllhhlllHHO.........',
-    '........OLkLhhhhhhhhlllO........',
-    '.......OLhhhHHHhhHHHhhhlO.......',
-    '......OlhHHHHHHddHHHHHHhlO......',
-    '......OHHlHLlHlddlHllHlHHO......',
-    '....OOHhlHdlHdHddHdHHdHHhHOO....',
-    '...OhOHhHHsHHsHssHsHHsHHhHOhO...',
-    '..OhHOldhhShhShSShShhShhdlOHhO..',
-    '.OlHdOLhEESSSSSSSSSSSSEEhlOdHlO.',
-    '.OLHdOLhsEEEEESSSSEEEEEshlOdHLO.',
-    '.OLHdOLhsSWeeESSSSEeeWSshlOdHLO.',
-    '.Okh.OlhsSeeneSSSSeneeSshlO.hkO.',
-    'OkLh.OlhsSniinSSSSniinSshlO.hLkO',
-    'OLh..OlhsSSnnSSSSSSnnSSshlO..hLO',
-    'OLh..OHhsbBBbSSSSSSbBBbshHO..hLO',
-    'OLh..OHhhsSSSSmSSmSSSSshhHO..hLO',
-    'Olh..OhhhhssSSSMMSSSsshhhhO..hlO',
-    'Olh..OhhhOOOsSSSSSSsOOOhhhO..hlO',
-    'Olh..OhhOOOOOOttttOOOOOOhhO..hlO',
-    'Olh..OOO.OCCCcsGGscCCCO.OOO..hlO',
-    'OHh....OCCCCCCgjJgCCCCCCO....hHO',
-    'OHh....OcCCCCCgJJgCCCCCcO....hHO',
-    'OHh...OxDcCCCcxGGxcCCCcDxO...hHO',
-    'OHh..OxDDDXDDDDDDDDDDXDDDxO..hHO',
-    'Ohh..OxDDXDDDDDDDDDDDDXDDxO..hhO',
-    'OhO..OxDDXDDDDDDDDDDDDXDDxO..OhO',
-    '.O...OxDDXDDDDDDDDDDDDXDDxO...O.',
+    '..................................',
+    '..................................',
+    '..................................',
+    '.............OOOOOOOO.............',
+    '...........OOHHHhhHHHOO...........',
+    '..........OHLLllhhlllHHO..........',
+    '.........OLkLhhhhhhhhlllO.........',
+    '........OLhhhHHHhhHHHhhhlO........',
+    '.......OlhHHHHHHddHHHHHHhlO.......',
+    '.......OHHlHLlHlddlHllHlHHO.......',
+    '.....OOHhlHdlHdHddHdHHdHHhHOO.....',
+    '....OhOHhHHsHHsHssHsHHsHHhHOhO....',
+    '...OhHOldhhShhShSShShhShhdlOHhO...',
+    '.OHlHdOLhEESSSSSSSSSSSSEEhlOdHlHO.',
+    'OHLlHdOLhsEEEEESSSSEEEEEshlOdHlLHO',
+    'OHLHHdOLhsSWeeESSSSEeeWSshlOdHHLHO',
+    'OHkHhdOlhsSeeneSSSSeneeSshlOdhHkHO',
+    'OHkHh.OlhsSniinSSSSniinSshlO.hHkHO',
+    'OHLHh.OlhsSSnnSSSSSSnnSSshlO.hHLHO',
+    'OHLHh.OHhsbBBbSSSSSSbBBbshHO.hHLHO',
+    'OHLHh.OHhhsSSSSmSSmSSSSshhHO.hHLHO',
+    'OHlHh.OhhhhssSSSMMSSSsshhhhO.hHlHO',
+    'OHlHh.OhhhOOOsSSSSSSsOOOhhhO.hHlHO',
+    'OHlHh.OhhOOOOOOttttOOOOOOhhO.hHlHO',
+    'OHlHh.OOO.OCCCcsGGscCCCO.OOO.hHlHO',
+    'OHHHh...OCCCCCCgjJgCCCCCCO...hHHHO',
+    'OHHhh...OcCCCCCgJJgCCCCCcO...hhHHO',
+    'OHHhh..OxDcCCCcxGGxcCCCcDxO..hhHHO',
+    'OhHhh.OxDDDXDDDDDDDDDDXDDDxO.hhHhO',
+    'OhHhh.OxDDXDDDDDDDDDDDDXDDxO.hhHhO',
+    'Ohhhh.OxDDXDDDDDDDDDDDDXDDxO.hhhhO',
+    'OOOOO.OxDDXDDDDDDDDDDDDXDDxO.OOOOO',
 ];
 const OJOU_COLORS = {
     O: '#120d1c', d: '#1a1530', h: '#2b2447', H: '#433c69', l: '#6d65a3', L: '#b4b8f0', k: '#eef0ff',
@@ -648,7 +648,8 @@ function ojouSvg() {
     const face = new Set([...OJOU_EYES, ...OJOU_MOUTH].map(([x, y]) => `${x},${y}`));
     /** @type {[number, number, string][]} */
     const body = [];
-    OJOU_PIXELS.forEach((row, y) => [...row].forEach((letter, x) => {
+    OJOU_PIXELS.forEach((row, y) => [...row].forEach((letter, column) => {
+        const x = column - 1;
         if (letter !== '.') body.push([x, y, face.has(`${x},${y}`) ? 'S' : letter]);
     }));
     const left = OJOU_CROWN_AT[0] - OJOU_CROWN[0].length / 2;
