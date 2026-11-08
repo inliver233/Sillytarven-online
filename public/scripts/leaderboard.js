@@ -66,9 +66,26 @@ let boardVersion = '';
 let lastBoard = null;
 /** 综合榜里点开看各项得分的行（按名字，刷新后保持展开） */
 const expandedRows = new Set();
-/** 上一次显示的数值，名字 → 数值，用来让涨了的行闪一下 */
+/** 上一次显示的数值和名次（key → 值），用来做涨跌、名次升降的效果 */
 let lastValues = new Map();
+let lastRanks = new Map();
+/** 上一次的榜是哪一期（小时榜按小时、其他按天）：换期时数值整体重来，不算涨跌 */
+let lastPeriod = '';
+/** 「我」那栏上一次的数值 */
+let lastMeValue = null;
+/** 名次变化的标记（▲2、▼1、NEW）显示一会儿，刷新后接着显示：key → {kind, text, at} */
+const moveMarks = new Map();
+const MOVE_MARK_MS = 8000;
 let requestSerial = 0;
+
+/** 换榜或重新打开：下一次显示不算涨跌、不比名次 */
+function resetEffects() {
+    lastValues = new Map();
+    lastRanks = new Map();
+    lastPeriod = '';
+    lastMeValue = null;
+    moveMarks.clear();
+}
 
 /**
  * @param {string} tag
@@ -205,7 +222,7 @@ export async function openLeaderboard() {
     buildPopup();
     boardVersion = '';
     lastBoard = null;
-    lastValues = new Map();
+    resetEffects();
     void refresh();
     pollTimer = setInterval(() => {
         if (document.visibilityState === 'visible') void refresh();
@@ -303,7 +320,7 @@ function pick(key, id) {
     saveView();
     updateControls();
     boardVersion = '';
-    lastValues = new Map();
+    resetEffects();
     popup?.list.classList.add('loading');
     void refresh();
 }
@@ -382,15 +399,142 @@ async function refresh() {
     }
 }
 
-function rankCell(rank) {
-    const medals = { 1: '🥇', 2: '🥈', 3: '🥉' };
-    return h('span', { class: 'leaderboard-rank', text: medals[rank] ?? String(rank) });
+const MEDALS = { 1: '🥇', 2: '🥈', 3: '🥉' };
+/** 前三名身上的星光：综合榜更多，第一名最多 */
+const SPARKLES = { score: { 1: 6, 2: 3 }, other: { 1: 3 } };
+
+/** 系统开了「减少动态效果」：不滚数字、不滑动、不浮出涨跌 */
+function calmMotion() {
+    return !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+}
+
+/**
+ * @param {number} rank
+ * @param {boolean} fancy 综合榜（第一名戴王冠）
+ */
+function rankCell(rank, fancy) {
+    const cell = h('span', { class: 'leaderboard-rank' }, h('span', { class: 'leaderboard-medal', text: MEDALS[rank] ?? String(rank) }));
+    if (fancy && rank === 1) cell.append(h('i', { class: 'fa-solid fa-crown leaderboard-crown', 'aria-hidden': 'true' }));
+    return cell;
+}
+
+function adminBadge() {
+    return h('span', { class: 'leaderboard-admin-badge', title: '管理员' }, h('i', { class: 'fa-solid fa-shield-halved' }), h('span', { text: 'ADMIN' }));
+}
+
+/** 比显示精度还小的变化不算（综合分 0.1、时长 1 分钟、其他 1） */
+function significant(metric, delta) {
+    if (metric === 'score') return Math.abs(delta) >= 0.05;
+    if (metric === 'online') return Math.abs(delta) >= 60000;
+    return Math.abs(delta) >= 1;
+}
+
+/** 正在滚动的数字：元素 → {from, to, metric, start} */
+const tweens = new Map();
+let tweenFrame = 0;
+const TWEEN_MS = 800;
+
+/**
+ * 数字从旧值滚到新值。
+ * @param {HTMLElement} element
+ * @param {number} from
+ * @param {number} to
+ * @param {string} metric
+ */
+function tweenValue(element, from, to, metric) {
+    tweens.set(element, { from, to, metric, start: performance.now() });
+    element.textContent = formatLeaderboardValue(metric, from);
+    tweenFrame ||= requestAnimationFrame(stepTweens);
+}
+
+function stepTweens(now) {
+    tweenFrame = 0;
+    for (const [element, tween] of tweens) {
+        const progress = Math.min(1, Math.max(0, (now - tween.start) / TWEEN_MS));
+        if (!element.isConnected || progress >= 1) {
+            if (element.isConnected) element.textContent = formatLeaderboardValue(tween.metric, tween.to);
+            tweens.delete(element);
+            continue;
+        }
+        const value = tween.from + (tween.to - tween.from) * (1 - (1 - progress) ** 3);
+        element.textContent = formatLeaderboardValue(tween.metric, tween.metric === 'score' ? value : Math.round(value));
+    }
+    if (tweens.size) tweenFrame = requestAnimationFrame(stepTweens);
+}
+
+/**
+ * 涨跌的数从数值旁边浮出来：涨的往上飘，跌的往下沉。
+ * @param {HTMLElement} cell
+ * @param {string} metric
+ * @param {number} delta
+ */
+function floatDelta(cell, metric, delta) {
+    const chip = h('span', { class: `leaderboard-delta ${delta > 0 ? 'gain' : 'loss'}`, 'aria-hidden': 'true', text: `${delta > 0 ? '+' : '−'}${formatLeaderboardValue(metric, Math.abs(delta))}` });
+    chip.addEventListener('animationend', () => chip.remove());
+    cell.append(chip);
+}
+
+/**
+ * 一次性的效果：整行闪一下（涨、跌、登顶、冲进前三），可带一句文字，放完就移除。
+ * @param {HTMLElement} row
+ * @param {'gain'|'loss'|'crown'|'podium'} kind
+ * @param {string} [label]
+ */
+function burst(row, kind, label) {
+    const flash = h('span', { class: `leaderboard-flash ${kind}`, 'aria-hidden': 'true' });
+    flash.addEventListener('animationend', () => flash.remove());
+    row.append(flash);
+    if (!label) return;
+    const callout = h('span', { class: `leaderboard-callout ${kind}`, 'aria-hidden': 'true', text: label });
+    callout.addEventListener('animationend', () => callout.remove());
+    row.append(callout);
+}
+
+/** 各行（按 key）在列表内容里的位置 */
+function rowTops(list) {
+    const base = list.getBoundingClientRect().top - list.scrollTop;
+    const tops = new Map();
+    for (const row of list.querySelectorAll('.leaderboard-row[data-key]')) tops.set(row.dataset.key, row.getBoundingClientRect().top - base);
+    return tops;
+}
+
+/**
+ * 换了名次的行从原来的位置滑到新位置（往上走的盖在别人上面），新上榜的从左边滑进来。
+ * @param {HTMLElement} list
+ * @param {Map<string, number>} before 刷新前的位置
+ */
+function slideRows(list, before) {
+    const after = rowTops(list);
+    for (const row of list.querySelectorAll('.leaderboard-row[data-key]')) {
+        const from = before.get(row.dataset.key);
+        if (from === undefined) {
+            row.animate([{ opacity: 0, transform: 'translateX(-16px)' }, { opacity: 1, transform: 'none' }], { duration: 450, easing: 'ease-out' });
+            continue;
+        }
+        const dy = from - after.get(row.dataset.key);
+        if (Math.abs(dy) < 1) continue;
+        row.classList.add(dy > 0 ? 'leaderboard-moving-up' : 'leaderboard-moving-down');
+        const animation = row.animate([{ transform: `translateY(${dy}px)` }, { transform: 'none' }], { duration: Math.min(900, 400 + Math.abs(dy) * 0.5), easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)' });
+        const done = () => row.classList.remove('leaderboard-moving-up', 'leaderboard-moving-down');
+        animation.addEventListener('finish', done);
+        animation.addEventListener('cancel', done);
+    }
 }
 
 function render(board) {
     if (!popup) return;
     const rows = board.rows ?? [];
+    const metric = view.metric;
+    const fancy = metric === 'score';
+    const period = String(board.version ?? '').split('-').pop();
+    // 刚打开、换了榜、换了一期（新的一小时或一天）：直接显示，不算涨跌
+    const fresh = lastValues.size === 0 || period !== lastPeriod;
+    if (fresh) moveMarks.clear();
+    const animate = !fresh && !calmMotion();
+    const before = animate ? rowTops(popup.list) : null;
+    const now = Date.now();
     const values = new Map();
+    const ranks = new Map();
     const fragment = document.createDocumentFragment();
     if (!rows.length) {
         const empty = { hour: '这个小时还没有人上榜，去聊两句就是第一名', today: '今天还没有人上榜，去聊两句就是第一名' };
@@ -399,23 +543,39 @@ function render(board) {
     for (const row of rows) {
         // 打码后的名字可能撞车，行按服务器给的 key 区分
         const id = row.key ?? row.name;
-        const before = lastValues.get(id);
+        const previous = lastValues.get(id);
+        const previousRank = lastRanks.get(id);
         values.set(id, row.value);
-        const bumped = lastValues.size > 0 && (before === undefined || row.value > before);
+        ranks.set(id, row.rank);
+        if (!fresh && previousRank === undefined) {
+            moveMarks.set(id, { kind: 'new', text: 'NEW', at: now });
+        } else if (!fresh && row.rank !== previousRank) {
+            const up = row.rank < previousRank;
+            moveMarks.set(id, { kind: up ? 'up' : 'down', text: `${up ? '▲' : '▼'}${Math.abs(previousRank - row.rank)}`, at: now });
+        }
+        const mark = moveMarks.get(id);
         const breakdown = row.parts ? formatScoreParts(row.parts, board.scoreParts) : '';
         const canRemove = !!(board.admin && row.id);
         const expandable = !!breakdown || canRemove;
         const expanded = expandable && expandedRows.has(id);
+        const valueText = h('span', { class: 'leaderboard-value-text', text: formatLeaderboardValue(metric, row.value) });
+        const valueCell = h('span', { class: 'leaderboard-value' },
+            // 名次变化的标记，几秒后淡出（刷新后从原来的进度接着淡）
+            mark ? h('span', { class: `leaderboard-move ${mark.kind}`, style: `animation-delay: -${now - mark.at}ms`, text: mark.text }) : null,
+            valueText);
+        const sparkles = row.rank <= 3 ? SPARKLES[fancy ? 'score' : 'other'][row.rank] ?? 0 : 0;
         const element = h('div', {
-            class: `leaderboard-row${row.rank <= 3 ? ` leaderboard-top leaderboard-top${row.rank}` : ''}${row.me ? ' leaderboard-row-me' : ''}${bumped ? ' leaderboard-bumped' : ''}${expandable ? ' leaderboard-row-expandable' : ''}${expanded ? ' expanded' : ''}`,
+            class: `leaderboard-row${row.rank <= 3 ? ` leaderboard-top leaderboard-top${row.rank}` : ''}${row.me ? ' leaderboard-row-me' : ''}${expandable ? ' leaderboard-row-expandable' : ''}${expanded ? ' expanded' : ''}`,
+            'data-key': id,
             title: breakdown || null,
         },
-        rankCell(row.rank),
+        rankCell(row.rank, fancy),
         h('span', { class: 'leaderboard-name' },
             h('span', { class: `leaderboard-name-text${row.anonymous ? ' leaderboard-anonymous' : ''}`, text: row.name, title: row.anonymous ? '匿名' : '' }),
             row.me ? h('span', { class: 'leaderboard-you', text: '我' }) : null,
+            row.admin ? adminBadge() : null,
             ...siteBadges(row.sites)),
-        h('span', { class: 'leaderboard-value', text: formatLeaderboardValue(view.metric, row.value) }),
+        valueCell,
         expandable ? h('span', { class: 'leaderboard-row-details' },
             breakdown ? h('span', { class: 'leaderboard-row-parts', text: breakdown }) : null,
             // 管理员的「移出」收在点开后的详情里，不占名字的地方
@@ -434,7 +594,8 @@ function render(board) {
                     event.stopPropagation();
                     void setRemoved(row.id, row.name, true);
                 },
-            }, h('i', { class: 'fa-solid fa-user-slash' }), h('span', { text: '移出榜单' })) : null) : null);
+            }, h('i', { class: 'fa-solid fa-user-slash' }), h('span', { text: '移出榜单' })) : null) : null,
+        sparkles ? h('span', { class: 'leaderboard-sparkles', 'aria-hidden': 'true' }, ...Array.from({ length: sparkles }, () => h('i'))) : null);
         if (expandable) {
             // 手机上没有悬停提示：点一下展开
             element.addEventListener('click', () => {
@@ -443,12 +604,34 @@ function render(board) {
                 element.classList.toggle('expanded', expandedRows.has(id));
             });
         }
+        if (animate) {
+            const delta = previous === undefined ? 0 : row.value - previous;
+            if (previous === undefined) {
+                burst(element, 'gain');
+            } else if (significant(metric, delta)) {
+                tweenValue(valueText, previous, row.value, metric);
+                floatDelta(valueCell, metric, delta);
+                burst(element, delta > 0 ? 'gain' : 'loss');
+            }
+            if (row.rank === 1 && previousRank !== 1) burst(element, 'crown', '👑 登顶');
+            else if (row.rank <= 3 && !(previousRank <= 3)) burst(element, 'podium', '冲进前三');
+            if (previousRank === 1 && row.rank > 1) element.classList.add('leaderboard-dethroned');
+        }
         fragment.append(element);
     }
+    for (const [id, mark] of moveMarks) {
+        if (now - mark.at > MOVE_MARK_MS || !values.has(id)) moveMarks.delete(id);
+    }
     lastValues = values;
+    lastRanks = ranks;
+    lastPeriod = period;
+    // 一直转的边框、流光按页面打开以来的时间对齐：每次刷新重建的行接着转，不会跳回起点
+    popup.root.style.setProperty('--lb-clock', String(Math.round(performance.now())));
+    popup.list.classList.toggle('leaderboard-list-score', fancy);
     popup.list.replaceChildren(fragment);
+    if (before) slideRows(popup.list, before);
     updateHint();
-    renderMe(board);
+    renderMe(board, animate);
     renderFooter(board);
     fitNames();
 }
@@ -468,13 +651,25 @@ function fitNames() {
     }
 }
 
-function renderMe(board) {
+/**
+ * @param {any} board
+ * @param {boolean} animate 涨跌要不要动起来
+ */
+function renderMe(board, animate) {
     if (!popup) return;
     const me = board.me;
     if (!me) {
         popup.me.replaceChildren();
+        lastMeValue = null;
         return;
     }
+    const valueText = h('span', { class: 'leaderboard-value-text', text: formatLeaderboardValue(view.metric, me.value) });
+    const valueCell = h('span', { class: 'leaderboard-me-value' }, valueText);
+    if (animate && lastMeValue !== null && significant(view.metric, me.value - lastMeValue)) {
+        tweenValue(valueText, lastMeValue, me.value, view.metric);
+        floatDelta(valueCell, view.metric, me.value - lastMeValue);
+    }
+    lastMeValue = me.value;
     const status = me.banned ? '已被管理员移出榜单' : me.rank ? `第 ${me.rank} 名` : '还没上榜';
     const gap = me.rank && me.gap ? `距上一名还差 ${formatLeaderboardValue(view.metric, me.gap)}` : (me.rank === 1 ? '目前第一' : '');
     // replaceChildren 会把 null 当成文字「null」显示出来，没有的部分要先去掉
@@ -483,8 +678,9 @@ function renderMe(board) {
             h('span', { class: 'leaderboard-me-rank', text: status }),
             h('span', { class: 'leaderboard-me-name' },
                 h('span', { class: `leaderboard-me-name-text${me.mode === 'public' ? '' : ' leaderboard-anonymous'}`, text: me.name }),
+                me.admin ? adminBadge() : null,
                 ...siteBadges(me.sites)),
-            h('span', { class: 'leaderboard-me-value', text: formatLeaderboardValue(view.metric, me.value) })),
+            valueCell),
         me.parts ? h('div', { class: 'leaderboard-me-parts', text: formatScoreParts(me.parts, board.scoreParts) }) : null,
         h('div', { class: 'leaderboard-me-side' },
             gap ? h('small', { class: 'leaderboard-gap', text: gap }) : null,

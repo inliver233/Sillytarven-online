@@ -192,6 +192,9 @@
 }
 
 .leaderboard-row {
+    position: relative;
+    /* 边框、流光、闪光这些层都垫在文字后面 */
+    isolation: isolate;
     display: grid;
     grid-template-columns: 2.6em minmax(0, 1fr) auto;
     align-items: center;
@@ -215,16 +218,8 @@
     border-color: var(--SmartThemeQuoteColor);
 }
 
-.leaderboard-bumped {
-    animation: leaderboard-bump 1.4s ease-out;
-}
-
-@keyframes leaderboard-bump {
-    0% { box-shadow: inset 0 0 0 100px rgba(63, 185, 80, 0.28); }
-    100% { box-shadow: inset 0 0 0 100px rgba(63, 185, 80, 0); }
-}
-
 .leaderboard-rank {
+    position: relative;
     text-align: center;
     font-weight: bold;
     font-variant-numeric: tabular-nums;
@@ -284,9 +279,467 @@
 }
 
 .leaderboard-value {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 6px;
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
     font-weight: bold;
+}
+
+
+/* ---- 前三名：转动的渐变边框，第一 > 第二 > 第三；综合榜的前三再高一档 ---- */
+@property --lb-angle {
+    syntax: '<angle>';
+    inherits: false;
+    initial-value: 0deg;
+}
+
+/* 一直在动的效果都按 --lb-clock（页面打开以来的毫秒数）对齐，每 3 秒重建的行接着动、不跳 */
+.leaderboard-top {
+    --lb-ring: 1px;
+    --lb-spin: 8s;
+    --lb-ring-colors: #8c5a2b, #f0b27a, #cd7f32, #6b4423, #8c5a2b;
+}
+
+.leaderboard-top2 {
+    --lb-ring: 1.5px;
+    --lb-spin: 6s;
+    --lb-shine: 6s;
+    --lb-ring-colors: #7f8c9a, #e8edf2, #c0c7d0, #5f6b78, #7f8c9a;
+}
+
+.leaderboard-top1 {
+    --lb-ring: 2px;
+    --lb-spin: 4s;
+    --lb-shine: 4.5s;
+    --lb-ring-colors: #b8860b, #ffe9a3, #e3b341, #fff6d5, #9a6f08, #b8860b;
+    animation: leaderboard-glow 3s ease-in-out infinite;
+    animation-delay: calc(var(--lb-clock, 0) * -1ms);
+}
+
+/* 边框：转动的锥形渐变，遮罩只留边上一圈 */
+.leaderboard-top::before {
+    content: '';
+    position: absolute;
+    inset: -1px;
+    z-index: -1;
+    padding: var(--lb-ring);
+    border-radius: inherit;
+    background: conic-gradient(from var(--lb-angle), var(--lb-ring-colors));
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+    animation: leaderboard-spin var(--lb-spin) linear infinite;
+    animation-delay: calc(var(--lb-clock, 0) * -1ms);
+    pointer-events: none;
+}
+
+/* 流光：一道斜光扫过（第二名起，越靠前越勤） */
+.leaderboard-top1::after,
+.leaderboard-top2::after,
+.leaderboard-list-score .leaderboard-top3::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: inherit;
+    background: linear-gradient(105deg, transparent 35%, rgba(255, 255, 255, 0.13) 50%, transparent 65%) no-repeat;
+    background-size: 250% 100%;
+    animation: leaderboard-shine var(--lb-shine, 7s) ease-in-out infinite;
+    animation-delay: calc(var(--lb-clock, 0) * -1ms);
+    pointer-events: none;
+}
+
+.leaderboard-medal {
+    display: inline-block;
+}
+
+.leaderboard-top1 .leaderboard-medal {
+    filter: drop-shadow(0 0 4px rgba(255, 216, 107, 0.7));
+    animation: leaderboard-bob 2.4s ease-in-out infinite;
+    animation-delay: calc(var(--lb-clock, 0) * -1ms);
+}
+
+/* 综合榜 */
+.leaderboard-list-score .leaderboard-top3 {
+    --lb-ring: 1.5px;
+    --lb-spin: 6s;
+    --lb-shine: 7s;
+    --lb-ring-colors: #8c5a2b, #ffcf9a, #cd7f32, #ffb366, #6b4423, #8c5a2b;
+    box-shadow: 0 0 8px rgba(205, 127, 50, 0.22);
+}
+
+.leaderboard-list-score .leaderboard-top2 {
+    --lb-ring: 2px;
+    --lb-spin: 4.5s;
+    --lb-shine: 5s;
+    --lb-ring-colors: #7f8c9a, #ffffff, #a9d8ff, #c0c7d0, #ffffff, #5f6b78, #7f8c9a;
+    animation: leaderboard-glow-silver 3.4s ease-in-out infinite;
+    animation-delay: calc(var(--lb-clock, 0) * -1ms);
+}
+
+.leaderboard-list-score .leaderboard-top1 {
+    --lb-ring: 2.5px;
+    --lb-spin: 3s;
+    --lb-shine: 3.5s;
+    --lb-ring-colors: #b8860b, #ffe9a3, #ff9f5a, #ffd86b, #f3c4ff, #fff6d5, #e3b341, #b8860b;
+    background-image: linear-gradient(110deg, rgba(227, 179, 65, 0.06), rgba(255, 159, 90, 0.16), rgba(243, 196, 255, 0.10), rgba(227, 179, 65, 0.06));
+    background-size: 300% 100%;
+    animation: leaderboard-glow-strong 2.6s ease-in-out infinite, leaderboard-aurora 8s ease-in-out infinite;
+    animation-delay: calc(var(--lb-clock, 0) * -1ms);
+}
+
+.leaderboard-list-score .leaderboard-top2 .leaderboard-medal {
+    filter: drop-shadow(0 0 4px rgba(200, 220, 240, 0.75));
+}
+
+.leaderboard-list-score .leaderboard-top3 .leaderboard-medal {
+    filter: drop-shadow(0 0 3px rgba(205, 127, 50, 0.65));
+}
+
+.leaderboard-crown {
+    position: absolute;
+    top: -0.42em;
+    left: 50%;
+    font-size: 0.62em;
+    color: #ffd86b;
+    filter: drop-shadow(0 0 3px rgba(255, 216, 107, 0.95)) drop-shadow(0 1px 0 rgba(0, 0, 0, 0.4));
+    transform: translateX(-50%) rotate(-10deg);
+    animation: leaderboard-crown 2.4s ease-in-out infinite;
+    animation-delay: calc(var(--lb-clock, 0) * -1ms);
+}
+
+/* 综合榜前三：奖牌更大，名字是流动的金、银、铜色字 */
+.leaderboard-list-score .leaderboard-top .leaderboard-rank {
+    font-size: 1.4em;
+}
+
+.leaderboard-list-score .leaderboard-top .leaderboard-name-text {
+    font-weight: 700;
+    color: transparent;
+    -webkit-text-fill-color: transparent;
+    background: var(--lb-name-colors) 0 0 / 200px 100% repeat-x;
+    -webkit-background-clip: text;
+    background-clip: text;
+    /* 浅色主题上也看得清 */
+    filter: drop-shadow(0 1px 0 rgba(0, 0, 0, 0.35));
+}
+
+.leaderboard-list-score .leaderboard-top1 .leaderboard-name-text {
+    --lb-name-colors: linear-gradient(90deg, #ffd86b, #fff2c4, #e3b341, #ffb35c, #ffd86b);
+    filter: drop-shadow(0 1px 0 rgba(0, 0, 0, 0.35)) drop-shadow(0 0 6px rgba(255, 216, 107, 0.35));
+    animation: leaderboard-name-flow 4s linear infinite;
+    animation-delay: calc(var(--lb-clock, 0) * -1ms);
+}
+
+.leaderboard-list-score .leaderboard-top2 .leaderboard-name-text {
+    --lb-name-colors: linear-gradient(90deg, #dfe6ee, #ffffff, #a9b6c4, #cfe8ff, #dfe6ee);
+    animation: leaderboard-name-flow 6s linear infinite;
+    animation-delay: calc(var(--lb-clock, 0) * -1ms);
+}
+
+.leaderboard-list-score .leaderboard-top3 .leaderboard-name-text {
+    --lb-name-colors: linear-gradient(90deg, #f0b27a, #ffd9b0, #cd7f32, #f0b27a);
+}
+
+/* 星光：第一名身上闪，综合榜更多 */
+.leaderboard-sparkles {
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    overflow: hidden;
+    border-radius: inherit;
+    pointer-events: none;
+}
+
+.leaderboard-sparkles i {
+    --d: 0s;
+    position: absolute;
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: radial-gradient(circle, #fff 0 35%, rgba(255, 233, 163, 0.9) 45%, transparent 70%);
+    box-shadow: 0 0 6px rgba(255, 233, 163, 0.9);
+    opacity: 0;
+    animation: leaderboard-twinkle 2.4s ease-in-out infinite;
+    animation-delay: calc(var(--lb-clock, 0) * -1ms + var(--d));
+}
+
+.leaderboard-top2 .leaderboard-sparkles i {
+    background: radial-gradient(circle, #fff 0 35%, rgba(169, 216, 255, 0.9) 45%, transparent 70%);
+    box-shadow: 0 0 6px rgba(169, 216, 255, 0.9);
+}
+
+.leaderboard-sparkles i:nth-child(1) { left: 12%; top: 22%; --d: 0s; }
+.leaderboard-sparkles i:nth-child(2) { left: 47%; top: 68%; --d: -0.8s; }
+.leaderboard-sparkles i:nth-child(3) { left: 71%; top: 26%; --d: -1.6s; }
+.leaderboard-sparkles i:nth-child(4) { left: 30%; top: 58%; --d: -0.4s; }
+.leaderboard-sparkles i:nth-child(5) { left: 58%; top: 18%; --d: -1.2s; }
+.leaderboard-sparkles i:nth-child(6) { left: 86%; top: 64%; --d: -2s; }
+
+/* 管理员 */
+.leaderboard-admin-badge {
+    position: relative;
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 0 6px;
+    overflow: hidden;
+    font-size: 0.66em;
+    font-weight: 800;
+    line-height: 1.75;
+    letter-spacing: 0.08em;
+    color: #fff;
+    text-shadow: 0 1px 1px rgba(0, 0, 0, 0.35);
+    border-radius: 4px;
+    background: linear-gradient(90deg, #6d28d9, #c026d3, #e11d48, #f59e0b, #c026d3, #6d28d9) 0 0 / 240px 100% repeat-x;
+    box-shadow: 0 0 8px rgba(192, 38, 211, 0.45), inset 0 0 0 1px rgba(255, 255, 255, 0.22);
+    animation: leaderboard-admin-flow 5s linear infinite;
+    animation-delay: calc(var(--lb-clock, 0) * -1ms);
+}
+
+.leaderboard-admin-badge i {
+    font-size: 0.95em;
+}
+
+.leaderboard-admin-badge::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(105deg, transparent 30%, rgba(255, 255, 255, 0.55) 50%, transparent 70%) no-repeat;
+    background-size: 250% 100%;
+    animation: leaderboard-shine 3.2s ease-in-out infinite;
+    animation-delay: calc(var(--lb-clock, 0) * -1ms);
+}
+
+/* ---- 变化：涨跌、名次升降、登顶 ---- */
+.leaderboard-move {
+    max-width: 4em;
+    padding: 0 4px;
+    overflow: hidden;
+    font-size: 0.72em;
+    line-height: 1.5;
+    border-radius: 4px;
+    animation: leaderboard-move-fade 8s ease forwards;
+}
+
+.leaderboard-move.up {
+    color: #3fb950;
+    background-color: rgba(63, 185, 80, 0.14);
+}
+
+.leaderboard-move.down {
+    color: #f85149;
+    background-color: rgba(248, 81, 73, 0.12);
+}
+
+.leaderboard-move.new {
+    color: #58a6ff;
+    background-color: rgba(88, 166, 255, 0.14);
+    letter-spacing: 0.04em;
+}
+
+.leaderboard-delta {
+    position: absolute;
+    right: calc(100% + 6px);
+    top: 50%;
+    z-index: 3;
+    font-size: 0.8em;
+    font-weight: 800;
+    white-space: nowrap;
+    pointer-events: none;
+    animation: leaderboard-float-up 1.6s ease-out forwards;
+}
+
+.leaderboard-delta.gain {
+    color: #3fb950;
+    text-shadow: 0 0 6px rgba(63, 185, 80, 0.6);
+}
+
+.leaderboard-delta.loss {
+    color: #f85149;
+    text-shadow: 0 0 6px rgba(248, 81, 73, 0.5);
+    animation-name: leaderboard-float-down;
+}
+
+.leaderboard-flash {
+    position: absolute;
+    inset: -1px;
+    z-index: -1;
+    border-radius: inherit;
+    pointer-events: none;
+    animation: leaderboard-flash 1.4s ease-out forwards;
+}
+
+.leaderboard-flash.gain { background-color: rgba(63, 185, 80, 0.28); }
+.leaderboard-flash.loss { background-color: rgba(248, 81, 73, 0.2); }
+
+.leaderboard-flash.podium {
+    background: radial-gradient(ellipse at 12% 50%, rgba(255, 207, 120, 0.55), transparent 70%);
+    animation-duration: 1.8s;
+}
+
+.leaderboard-flash.crown {
+    background: radial-gradient(ellipse at 10% 50%, rgba(255, 233, 163, 0.85), rgba(227, 179, 65, 0.35) 35%, transparent 75%);
+    box-shadow: 0 0 18px rgba(255, 216, 107, 0.6);
+    animation: leaderboard-crown-flash 2.2s ease-out forwards;
+}
+
+.leaderboard-callout {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    z-index: 3;
+    padding: 1px 10px;
+    font-size: 0.85em;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+    white-space: nowrap;
+    border-radius: 999px;
+    pointer-events: none;
+    transform: translate(-50%, -50%);
+    animation: leaderboard-callout 2.2s ease-out forwards;
+}
+
+.leaderboard-callout.crown {
+    color: #3b2a00;
+    background: linear-gradient(90deg, #ffd86b, #fff2b0, #e3b341);
+    box-shadow: 0 0 14px rgba(255, 216, 107, 0.7);
+}
+
+.leaderboard-callout.podium {
+    color: #fff;
+    background: linear-gradient(90deg, #cd7f32, #e3b341);
+    box-shadow: 0 0 10px rgba(227, 179, 65, 0.5);
+}
+
+/* 换名次时往上走的行盖在别的行上面 */
+.leaderboard-moving-up { z-index: 2; }
+.leaderboard-moving-down { z-index: 1; }
+
+.leaderboard-dethroned .leaderboard-medal {
+    animation: leaderboard-shake 0.6s ease-in-out;
+}
+
+@keyframes leaderboard-spin { to { --lb-angle: 360deg; } }
+
+@keyframes leaderboard-shine {
+    0% { background-position: 150% 0; }
+    45%, 100% { background-position: -60% 0; }
+}
+
+@keyframes leaderboard-glow {
+    0%, 100% { box-shadow: 0 0 6px rgba(227, 179, 65, 0.16); }
+    50% { box-shadow: 0 0 14px rgba(227, 179, 65, 0.36); }
+}
+
+@keyframes leaderboard-glow-silver {
+    0%, 100% { box-shadow: 0 0 6px rgba(200, 220, 240, 0.16); }
+    50% { box-shadow: 0 0 13px rgba(200, 220, 240, 0.34); }
+}
+
+@keyframes leaderboard-glow-strong {
+    0%, 100% { box-shadow: 0 0 8px rgba(255, 200, 90, 0.28), 0 0 2px rgba(255, 233, 163, 0.5); }
+    50% { box-shadow: 0 0 20px rgba(255, 180, 80, 0.5), 0 0 6px rgba(243, 196, 255, 0.45); }
+}
+
+@keyframes leaderboard-aurora {
+    0%, 100% { background-position: 0% 0; }
+    50% { background-position: 100% 0; }
+}
+
+@keyframes leaderboard-bob {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-2px); }
+}
+
+@keyframes leaderboard-crown {
+    0%, 100% { transform: translateX(-50%) rotate(-10deg) translateY(0); }
+    50% { transform: translateX(-50%) rotate(-4deg) translateY(-2px); }
+}
+
+@keyframes leaderboard-name-flow {
+    to { background-position: 200px 0; }
+}
+
+@keyframes leaderboard-twinkle {
+    0%, 100% { opacity: 0; transform: scale(0.4); }
+    50% { opacity: 1; transform: scale(1); }
+}
+
+@keyframes leaderboard-admin-flow {
+    to { background-position: 240px 0; }
+}
+
+@keyframes leaderboard-move-fade {
+    0% { opacity: 0; transform: translateY(3px); }
+    4% { opacity: 1; transform: none; }
+    80% { opacity: 1; }
+    95% { opacity: 0; max-width: 4em; padding: 0 4px; }
+    100% { opacity: 0; max-width: 0; padding: 0; }
+}
+
+@keyframes leaderboard-float-up {
+    0% { opacity: 0; transform: translate(10px, -50%) scale(0.7); }
+    14% { opacity: 1; transform: translate(0, -50%) scale(1.1); }
+    24% { transform: translate(0, -50%) scale(1); }
+    70% { opacity: 1; transform: translate(-3px, -65%); }
+    100% { opacity: 0; transform: translate(-6px, -90%); }
+}
+
+@keyframes leaderboard-float-down {
+    0% { opacity: 0; transform: translate(10px, -50%) scale(0.7); }
+    14% { opacity: 1; transform: translate(0, -50%) scale(1.1); }
+    24% { transform: translate(0, -50%) scale(1); }
+    70% { opacity: 1; transform: translate(-3px, -35%); }
+    100% { opacity: 0; transform: translate(-6px, -10%); }
+}
+
+@keyframes leaderboard-flash {
+    from { opacity: 1; }
+    to { opacity: 0; }
+}
+
+@keyframes leaderboard-crown-flash {
+    0% { opacity: 0; transform: scaleX(0.6); }
+    12% { opacity: 1; transform: none; }
+    100% { opacity: 0; }
+}
+
+@keyframes leaderboard-callout {
+    0% { opacity: 0; transform: translate(-50%, -50%) scale(0.5); }
+    14% { opacity: 1; transform: translate(-50%, -50%) scale(1.12); }
+    24% { transform: translate(-50%, -50%) scale(1); }
+    75% { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+    100% { opacity: 0; transform: translate(-50%, -80%) scale(0.96); }
+}
+
+@keyframes leaderboard-shake {
+    0%, 100% { transform: none; }
+    20% { transform: rotate(-14deg); }
+    40% { transform: rotate(10deg); }
+    60% { transform: rotate(-6deg); }
+    80% { transform: rotate(3deg); }
+}
+
+/* 系统设置了「减少动态效果」：只留静止的边框和颜色 */
+@media (prefers-reduced-motion: reduce) {
+    .leaderboard-popup *,
+    .leaderboard-popup *::before,
+    .leaderboard-popup *::after {
+        animation: none !important;
+    }
+
+    .leaderboard-sparkles,
+    .leaderboard-flash,
+    .leaderboard-callout,
+    .leaderboard-delta {
+        display: none;
+    }
 }
 
 .leaderboard-row-expandable {
@@ -499,6 +952,7 @@
 }
 
 .leaderboard-me-value {
+    position: relative;
     margin-left: auto;
     font-weight: bold;
     white-space: nowrap;
@@ -738,6 +1192,22 @@
         padding: 0 3px;
         font-size: 0.62em;
         letter-spacing: 0;
+    }
+
+    .leaderboard-admin-badge {
+        gap: 2px;
+        padding: 0 4px;
+        font-size: 0.58em;
+        letter-spacing: 0.03em;
+    }
+
+    .leaderboard-move {
+        padding: 0 3px;
+        font-size: 0.66em;
+    }
+
+    .leaderboard-value {
+        gap: 4px;
     }
 }
 

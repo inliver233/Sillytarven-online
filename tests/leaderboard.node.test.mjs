@@ -669,6 +669,28 @@ test('administrators are counted, ranked and sent to the other site like everybo
     assert.deepEqual(view.rows.map(row => row.value), [1]);
 });
 
+test('administrators carry a mark on both sites, until they are no longer administrators', () => {
+    const legacy = makeStore('legacy').store;
+    const modern = makeStore('modern').store;
+    legacy.ensureAccount({ handle: 'boss', admin: true, discord: '333333333333' });
+    legacy.ensureAccount({ handle: 'user', discord: '444444444444' });
+    modern.ensureAccount({ handle: 'viewer', discord: '555555555555' });
+    for (const handle of ['boss', 'user']) {
+        const stats = legacy.dayStats(legacy.accounts.get(handle), dayOf(NOON));
+        stats.ai += handle === 'boss' ? 2 : 1;
+        legacy.touch(legacy.accounts.get(handle), stats);
+    }
+    const sync = () => modern.applyPeer('https://legacy', legacy.exportForPeer(modern.peers.get('https://legacy')?.version ?? -1, modern.peers.get('https://legacy')?.epoch ?? 'none'));
+    sync();
+    const marks = store => store.board({ metric: 'chat', window: 'today', site: 'all', handle: 'viewer' }).rows.map(row => !!row.admin);
+    assert.deepEqual(marks(modern), [true, false]);
+    assert.equal(legacy.board({ metric: 'chat', window: 'today', site: 'all', handle: 'boss' }).me.admin, true);
+
+    legacy.ensureAccount({ handle: 'boss', admin: false, discord: '333333333333' });
+    sync();
+    assert.deepEqual(marks(modern), [false, false]);
+});
+
 test('saved numbers survive a restart, and recent messages are not counted again', () => {
     const { store, clock } = makeStore();
     store.ensureAccount({ handle: 'a', name: '存档', created: 5, discord: '333333333333' });

@@ -187,7 +187,7 @@ export function numberedName(prefs, name, number) {
  * @typedef {{ai: number, chars: number, user: number, night: number, group: number, online: number, cset: string[], v: number}} DayStats
  * @typedef {{mode: string, nickname: string, explicit: boolean, updatedAt: number}} Prefs
  * @typedef {{handle: string, name: string, number: number, created: number, discord: string|null, admin: boolean, prefs: Prefs, days: Map<number, DayStats>, hours: Map<number, DayStats>, v: number}} Account
- * @typedef {{key: string, number: number|null, name: string, created: number, prefs: Prefs, days: Map<number, DayStats>, hours: Map<number, DayStats>}} RemoteAccount
+ * @typedef {{key: string, number: number|null, name: string, created: number, admin: boolean, prefs: Prefs, days: Map<number, DayStats>, hours: Map<number, DayStats>}} RemoteAccount
  * @typedef {{site: string, epoch: string, version: number, accounts: Map<string, RemoteAccount>, syncedAt: number, error: string}} Peer
  * @typedef {{ts: number, len: number, tail: string, counted: boolean, name: string}} RecentMessage
  * @typedef {{recent: Map<string, RecentMessage>, credits: number[], generations: {at: number, w: number}[], pending: {ts: number}[], ai: number[], user: number[], offset: number, lastActivity: number}} LiveState
@@ -931,6 +931,7 @@ export class LeaderboardStore {
                 k: this.personKey(account),
                 n: account.number,
                 c: account.created,
+                ...(account.admin ? { a: 1 } : {}),
                 p: { mode: prefs.mode, nickname: prefs.mode === 'public' ? prefs.nickname : '', explicit: prefs.explicit, updatedAt: prefs.updatedAt },
                 // The display name leaves the site only for someone who chose real name here.
                 ...(prefs.mode === 'public' ? { nm: account.name } : {}),
@@ -964,10 +965,11 @@ export class LeaderboardStore {
             if (!row?.k) continue;
             let account = peer.accounts.get(row.k);
             if (!account) {
-                account = { key: String(row.k), number: null, name: '', created: 0, prefs: defaultPrefs(), days: new Map(), hours: new Map() };
+                account = { key: String(row.k), number: null, name: '', created: 0, admin: false, prefs: defaultPrefs(), days: new Map(), hours: new Map() };
                 peer.accounts.set(account.key, account);
             }
             account.created = Number(row.c) || account.created;
+            account.admin = row.a === 1;
             if (Number.isInteger(row.n) && row.n > 0) account.number = row.n;
             account.name = cleanName(row.nm);
             account.prefs = cleanPrefs(row.p);
@@ -997,13 +999,15 @@ export class LeaderboardStore {
     people() {
         if (this.peopleCache?.version === this.boardVersion) return this.peopleCache.people;
         const people = new Map();
-        const add = (key, site, created, prefs, days, hours, number, name) => {
+        const add = (key, site, created, prefs, days, hours, number, name, admin) => {
             let person = people.get(key);
             if (!person) {
-                person = { key, sites: new Set(), created: Infinity, prefs: defaultPrefs(), prefsSite: '', parts: [], number: null, numberFrom: null, name: '' };
+                person = { key, sites: new Set(), created: Infinity, prefs: defaultPrefs(), prefsSite: '', parts: [], number: null, numberFrom: null, name: '', admin: false };
                 people.set(key, person);
             }
             person.sites.add(site);
+            // An administrator on either site.
+            if (admin) person.admin = true;
             if (created > 0) person.created = Math.min(person.created, created);
             // The latest decision on either site counts (a choice, or an administrator asking them to
             // choose again); real name shows the display name of the account it was made with.
@@ -1024,10 +1028,10 @@ export class LeaderboardStore {
             }
         };
         for (const account of this.accounts.values()) {
-            add(this.personKey(account), this.site, account.created, account.prefs, account.days, account.hours, account.number, account.name);
+            add(this.personKey(account), this.site, account.created, account.prefs, account.days, account.hours, account.number, account.name, account.admin);
         }
         for (const peer of this.peers.values()) {
-            for (const account of peer.accounts.values()) add(account.key, peer.site, account.created, account.prefs, account.days, account.hours, account.number, account.name);
+            for (const account of peer.accounts.values()) add(account.key, peer.site, account.created, account.prefs, account.days, account.hours, account.number, account.name, account.admin);
         }
         // Site order, so that both sites go through a person's history the same way (see values()).
         for (const person of people.values()) person.parts.sort((a, b) => (a.site < b.site ? -1 : a.site > b.site ? 1 : 0));
@@ -1192,6 +1196,7 @@ export class LeaderboardStore {
             sites: entry.values.sites.length ? entry.values.sites : [...entry.person.sites].sort(),
             value: entry.value,
             ...(isScore ? { parts: compositeScore(entry.values, ranking.best).parts } : {}),
+            ...(entry.person.admin ? { admin: true } : {}),
             me: entry.person.key === myKey,
         }));
         let me = null;
@@ -1218,6 +1223,7 @@ export class LeaderboardStore {
                 mode: person.prefs.mode,
                 explicit: person.prefs.explicit,
                 sites: values.sites.length ? values.sites : [...person.sites].sort(),
+                admin: !!person.admin,
             };
         }
         return {
