@@ -118,6 +118,7 @@ import {
     splitGroupChatFile,
 } from './group-chat-paging.js';
 import { compressRequest } from './request-compression.js';
+import { withOwnChatWriteHeader } from './foreign-chat-write.js';
 
 export {
     selected_group,
@@ -828,7 +829,7 @@ async function saveGroupChat(groupId, shouldSaveGroup, force = false) {
         try {
             response = await sendWithRetry(() => fetch(saveRequest.url, {
                 method: 'POST',
-                headers: getRequestHeaders(),
+                headers: withOwnChatWriteHeader(getRequestHeaders()),
                 body: saveRequest.body,
             }));
         } catch (error) {
@@ -990,7 +991,7 @@ export async function renameGroupMember(oldAvatar, newAvatar, newName) {
 
                         const saveChatRequest = await compressRequest({
                             method: 'POST',
-                            headers: getRequestHeaders(),
+                            headers: withOwnChatWriteHeader(getRequestHeaders()),
                             body: JSON.stringify({ id: chatId, chat: [...messages] }),
                         });
                         const saveChatResponse = await fetch('/api/chats/group/save', saveChatRequest);
@@ -2696,7 +2697,7 @@ export async function saveGroupBookmarkChat(groupId, name, metadata, mesId, chat
 
     const saveChatRequest = await compressRequest({
         method: 'POST',
-        headers: getRequestHeaders(),
+        headers: withOwnChatWriteHeader(getRequestHeaders()),
         body: JSON.stringify({ id: name, chat: [chatHeader, ...trimmedChat] }),
     });
     const response = await fetch('/api/chats/group/save', saveChatRequest);

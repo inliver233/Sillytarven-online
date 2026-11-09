@@ -36,6 +36,7 @@ import { SlashCommandParser } from './slash-commands/SlashCommandParser.js';
 import { createTagMapFromList } from './tags.js';
 import { renderTemplateAsync } from './templates.js';
 import { compressRequest } from './request-compression.js';
+import { withOwnChatWriteHeader } from './foreign-chat-write.js';
 import { t } from './i18n.js';
 
 import {
@@ -431,7 +432,7 @@ export async function convertSoloToGroupChat() {
     // Save group chat
     const createChatRequest = await compressRequest({
         method: 'POST',
-        headers: getRequestHeaders(),
+        headers: withOwnChatWriteHeader(getRequestHeaders()),
         body: JSON.stringify({ id: chatName, chat: [chatHeader, ...groupChat] }),
     });
     const createChatResponse = await fetch('/api/chats/group/save', createChatRequest);

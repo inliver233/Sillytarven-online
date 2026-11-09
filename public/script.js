@@ -282,6 +282,7 @@ import { extractReasoningFromData, extractReasoningSignatureFromData, initReason
 import { accountStorage } from './scripts/util/AccountStorage.js';
 import { initWelcomeScreen, openPermanentAssistantChat, openPermanentAssistantCard, getPermanentAssistantAvatar } from './scripts/welcome-screen.js';
 import { initTabSync, noteSettingsSaved, reloadPageKeepingChat, tellOtherTabs } from './scripts/tab-sync.js';
+import { chatWriteResponse, readForeignChatWrite, withOwnChatWriteHeader, writesOpenChatAsHeld } from './scripts/foreign-chat-write.js';
 import { confirmUsageBudget, initUsageMeter, renderMessageUsage } from './scripts/usage-meter.js';
 import { initReferrals, openReferralPanel } from './scripts/referral-panel.js';
 import { initDataMaid } from './scripts/data-maid.js';
@@ -1267,7 +1268,11 @@ function setupFetchInterceptor() {
     };
 
     window.fetch = async function(...args) {
-        const response = await originalFetch.apply(this, args);
+        // 扩展自己整份写当前聊天：内容和页面手上的一样就由页面自己存（见 saveForeignChatWrite）
+        const foreignWrite = await readForeignChatWrite(args[0], args[1], window.location.href).catch(() => null);
+        const response = foreignWrite
+            ? await saveForeignChatWrite(foreignWrite, () => originalFetch.apply(this, args))
+            : await originalFetch.apply(this, args);
 
         if (response.status === 401 || response.status === 409) {
             try {
@@ -8553,7 +8558,7 @@ async function renamePastChats(oldAvatar, newAvatar, newName) {
 
                 const saveChatRequest = await compressRequest({
                     method: 'POST',
-                    headers: getRequestHeaders(),
+                    headers: withOwnChatWriteHeader(getRequestHeaders()),
                     body: JSON.stringify({
                         ch_name: newName,
                         file_name: fileNameWithoutExtension,
@@ -8650,11 +8655,12 @@ async function ensureStorageAvailableForChatAction() {
 
 /**
  * @param {Partial<SaveChatTailOptions>} [options]
+ * @returns {Promise<boolean>} Whether the chat was saved
  */
 async function saveChatTail(options = {}) {
     const { fileName, header, messages, force = false, session = null } = options;
     if (!fileName || !header || !Array.isArray(messages)) {
-        return;
+        return false;
     }
     const before = Number.isFinite(options.before) ? options.before
         : Number.isFinite(chatPagingState.cursor) ? chatPagingState.cursor : 0;
@@ -8715,21 +8721,21 @@ async function saveChatTail(options = {}) {
                 revision: chatPagingState.revision,
             });
         }
-        return;
+        return true;
     }
 
     if (result.status === 409 && errorData?.error === 'revision_conflict') {
         clearCachedChatPage({ isGroup: false });
         scheduleChangedChatReload();
-        return;
+        return false;
     }
     if (errorData?.error === 'chat_wipe_rejected') {
         reportChatWipeRejected();
-        return;
+        return false;
     }
     if (errorData?.error === 'storage_limit') {
         toastr.error(errorData.message || '存储空间不足，无法保存聊天记录。请删除内容或使用激活码扩容。', '存储空间不足');
-        return;
+        return false;
     }
     const isIntegrityError = errorData?.error === 'integrity' && !force;
     if (!isIntegrityError) {
@@ -8749,10 +8755,10 @@ async function saveChatTail(options = {}) {
     if (!forceSaveConfirmed) {
         console.warn('Chat integrity check failed, and user did not confirm the overwrite. Reloading the page.');
         window.location.reload();
-        return;
+        return false;
     }
 
-    await saveChatTail({ ...options, force: true });
+    return await saveChatTail({ ...options, force: true });
 }
 
 /**
@@ -8762,7 +8768,7 @@ async function saveChatTail(options = {}) {
  * @param {ChatMessage[]} options.messages Whole chat, as it is now
  * @param {object} options.header Chat header
  * @param {boolean} [options.force] Override an integrity mismatch
- * @returns {Promise<void>}
+ * @returns {Promise<boolean>} Whether the chat was saved
  */
 async function saveChatPatch({ session, messages, header, force = false }) {
     // 网络抖一下自动重试；带上自己定的新版本号，回应丢了的那次重试时能认出来
@@ -8803,17 +8809,17 @@ async function saveChatPatch({ session, messages, header, force = false }) {
             chatPagingState.revision = savedRevision;
             noteChatSaved(messages);
         }
-        return;
+        return true;
     }
 
     prepared.rollback();
     if (result.status === 409 && errorData?.error === 'revision_conflict') {
         scheduleChangedChatReload();
-        return;
+        return false;
     }
     if (errorData?.error === 'storage_limit') {
         toastr.error(errorData.message || '存储空间不足，无法保存聊天记录。请删除内容或使用激活码扩容。', '存储空间不足');
-        return;
+        return false;
     }
     if (errorData?.error !== 'integrity' || force) {
         throw new Error(result.statusText);
@@ -8829,9 +8835,9 @@ async function saveChatPatch({ session, messages, header, force = false }) {
     if (popupResult !== 'OVERWRITE') {
         console.warn('Chat integrity check failed, and user did not confirm the overwrite. Reloading the page.');
         window.location.reload();
-        return;
+        return false;
     }
-    await saveChatPatch({ session, messages, header, force: true });
+    return await saveChatPatch({ session, messages, header, force: true });
 }
 
 /**
@@ -8842,28 +8848,26 @@ async function saveChatPatch({ session, messages, header, force = false }) {
  * @param {object} options.header Chat header
  * @param {ChatMessage[]} options.messages Chat messages as they are now
  * @param {boolean} [options.force] Override an integrity mismatch
- * @returns {Promise<void>}
+ * @returns {Promise<boolean>} Whether the chat was saved
  */
 async function savePagedChat({ fileName, header, messages, force = false }) {
     const session = chatHydration;
     if (!session) {
-        await saveChatTail({ fileName, header, messages, force });
-        return;
+        return await saveChatTail({ fileName, header, messages, force });
     }
     const wasHydrated = session.hydrated;
     const before = chatPagingState.cursor;
-    await session.enqueue(async () => {
+    return await session.enqueue(async () => {
         if (session.hydrated) {
             // A snapshot taken before the hydration lacks the history it added.
             const allMessages = wasHydrated ? messages : [...session.history, ...messages];
-            await saveChatPatch({ session, messages: allMessages, header, force });
-            return;
+            return await saveChatPatch({ session, messages: allMessages, header, force });
         }
         if (session !== chatHydration) {
             console.warn('Skipped a queued save of a chat that is no longer open.');
-            return;
+            return false;
         }
-        await saveChatTail({ fileName, header, messages, force, session, before });
+        return await saveChatTail({ fileName, header, messages, force, session, before });
     });
 }
 
@@ -8950,7 +8954,7 @@ async function saveChatCopy({ character, fileName, messages }) {
     const result = await fetch('/api/chats/save', {
         method: 'POST',
         cache: 'no-cache',
-        headers: getRequestHeaders(),
+        headers: withOwnChatWriteHeader(getRequestHeaders()),
         body: JSON.stringify({
             ch_name: character.name,
             file_name: fileName,
@@ -8981,7 +8985,7 @@ async function saveChatCopy({ character, fileName, messages }) {
  * @param {boolean} [options.force] Force the saving despite the integrity check result
  * @param {ChatMessage[]} [options.chatData] Chat snapshot to save instead of the current in-memory chat
  *
- * @returns {Promise<void>}
+ * @returns {Promise<boolean>} Whether the chat was saved
  */
 export async function saveChat({ chatName, withMetadata, mesId, force = false, chatData = undefined } = {}) {
     if (selected_group) {
@@ -8995,11 +8999,11 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false, c
     }
 
     if (isChatSaveBlocked()) {
-        return;
+        return false;
     }
     if (isChatLoading()) {
         console.warn('Not saving while a chat is loading.');
-        return;
+        return false;
     }
 
     const metadata = { ...chat_metadata, ...(withMetadata || {}) };
@@ -9007,12 +9011,12 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false, c
 
     if (!fileName && name2 === neutralCharacterName) {
         // TODO: Do something for a temporary chat with no character.
-        return;
+        return false;
     }
 
     if (!fileName) {
         console.warn('saveChat called without chat_name and no chat file found');
-        return;
+        return false;
     }
 
     characters[this_chid].date_last_chat = Date.now();
@@ -9035,22 +9039,21 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false, c
         // tail of the chat, so copy them from the full saved chat instead.
         try {
             await saveChatCopyFromPagedChat({ fileName, metadata, mesId, chatData });
-            return;
+            return true;
         } catch (error) {
             console.error(error);
             toastr.error(t`Check the server connection and reload the page to prevent data loss.`, t`Chat could not be saved`);
-            return;
+            return false;
         }
     }
 
     if (chatPagingState.active) {
         try {
-            await savePagedChat({ fileName, header, messages: trimmedChat, force });
-            return;
+            return await savePagedChat({ fileName, header, messages: trimmedChat, force });
         } catch (error) {
             console.error(error);
             toastr.error(t`Check the server connection and reload the page to prevent data loss.`, t`Chat could not be saved`);
-            return;
+            return false;
         }
     }
 
@@ -9066,7 +9069,7 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false, c
         const saveChatRequest = await compressRequest({
             method: 'POST',
             cache: 'no-cache',
-            headers: getRequestHeaders(),
+            headers: withOwnChatWriteHeader(getRequestHeaders()),
             body: JSON.stringify({
                 ch_name: characters[this_chid].name,
                 file_name: fileName,
@@ -9088,20 +9091,20 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false, c
                 setFullChatRevision(saved?.revision);
                 noteChatSaved(trimmedChat);
             }
-            return;
+            return true;
         }
 
         if (result.status === 409 && errorData?.error === 'revision_conflict') {
             scheduleChangedChatReload();
-            return;
+            return false;
         }
         if (errorData?.error === 'chat_wipe_rejected') {
             reportChatWipeRejected();
-            return;
+            return false;
         }
         if (errorData?.error === 'storage_limit') {
             toastr.error(errorData.message || '存储空间不足，无法保存聊天记录。请删除内容或使用激活码扩容。', '存储空间不足');
-            return;
+            return false;
         }
         const isIntegrityError = errorData?.error === 'integrity' && !force;
         if (!isIntegrityError) {
@@ -9121,13 +9124,14 @@ export async function saveChat({ chatName, withMetadata, mesId, force = false, c
         if (!forceSaveConfirmed) {
             console.warn('Chat integrity check failed, and user did not confirm the overwrite. Reloading the page.');
             window.location.reload();
-            return;
+            return false;
         }
 
-        await saveChat({ chatName, withMetadata, mesId, force: true, chatData });
+        return await saveChat({ chatName, withMetadata, mesId, force: true, chatData });
     } catch (error) {
         console.error(error);
         toastr.error(t`Check the server connection and reload the page to prevent data loss.`, t`Chat could not be saved`);
+        return false;
     }
 }
 
@@ -11259,24 +11263,25 @@ export async function saveMetadata() {
     return await saveChatConditional();
 }
 
+/**
+ * Saves the open chat, after a save that is already running.
+ * @returns {Promise<boolean>} Whether the chat was saved
+ */
 export async function saveChatConditional() {
     try {
         await waitUntilCondition(() => !isChatSaving, DEFAULT_SAVE_EDIT_TIMEOUT, 100);
     } catch {
         console.warn('Timeout waiting for chat to save');
-        return;
+        return false;
     }
 
+    let saved = false;
     try {
         cancelDebouncedChatSave();
 
         isChatSaving = true;
 
-        if (selected_group) {
-            await saveGroupChat(selected_group, true);
-        } else {
-            await saveChat();
-        }
+        saved = Boolean(selected_group ? await saveGroupChat(selected_group, true) : await saveChat());
 
         // Save token and prompts cache to IndexedDB storage
         saveTokenCache();
@@ -11286,6 +11291,61 @@ export async function saveChatConditional() {
     } finally {
         isChatSaving = false;
     }
+    return saved;
+}
+
+/** 扩展的整份写入要等页面正在进行的那次保存，最多等这么久 */
+const FOREIGN_CHAT_WRITE_WAIT_MS = 30_000;
+
+/**
+ * 扩展要整份写的是不是当前打开的这个聊天。
+ * @param {import('./scripts/foreign-chat-write.js').ForeignChatWrite} write
+ * @returns {boolean}
+ */
+function isForeignWriteOfOpenChat(write) {
+    if (write.kind === 'group') {
+        const group = selected_group ? groups.find(item => String(item.id) === String(selected_group)) : null;
+        return Boolean(group?.chat_id) && String(write.body.id) === String(group.chat_id);
+    }
+    const character = !selected_group && this_chid !== undefined ? characters[this_chid] : null;
+    return Boolean(character?.chat) && write.body.avatar_url === character.avatar && String(write.body.file_name) === String(character.chat);
+}
+
+/**
+ * 扩展自己整份写当前打开的聊天（见 foreign-chat-write.js）。写的和页面手上的一模一样时不发这个请求，
+ * 由页面自己存：分页的聊天增量保存（更早的记录没加载下来也不会被写短），不分页的带着版本号整份保存；
+ * 页面接下来的保存就不会被拒，聊天也不会重新载入。扩展拿到的回应和服务器的一样。
+ * 聊天正在加载或没加载成功时不写；内容不一样（扩展改了页面上没有的东西）照原样发出去。
+ * @param {import('./scripts/foreign-chat-write.js').ForeignChatWrite} write
+ * @param {() => Promise<Response>} send 照原样发出这个请求
+ * @returns {Promise<Response>}
+ */
+async function saveForeignChatWrite(write, send) {
+    if (!isForeignWriteOfOpenChat(write)) {
+        return send();
+    }
+    if (isChatLoading() || isChatLoadFailed()) {
+        return chatWriteResponse(409, { error: 'chat_not_ready' });
+    }
+    if (!writesOpenChatAsHeld(write, { messages: chat, metadata: chat_metadata })) {
+        return send();
+    }
+    const identity = getCurrentChatIdentity();
+    try {
+        // 页面正在存：等它存完再存一次，存的是那之后的内容
+        await waitUntilCondition(() => !isChatSaving, FOREIGN_CHAT_WRITE_WAIT_MS, 50);
+    } catch {
+        return chatWriteResponse(409, { error: 'chat_busy' });
+    }
+    if (identity !== getCurrentChatIdentity()) {
+        // 等的时候换了聊天：扩展写的是原来那个，照原样写过去
+        return send();
+    }
+    if (!await saveChatConditional()) {
+        return chatWriteResponse(409, { error: 'chat_not_saved' });
+    }
+    const revision = chatPagingState.active ? chatPagingState.revision : getFullChatRevision();
+    return chatWriteResponse(200, write.kind === 'group' ? { ok: true, revision } : { result: 'ok', revision });
 }
 
 /**

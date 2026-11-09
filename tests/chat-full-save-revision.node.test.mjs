@@ -144,3 +144,18 @@ test('a save writes the revision the page proposed, so a retry after a lost answ
     assert.notEqual(odd.data.revision, '../x');
 });
 
+test('a whole-chat save that holds only the end of a longer chat is refused (plain chat file)', async () => {
+    const chat = { ...target, file_name: 'Alice - partial' };
+    // Every message has the same date here, so the text tells the first one apart.
+    const history = ['greeting', 'one', 'two', 'three', 'four'].map((text, index) => message(text, index % 2 === 1));
+    assert.equal((await post('/save', { ...chat, chat: [header, ...history] })).response.status, 200);
+
+    const refused = await post('/save', { ...chat, chat: [header, ...history.slice(3), message('reply', false)], force: false });
+    assert.equal(refused.response.status, 409);
+    assert.equal(refused.data.error, 'chat_partial_overwrite_rejected');
+    assert.equal(refused.data.storedMessageCount, 5);
+    const stored = await post('/get', chat);
+    assert.deepEqual(stored.data.slice(1).map(item => item.mes), history.map(item => item.mes));
+
+    assert.equal((await post('/save', { ...chat, chat: [header, ...history, message('reply', false)] })).response.status, 200);
+});

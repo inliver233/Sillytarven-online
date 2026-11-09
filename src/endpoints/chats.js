@@ -1550,14 +1550,7 @@ async function rejectChatWipe(request, response, filePath, nextMessageCount, isG
     }
     let storedMessageCount = 0;
     try {
-        if (isChunkedChat(filePath)) {
-            const index = await ensureChatIndex(filePath);
-            const embeddedHeaderCount = isGroup ? Number((await readGroupChatHeaderInfo(filePath)).embeddedHeaderCount || 0) : 0;
-            storedMessageCount = Math.max(0, (Number(index?.message_count) || 0) - embeddedHeaderCount);
-        } else {
-            const lineCount = await countJsonlLines(filePath);
-            storedMessageCount = isGroup ? lineCount : Math.max(lineCount - 1, 0);
-        }
+        storedMessageCount = await countStoredMessages(filePath, isGroup);
     } catch (error) {
         // Keep what cannot be counted: this save is suspicious to begin with.
         console.warn(`Could not count the messages of ${filePath}:`, error);
@@ -1568,6 +1561,130 @@ async function rejectChatWipe(request, response, filePath, nextMessageCount, isG
     }
     console.warn(`Refused a save that would shrink ${filePath} from ${storedMessageCount} messages to ${nextMessageCount}.`);
     response.status(409).send({ error: 'chat_wipe_rejected', storedMessageCount, nextMessageCount });
+    return true;
+}
+
+/**
+ * How many messages a stored chat has.
+ * @param {string} filePath Chat file
+ * @param {boolean} isGroup Whether it is a group chat
+ * @returns {Promise<number>}
+ */
+async function countStoredMessages(filePath, isGroup) {
+    if (isChunkedChat(filePath)) {
+        const index = await ensureChatIndex(filePath);
+        const embeddedHeaderCount = isGroup ? Number((await readGroupChatHeaderInfo(filePath)).embeddedHeaderCount || 0) : 0;
+        return Math.max(0, (Number(index?.message_count) || 0) - embeddedHeaderCount);
+    }
+    const lineCount = await countJsonlLines(filePath);
+    return isGroup ? lineCount : Math.max(lineCount - 1, 0);
+}
+
+/**
+ * Reads the first lines of a file (fewer when it is shorter).
+ * @param {string} filePath Path to the file
+ * @param {number} count Number of lines
+ * @returns {Promise<string[]>}
+ */
+function readFirstLines(filePath, count) {
+    const stream = fs.createReadStream(filePath, { encoding: 'utf8' });
+    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+    const lines = [];
+    return new Promise((resolve, reject) => {
+        const finish = () => {
+            rl.close();
+            stream.destroy();
+            resolve(lines);
+        };
+        rl.on('line', line => {
+            // Lines already read can still arrive after close()
+            if (lines.length >= count) {
+                return;
+            }
+            lines.push(line);
+            if (lines.length >= count) {
+                finish();
+            }
+        });
+        rl.on('close', () => resolve(lines));
+        rl.on('error', reject);
+        stream.on('error', reject);
+    });
+}
+
+/**
+ * The first message of a stored chat (not its header).
+ * @param {string} filePath Chat file
+ * @param {boolean} isGroup Whether it is a group chat
+ * @returns {Promise<any>} The message, or null
+ */
+async function readFirstStoredMessage(filePath, isGroup) {
+    if (isChunkedChat(filePath)) {
+        const skip = isGroup ? Number((await readGroupChatHeaderInfo(filePath)).embeddedHeaderCount || 0) : 0;
+        const [line] = await readChunkedChatLinesRange(filePath, skip, 1);
+        return line ? tryParse(line) ?? null : null;
+    }
+    const [first = '', second = ''] = await readFirstLines(filePath, 2);
+    const firstItem = tryParse(first.replace(/^\uFEFF/, ''));
+    if (isGroup && !isGroupChatHeader(firstItem)) {
+        return firstItem ?? null;
+    }
+    return tryParse(second) ?? null;
+}
+
+/**
+ * Whether a sent message is the stored first message of a chat: same author and date, and its
+ * text or another of its swipes.
+ * @param {any} stored First message as stored
+ * @param {any} sent First message as sent
+ * @returns {boolean}
+ */
+function isSameFirstMessage(stored, sent) {
+    if (!stored || !sent || typeof stored !== 'object' || typeof sent !== 'object') {
+        return false;
+    }
+    if (Boolean(stored.is_user) !== Boolean(sent.is_user)
+        || String(stored.name ?? '') !== String(sent.name ?? '')
+        || String(stored.send_date ?? '') !== String(sent.send_date ?? '')) {
+        return false;
+    }
+    return stored.mes === sent.mes || (Array.isArray(stored.swipes) && stored.swipes.includes(sent.mes));
+}
+
+/**
+ * Refuses a whole-chat save that would replace a longer stored chat with one starting at a later
+ * message: the writer held only the latest part of the chat. The page saves such a chat with
+ * save-tail or save-patch, so this is an extension writing a paged chat by itself while its older
+ * history was not loaded (Amily2's table system does that after each reply). Revision-checked saves,
+ * ones allowed to shrink the chat and forced ones are not checked.
+ * @param {import('express').Request} request Request
+ * @param {import('express').Response} response Response
+ * @param {string} filePath Chat file
+ * @param {any[]} messages Messages being saved
+ * @param {boolean} isGroup Whether it is a group chat
+ * @returns {Promise<boolean>} Whether the save was refused
+ */
+async function rejectPartialChatOverwrite(request, response, filePath, messages, isGroup) {
+    const body = request.body ?? {};
+    if (Object.hasOwn(body, 'expectedRevision') || body.allow_shrink === true || body.force || messages.length === 0 || !fs.existsSync(filePath)) {
+        return false;
+    }
+    let storedMessageCount = 0;
+    try {
+        const storedFirst = await readFirstStoredMessage(filePath, isGroup);
+        if (!storedFirst || isSameFirstMessage(storedFirst, messages[0])) {
+            return false;
+        }
+        storedMessageCount = await countStoredMessages(filePath, isGroup);
+    } catch (error) {
+        console.warn(`Could not read the start of ${filePath}:`, error);
+        return false;
+    }
+    if (storedMessageCount <= messages.length) {
+        return false;
+    }
+    console.warn(`Refused a save of ${filePath} that starts at a later message (${storedMessageCount} messages stored, ${messages.length} sent).`);
+    response.status(409).send({ error: 'chat_partial_overwrite_rejected', storedMessageCount, nextMessageCount: messages.length });
     return true;
 }
 
@@ -1954,6 +2071,9 @@ async function persistFullChat({ request, response, filePath, header, messages, 
     }
 
     if (await rejectChatWipe(request, response, filePath, messages.length, isGroup)) {
+        return null;
+    }
+    if (await rejectPartialChatOverwrite(request, response, filePath, messages, isGroup)) {
         return null;
     }
 

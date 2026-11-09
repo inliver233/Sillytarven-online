@@ -161,6 +161,59 @@ test('group chats get the same guard', async () => {
     assert.equal((await post('/group/save', { id, chat: [header, greeting], allow_shrink: true })).response.status, 200);
 });
 
+test('a whole-chat save holding only the latest part of a longer chat is refused', async () => {
+    const { header, target } = characterChat('partial-overwrite', 'integrity-e');
+    const history = [greeting, ...makeMessages(20)];
+    assert.equal((await post('/save', { ...target, chat: [header, ...history] })).response.status, 200);
+
+    // An extension saving the chat by itself from a page that holds only the latest page (the older
+    // history did not load), with a new reply. It sends force: false, like Amily2.
+    const reply = { name: 'Character', is_user: false, send_date: 1_900_000_000_000, mes: 'reply' };
+    const refused = await post('/save', { ...target, chat: [header, ...history.slice(-15), reply], force: false });
+    assert.equal(refused.response.status, 409);
+    assert.equal(refused.data.error, 'chat_partial_overwrite_rejected');
+    assert.equal(refused.data.storedMessageCount, 21);
+    assert.equal(refused.data.nextMessageCount, 16);
+    assert.deepEqual(await storedMessages(target), history.map(message => message.mes));
+
+    // The whole chat, deleting from its end, or another swipe of the first message: ordinary saves.
+    assert.equal((await post('/save', { ...target, chat: [header, ...history, reply] })).response.status, 200);
+    assert.equal((await post('/save', { ...target, chat: [header, ...history.slice(0, 18)] })).response.status, 200);
+    const otherSwipe = { ...greeting, mes: 'alt', swipe_id: 1 };
+    assert.equal((await post('/save', { ...target, chat: [header, otherSwipe, ...history.slice(1, 10)] })).response.status, 200);
+    assert.deepEqual(await storedMessages(target), ['alt', ...history.slice(1, 10).map(message => message.mes)]);
+    assert.equal((await post('/save', { ...target, chat: [header, greeting, ...history.slice(1, 5)] })).response.status, 200);
+});
+
+test('saves that may shrink a chat are not checked: allowed to shrink, revision-checked, forced', async () => {
+    const history = [greeting, ...makeMessages(6)];
+    const tail = history.slice(-2);
+    for (const [name, extra] of [['allowed', { allow_shrink: true }], ['forced', { force: true }]]) {
+        const { header, target } = characterChat(`partial-${name}`, `integrity-${name}`);
+        assert.equal((await post('/save', { ...target, chat: [header, ...history] })).response.status, 200);
+        assert.equal((await post('/save', { ...target, chat: [header, ...tail], ...extra })).response.status, 200);
+        assert.deepEqual(await storedMessages(target), tail.map(message => message.mes));
+    }
+    const { header, target } = characterChat('partial-revision', 'integrity-revision');
+    const saved = await post('/save', { ...target, chat: [header, ...history] });
+    assert.equal((await post('/save', { ...target, chat: [header, ...tail], expectedRevision: saved.data.revision })).response.status, 200);
+});
+
+test('group chats: a save holding only the latest part is refused too', async () => {
+    const id = 'group-partial';
+    const header = { user_name: 'unused', character_name: 'unused', chat_metadata: { integrity: 'group-partial' } };
+    const history = [greeting, ...makeMessages(8)];
+    assert.equal((await post('/group/save', { id, chat: [header, ...history] })).response.status, 200);
+
+    const refused = await post('/group/save', { id, chat: [header, ...history.slice(-3)] });
+    assert.equal(refused.response.status, 409);
+    assert.equal(refused.data.error, 'chat_partial_overwrite_rejected');
+    const stored = await post('/group/get', { id });
+    assert.deepEqual(stored.data.slice(1).map(message => message.mes), history.map(message => message.mes));
+
+    assert.equal((await post('/group/save', { id, chat: [header, ...history.slice(0, 5)] })).response.status, 200);
+});
+
 test('a chat that cannot be read is an error, not an empty chat', async () => {
     const { header, target } = characterChat('unreadable', 'integrity-d');
     assert.equal((await post('/save', { ...target, chat: [header, ...makeMessages(3)] })).response.status, 200);
