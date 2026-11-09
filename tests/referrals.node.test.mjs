@@ -282,7 +282,7 @@ test('across the two sites: codes of the other site work here, and this site pay
     assert.equal((await referrals.answerPeerLookup({ code: frankCode, identity: identityKey('123456789012345678') })).reason, '不能邀请自己在另一个站的账号');
     const frankBefore = await limit('frank');
     assert.deepEqual(await referrals.applyPeerSync({ inviteeSite: 'modern', invitee: 'quin', inviteeName: 'Quin', inviter: 'frank', code: frankCode, status: 'pending', boundAt: Date.now() }),
-        { ok: true, inviterRewardMiB: 0, status: 'pending' });
+        { ok: true, inviterRewardMiB: 0, status: 'pending', flags: [] });
     const success = { inviteeSite: 'modern', invitee: 'quin', inviteeName: 'Quin', inviter: 'frank', code: frankCode, status: 'success', boundAt: Date.now(), successAt: Date.now(), inviteeRewardMiB: 150 };
     assert.equal((await referrals.applyPeerSync(success)).inviterRewardMiB, 500, 'paid by this site\'s rules');
     assert.equal((await referrals.applyPeerSync(success)).inviterRewardMiB, 500, 'told twice, paid once');
@@ -410,3 +410,137 @@ test('a node managed by the Controller: links go to the Controller, which brings
     assert.equal(await link('xia'), undefined);
 });
 
+test('tracing: where things came from, kept for admins; raw addresses go after 90 days', async () => {
+    const trace = await import('../src/referral-trace.js');
+    assert.equal(trace.deviceFromCookies('a=1; st_did=abcdefghijklmnop1234; b=2'), 'abcdefghijklmnop1234');
+    assert.equal(trace.deviceFromCookies('st_did=<bad>'), '');
+    assert.equal(trace.maskIp('203.0.113.45'), '203.0.113.x');
+    assert.equal(trace.maskIp('2001:db8:1234:5678::1'), '2001:db8:1234::/48');
+    const ip = trace.describeIp('203.0.113.45');
+    assert.equal(ip.ipHash.length, 32);
+    assert.equal(ip.netHash, trace.describeIp('203.0.113.99').netHash, 'same network, same digest');
+    assert.notEqual(ip.ipHash, trace.describeIp('203.0.113.99').ipHash);
+    // Discord's own example: 175928847299117063 was created at 2016-04-30T11:18:25.796Z.
+    assert.equal(Math.abs(trace.discordCreatedAt('175928847299117063') - Date.parse('2016-04-30T11:18:25.796Z')) < 10, true);
+
+    const old = { at: Date.now() - 91 * DAY, ip: '203.0.113.45', ua: 'Firefox', net: '203.0.113.x', ipHash: 'h' };
+    assert.equal(trace.scrubRaw(old), true);
+    assert.deepEqual(Object.keys(old).sort(), ['at', 'ipHash', 'net']);
+    assert.equal(trace.scrubRaw({ at: Date.now(), ip: '1.2.3.4' }), false);
+});
+
+test('tracing: suspicious invitations are marked (rewards still go out)', async () => {
+    const trace = await import('../src/referral-trace.js');
+    const at = (address, device) => ({ ...trace.describeIp(address), device, ua: 'Mozilla/5.0 Chrome/140' });
+    await referrals.setReferralConfig({ requireValidReply: true, crossSite: false, claimWindowDays: 7 });
+    await makeUser('yan', 60);
+    const code = await referrals.ensureCode('yan');
+    // Only people taking part are noted when they open the site.
+    await makeUser('outsider', 60);
+    await referrals.noteParticipant('outsider', at('198.51.100.1', 'outsiderdevice000001'));
+    assert.deepEqual(await trace.readSeen('outsider'), []);
+    await referrals.noteParticipant('yan', at('198.51.100.7', 'yandevice00000000001'));
+    assert.equal((await trace.readSeen('yan')).length, 1);
+
+    // A link opened before signing in, on the device that later binds.
+    await referrals.noteInviteVisit('zoedevice00000000001', code, at('192.0.2.10', 'zoedevice00000000001'));
+    for (const [handle, address, device] of [
+        ['zoe', '198.51.100.7', 'yandevice00000000001'],   // yan's own device
+        ['amy', '198.51.100.7', 'amydevice00000000001'],   // yan's IP
+        ['ben', '198.51.100.200', 'bendevice00000000001'], // yan's network
+        ['cal', '192.0.2.77', 'amydevice00000000001'],     // amy's device, another of yan's
+        ['dan', '192.0.2.88', 'dandevice00000000001'],     // nothing in common: only the burst
+    ]) {
+        await makeUser(handle, 0);
+        const result = await referrals.claimReferral(handle, code, { source: 'link', context: at(address, device) });
+        assert.equal(result.ok, true, handle);
+    }
+    // zoe also opened the link on her own device first, and her Discord account is a week old.
+    await storage.setItem('user:zoe', { ...await storage.getItem('user:zoe'), oauthIdentities: { discord: String(Math.floor((Date.now() - 7 * DAY - 1420070400000) * 4194304)) } });
+
+    const listed = await referrals.listReferrals({ inviter: 'yan' });
+    const flagsOf = handle => listed.rows.find(row => row.invitee === handle).flags.map(flag => flag.code).sort();
+    assert.deepEqual(flagsOf('zoe'), ['burst', 'new-discord', 'same-device', 'sibling-ip'], 'amy used the same IP');
+    assert.deepEqual(flagsOf('amy'), ['burst', 'same-ip', 'sibling-device', 'sibling-ip']);
+    assert.deepEqual(flagsOf('ben'), ['burst', 'same-network']);
+    assert.deepEqual(flagsOf('cal'), ['burst', 'sibling-device']);
+    assert.deepEqual(flagsOf('dan'), ['burst']);
+    assert.equal(listed.rows.find(row => row.invitee === 'zoe').risk, 'high');
+    assert.equal(listed.rows.find(row => row.invitee === 'zoe').inviteeDiscordDays, 7);
+    assert.equal(listed.focus.seen[0].ip, '198.51.100.7', 'the inviter\'s recent addresses, for the admin');
+
+    // The admin can filter them, and search by address or device.
+    const suspicious = await referrals.listReferrals({ status: 'suspicious', inviter: 'yan' });
+    assert.deepEqual(suspicious.rows.map(row => row.invitee).sort(), ['amy', 'ben', 'cal', 'dan', 'zoe'], 'the burst alone is medium');
+    assert.equal(suspicious.summary.suspicious >= 5, true);
+    assert.deepEqual((await referrals.listReferrals({ query: '192.0.2.77' })).rows.map(row => row.invitee), ['cal']);
+    assert.deepEqual((await referrals.listReferrals({ query: 'amydevice' })).rows.map(row => row.invitee).sort(), ['amy', 'cal']);
+
+    // The moments: the link opened, bound, the first reply, success; rewards still go out.
+    const before = await limit('zoe');
+    referrals.noteValidReply('zoe', at('192.0.2.11', 'zoedevice00000000001'));
+    const done = await settled('zoe');
+    assert.deepEqual(done.events.map(event => event.type), ['bound', 'reply', 'success']);
+    assert.equal(done.events[0].ip, '198.51.100.7');
+    assert.equal(await limit('zoe'), before + 300, 'marked, still paid');
+    await makeUser('eve', 0);
+    await referrals.claimReferral('eve', code, { source: 'link', context: at('192.0.2.10', 'zoedevice00000000001') });
+    const eve = await link('eve');
+    assert.deepEqual(eve.events.map(event => [event.type, event.ip]), [['visit', '192.0.2.10'], ['bound', '192.0.2.10']], 'the earlier link visit on this device');
+    assert.equal((await referrals.listReferrals({ inviter: 'yan' })).rows.find(row => row.invitee === 'eve').flags.some(flag => flag.code === 'sibling-device'), true, 'zoe used that device');
+
+    // 90 days on: raw addresses are gone, digests still compare.
+    await trace.sweepTraces(Date.now() + 91 * DAY);
+    const seen = await trace.readSeen('yan');
+    assert.equal(seen[0].ip, undefined);
+    assert.equal(typeof seen[0].ipHash, 'string');
+});
+
+
+test('tracing across the two sites: only digests go over, the inviter\'s site compares them', async t => {
+    const trace = await import('../src/referral-trace.js');
+    const { sharedDigest } = await import('../src/referral-peer.js');
+    const at = (address, device) => ({ ...trace.describeIp(address), device, ua: 'Mozilla/5.0 Firefox/140' });
+    const told = [];
+    setPeerTransport(async (path, payload) => {
+        told.push({ path, payload });
+        if (path === '/lookup') return { ok: true, site: 'modern', inviter: 'zed', inviterName: 'Zed' };
+        if (path === '/sync') {
+            const flags = payload.status === 'success' ? [{ code: 'same-ip', level: 'medium', text: '和邀请人用过同一个 IP（跨站）' }] : [];
+            return { ok: true, inviterRewardMiB: payload.status === 'success' ? 150 : 0, flags };
+        }
+        return { ok: true, site: 'modern', enabled: true, crossSite: true, registrationOpen: true };
+    });
+    await referrals.setReferralConfig({ crossSite: true });
+    t.after(async () => {
+        setPeerTransport(null);
+        await referrals.setReferralConfig({ crossSite: false });
+    });
+
+    // This site has the new account: what goes over, and what comes back.
+    await makeUser('fay', 0);
+    await referrals.claimReferral('fay', 'ZEDZED22', { source: 'link', context: at('203.0.113.9', 'faydevice00000000001') });
+    referrals.noteValidReply('fay', at('203.0.113.9', 'faydevice00000000001'));
+    await until(async () => (await link('fay'))?.remoteFlags?.length === 1, 'the flags from over there');
+    const sync = told.filter(call => call.path === '/sync').at(-1).payload;
+    assert.equal(sync.evidence.ips.length, 1);
+    assert.equal(sync.evidence.ips[0], sharedDigest('ip', '203.0.113.9'));
+    assert.equal(JSON.stringify(sync.evidence).includes('203.0.113.9'), false, 'no raw address among the digests');
+    assert.equal(sync.events.some(event => event.net === '203.0.113.x'), true, 'the moments, for the admins over there');
+    assert.equal(JSON.stringify(sync.events).includes('203.0.113.9'), false, 'raw addresses stay on this site');
+    assert.equal(sync.events.some(event => 'ipHash' in event || 'ua' in event), false, 'so do digests and browsers');
+    assert.equal((await referrals.listReferrals({ query: 'fay' })).rows[0].flags.some(flag => flag.code === 'same-ip'), true);
+
+    // This site has the inviter: the other site's digests against the inviter's own addresses.
+    await referrals.noteParticipant('yan', at('203.0.113.50', 'yandevice00000000002'), { force: true });
+    const answer = await referrals.applyPeerSync({
+        inviteeSite: 'modern', invitee: 'gus', inviteeName: 'Gus', inviter: 'yan', code: 'ABCD2345', status: 'pending', boundAt: Date.now(),
+        evidence: { devices: [], ips: [sharedDigest('ip', '203.0.113.50')], nets: [] },
+        flags: [{ code: 'new-discord', level: 'medium', text: '绑定时 Discord 号才注册 3 天' }],
+        events: [{ type: 'bound', at: Date.now(), ip: '192.0.2.1', net: '192.0.2.x', ipHash: 'theirs' }],
+    });
+    assert.deepEqual(answer.flags.map(flag => flag.code), ['same-ip']);
+    const mirror = await link('@modern:gus');
+    assert.deepEqual(mirror.flags.map(flag => flag.code), ['same-ip', 'new-discord']);
+    assert.deepEqual(mirror.events.map(event => [event.type, event.net, 'ip' in event, 'ipHash' in event]), [['bound', '192.0.2.x', false, false]]);
+});

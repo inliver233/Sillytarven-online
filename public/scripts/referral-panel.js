@@ -320,7 +320,31 @@ export function decorateReferralEntries(root = document) {
     scope.find('.referralEntryPill').text(`+${reward}MB`).prop('hidden', !(reward > 0));
 }
 
+const DEVICE_KEY = 'st_did';
+const DEVICE_PATTERN = /^[A-Za-z0-9_-]{16,64}$/;
+
+/**
+ * 设备号（邀请奖励的溯源用）：cookie 和 localStorage 互相补，服务器从 cookie 读，比对邀请人和被邀请人是不是
+ * 同一台设备。打开邀请链接时服务器可能已经发过一个。
+ */
+function ensureDeviceId() {
+    try {
+        const fromCookie = document.cookie.split(';').map(part => part.trim()).find(part => part.startsWith(`${DEVICE_KEY}=`))?.slice(DEVICE_KEY.length + 1) ?? '';
+        const stored = localStorage.getItem(DEVICE_KEY) ?? '';
+        let device = DEVICE_PATTERN.test(fromCookie) ? fromCookie : (DEVICE_PATTERN.test(stored) ? stored : '');
+        if (!device) {
+            const bytes = crypto.getRandomValues(new Uint8Array(16));
+            device = btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+        }
+        if (stored !== device) localStorage.setItem(DEVICE_KEY, device);
+        if (fromCookie !== device) document.cookie = `${DEVICE_KEY}=${device}; path=/; max-age=31536000; samesite=lax${location.protocol === 'https:' ? '; secure' : ''}`;
+    } catch {
+        // Storage or cookies blocked: no device number.
+    }
+}
+
 export function initReferrals() {
+    ensureDeviceId();
     $('#referral_button').on('click', () => void openReferralPanel());
     eventSource.on(event_types.APP_READY, () => {
         void api('/status').then(status => {

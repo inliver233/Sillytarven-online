@@ -88,7 +88,8 @@ import { startGitSync } from './git-sync/router.js';
 import { leaderboard, leaderboardPeerHandler } from './leaderboard-service.js';
 import { live } from './live.js';
 import { startUsageMeter } from './usage-meter.js';
-import { renderInvitePage, startReferrals } from './referrals.js';
+import { noteInviteVisit, renderInvitePage, startReferrals } from './referrals.js';
+import { ensureDeviceCookie, traceContext } from './referral-trace.js';
 import { peerRouter as referralPeerRouter } from './endpoints/referrals.js';
 
 // Routers
@@ -345,6 +346,9 @@ app.get('/', cacheBuster.middleware, (request, response) => {
 // which brings the code along to the new account: bindFromLink).
 app.get('/invite/:code', (request, response) => {
     setPrivateNoStoreHeaders(response);
+    // 溯源：给这个浏览器一个设备号（没有的话），记下谁在什么时候打开了这个邀请链接
+    const device = ensureDeviceCookie(request, response);
+    void noteInviteVisit(device, request.params.code, { ...traceContext(request), device });
     response.type('html').send(renderInvitePage(request.params.code));
 });
 

@@ -21,6 +21,7 @@
 import express from 'express';
 
 import { verifyPeer } from '../referral-peer.js';
+import { traceContext } from '../referral-trace.js';
 import {
     answerPeerInfo,
     answerPeerLookup,
@@ -31,6 +32,7 @@ import {
     ensureCode,
     getCrossSiteStatus,
     listAccess,
+    noteParticipant,
     getMyReferralData,
     getReferralConfig,
     listReferrals,
@@ -51,13 +53,16 @@ router.use((_request, response, next) => {
     next();
 });
 
-router.get('/status', requireLoginMiddleware, async (_request, response) => {
+router.get('/status', requireLoginMiddleware, async (request, response) => {
+    // 溯源：参与邀请的人每次打开页面记一下 IP 和设备（同一组 6 小时一次）
+    void noteParticipant(request.user.profile.handle, traceContext(request));
     const config = await getReferralConfig();
     return response.send({ enabled: config.enabled, rewardMiB: rewardsAvailable() ? config.inviterRewardMiB : 0 });
 });
 
 router.get('/my', requireLoginMiddleware, async (request, response) => {
     try {
+        void noteParticipant(request.user.profile.handle, traceContext(request), { force: true });
         return response.send(await getMyReferralData(request.user.profile.handle));
     } catch (error) {
         console.error('[referrals] /my failed:', error);
@@ -73,6 +78,7 @@ router.post('/code', requireLoginMiddleware, async (request, response) => {
         if (data.blocked) return response.status(403).send({ error: '你的邀请已被管理员停用' });
         if (!data.eligible) return response.status(403).send({ error: '暂未达到邀请资格' });
         const code = request.body?.reset ? await resetCode(handle) : await ensureCode(handle);
+        void noteParticipant(handle, traceContext(request), { force: true });
         return response.send({ code });
     } catch (error) {
         console.error('[referrals] /code failed:', error);
@@ -84,7 +90,7 @@ router.post('/claim', requireLoginMiddleware, async (request, response) => {
     try {
         const handle = request.user.profile.handle;
         const source = request.body?.source === 'link' ? 'link' : 'code';
-        const result = await claimReferral(handle, request.body?.code, { source, hadValidReply: hadValidReply(handle) });
+        const result = await claimReferral(handle, request.body?.code, { source, hadValidReply: hadValidReply(handle), context: traceContext(request) });
         if (!result.ok) return response.status(400).send({ error: result.reason });
         return response.send({ status: result.link.status, rewardMiB: result.link.inviteeRewardMiB || 0 });
     } catch (error) {
@@ -141,7 +147,7 @@ router.post('/admin/revoke', requireAdminMiddleware, async (request, response) =
 });
 
 router.post('/admin/approve', requireAdminMiddleware, async (request, response) => {
-    const result = await approveReferral(String(request.body?.invitee ?? ''));
+    const result = await approveReferral(String(request.body?.invitee ?? ''), { by: request.user.profile.handle });
     return result.ok ? response.send({ status: result.link.status }) : response.status(400).send({ error: result.reason });
 });
 

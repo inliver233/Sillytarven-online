@@ -15,6 +15,18 @@ const STATUS = Object.freeze({
 
 const SOURCES = Object.freeze({ link: '邀请链接', code: '填写邀请码', registration: '注册邀请码' });
 
+/** 可疑标记的短名（悬停看全文） */
+const FLAG_LABELS = Object.freeze({
+    'same-device': '同设备', 'same-ip': '同 IP', 'same-network': '同网段', 'sibling-device': '共用设备', 'sibling-ip': '共用 IP',
+    'new-discord': 'Discord 新号', 'burst': '集中绑定', 'inactive': '不活跃',
+});
+const LEVEL_ORDER = Object.freeze({ high: 3, medium: 2, low: 1 });
+
+/** 溯源时间线里的时刻 */
+const EVENT_LABELS = Object.freeze({
+    visit: '打开邀请链接', bound: '绑定', reply: '第一条 AI 回复', success: '成功', approved: '管理员判定成功', revoked: '撤销', expired: '作废',
+});
+
 /** 数字设置：分组显示；shared 的两项和下方「注册邀请码」共用 */
 const GROUPS = Object.freeze([
     {
@@ -119,7 +131,7 @@ function buildView(mount) {
 
     const header = element('header', 'referralAdmin-header');
     header.append(element('h3', '', '邀请奖励'),
-        element('p', 'referralAdmin-muted', '每个用户有自己的邀请链接和邀请码。新账号绑定邀请人、邀请成功后，双方各加存储空间；邀请人得到的空间有上限。邀请成功和奖励到账会实时通知在线的用户。'));
+        element('p', 'referralAdmin-muted', '每个用户有自己的邀请链接和邀请码。新账号绑定邀请人、邀请成功后，双方各加存储空间；邀请人得到的空间有上限。邀请成功和奖励到账会实时通知在线的用户。每条邀请都记下关键时刻的 IP、设备和浏览器（原始 IP 保留 90 天），同设备、同 IP 等可疑情况会标出来，同设备的还会提醒在线的管理员；只标记，奖励照发。'));
 
     const settings = element('section', 'referralAdmin-card');
     const toggles = element('div', 'referralAdmin-toggles');
@@ -207,9 +219,9 @@ function buildView(mount) {
     const tools = element('div', 'referralAdmin-tools');
     const search = /** @type {HTMLInputElement} */ (element('input', 'text_pole referralAdmin-search'));
     search.type = 'search';
-    search.placeholder = '搜索账号或邀请码';
+    search.placeholder = '搜索账号、邀请码、IP 或设备号';
     const filter = /** @type {HTMLSelectElement} */ (element('select', 'text_pole referralAdmin-filter'));
-    for (const [value, label] of [['', '全部状态'], ...Object.entries(STATUS).map(([key, [text]]) => [key, text])]) {
+    for (const [value, label] of [['', '全部状态'], ['suspicious', '可疑'], ...Object.entries(STATUS).map(([key, [text]]) => [key, text])]) {
         const option = element('option', '', label);
         option.value = value;
         filter.append(option);
@@ -295,6 +307,7 @@ function renderTiles(view, summary) {
         tile('等待中', summary.pending),
         tile('作废 / 撤销', `${summary.expired} / ${summary.revoked}`),
         tile('已发放', formatMiB(summary.inviterMiB + summary.inviteeMiB), `邀请人 ${formatMiB(summary.inviterMiB)} · 被邀请人 ${formatMiB(summary.inviteeMiB)}`),
+        tile('可疑', summary.suspicious ?? 0, '同设备、同 IP 等，只标记'),
     );
 }
 
@@ -353,7 +366,7 @@ function renderLinks(view, data, state, ctx) {
             const row = element('div', 'referralAdmin-link');
             const main = element('div', 'referralAdmin-linkMain');
             main.append(person(link.inviteeName, link.mirror ? link.inviteeHandle : link.invitee), element('span', 'referralAdmin-by', '← 邀请人'),
-                inviterButton(link.inviterName, link.inviter, link.inviterKey, ctx.focusInviter, link.inviterBlocked), badge(link.status));
+                inviterButton(link.inviterName, link.inviter, link.inviterKey, ctx.focusInviter, link.inviterBlocked), badge(link.status), ...flagBadges(link.flags));
             const source = SOURCES[link.source] ?? link.source;
             const time = element('span', 'referralAdmin-time', formatDateTime(link.boundAt));
             time.title = describeTimes(link);
@@ -372,6 +385,15 @@ function renderLinks(view, data, state, ctx) {
                 }, reload));
                 actions.append(approve);
             }
+            const details = element('div', 'referralAdmin-trace');
+            details.hidden = true;
+            const traceButton = button('溯源', 'fa-fingerprint', 'referralAdmin-small');
+            traceButton.title = '这条邀请的时间线、IP、设备';
+            traceButton.addEventListener('click', () => {
+                if (!details.childElementCount) renderTrace(details, link);
+                details.hidden = !details.hidden;
+            });
+            actions.append(traceButton);
             if (link.status !== 'revoked') {
                 const revoke = button('撤销', 'fa-ban', 'referralAdmin-small is-danger');
                 revoke.addEventListener('click', () => void act(revoke, async () => {
@@ -382,7 +404,7 @@ function renderLinks(view, data, state, ctx) {
                 }, reload));
                 actions.append(revoke);
             }
-            row.append(main, meta, actions);
+            row.append(main, meta, actions, details);
             rows.push(row);
         }
         view.table.replaceChildren(...rows);
@@ -393,6 +415,66 @@ function renderLinks(view, data, state, ctx) {
     view.previous.disabled = state.offset <= 0;
     view.next.disabled = state.offset + PAGE_SIZE >= data.total;
     view.pager.hidden = data.total <= PAGE_SIZE;
+}
+
+/** 可疑标签（重的在前） */
+function flagBadges(flags) {
+    return [...(flags ?? [])].sort((a, b) => (LEVEL_ORDER[b.level] ?? 0) - (LEVEL_ORDER[a.level] ?? 0)).map(flag => {
+        const node = element('span', `referralAdmin-flag is-${flag.level}`, FLAG_LABELS[flag.code] ?? flag.code);
+        node.title = flag.text;
+        return node;
+    });
+}
+
+/** 浏览器信息的简写 */
+function shortAgent(agent) {
+    if (!agent) return '';
+    const browser = /Edg\//.test(agent) ? 'Edge' : /OPR\//.test(agent) ? 'Opera' : /Firefox\//.test(agent) ? 'Firefox' : /Chrome\//.test(agent) ? 'Chrome' : /Safari\//.test(agent) ? 'Safari' : '其他浏览器';
+    const system = /Windows/.test(agent) ? 'Windows' : /Android/.test(agent) ? 'Android' : /iPhone|iPad/.test(agent) ? 'iOS' : /Mac OS X/.test(agent) ? 'macOS' : /Linux/.test(agent) ? 'Linux' : '';
+    return system ? `${browser} · ${system}` : browser;
+}
+
+/** 一处来路：IP（过了保留期、或者是另一个站记的，只有打码的网段）、设备号前 8 位、浏览器 */
+function describeOrigin(item, { remote = false } = {}) {
+    const masked = remote ? '（另一个站只给网段）' : '（原始 IP 已过保留期）';
+    const parts = [item.ip || (item.net ? `${item.net}${masked}` : '没有 IP')];
+    if (item.device) parts.push(`设备 ${item.device.slice(0, 8)}`);
+    const agent = shortAgent(item.ua);
+    if (agent) parts.push(agent);
+    return parts.join(' · ');
+}
+
+/** 「溯源」展开的内容：可疑在哪、Discord 号、时间线、被邀请人最近用过的 */
+function renderTrace(details, link) {
+    const flags = link.flags ?? [];
+    if (flags.length) {
+        const list = element('ul', 'referralAdmin-traceFlags');
+        for (const flag of flags) list.append(element('li', `is-${flag.level}`, flag.text));
+        details.append(element('h5', '', '可疑（只标记，奖励照发）'), list);
+    }
+    if (link.inviteeDiscordDays !== null && link.inviteeDiscordDays !== undefined) {
+        details.append(element('p', 'referralAdmin-muted', `被邀请人的 Discord 号注册了 ${link.inviteeDiscordDays} 天`));
+    }
+    details.append(element('h5', '', link.mirror ? `时间线（${link.inviteeSiteLabel}记下的）` : '时间线'));
+    const events = link.events ?? [];
+    if (!events.length) details.append(element('p', 'referralAdmin-muted', '没有记录（这个功能上线前的邀请）。'));
+    for (const event of events) {
+        const line = element('div', 'referralAdmin-traceLine');
+        const what = [EVENT_LABELS[event.type] ?? event.type];
+        if (event.via === 'controller') what.push('（在总控注册时，没有来路）');
+        if (event.by) what.push(`（${event.by}）`);
+        if (event.reclaim) what.push('（收回空间）');
+        line.append(element('span', 'referralAdmin-time', formatDateTime(event.at)), element('span', '', what.join('')));
+        if (event.ip || event.net || event.device) line.append(element('span', 'referralAdmin-muted', describeOrigin(event, { remote: link.mirror })));
+        details.append(line);
+    }
+    const seen = link.inviteeSeen ?? [];
+    if (seen.length) {
+        details.append(element('h5', '', '被邀请人最近用过'));
+        for (const item of seen) {
+            details.append(element('div', 'referralAdmin-traceLine', `${describeOrigin(item)} · ${formatDateTime(item.first)} 到 ${formatDateTime(item.last)}，${item.count} 次`));
+        }
+    }
 }
 
 /** 只看一个人时：这个人的情况和处理按钮 */
@@ -449,7 +531,12 @@ function renderFocus(view, focus, ctx) {
         actions.append(block);
     }
     actions.append(clear);
-    view.focus.replaceChildren(text, actions, info);
+    const seen = element('div', 'referralAdmin-focusSeen');
+    if (focus.seen?.length) {
+        seen.append(element('span', 'referralAdmin-muted', '最近用过：'));
+        for (const item of focus.seen.slice(0, 5)) seen.append(element('span', 'referralAdmin-seenItem', `${describeOrigin(item)}（${formatDateTime(item.last)}）`));
+    }
+    view.focus.replaceChildren(text, actions, info, seen);
 }
 
 /** 单独设置过的人 */

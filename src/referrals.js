@@ -24,6 +24,11 @@
  *   referral:inviter:<邀请人>       [被邀请人]（含镜像）
  *   referral:index                  [所有被邀请人]（含镜像，管理员列表）
  *   referral:peer-outbox            ['sync:<被邀请人>' | 'revoked:@<站>:<账号>']
+ *
+ * 溯源（referral-trace.js）：每条邀请的 events 记下关键时刻（打开链接、绑定、第一条有效回复、成功、判定、撤销、
+ * 作废）的 IP、设备号、浏览器；参与邀请的人记下最近用过的 IP 和设备。管理员查看时按这些算可疑标记（只标记，
+ * 奖励照发）：同设备、同 IP、同网段、同一个邀请人的被邀请人共用设备或 IP、Discord 号很新、短时间大量绑定、
+ * 成功后几乎不上线。跨站时只交换加了两站共用 secret 的摘要。
  */
 import crypto from 'node:crypto';
 
@@ -31,7 +36,8 @@ import storage from 'node-persist';
 
 import { discordIdOf } from './leaderboard.js';
 import { live } from './live.js';
-import { callPeer, getPeerInfo, identityKey, peerConfig, siteLabel } from './referral-peer.js';
+import { callPeer, getPeerInfo, identityKey, peerConfig, sharedDigest, siteLabel } from './referral-peer.js';
+import { discordCreatedAt, findVisit, readSeen, recordSeen, recordVisit, scrubRaw, sweepTraces, traceEvent } from './referral-trace.js';
 import { getRegistrationMethodConfig } from './registration-policy.js';
 import { getStcontrolControllerUrl, isStcontrolEnabled } from './stcontrol.js';
 import { getStorageConfig, getUserLimitMiB } from './storage-quota.js';
@@ -190,6 +196,12 @@ async function addToList(key, item) {
 async function removeFromList(key, item) {
     const list = await readList(key);
     if (list.includes(item)) await storage.setItem(key, list.filter(value => value !== item));
+}
+
+const MAX_EVENTS = 30;
+/** 给一条邀请记一个时刻 */
+function addEvent(link, event) {
+    link.events = [...(Array.isArray(link.events) ? link.events : []), event].slice(-MAX_EVENTS);
 }
 
 /** 对方站的被邀请人在本站的记法 */
@@ -371,9 +383,10 @@ async function notifyInviterSuccess(inviter, inviteeName, granted) {
  * @param {any} link
  * @param {typeof DEFAULT_REFERRAL_CONFIG} config
  */
-async function settle(link, config) {
+async function settle(link, config, { by = '' } = {}) {
     link.status = STATUS.SUCCESS;
     link.successAt = Date.now();
+    addEvent(link, by ? { type: 'approved', at: link.successAt, by } : { type: 'success', at: link.successAt });
     link.inviteeRewardMiB = await addStorage(link.invitee, rewardsAvailable() ? config.inviteeRewardMiB : 0);
     if (!link.inviterSite) link.inviterRewardMiB = await addStorage(link.inviter, await inviterRewardFor(link.inviter, config));
     await storage.setItem(LINK_PREFIX + link.invitee, link);
@@ -382,6 +395,21 @@ async function settle(link, config) {
     if (link.inviteeRewardMiB > 0) notify(link.invitee, '邀请奖励到账', `你已获得 ${link.inviteeRewardMiB} MB 存储空间（邀请人：${await inviterNameOf(link)}）。`);
     if (link.inviterSite) await tellPeer(`sync:${link.invitee}`);
     else await notifyInviterSuccess(link.inviter, await nameOf(link.invitee), link.inviterRewardMiB);
+    await warnAdmins(link);
+}
+
+/** 成功的邀请有强可疑标记（同设备）：告诉在线的管理员（只提醒，奖励照发） */
+async function warnAdmins(link) {
+    try {
+        const strong = (await assessLink(link)).filter(flag => flag.level === 'high');
+        if (!strong.length) return;
+        live.send({ admins: true }, 'notice', {
+            title: '可疑邀请', level: 'warning', timeout: 30,
+            text: `${await inviterNameOf(link)} 邀请的 ${await inviteeNameOf(link)} 已成功：${strong.map(flag => flag.text).join('；')}。可在管理面板「邀请奖励」里查看、撤销。`,
+        });
+    } catch {
+        // Not running (tests, scripts).
+    }
 }
 
 /** 待成功太久的作废（必须在队列里调用）；对方站的被邀请人由对方站判断 */
@@ -390,6 +418,7 @@ async function expireIfStale(link, config) {
     if (Date.now() - link.boundAt < config.pendingExpireDays * DAY_MS) return false;
     link.status = STATUS.EXPIRED;
     link.expiredAt = Date.now();
+    addEvent(link, { type: 'expired', at: link.expiredAt });
     await storage.setItem(LINK_PREFIX + link.invitee, link);
     pendingInvitees.delete(link.invitee);
     if (link.inviterSite) await tellPeer(`sync:${link.invitee}`);
@@ -423,10 +452,11 @@ export async function claimReferral(inviteeHandle, rawCode, options = {}) {
  * 绑定（在队列里）。返回 askPeer 表示本站没有这个码、该去对方站查。
  * @param {string} inviteeHandle
  * @param {unknown} rawCode
- * @param {{ source?: string, hadValidReply?: boolean, inviter?: string, remote?: { site: string, inviter: string, inviterName: string } }} options
+ * @param {{ source?: string, hadValidReply?: boolean, inviter?: string, remote?: { site: string, inviter: string, inviterName: string }, context?: any, via?: string }} options
+ *     context：绑定请求的来路（traceContext）；via：经谁绑定（'controller' = 在总控注册时）
  * @returns {Promise<any>}
  */
-async function claimHere(inviteeHandle, rawCode, { source = 'code', hadValidReply = false, inviter: knownInviter, remote } = {}) {
+async function claimHere(inviteeHandle, rawCode, { source = 'code', hadValidReply = false, inviter: knownInviter, remote, context = null, via = '' } = {}) {
     const config = await getReferralConfig();
     if (!config.enabled) return { ok: false, reason: '邀请奖励暂未开放' };
     const invitee = await storage.getItem(toKey(inviteeHandle));
@@ -451,6 +481,11 @@ async function claimHere(inviteeHandle, rawCode, { source = 'code', hadValidRepl
         invitee: inviteeHandle, inviter, code, source, boundAt: Date.now(), status: STATUS.PENDING, successAt: null, inviterRewardMiB: 0, inviteeRewardMiB: 0,
         ...(remote ? { inviterSite: remote.site, inviterName: remote.inviterName } : {}),
     };
+    // 溯源：这台设备之前打开过这个码的邀请链接；绑定时的来路
+    const visit = context?.device && code ? await findVisit(context.device, code) : null;
+    if (visit) addEvent(link, { type: 'visit', at: visit.at, ip: visit.ip, net: visit.net, ipHash: visit.ipHash, netHash: visit.netHash, device: context.device, ua: visit.ua });
+    addEvent(link, traceEvent('bound', context, { source, ...(via ? { via } : {}) }));
+    if (context) await recordSeen(inviteeHandle, context);
     await storage.setItem(LINK_PREFIX + inviteeHandle, link);
     if (!remote) await addToList(INVITER_PREFIX + inviter, inviteeHandle);
     await addToList(INDEX_KEY, inviteeHandle);
@@ -472,7 +507,7 @@ async function claimHere(inviteeHandle, rawCode, { source = 'code', hadValidRepl
 export async function bindFromLink(inviteeHandle, rawCode) {
     try {
         if (!normalizeCode(rawCode)) return;
-        const result = await claimReferral(inviteeHandle, rawCode, { source: 'link' });
+        const result = await claimReferral(inviteeHandle, rawCode, { source: 'link', via: 'controller' });
         console.info(`[referrals] ${inviteeHandle} signed up through an invitation link: ${result.ok ? 'bound' : `not bound (${result.reason})`}`);
     } catch (error) {
         console.warn('[referrals] Could not bind an invitation link at sign-up:', error?.message ?? error);
@@ -498,10 +533,11 @@ export async function bindFromInvitation(invitation, inviteeHandle) {
  * 服务器转发的生成拿到了有效回复（usage-meter.js 调用）：这个人有待成功的邀请就算成功。
  * 邀请奖励关着时不结算（等待中的留着，打开后下一次有效回复再算）。
  * @param {string} handle
+ * @param {any} [context] 生成请求的来路（traceContext）
  */
-export function noteValidReply(handle) {
+export function noteValidReply(handle, context = null) {
     if (!pendingLoaded) {
-        void loadPending().then(() => noteValidReply(handle)).catch(() => undefined);
+        void loadPending().then(() => noteValidReply(handle, context)).catch(() => undefined);
         return;
     }
     if (!pendingInvitees.has(handle)) return;
@@ -511,6 +547,12 @@ export function noteValidReply(handle) {
         if (link?.status !== STATUS.PENDING || await expireIfStale(link, config)) {
             pendingInvitees.delete(handle);
             return;
+        }
+        // 溯源：第一条有效回复的来路
+        if (context && !link.events?.some(event => event.type === 'reply')) {
+            addEvent(link, traceEvent('reply', context));
+            await recordSeen(handle, context);
+            await storage.setItem(LINK_PREFIX + handle, link);
         }
         if (!config.enabled) return;
         await settle(link, config);
@@ -536,10 +578,16 @@ async function peerPayload(kind, link) {
     if (kind === 'revoked') {
         return { inviterSite: peerConfig().site, inviter: link.inviter, invitee: link.remoteInvitee, reclaim: Boolean(link.reclaimed) };
     }
+    // 溯源：两站共用 secret 的摘要（邀请人那边拿去和邀请人比），本站自己算出的标记，记下的时刻（给那边的管理员看，
+    // 只带打码的网段，原始 IP 和浏览器信息留在本站）
+    const evidence = sharedEvidenceFrom([...(link.events ?? []), ...await readSeen(link.invitee)]);
+    const localFlags = (await assessLink(link)).filter(flag => !INVITER_MATCHES.includes(flag.code));
     return {
         inviteeSite: peerConfig().site, invitee: link.invitee, inviteeName: await nameOf(link.invitee), inviter: link.inviter,
         code: link.code, source: link.source, status: link.status, boundAt: link.boundAt, successAt: link.successAt,
         revokedAt: link.revokedAt ?? null, reclaim: Boolean(link.reclaimed), inviteeRewardMiB: link.inviteeRewardMiB || 0,
+        evidence: { devices: [...evidence.devices], ips: [...evidence.ips], nets: [...evidence.nets] }, flags: localFlags,
+        events: (link.events ?? []).map(({ ip, ua, ipHash, netHash, ...event }) => event),
     };
 }
 
@@ -570,6 +618,8 @@ export async function flushPeerOutbox() {
                 const fresh = await storage.getItem(LINK_PREFIX + key);
                 if (fresh && kind === 'sync' && answer?.ok && Number.isFinite(Number(answer.inviterRewardMiB))) {
                     fresh.inviterRewardMiB = Number(answer.inviterRewardMiB);
+                    // 邀请人那边比出来的（同设备 / 同 IP / 同网段）
+                    if (Array.isArray(answer.flags)) fresh.remoteFlags = sanitizeFlags(answer.flags);
                     await storage.setItem(LINK_PREFIX + key, fresh);
                 }
                 // 发的时候又变了：留着，下一轮发新的
@@ -632,6 +682,13 @@ export function applyPeerSync(payload) {
         if (mirror.inviter !== inviter) return { ok: false, reason: '邀请人对不上' };
         mirror.inviteeName = String(payload.inviteeName || invitee).slice(0, 60);
         mirror.inviteeRewardMiB = Number(payload.inviteeRewardMiB) || 0;
+        // 溯源：那边记下的时刻；那边传来的摘要和本站邀请人用过的比
+        if (Array.isArray(payload.events)) mirror.events = sanitizeEvents(payload.events);
+        const theirs = payload.evidence && typeof payload.evidence === 'object' ? payload.evidence : {};
+        const matched = compareWithInviter(
+            { devices: new Set(asStrings(theirs.devices)), ips: new Set(asStrings(theirs.ips)), nets: new Set(asStrings(theirs.nets)) },
+            sharedEvidenceFrom(await readSeen(inviter)), '（跨站）');
+        mirror.flags = [...matched, ...sanitizeFlags(payload.flags)];
         const name = `${shorten(mirror.inviteeName)}（${siteLabel(site)}）`;
         const status = String(payload.status ?? '');
         // 本站已经撤销（邀请人被停用）：保持撤销
@@ -659,7 +716,7 @@ export function applyPeerSync(payload) {
             }
         }
         await storage.setItem(LINK_PREFIX + key, mirror);
-        return { ok: true, inviterRewardMiB: mirror.inviterRewardMiB, status: mirror.status };
+        return { ok: true, inviterRewardMiB: mirror.inviterRewardMiB, status: mirror.status, flags: matched };
     });
 }
 
@@ -680,10 +737,32 @@ export function applyPeerRevoke(payload) {
         link.status = STATUS.REVOKED;
         link.revokedAt = Date.now();
         link.revokedBy = `${siteLabel(link.inviterSite)}管理员`;
+        addEvent(link, { type: 'revoked', at: link.revokedAt, by: link.revokedBy, reclaim: Boolean(link.reclaimed) });
         await storage.setItem(LINK_PREFIX + invitee, link);
         pendingInvitees.delete(invitee);
         console.info(`[referrals] ${inviterKeyOf(link)} → ${invitee}: revoked over there${link.reclaimed ? ', rewards taken back' : ''}`);
         return { ok: true };
+    });
+}
+
+const asStrings = value => (Array.isArray(value) ? value.filter(item => typeof item === 'string').slice(0, 200) : []);
+
+/** 对方站传来的标记：只留认得的字段 */
+function sanitizeFlags(flags) {
+    return (Array.isArray(flags) ? flags : []).slice(0, 20)
+        .filter(flag => flag && typeof flag.code === 'string' && LEVEL_ORDER[flag.level])
+        .map(flag => ({ code: flag.code.slice(0, 40), level: flag.level, text: String(flag.text ?? '').slice(0, 200) }));
+}
+
+/** 对方站传来的时刻：只留认得的字段（不收原始 IP 和浏览器信息） */
+function sanitizeEvents(events) {
+    return events.slice(-MAX_EVENTS).filter(event => event && typeof event.type === 'string').map(event => {
+        const kept = { type: event.type.slice(0, 20), at: Number(event.at) || 0 };
+        for (const field of ['net', 'device', 'source', 'via', 'by']) {
+            if (typeof event[field] === 'string' && event[field]) kept[field] = event[field].slice(0, 300);
+        }
+        if (event.reclaim) kept.reclaim = true;
+        return kept;
     });
 }
 
@@ -723,6 +802,160 @@ async function inviteTargets(config) {
         }
     }
     return targets;
+}
+
+// ---------------------------------------------------------------------------
+// 溯源：记录、比对（只标记）
+// ---------------------------------------------------------------------------
+
+/**
+ * 记下这个人用过的 IP 和设备：参与邀请的人（有邀请码，或绑定了邀请人）才记；force 时不看（在用邀请功能）。
+ * @param {string} handle
+ * @param {any} context traceContext()
+ * @param {{ force?: boolean }} [options]
+ */
+export async function noteParticipant(handle, context, { force = false } = {}) {
+    try {
+        if (!handle || !context) return;
+        if (!force && !await storage.getItem(OWNER_PREFIX + handle) && !await storage.getItem(LINK_PREFIX + handle)) return;
+        await recordSeen(handle, context);
+    } catch (error) {
+        console.warn('[referrals] Could not note where someone came from:', error?.message ?? error);
+    }
+}
+
+/**
+ * 有人打开了邀请链接（还没登录也记）。
+ * @param {string} device
+ * @param {unknown} rawCode
+ * @param {any} context
+ */
+export async function noteInviteVisit(device, rawCode, context) {
+    try {
+        const code = normalizeCode(rawCode);
+        if (code && device) await recordVisit(device, code, context);
+    } catch (error) {
+        console.warn('[referrals] Could not note an invitation visit:', error?.message ?? error);
+    }
+}
+
+const LEVEL_ORDER = Object.freeze({ high: 3, medium: 2, low: 1 });
+const NEW_DISCORD_DAYS = 60;
+const BURST_COUNT = 5;
+const INACTIVE_AFTER_MS = 3 * DAY_MS;
+const INACTIVE_HOURS = 0.5;
+const INVITER_MATCHES = Object.freeze(['same-device', 'same-ip', 'same-network']);
+
+/** 一组证据：设备号、IP 摘要、网段摘要（本站的摘要） */
+function evidenceFrom(items) {
+    const evidence = { devices: new Set(), ips: new Set(), nets: new Set() };
+    for (const item of items) {
+        if (item?.device) evidence.devices.add(item.device);
+        if (item?.ipHash) evidence.ips.add(item.ipHash);
+        if (item?.netHash) evidence.nets.add(item.netHash);
+    }
+    return evidence;
+}
+
+/** 跨站用的证据：用两站共用的 secret 重新算摘要（只有还留着原始 IP 的才算得出） */
+function sharedEvidenceFrom(items) {
+    const evidence = { devices: new Set(), ips: new Set(), nets: new Set() };
+    for (const item of items) {
+        if (item?.device) evidence.devices.add(sharedDigest('device', item.device));
+        if (item?.ip) evidence.ips.add(sharedDigest('ip', item.ip));
+        if (item?.net) evidence.nets.add(sharedDigest('net', item.net));
+    }
+    for (const set of Object.values(evidence)) set.delete('');
+    return evidence;
+}
+
+function intersects(a, b) {
+    for (const value of a) if (b.has(value)) return true;
+    return false;
+}
+
+/** 两组证据比一比：同设备 > 同 IP > 同网段 */
+function compareWithInviter(mine, theirs, suffix = '') {
+    if (intersects(mine.devices, theirs.devices)) return [{ code: 'same-device', level: 'high', text: `和邀请人用过同一台设备${suffix}` }];
+    if (intersects(mine.ips, theirs.ips)) return [{ code: 'same-ip', level: 'medium', text: `和邀请人用过同一个 IP${suffix}` }];
+    if (intersects(mine.nets, theirs.nets)) return [{ code: 'same-network', level: 'low', text: `和邀请人在同一网段${suffix}` }];
+    return [];
+}
+
+async function cached(cache, key, load) {
+    if (!cache.has(key)) cache.set(key, load());
+    return cache.get(key);
+}
+
+/** 被邀请人的证据：这条邀请记下的时刻 + 这个人最近用过的（对方站的被邀请人只有那边传来的时刻，摘要不能比） */
+function inviteeEvidence(link, cache) {
+    return cached(cache, `invitee:${link.invitee}`, async () => (link.mirror ? evidenceFrom([]) : evidenceFrom([...(link.events ?? []), ...await readSeen(link.invitee)])));
+}
+
+/** 同一个邀请人的其他邀请（本站的邀请人；列表时直接传进来） */
+async function siblingsOf(link) {
+    if (link.inviterSite || link.mirror) return [];
+    const links = [];
+    for (const invitee of await readList(INVITER_PREFIX + link.inviter)) {
+        const other = await storage.getItem(LINK_PREFIX + invitee);
+        if (other) links.push(other);
+    }
+    return links;
+}
+
+/**
+ * 这条邀请可疑在哪（只标记，奖励照发）：[{ code, level: 'high'|'medium'|'low', text }]。
+ * @param {any} link
+ * @param {Map<string, any>} [cache]
+ * @param {any[]|null} [siblings] 同一个邀请人的所有邀请（含自己）
+ */
+async function assessLink(link, cache = new Map(), siblings = null) {
+    if (link.mirror) return Array.isArray(link.flags) ? link.flags : [];
+    const flags = [];
+    const mine = await inviteeEvidence(link, cache);
+    if (link.inviterSite) flags.push(...(Array.isArray(link.remoteFlags) ? link.remoteFlags : []));
+    else flags.push(...compareWithInviter(mine, await cached(cache, `seen:${link.inviter}`, async () => evidenceFrom(await readSeen(link.inviter)))));
+    const others = (siblings ?? await siblingsOf(link)).filter(other => other.invitee !== link.invitee);
+    let sharedIp = false;
+    for (const other of others) {
+        if (other.mirror) continue;
+        const theirs = await inviteeEvidence(other, cache);
+        if (intersects(mine.devices, theirs.devices)) {
+            flags.push({ code: 'sibling-device', level: 'high', text: `和同一个邀请人的 ${await inviteeNameOf(other)} 用同一台设备` });
+            break;
+        }
+        if (!sharedIp && intersects(mine.ips, theirs.ips)) {
+            sharedIp = true;
+            flags.push({ code: 'sibling-ip', level: 'medium', text: `和同一个邀请人的 ${await inviteeNameOf(other)} 用同一个 IP` });
+        }
+    }
+    const user = await cached(cache, `user:${link.invitee}`, () => storage.getItem(toKey(link.invitee)));
+    const created = discordCreatedAt(discordIdOf(user));
+    if (created) {
+        const days = Math.floor((Number(link.boundAt) - created) / DAY_MS);
+        if (days < NEW_DISCORD_DAYS) flags.push({ code: 'new-discord', level: 'medium', text: `绑定时 Discord 号才注册 ${Math.max(0, days)} 天` });
+    }
+    const burst = others.filter(other => Math.abs(Number(other.boundAt) - Number(link.boundAt)) <= DAY_MS).length + 1;
+    if (burst >= BURST_COUNT) flags.push({ code: 'burst', level: 'medium', text: `邀请人前后 24 小时内绑定了 ${burst} 个` });
+    if (link.status === STATUS.SUCCESS && Date.now() - Number(link.successAt) > INACTIVE_AFTER_MS) {
+        const hours = await getInvitationOnlineHours(link.invitee).catch(() => 0);
+        if (hours < INACTIVE_HOURS) flags.push({ code: 'inactive', level: 'low', text: `成功后几乎没上线（累计在线 ${Math.round(hours * 10) / 10} 小时）` });
+    }
+    return flags;
+}
+
+/** 最高的可疑程度 */
+const riskOf = flags => flags.reduce((top, flag) => (LEVEL_ORDER[flag.level] > (LEVEL_ORDER[top] ?? 0) ? flag.level : top), null);
+
+/** 过了保留期的原始 IP、浏览器信息从邀请记录里去掉（每天一次） */
+async function scrubLinks(now = Date.now()) {
+    for (const invitee of await readList(INDEX_KEY)) {
+        await serialized(async () => {
+            const link = await storage.getItem(LINK_PREFIX + invitee);
+            if (!Array.isArray(link?.events)) return;
+            if (link.events.map(event => scrubRaw(event, now)).some(Boolean)) await storage.setItem(LINK_PREFIX + invitee, link);
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -794,8 +1027,15 @@ async function describeInviter(handle) {
     return {
         inviter: handle, inviterName: await nameOf(handle), remote: false, exists: true, mode, blocked: mode === 'block',
         registeredDays: Math.floor(measured.registeredDays), onlineHours: measured.onlineHours, roundedHours: measured.roundedHours, meetsThresholds: measured.meetsThresholds,
+        seen: (await readSeen(handle)).slice(0, 8),
         eligible: user.enabled !== false && (mode ? mode === 'allow' : measured.meetsThresholds),
     };
+}
+
+/** 管理员搜索：账号、名字、邀请码，以及记下的 IP、网段、设备号 */
+async function searchText(link) {
+    const traces = [...(link.events ?? []), ...(link.mirror ? [] : await readSeen(link.invitee))].map(item => `${item.ip ?? ''} ${item.net ?? ''} ${item.device ?? ''}`);
+    return `${link.inviter} ${link.invitee} ${link.inviteeName ?? ''} ${link.inviterName ?? ''} ${link.code} ${traces.join(' ')}`.toLowerCase();
 }
 
 /** 跨站邀请的情况（管理员面板）：配好了没有、对方站开没开、对方站开着注册没有 */
@@ -816,13 +1056,25 @@ export function listReferrals({ query = '', status = '', inviter: onlyInviter = 
         const config = await getReferralConfig();
         const needle = String(query).trim().toLowerCase();
         const rows = [];
-        const summary = { total: 0, pending: 0, success: 0, revoked: 0, expired: 0, inviterMiB: 0, inviteeMiB: 0 };
+        const summary = { total: 0, pending: 0, success: 0, revoked: 0, expired: 0, suspicious: 0, inviterMiB: 0, inviteeMiB: 0 };
         /** @type {Map<string, { inviter: string, site: string, handle: string, success: number, pending: number, earnedMiB: number, link: any }>} */
         const inviters = new Map();
+        const all = [];
         for (const invitee of await readList(INDEX_KEY)) {
             const link = await storage.getItem(LINK_PREFIX + invitee);
             if (!link) continue;
             await expireIfStale(link, config);
+            all.push(link);
+        }
+        // 溯源：按同一个邀请人分组，算每条的可疑标记
+        const groups = new Map();
+        for (const link of all) groups.set(inviterKeyOf(link), [...(groups.get(inviterKeyOf(link)) ?? []), link]);
+        const cache = new Map();
+        for (const link of all) {
+            link.flags = await assessLink(link, cache, groups.get(inviterKeyOf(link)));
+            link.risk = riskOf(link.flags);
+        }
+        for (const link of all) {
             summary.total++;
             summary[link.status] = (summary[link.status] ?? 0) + 1;
             if (link.status !== STATUS.REVOKED) {
@@ -835,9 +1087,11 @@ export function listReferrals({ query = '', status = '', inviter: onlyInviter = 
             if (link.status === STATUS.PENDING) row.pending++;
             if (link.status !== STATUS.REVOKED) row.earnedMiB += Number(link.inviterRewardMiB) || 0;
             inviters.set(key, row);
-            if (status && link.status !== status) continue;
+            const suspicious = link.status !== STATUS.REVOKED && (link.risk === 'high' || link.risk === 'medium');
+            if (suspicious) summary.suspicious++;
+            if (status === 'suspicious' ? !suspicious : (status && link.status !== status)) continue;
             if (onlyInviter && key !== onlyInviter) continue;
-            if (needle && !`${link.inviter} ${link.invitee} ${link.inviteeName ?? ''} ${link.inviterName ?? ''} ${link.code}`.toLowerCase().includes(needle)) continue;
+            if (needle && !(await searchText(link)).includes(needle)) continue;
             rows.push(link);
         }
         rows.sort((a, b) => b.boundAt - a.boundAt);
@@ -848,10 +1102,14 @@ export function listReferrals({ query = '', status = '', inviter: onlyInviter = 
         }
         const page = [];
         for (const link of rows.slice(offset, offset + limit)) {
+            const user = link.mirror ? null : await storage.getItem(toKey(link.invitee));
+            const discordAt = discordCreatedAt(discordIdOf(user));
             page.push({
                 ...link, inviterKey: inviterKeyOf(link), inviterName: await inviterNameOf(link), inviteeName: await inviteeNameOf(link),
                 inviterSiteLabel: link.inviterSite ? siteLabel(link.inviterSite) : '', inviterBlocked: link.inviterSite ? false : await isBlocked(link.inviter),
                 ...await describeInvitee(link),
+                inviteeDiscordDays: discordAt ? Math.floor((Date.now() - discordAt) / DAY_MS) : null,
+                inviteeSeen: link.mirror ? [] : (await readSeen(link.invitee)).slice(0, 6),
             });
         }
         // 只看一个人时：这个人的情况（停用没有、一共邀请了多少、拿了多少）。对方站的人在对方站停用。
@@ -896,6 +1154,7 @@ async function revokeLink(link, { reclaim, by }) {
     link.status = STATUS.REVOKED;
     link.revokedAt = Date.now();
     link.revokedBy = by;
+    addEvent(link, { type: 'revoked', at: link.revokedAt, by, reclaim: Boolean(link.reclaimed) });
     await storage.setItem(LINK_PREFIX + link.invitee, link);
     pendingInvitees.delete(link.invitee);
     console.info(`[referrals] ${inviterKeyOf(link)} → ${link.invitee}: revoked by ${by}${link.reclaimed ? ', rewards taken back' : ''}`);
@@ -963,14 +1222,15 @@ export async function listAccess() {
 /**
  * 管理员直接判定成功（不等有效回复），发奖励。对方站的被邀请人由对方站判定。
  * @param {string} invitee
+ * @param {{ by?: string }} [options]
  */
-export function approveReferral(invitee) {
+export function approveReferral(invitee, { by = '' } = {}) {
     return serialized(async () => {
         const link = await storage.getItem(LINK_PREFIX + invitee);
         if (!link) return { ok: false, reason: '没有这条邀请关系' };
         if (link.mirror) return { ok: false, reason: `被邀请人在${siteLabel(link.inviteeSite)}，由那边判定` };
         if (link.status !== STATUS.PENDING && link.status !== STATUS.EXPIRED) return { ok: false, reason: '只有等待中或已作废的可以判定成功' };
-        await settle(link, await getReferralConfig());
+        await settle(link, await getReferralConfig(), { by: by || 'admin' });
         return { ok: true, link };
     });
 }
@@ -985,6 +1245,10 @@ export function startReferrals() {
             await expireIfStale(await storage.getItem(LINK_PREFIX + invitee), config);
         }
     }).then(() => flushPeerOutbox()).catch(() => undefined), 3600e3).unref?.();
+    // 溯源：原始 IP 和浏览器信息保留 90 天（每天清一次）
+    const sweep = () => void sweepTraces().then(() => scrubLinks()).catch(error => console.warn('[referrals] Trace clean-up failed:', error?.message ?? error));
+    setTimeout(sweep, 10 * 60e3).unref?.();
+    setInterval(sweep, DAY_MS).unref?.();
 }
 
 /** 测试用 */

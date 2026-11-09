@@ -8,6 +8,7 @@ import { sync as writeFileAtomicSync } from 'write-file-atomic';
 
 import { readSecret, SECRET_KEYS } from './endpoints/secrets.js';
 import { noteValidReply } from './referrals.js';
+import { traceContext } from './referral-trace.js';
 import { canPersistSharedState, onActivate } from './process-lifecycle.js';
 import { describeRelay, detectRelay, FREE_RELAYS, knownRelay, readRelaySpend, RELAY_LABELS } from './relay-billing.js';
 import { getLocalDateKey } from './storage-quota.js';
@@ -754,7 +755,7 @@ export function meterGeneration(request, response) {
         // A reply with some text in it (or output the service counted): what an invitation waits for.
         const validReply = (usage?.output ?? 0) > 0 || reader.sawText;
         await recordUsage(handle, entry, Boolean(usage), { validReply });
-        if (validReply) noteValidReply(handle);
+        if (validReply) noteValidReply(handle, traceContext(request));
         if (waitForRelay && relay) settleRelay(handle, relay, id, Math.max(1, entry.input + entry.output));
         if (firstReading && relay && entry.relay?.kind) await takeReading(handle, relay, entry.relay.kind);
     }

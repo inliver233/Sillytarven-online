@@ -803,6 +803,87 @@
     background: var(--rf-accent-soft);
 }
 
+/* 可疑标签、溯源 */
+.referralAdmin-flag {
+    display: inline-block;
+    padding: 0 7px;
+    border-radius: 6px;
+    font-size: 0.78em;
+    line-height: 1.6;
+    white-space: nowrap;
+    cursor: help;
+}
+
+.referralAdmin-flag.is-high,
+.referralAdmin-traceFlags .is-high {
+    background: color-mix(in srgb, var(--rf-danger) 18%, transparent);
+    color: var(--rf-danger);
+}
+
+.referralAdmin-flag.is-medium,
+.referralAdmin-traceFlags .is-medium {
+    background: color-mix(in srgb, var(--rf-warning) 18%, transparent);
+    color: var(--rf-warning);
+}
+
+.referralAdmin-flag.is-low,
+.referralAdmin-traceFlags .is-low {
+    background: var(--rf-surface);
+    color: var(--rf-muted);
+}
+
+.referralAdmin-trace {
+    grid-column: 1 / -1;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: 6px;
+    padding: 10px 12px;
+    border: 1px dashed var(--rf-border);
+    border-radius: 8px;
+    font-size: 0.86em;
+}
+
+.referralAdmin-trace h5 {
+    margin: 4px 0 0;
+    color: var(--rf-muted);
+    font-size: 0.92em;
+}
+
+.referralAdmin-traceFlags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.referralAdmin-traceFlags li {
+    padding: 1px 8px;
+    border-radius: 6px;
+}
+
+.referralAdmin-traceLine {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px 12px;
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
+}
+
+.referralAdmin-focusSeen {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px 12px;
+    flex-basis: 100%;
+    font-size: 0.84em;
+}
+
+.referralAdmin-seenItem {
+    overflow-wrap: anywhere;
+}
+
 .referralAdmin-focusInfo {
     flex-basis: 100%;
     color: var(--rf-muted);

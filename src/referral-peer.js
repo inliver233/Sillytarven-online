@@ -38,6 +38,16 @@ export function identityKey(discordId) {
     return discordId && secret ? crypto.createHmac('sha256', secret).update(`discord:${discordId}`).digest('hex') : '';
 }
 
+/**
+ * 跨站比对用的摘要（两站共用的 secret，同一个 IP / 设备在两站算出来一样）。
+ * @param {string} kind ip | net | device
+ * @param {string} value
+ */
+export function sharedDigest(kind, value) {
+    const { secret } = peerConfig();
+    return value && secret ? crypto.createHmac('sha256', secret).update(`${kind}:${value}`).digest('hex').slice(0, 32) : '';
+}
+
 /** @type {((path: string, payload: any) => Promise<any>)|null} 测试换成假的对方站 */
 let transport = null;
 /** @type {{ at: number, value: any, error: string }|null} 对方站的情况 */
