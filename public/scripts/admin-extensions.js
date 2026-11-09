@@ -1011,10 +1011,6 @@ function checkAndLoadCurrentTab() {
         if (invitationCodesBlock && isElementVisible(invitationCodesBlock)) {
             console.log('Invitation codes tab is visible, loading data...');
             loadInvitationCodes();
-        }
-
-        const userInvitationsAdminBlock = document.querySelector('.userInvitationsAdminBlock');
-        if (userInvitationsAdminBlock && isElementVisible(userInvitationsAdminBlock)) {
             loadUserInvitationConfig();
             loadUserInvitationStats();
         }
@@ -1167,22 +1163,22 @@ function showInvitationCodesTab() {
     currentCodePage = 1;
     codeSearchTerm = '';
 
-    // 显示邀请码管理选项卡
+    // 显示注册邀请码选项卡（管理员发的 + 用户发的）
     const invitationCodesBlock = document.querySelector('.invitationCodesBlock');
     if (invitationCodesBlock) {
         invitationCodesBlock.style.display = 'block';
         loadInvitationCodes();
+        loadUserInvitationConfig();
+        loadUserInvitationStats();
     }
 }
 
-// 显示独立用户邀请码管理选项卡；系统关闭时管理员仍可进入并重新开启。
+// 显示邀请奖励选项卡（内容由 referral-admin.js 填）
 function showUserInvitationsAdminTab() {
     hideAllTabs();
     const block = document.querySelector('.userInvitationsAdminBlock');
     if (block) {
         block.style.display = 'block';
-        loadUserInvitationConfig();
-        loadUserInvitationStats();
     }
 }
 

@@ -38,7 +38,7 @@ const GROUPS = Object.freeze([
             { key: 'minRegisteredDays', label: '注册满', unit: '天', max: 3650, shared: '#userInvMinRegDays' },
             { key: 'minOnlineHours', label: '累计在线满', unit: '小时', max: 100_000, shared: '#userInvMinOnlineHours' },
         ],
-        hint: '和下方「注册邀请码」的门槛是同一份设置。用户只会看到「暂未达到邀请资格」，看不到具体门槛。',
+        hint: '和「注册邀请码」页里用户发码的门槛是同一份设置。用户只会看到「暂未达到邀请资格」，看不到具体门槛。',
     },
 ]);
 
@@ -83,6 +83,26 @@ function person(name, handle) {
     if (name && name !== handle) node.append(element('small', '', handle));
     node.title = handle;
     return node;
+}
+
+/** 点了只看这个人邀请的 */
+function inviterButton(name, handle, onClick, blocked = false) {
+    const node = element('button', 'referralAdmin-personButton');
+    node.type = 'button';
+    node.title = `只看 ${handle} 邀请的`;
+    node.append(person(name, handle));
+    if (blocked) node.append(element('span', 'referralAdmin-badge is-error', '已停用'));
+    node.addEventListener('click', () => onClick(handle));
+    return node;
+}
+
+/** 被邀请人现在怎样：判断是不是小号 */
+function describeInvitee(link) {
+    if (link.inviteeExists === false) return '账号已删除';
+    const parts = [];
+    if (link.inviteeCreated) parts.push(`注册 ${formatDateTime(link.inviteeCreated)}`);
+    parts.push(`累计在线 ${link.inviteeOnlineHours ?? 0} 小时`);
+    return parts.join(' · ');
 }
 
 function badge(status) {
@@ -158,7 +178,7 @@ function buildView(mount) {
     stats.append(statsHead, tiles);
 
     const top = element('section', 'referralAdmin-section');
-    top.append(element('h4', '', '邀请人排行'));
+    top.append(element('h4', '', '邀请人排行'), element('p', 'referralAdmin-muted', '点名字只看这个人邀请的，在那里可以停用这个人的邀请。'));
     const topTable = element('div', 'referralAdmin-table referralAdmin-top');
     top.append(topTable);
 
@@ -177,17 +197,19 @@ function buildView(mount) {
     }
     tools.append(search, filter);
     listHead.append(tools);
+    const focus = element('div', 'referralAdmin-focus');
+    focus.hidden = true;
     const table = element('div', 'referralAdmin-table referralAdmin-links');
     const pager = element('div', 'referralAdmin-pager');
     const previous = button('上一页', 'fa-chevron-left', 'referralAdmin-small');
     const next = button('下一页', 'fa-chevron-right', 'referralAdmin-small');
     const pageText = element('span', 'referralAdmin-muted');
     pager.append(previous, pageText, next);
-    list.append(listHead, table, pager);
+    list.append(listHead, focus, table, pager);
 
     root.append(header, settings, stats, top, list);
     mount.replaceChildren(root);
-    return { root, warning, status, save, refresh, tiles, topTable, search, filter, table, pager, previous, next, pageText };
+    return { root, warning, status, save, refresh, tiles, topTable, search, filter, focus, table, pager, previous, next, pageText };
 }
 
 function setStatus(view, text, state = '') {
@@ -257,7 +279,7 @@ function cell(label, ...children) {
     return node;
 }
 
-function renderTop(view, top) {
+function renderTop(view, top, ctx) {
     if (!top.length) {
         view.topTable.replaceChildren(element('p', 'referralAdmin-empty', '还没有人邀请过。'));
         return;
@@ -265,7 +287,7 @@ function renderTop(view, top) {
     const rows = [headRow(['邀请人', '成功', '等待中', '得到'])];
     for (const item of top) {
         const row = element('div', 'referralAdmin-row');
-        row.append(cell('', person(item.inviterName, item.inviter)), cell('成功', document.createTextNode(String(item.success))),
+        row.append(cell('', inviterButton(item.inviterName, item.inviter, ctx.focusInviter, item.blocked)), cell('成功', document.createTextNode(String(item.success))),
             cell('等待', document.createTextNode(String(item.pending))), cell('得到', document.createTextNode(formatMiB(item.earnedMiB))));
         rows.push(row);
     }
@@ -288,16 +310,18 @@ function describeTimes(link) {
     return parts.join('\n');
 }
 
-function renderLinks(view, data, state, reload) {
+function renderLinks(view, data, state, ctx) {
+    const reload = ctx.reloadList;
     if (!data.rows.length) {
-        view.table.replaceChildren(element('p', 'referralAdmin-empty', state.query || state.status ? '没有符合条件的邀请关系。' : '还没有邀请关系。'));
+        view.table.replaceChildren(element('p', 'referralAdmin-empty', state.query || state.status || state.inviter ? '没有符合条件的邀请关系。' : '还没有邀请关系。'));
     } else {
         const rows = [];
         for (const link of data.rows) {
             // 第一行：被邀请人 ← 邀请人、状态；第二行：来源、时间、奖励；右边：操作
             const row = element('div', 'referralAdmin-link');
             const main = element('div', 'referralAdmin-linkMain');
-            main.append(person(link.inviteeName, link.invitee), element('span', 'referralAdmin-by', '← 邀请人'), person(link.inviterName, link.inviter), badge(link.status));
+            main.append(person(link.inviteeName, link.invitee), element('span', 'referralAdmin-by', '← 邀请人'),
+                inviterButton(link.inviterName, link.inviter, ctx.focusInviter, link.inviterBlocked), badge(link.status));
             const source = SOURCES[link.source] ?? link.source;
             const time = element('span', 'referralAdmin-time', formatDateTime(link.boundAt));
             time.title = describeTimes(link);
@@ -305,6 +329,7 @@ function renderLinks(view, data, state, reload) {
             meta.append(element('span', '', link.code ? `${source} ${link.code}` : source), time);
             const reward = describeReward(link);
             if (reward) meta.append(element('span', '', reward));
+            meta.append(element('span', 'referralAdmin-invitee', `被邀请人：${describeInvitee(link)}`));
             const actions = element('div', 'referralAdmin-rowActions');
             if (link.status === 'pending' || link.status === 'expired') {
                 const approve = button('判定成功', 'fa-check', 'referralAdmin-small');
@@ -338,6 +363,60 @@ function renderLinks(view, data, state, reload) {
     view.pager.hidden = data.total <= PAGE_SIZE;
 }
 
+/** 只看一个人时：这个人的情况和处理按钮 */
+function renderFocus(view, focus, ctx) {
+    view.focus.hidden = !focus;
+    if (!focus) {
+        view.focus.replaceChildren();
+        return;
+    }
+    const text = element('div', 'referralAdmin-focusText');
+    text.append(element('span', '', '只看'), person(focus.inviterName, focus.inviter),
+        element('span', '', `邀请的：共 ${focus.total} 人，得到 ${formatMiB(focus.earnedMiB)}`));
+    if (focus.blocked) text.append(element('span', 'referralAdmin-badge is-error', '邀请已停用'));
+    const actions = element('div', 'referralAdmin-rowActions');
+    const toggle = focus.blocked ? button('恢复邀请', 'fa-unlock', 'referralAdmin-small') : button('停用邀请', 'fa-user-slash', 'referralAdmin-small is-danger');
+    toggle.addEventListener('click', () => void act(toggle, async () => {
+        if (focus.blocked) {
+            await api('/admin/block', { handle: focus.inviter, blocked: false });
+            toastr.success('已恢复，可以重新生成邀请码了');
+            return;
+        }
+        const choice = await confirmBlock(focus);
+        if (!choice) return;
+        const result = await api('/admin/block', { handle: focus.inviter, blocked: true, ...choice });
+        toastr.success(result.revoked ? `已停用，撤销了 ${result.revoked} 条邀请${choice.reclaim ? '并收回空间' : ''}` : '已停用');
+    }, ctx.reloadList));
+    const clear = button('看全部', 'fa-xmark', 'referralAdmin-small');
+    clear.addEventListener('click', () => ctx.focusInviter(''));
+    actions.append(toggle, clear);
+    view.focus.replaceChildren(text, actions);
+}
+
+/** @returns {Promise<{revokeAll: boolean, reclaim: boolean}|null>} null = 取消 */
+async function confirmBlock(focus) {
+    const box = element('div', 'referralAdmin-confirm');
+    box.append(element('h3', '', '停用这个人的邀请'),
+        element('p', '', `${focus.inviterName || focus.inviter} 的邀请码马上失效，也不能再生成；之后还在等待的邀请成功了，邀请人拿不到空间（被邀请人照常）。随时可以恢复。`));
+    const revokeLabel = element('label', 'checkbox_label');
+    const revokeAll = /** @type {HTMLInputElement} */ (element('input'));
+    revokeAll.type = 'checkbox';
+    revokeLabel.append(revokeAll, element('span', '', `同时撤销已有的邀请（共 ${focus.total} 条，等待中的不再结算）`));
+    const reclaimLabel = element('label', 'checkbox_label');
+    const reclaim = /** @type {HTMLInputElement} */ (element('input'));
+    reclaim.type = 'checkbox';
+    reclaim.disabled = true;
+    reclaimLabel.append(reclaim, element('span', '', '连已发的空间一起收回（邀请人和被邀请人）'));
+    revokeAll.addEventListener('change', () => {
+        reclaim.disabled = !revokeAll.checked;
+        if (!revokeAll.checked) reclaim.checked = false;
+    });
+    box.append(revokeLabel, reclaimLabel);
+    const answer = await callGenericPopup(box, POPUP_TYPE.CONFIRM, '', { okButton: '停用', cancelButton: '取消' });
+    if (answer !== POPUP_RESULT.AFFIRMATIVE) return null;
+    return { revokeAll: revokeAll.checked, reclaim: reclaim.checked };
+}
+
 /** @returns {Promise<boolean|null>} 收不收回空间；null = 取消 */
 async function confirmRevoke(link) {
     const box = element('div', 'referralAdmin-confirm');
@@ -368,21 +447,37 @@ async function act(control, task, after) {
     }
 }
 
-/** 共用的门槛：两处输入框保持一致，免得一边保存时用旧值覆盖另一边 */
-function bindShared(view, mount) {
-    const block = mount.closest('.userInvitationsAdminBlock');
+/**
+ * 共用的门槛：这里和「注册邀请码」页里的输入框保持一致，免得一边保存时用旧值覆盖另一边。
+ * 那边的输入框在另一个标签页里，用到时再找。
+ */
+const views = new Set();
+document.addEventListener('input', event => {
+    const target = /** @type {HTMLElement} */ (event.target);
+    if (!(target instanceof HTMLInputElement) || !target.id) return;
+    for (const view of views) {
+        if (!view.root.isConnected) {
+            views.delete(view);
+            continue;
+        }
+        const mine = view.root.querySelector(`input[data-shared="#${target.id}"]`);
+        if (mine) mine.value = target.value;
+    }
+});
+
+function bindShared(view) {
+    views.add(view);
     for (const input of view.root.querySelectorAll('input[data-shared]')) {
-        const other = /** @type {HTMLInputElement|null} */ (block?.querySelector(input.dataset.shared));
-        if (!other) continue;
-        input.addEventListener('input', () => { other.value = input.value; });
-        other.addEventListener('input', () => { input.value = other.value; });
+        input.addEventListener('input', () => {
+            const other = /** @type {HTMLInputElement|null} */ (document.querySelector(input.dataset.shared));
+            if (other) other.value = input.value;
+        });
     }
 }
 
-function writeShared(view, mount, config) {
-    const block = mount.closest('.userInvitationsAdminBlock');
+function writeShared(view, config) {
     for (const input of view.root.querySelectorAll('input[data-shared]')) {
-        const other = /** @type {HTMLInputElement|null} */ (block?.querySelector(input.dataset.shared));
+        const other = /** @type {HTMLInputElement|null} */ (document.querySelector(input.dataset.shared));
         if (other) other.value = String(config[input.dataset.key]);
     }
 }
@@ -396,19 +491,28 @@ export async function openReferralAdmin(mount) {
     if (opened.has(mount)) return opened.get(mount)();
 
     const view = buildView(mount);
-    const state = { query: '', status: '', offset: 0 };
+    const state = { query: '', status: '', inviter: '', offset: 0 };
     let searchTimer = 0;
 
     const loadList = async () => {
-        const params = new URLSearchParams({ query: state.query, status: state.status, offset: String(state.offset), limit: String(PAGE_SIZE) });
+        const params = new URLSearchParams({ query: state.query, status: state.status, inviter: state.inviter, offset: String(state.offset), limit: String(PAGE_SIZE) });
         const data = await api(`/admin/list?${params}`);
         if (state.offset > 0 && state.offset >= data.total) {
             state.offset = Math.max(0, Math.floor((data.total - 1) / PAGE_SIZE) * PAGE_SIZE);
             return loadList();
         }
         renderTiles(view, data.summary);
-        renderTop(view, data.top);
-        renderLinks(view, data, state, loadList);
+        renderTop(view, data.top, ctx);
+        renderFocus(view, data.focus, ctx);
+        renderLinks(view, data, state, ctx);
+    };
+    const ctx = {
+        reloadList: loadList,
+        focusInviter: handle => {
+            state.inviter = handle;
+            state.offset = 0;
+            void loadList().then(() => view.focus.scrollIntoView?.({ block: 'nearest', behavior: 'smooth' })).catch(error => toastr.error(error.message));
+        },
     };
     const reload = async () => {
         try {
@@ -436,7 +540,7 @@ export async function openReferralAdmin(mount) {
         try {
             const saved = await api('/admin/config', body);
             fillSettings(view, saved);
-            writeShared(view, mount, saved);
+            writeShared(view, saved);
             setStatus(view, '已保存', 'ok');
         } catch (error) {
             setStatus(view, `保存失败：${error.message}`, 'error');
@@ -466,7 +570,7 @@ export async function openReferralAdmin(mount) {
         state.offset += PAGE_SIZE;
         void loadList().catch(error => toastr.error(error.message));
     });
-    bindShared(view, mount);
+    bindShared(view);
 
     opened.set(mount, reload);
     await reload();

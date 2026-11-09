@@ -6,9 +6,10 @@
  *   POST /claim              绑定邀请人 { code, source }
  *   GET  /admin/config       管理员：设置（含共用的邀请资格门槛）
  *   POST /admin/config
- *   GET  /admin/list         管理员：邀请关系 ?query=&status=&offset=&limit=，含汇总和邀请人排行
+ *   GET  /admin/list         管理员：邀请关系 ?query=&status=&inviter=&offset=&limit=，含汇总和邀请人排行
  *   POST /admin/revoke       管理员：撤销 { invitee, reclaim }
  *   POST /admin/approve      管理员：判定成功 { invitee }
+ *   POST /admin/block        管理员：停用 / 恢复一个人的邀请 { handle, blocked, revokeAll, reclaim }
  */
 import express from 'express';
 
@@ -22,6 +23,7 @@ import {
     resetCode,
     revokeReferral,
     rewardsAvailable,
+    setInviterBlocked,
     setReferralConfig,
 } from '../referrals.js';
 import { hadValidReply } from '../usage-meter.js';
@@ -53,6 +55,7 @@ router.post('/code', requireLoginMiddleware, async (request, response) => {
         const handle = request.user.profile.handle;
         const data = await getMyReferralData(handle);
         if (!data.enabled) return response.status(400).send({ error: '邀请奖励暂未开放' });
+        if (data.blocked) return response.status(403).send({ error: '你的邀请已被管理员停用' });
         if (!data.eligible) return response.status(403).send({ error: '暂未达到邀请资格' });
         const code = request.body?.reset ? await resetCode(handle) : await ensureCode(handle);
         return response.send({ code });
@@ -105,7 +108,13 @@ router.post('/admin/config', requireAdminMiddleware, async (request, response) =
 router.get('/admin/list', requireAdminMiddleware, async (request, response) => {
     const offset = Math.max(0, Number(request.query.offset) || 0);
     const limit = Math.min(200, Math.max(1, Number(request.query.limit) || 50));
-    return response.send(await listReferrals({ query: String(request.query.query ?? ''), status: String(request.query.status ?? ''), offset, limit }));
+    return response.send(await listReferrals({
+        query: String(request.query.query ?? ''),
+        status: String(request.query.status ?? ''),
+        inviter: String(request.query.inviter ?? ''),
+        offset,
+        limit,
+    }));
 });
 
 router.post('/admin/revoke', requireAdminMiddleware, async (request, response) => {
@@ -116,4 +125,14 @@ router.post('/admin/revoke', requireAdminMiddleware, async (request, response) =
 router.post('/admin/approve', requireAdminMiddleware, async (request, response) => {
     const result = await approveReferral(String(request.body?.invitee ?? ''));
     return result.ok ? response.send({ status: result.link.status }) : response.status(400).send({ error: result.reason });
+});
+
+router.post('/admin/block', requireAdminMiddleware, async (request, response) => {
+    const body = request.body ?? {};
+    const result = await setInviterBlocked(String(body.handle ?? ''), body.blocked === true, {
+        revokeAll: body.revokeAll === true,
+        reclaim: body.reclaim === true,
+        by: request.user.profile.handle,
+    });
+    return result.ok ? response.send({ revoked: result.revoked }) : response.status(400).send({ error: result.reason });
 });

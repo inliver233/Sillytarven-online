@@ -10,7 +10,7 @@
  * 存储（node-persist）：
  *   referral:config                 设置
  *   referral:code:<码>              { code, owner, createdAt }
- *   referral:owner:<账号>           { code }
+ *   referral:owner:<账号>           { code } 或 { blocked: { at, by } }（管理员停用了这个人的邀请）
  *   referral:link:<被邀请人>        { invitee, inviter, code, source, boundAt, status, successAt, inviterRewardMiB, inviteeRewardMiB, revokedAt, reclaimed }
  *   referral:inviter:<邀请人>       [被邀请人]
  *   referral:index                  [所有被邀请人]（管理员列表）
@@ -39,10 +39,10 @@ export const STATUS = Object.freeze({ PENDING: 'pending', SUCCESS: 'success', RE
 
 export const DEFAULT_REFERRAL_CONFIG = Object.freeze({
     enabled: false,
-    inviterRewardMiB: 500,
-    inviteeRewardMiB: 200,
+    inviterRewardMiB: 100,
+    inviteeRewardMiB: 50,
     /** 邀请人通过邀请最多拿多少（0 = 不限） */
-    inviterCapMiB: 5000,
+    inviterCapMiB: 500,
     /** 被邀请人注册多少天内可以绑定 */
     claimWindowDays: 7,
     /** 收到第一条有效 AI 回复才算成功 */
@@ -153,6 +153,7 @@ export function normalizeCode(code) {
 export function ensureCode(handle) {
     return serialized(async () => {
         const owned = await storage.getItem(OWNER_PREFIX + handle);
+        if (owned?.blocked) throw new Error('邀请已被停用');
         if (owned?.code) return owned.code;
         return createCode(handle);
     });
@@ -176,6 +177,7 @@ async function createCode(handle) {
 export function resetCode(handle) {
     return serialized(async () => {
         const owned = await storage.getItem(OWNER_PREFIX + handle);
+        if (owned?.blocked) throw new Error('邀请已被停用');
         if (owned?.code) await storage.removeItem(CODE_PREFIX + owned.code);
         await storage.removeItem(OWNER_PREFIX + handle);
         return createCode(handle);
@@ -193,11 +195,17 @@ export function resetCode(handle) {
  */
 async function inviterEligible(user) {
     if (!user || user.enabled === false) return false;
+    if (await isBlocked(user.handle)) return false;
     const thresholds = await getUserInvitationConfig();
     const registeredDays = (Date.now() - (Number(user.created) || Date.now())) / DAY_MS;
     if (registeredDays < thresholds.minRegisteredDays) return false;
     if (thresholds.minOnlineHours > 0 && await getInvitationOnlineHours(user.handle) < thresholds.minOnlineHours) return false;
     return true;
+}
+
+/** 管理员停用了这个人的邀请 */
+async function isBlocked(handle) {
+    return Boolean((await storage.getItem(OWNER_PREFIX + handle))?.blocked);
 }
 
 /** 注册多久以后就不能再绑定邀请人 */
@@ -254,7 +262,9 @@ function notify(handle, title, text) {
  */
 async function settle(link, config) {
     const rewards = rewardsAvailable();
-    let inviterReward = rewards ? config.inviterRewardMiB : 0;
+    // 邀请被停用的人不再得到空间（被邀请人照常）
+    const inviterBlocked = await isBlocked(link.inviter);
+    let inviterReward = rewards && !inviterBlocked ? config.inviterRewardMiB : 0;
     if (inviterReward > 0 && config.inviterCapMiB > 0) {
         inviterReward = Math.max(0, Math.min(inviterReward, config.inviterCapMiB - await earnedByInviter(link.inviter)));
     }
@@ -269,7 +279,7 @@ async function settle(link, config) {
     if (link.inviteeRewardMiB > 0) notify(link.invitee, '邀请奖励到账', `你已获得 ${link.inviteeRewardMiB} MB 存储空间（邀请人：${await nameOf(link.inviter)}）。`);
     const invitee = await nameOf(link.invitee);
     if (link.inviterRewardMiB > 0) notify(link.inviter, '邀请成功', `${invitee} 已开始使用，你获得了 ${link.inviterRewardMiB} MB 存储空间。`);
-    else if (rewards) notify(link.inviter, '邀请成功', `${invitee} 已开始使用。你通过邀请获得的空间已到上限，这次没有再加。`);
+    else if (rewards && !inviterBlocked) notify(link.inviter, '邀请成功', `${invitee} 已开始使用。你通过邀请获得的空间已到上限，这次没有再加。`);
     else notify(link.inviter, '邀请成功', `${invitee} 已开始使用。`);
 }
 
@@ -374,6 +384,7 @@ export function noteValidReply(handle) {
 export async function getMyReferralData(handle) {
     const config = await getReferralConfig();
     const user = await storage.getItem(toKey(handle));
+    const blocked = await isBlocked(handle);
     const eligible = config.enabled && await inviterEligible(user);
     const owned = eligible ? await storage.getItem(OWNER_PREFIX + handle) : null;
     const invitees = [];
@@ -399,6 +410,7 @@ export async function getMyReferralData(handle) {
             pendingExpireDays: config.pendingExpireDays,
         },
         eligible,
+        blocked,
         code: owned?.code ?? null,
         earnedMiB: earned,
         invitees,
@@ -412,11 +424,19 @@ export async function getMyReferralData(handle) {
 // 管理员
 // ---------------------------------------------------------------------------
 
+/** 管理员看的被邀请人情况：注册时间、累计在线（判断是不是小号） */
+async function describeInvitee(handle) {
+    const user = await storage.getItem(toKey(handle));
+    const hours = await getInvitationOnlineHours(handle).catch(() => 0);
+    return { inviteeCreated: Number(user?.created) || null, inviteeOnlineHours: Math.round(hours * 10) / 10, inviteeExists: Boolean(user) };
+}
+
 /**
  * 所有邀请关系（顺带把过期的标成作废）。
- * @param {{ query?: string, status?: string, offset?: number, limit?: number }} [options]
+ * @param {{ query?: string, status?: string, inviter?: string, offset?: number, limit?: number }} [options]
+ *     inviter：只看这个人邀请的（精确匹配）
  */
-export function listReferrals({ query = '', status = '', offset = 0, limit = 50 } = {}) {
+export function listReferrals({ query = '', status = '', inviter: onlyInviter = '', offset = 0, limit = 50 } = {}) {
     return serialized(async () => {
         const config = await getReferralConfig();
         const needle = String(query).trim().toLowerCase();
@@ -440,17 +460,24 @@ export function listReferrals({ query = '', status = '', offset = 0, limit = 50 
             if (link.status !== STATUS.REVOKED) row.earnedMiB += Number(link.inviterRewardMiB) || 0;
             inviters.set(link.inviter, row);
             if (status && link.status !== status) continue;
+            if (onlyInviter && link.inviter !== onlyInviter) continue;
             if (needle && !`${link.inviter} ${link.invitee} ${link.code}`.toLowerCase().includes(needle)) continue;
             rows.push(link);
         }
         rows.sort((a, b) => b.boundAt - a.boundAt);
         const top = [...inviters.values()].sort((a, b) => (b.success - a.success) || (b.earnedMiB - a.earnedMiB)).slice(0, 20);
-        for (const row of top) row.inviterName = await nameOf(row.inviter);
+        for (const row of top) Object.assign(row, { inviterName: await nameOf(row.inviter), blocked: await isBlocked(row.inviter) });
         const page = [];
         for (const link of rows.slice(offset, offset + limit)) {
-            page.push({ ...link, inviterName: await nameOf(link.inviter), inviteeName: await nameOf(link.invitee) });
+            page.push({ ...link, inviterName: await nameOf(link.inviter), inviteeName: await nameOf(link.invitee), inviterBlocked: await isBlocked(link.inviter), ...await describeInvitee(link.invitee) });
         }
-        return { summary, top, total: rows.length, rows: page };
+        // 只看一个人时：这个人的情况（停用没有、一共邀请了多少、拿了多少）
+        let focus = null;
+        if (onlyInviter) {
+            const mine = (await readList(INVITER_PREFIX + onlyInviter)).length;
+            focus = { inviter: onlyInviter, inviterName: await nameOf(onlyInviter), blocked: await isBlocked(onlyInviter), total: mine, earnedMiB: inviters.get(onlyInviter)?.earnedMiB ?? 0 };
+        }
+        return { summary, top, total: rows.length, rows: page, focus };
     });
 }
 
@@ -464,18 +491,54 @@ export function revokeReferral(invitee, { reclaim = false, by = '' } = {}) {
         const link = await storage.getItem(LINK_PREFIX + invitee);
         if (!link) return { ok: false, reason: '没有这条邀请关系' };
         if (link.status === STATUS.REVOKED) return { ok: false, reason: '已经撤销过了' };
-        if (reclaim && link.status === STATUS.SUCCESS) {
-            await addStorage(link.inviter, -(Number(link.inviterRewardMiB) || 0));
-            await addStorage(link.invitee, -(Number(link.inviteeRewardMiB) || 0));
-            link.reclaimed = true;
-        }
-        link.status = STATUS.REVOKED;
-        link.revokedAt = Date.now();
-        link.revokedBy = by;
-        await storage.setItem(LINK_PREFIX + invitee, link);
-        pendingInvitees.delete(invitee);
-        console.info(`[referrals] ${link.inviter} → ${invitee}: revoked by ${by}${link.reclaimed ? ', rewards taken back' : ''}`);
+        await revokeLink(link, { reclaim, by });
         return { ok: true, link };
+    });
+}
+
+/** 撤销一条（必须在队列里调用） */
+async function revokeLink(link, { reclaim, by }) {
+    if (reclaim && link.status === STATUS.SUCCESS) {
+        await addStorage(link.inviter, -(Number(link.inviterRewardMiB) || 0));
+        await addStorage(link.invitee, -(Number(link.inviteeRewardMiB) || 0));
+        link.reclaimed = true;
+    }
+    link.status = STATUS.REVOKED;
+    link.revokedAt = Date.now();
+    link.revokedBy = by;
+    await storage.setItem(LINK_PREFIX + link.invitee, link);
+    pendingInvitees.delete(link.invitee);
+    console.info(`[referrals] ${link.inviter} → ${link.invitee}: revoked by ${by}${link.reclaimed ? ', rewards taken back' : ''}`);
+}
+
+/**
+ * 管理员停用 / 恢复一个人的邀请。停用：邀请码作废、不能再邀请，之后成功的邀请也不给邀请人空间；
+ * revokeAll 时把这个人已有的邀请都撤销（reclaim：连已发的空间一起收回）。恢复后可以重新生成邀请码。
+ * @param {string} handle
+ * @param {boolean} blocked
+ * @param {{ revokeAll?: boolean, reclaim?: boolean, by?: string }} [options]
+ */
+export function setInviterBlocked(handle, blocked, { revokeAll = false, reclaim = false, by = '' } = {}) {
+    return serialized(async () => {
+        if (!handle || !await storage.getItem(toKey(handle))) return { ok: false, reason: '用户不存在' };
+        const owned = await storage.getItem(OWNER_PREFIX + handle);
+        if (blocked) {
+            if (owned?.code) await storage.removeItem(CODE_PREFIX + owned.code);
+            await storage.setItem(OWNER_PREFIX + handle, { blocked: { at: Date.now(), by } });
+        } else if (owned?.blocked) {
+            await storage.removeItem(OWNER_PREFIX + handle);
+        }
+        let revoked = 0;
+        if (blocked && revokeAll) {
+            for (const invitee of await readList(INVITER_PREFIX + handle)) {
+                const link = await storage.getItem(LINK_PREFIX + invitee);
+                if (!link || link.status === STATUS.REVOKED) continue;
+                await revokeLink(link, { reclaim, by });
+                revoked++;
+            }
+        }
+        console.info(`[referrals] ${handle}: invitations ${blocked ? 'blocked' : 'allowed again'} by ${by}${revoked ? `, ${revoked} revoked${reclaim ? ' with rewards taken back' : ''}` : ''}`);
+        return { ok: true, revoked };
     });
 }
 

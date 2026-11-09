@@ -177,3 +177,49 @@ test('the API: a new user binds by code; errors come back as messages; admins on
     const config = await call('alice', '/admin/config', { inviteeRewardMiB: 300, minRegisteredDays: 10 });
     assert.deepEqual([config.data.inviteeRewardMiB, config.data.minRegisteredDays, config.data.enabled, config.data.rewardsAvailable], [300, 10, true, true]);
 });
+
+test('admins can stop someone inviting: the code dies, they earn nothing more, and their invitations can go', async () => {
+    for (const handle of ['mona', 'nina', 'otto']) await makeUser(handle, 0);
+    // From the tests above: the inviter gets 500, the new account 300, no cap.
+    const code = await referrals.ensureCode('carol');
+    await referrals.claimReferral('mona', code);
+    referrals.noteValidReply('mona');
+    await settled('mona');
+    await referrals.claimReferral('nina', code);
+    const [carolBefore, monaBefore] = [await limit('carol'), await limit('mona')];
+
+    // Stopped: the code no longer works, no new one, and a pending invitation pays only the new account.
+    assert.deepEqual(await referrals.setInviterBlocked('carol', true, { by: 'admin' }), { ok: true, revoked: 0 });
+    assert.equal((await referrals.claimReferral('otto', code)).reason, '邀请码不存在或已更换');
+    await assert.rejects(referrals.ensureCode('carol'), /停用/);
+    const mine = await referrals.getMyReferralData('carol');
+    assert.deepEqual([mine.blocked, mine.eligible, mine.code], [true, false, null]);
+    referrals.noteValidReply('nina');
+    const late = await settled('nina');
+    assert.deepEqual([late.inviterRewardMiB, late.inviteeRewardMiB], [0, 300]);
+    assert.equal(await limit('carol'), carolBefore);
+
+    // Only carol's, exactly; with how the new accounts are doing.
+    const listed = await referrals.listReferrals({ inviter: 'carol' });
+    assert.deepEqual(listed.rows.map(row => row.invitee).sort(), ['mona', 'nina']);
+    assert.deepEqual([listed.focus.blocked, listed.focus.total, listed.focus.earnedMiB], [true, 2, 500]);
+    assert.equal(listed.rows[0].inviteeOnlineHours, 0);
+    assert.equal(typeof listed.rows[0].inviteeCreated, 'number');
+    assert.equal(listed.top.find(row => row.inviter === 'carol').blocked, true);
+
+    // Everything taken back.
+    assert.deepEqual(await referrals.setInviterBlocked('carol', true, { revokeAll: true, reclaim: true, by: 'admin' }), { ok: true, revoked: 2 });
+    assert.deepEqual([await limit('carol'), await limit('mona'), await limit('nina')], [carolBefore - 500, monaBefore - 300, 2000]);
+
+    // Allowed again: a new code, which works.
+    await referrals.setInviterBlocked('carol', false, { by: 'admin' });
+    const fresh = await referrals.ensureCode('carol');
+    assert.notEqual(fresh, code);
+    assert.equal((await referrals.claimReferral('otto', fresh)).ok, true);
+    assert.equal((await referrals.setInviterBlocked('nobody', true)).ok, false);
+});
+
+test('the defaults are modest', () => {
+    const defaults = referrals.mergeReferralConfig(undefined);
+    assert.deepEqual([defaults.enabled, defaults.inviterRewardMiB, defaults.inviteeRewardMiB, defaults.inviterCapMiB], [false, 100, 50, 500]);
+});

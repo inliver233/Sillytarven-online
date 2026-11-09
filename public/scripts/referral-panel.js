@@ -131,6 +131,7 @@ function renderMyLink(data, refresh) {
             }, 'is-quiet'));
         return section('我的邀请链接', linkRow, codeRow);
     }
+    if (data.blocked) return section('我的邀请链接', element('p', 'referralMuted', '你的邀请已被管理员停用。'));
     if (data.eligible) {
         return section('我的邀请链接', button('生成我的邀请链接', 'fa-wand-magic-sparkles', async () => {
             try {
@@ -220,7 +221,7 @@ async function renderExtras(data) {
     if (registration?.systemEnabled || registration?.codes?.length) {
         extras.append(button('注册邀请码', 'fa-ticket', () => openMyInvitationCodes(), 'is-quiet'));
     }
-    if (data.isAdmin) extras.append(button('邀请管理', 'fa-user-gear', () => openAdminPanel('userInvitationsAdminBlock'), 'is-quiet'));
+    if (data.isAdmin) extras.append(button('管理邀请奖励', 'fa-user-gear', () => openAdminPanel('userInvitationsAdminBlock'), 'is-quiet'));
     return extras.childElementCount ? extras : null;
 }
 

@@ -678,6 +678,54 @@
     cursor: help;
 }
 
+/* 点名字只看这个人邀请的 */
+.referralAdmin .referralAdmin-personButton {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    max-width: 100%;
+    margin: 0;
+    padding: 2px 6px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.referralAdmin .referralAdmin-personButton:hover,
+.referralAdmin .referralAdmin-personButton:focus-visible {
+    border-color: var(--rf-border);
+    background: var(--rf-accent-soft);
+}
+
+.referralAdmin-invitee {
+    flex-basis: 100%;
+}
+
+.referralAdmin-focus {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    padding: 10px 12px;
+    border: 1px solid color-mix(in srgb, var(--rf-accent) 35%, transparent);
+    border-radius: 10px;
+    background: var(--rf-accent-soft);
+}
+
+.referralAdmin-focusText {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+    min-width: 0;
+}
+
 .referralAdmin-rowActions {
     display: flex;
     justify-content: flex-end;

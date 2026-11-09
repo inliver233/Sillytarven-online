@@ -13,10 +13,10 @@
             <h4>性能指标</h4>
         </button>
         <button type="button" class="invitationCodesButton menu_button menu_button_icon" data-target-tab="invitationCodesBlock">
-            <h4 data-i18n="Invitation Codes">邀请码管理</h4>
+            <h4>注册邀请码</h4>
         </button>
         <button type="button" class="userInvitationsAdminButton menu_button menu_button_icon" data-target-tab="userInvitationsAdminBlock">
-            <h4>邀请管理</h4>
+            <h4>邀请奖励</h4>
         </button>
         <button type="button" class="freeGeminiChannelsButton menu_button menu_button_icon" data-target-tab="freeGeminiChannelsBlock">
             <img class="freeGeminiBrandIcon" src="/img/free-gemini.svg" alt="">
@@ -407,66 +407,9 @@
         </div>
     </div>
 
-    <!-- 用户邀请码发放系统：与旧管理员邀请码系统独立 -->
+    <!-- 邀请奖励（referral-admin.js 挂在这里） -->
     <div class="navTab userInvitationsAdminBlock" style="display: none;">
         <div class="referralAdminMount"></div>
-        <div class="flex-container flexFlowColumn flexGap10">
-            <h3>注册邀请码（用户发放）</h3>
-            <small style="color: var(--st-text-muted, #64748b);">开启「邀请码注册」时才用得到：用户给朋友发一次性的注册邀请码。用户发的码被用来注册时，也算一次邀请奖励的邀请。</small>
-            <div class="userInvSystemBlock" style="border: 1px solid var(--st-border-subtle, rgba(255,255,255,0.07)); border-radius: 12px; padding: 16px; margin-bottom: 8px; background: rgba(255,255,255,0.02);">
-                <h4 class="margin0 flex-container alignItemsCenter" style="gap: 8px; margin-bottom: 12px;">
-                    <i class="fa-fw fa-solid fa-users-gear" style="color: var(--st-primary, #3b82f6);"></i>
-                    <span>用户邀请码发放系统</span>
-                </h4>
-                <div class="flex-container alignItemsCenter" style="gap: 10px; margin-bottom: 12px; flex-wrap: wrap;">
-                    <label class="checkbox_label">
-                        <input type="checkbox" id="userInvEnabled">
-                        <span>启用用户发放系统</span>
-                    </label>
-                    <small style="color: var(--st-text-muted, #64748b);">关闭后用户无法生成新邀请码（已发的不受影响）</small>
-                </div>
-                <div class="flex-container" style="flex-wrap: wrap; gap: 10px; margin-bottom: 12px;">
-                    <div class="flex1" style="min-width: 130px;">
-                        <span style="display:block;font-size:0.78rem;color:var(--st-text-muted,#64748b);margin-bottom:2px;">注册门槛（天）</span>
-                        <input id="userInvMinRegDays" class="text_pole" type="number" min="0" step="1">
-                    </div>
-                    <div class="flex1" style="min-width: 130px;">
-                        <span style="display:block;font-size:0.78rem;color:var(--st-text-muted,#64748b);margin-bottom:2px;">在线门槛（小时）</span>
-                        <input id="userInvMinOnlineHours" class="text_pole" type="number" min="0" step="1">
-                    </div>
-                    <div class="flex1" style="min-width: 100px;">
-                        <span style="display:block;font-size:0.78rem;color:var(--st-text-muted,#64748b);margin-bottom:2px;">每周期数量</span>
-                        <input id="userInvQuota" class="text_pole" type="number" min="1" step="1">
-                    </div>
-                    <div class="flex1" style="min-width: 90px;">
-                        <span style="display:block;font-size:0.78rem;color:var(--st-text-muted,#64748b);margin-bottom:2px;">周期（天）</span>
-                        <input id="userInvPeriodDays" class="text_pole" type="number" min="1" step="1">
-                    </div>
-                    <div class="flex1" style="min-width: 120px;">
-                        <span style="display:block;font-size:0.78rem;color:var(--st-text-muted,#64748b);margin-bottom:2px;">用户邀请码总上限</span>
-                        <input id="userInvMaxTotal" class="text_pole" type="number" min="1" step="1">
-                    </div>
-                </div>
-                <small style="display:block;color:var(--st-text-muted,#64748b);margin-bottom:12px;">
-                    用户必须等待上一个邀请码成功使用后才能继续生成；这里的总上限不包含旧管理员邀请码。
-                </small>
-                <div class="flex-container" style="gap: 10px; margin-bottom: 14px;">
-                    <button type="button" class="menu_button menu_button_icon" id="userInvSaveConfig">
-                        <i class="fa-fw fa-solid fa-floppy-disk"></i><span>保存规则</span>
-                    </button>
-                    <button type="button" class="menu_button menu_button_icon" id="userInvRefreshStats">
-                        <i class="fa-fw fa-solid fa-rotate"></i><span>刷新统计</span>
-                    </button>
-                </div>
-                <div id="userInvSummary" class="flex-container" style="gap: 8px; flex-wrap: wrap; margin-bottom: 12px;"></div>
-                <div class="flex-container alignItemsCenter" style="justify-content: space-between; margin-bottom: 6px;">
-                    <h5 class="margin0">发放者统计（谁邀请了谁）</h5>
-                </div>
-                <div id="userInvStatsContainer" class="flex-container flexFlowColumn" style="gap: 6px; max-height: 360px; overflow-y: auto;">
-                    <div style="color: var(--st-text-muted, #64748b); padding: 14px; text-align: center; font-size: 0.85rem;">点击「刷新统计」加载</div>
-                </div>
-            </div>
-        </div>
     </div>
 
     <!-- 全局免费 Gemini 渠道管理 -->
@@ -589,7 +532,7 @@
     <!-- 旧管理员邀请码管理选项卡 -->
     <div class="navTab invitationCodesBlock" style="display: none;">
         <div class="flex-container flexFlowColumn flexGap10">
-            <h3 data-i18n="Invitation Code Management">邀请码管理</h3>
+            <h3>注册邀请码</h3>
             <!-- 使用说明 -->
             <div class="usage-notice" style="background-color: #fff3cd; border: 1px solid #ffeaa7; border-radius: 5px; padding: 10px; margin-bottom: 15px;">
                 <h4 style="margin-top: 0; color: #856404;">
@@ -716,6 +659,63 @@
                         <i class="fa-fw fa-solid fa-trash-alt"></i>
                         <span data-i18n="Delete Selected">删除选中</span>
                     </button>
+                </div>
+            </div>
+        </div>
+        <div class="flex-container flexFlowColumn flexGap10" style="margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--SmartThemeBorderColor, rgba(255,255,255,0.12));">
+            <h3>用户发的注册邀请码</h3>
+            <small style="color: var(--st-text-muted, #64748b);">开启「邀请码注册」时才用得到：用户给朋友发一次性的注册邀请码。用户发的码被用来注册，也算一次「邀请奖励」里的邀请；「谁能发」的门槛和邀请奖励的「谁能邀请」是同一份设置。</small>
+            <div class="userInvSystemBlock" style="border: 1px solid var(--st-border-subtle, rgba(255,255,255,0.07)); border-radius: 12px; padding: 16px; margin-bottom: 8px; background: rgba(255,255,255,0.02);">
+                <h4 class="margin0 flex-container alignItemsCenter" style="gap: 8px; margin-bottom: 12px;">
+                    <i class="fa-fw fa-solid fa-users-gear" style="color: var(--st-primary, #3b82f6);"></i>
+                    <span>用户邀请码发放系统</span>
+                </h4>
+                <div class="flex-container alignItemsCenter" style="gap: 10px; margin-bottom: 12px; flex-wrap: wrap;">
+                    <label class="checkbox_label">
+                        <input type="checkbox" id="userInvEnabled">
+                        <span>启用用户发放系统</span>
+                    </label>
+                    <small style="color: var(--st-text-muted, #64748b);">关闭后用户无法生成新邀请码（已发的不受影响）</small>
+                </div>
+                <div class="flex-container" style="flex-wrap: wrap; gap: 10px; margin-bottom: 12px;">
+                    <div class="flex1" style="min-width: 130px;">
+                        <span style="display:block;font-size:0.78rem;color:var(--st-text-muted,#64748b);margin-bottom:2px;">注册门槛（天）</span>
+                        <input id="userInvMinRegDays" class="text_pole" type="number" min="0" step="1">
+                    </div>
+                    <div class="flex1" style="min-width: 130px;">
+                        <span style="display:block;font-size:0.78rem;color:var(--st-text-muted,#64748b);margin-bottom:2px;">在线门槛（小时）</span>
+                        <input id="userInvMinOnlineHours" class="text_pole" type="number" min="0" step="1">
+                    </div>
+                    <div class="flex1" style="min-width: 100px;">
+                        <span style="display:block;font-size:0.78rem;color:var(--st-text-muted,#64748b);margin-bottom:2px;">每周期数量</span>
+                        <input id="userInvQuota" class="text_pole" type="number" min="1" step="1">
+                    </div>
+                    <div class="flex1" style="min-width: 90px;">
+                        <span style="display:block;font-size:0.78rem;color:var(--st-text-muted,#64748b);margin-bottom:2px;">周期（天）</span>
+                        <input id="userInvPeriodDays" class="text_pole" type="number" min="1" step="1">
+                    </div>
+                    <div class="flex1" style="min-width: 120px;">
+                        <span style="display:block;font-size:0.78rem;color:var(--st-text-muted,#64748b);margin-bottom:2px;">用户邀请码总上限</span>
+                        <input id="userInvMaxTotal" class="text_pole" type="number" min="1" step="1">
+                    </div>
+                </div>
+                <small style="display:block;color:var(--st-text-muted,#64748b);margin-bottom:12px;">
+                    用户必须等待上一个邀请码成功使用后才能继续生成；这里的总上限不包含旧管理员邀请码。
+                </small>
+                <div class="flex-container" style="gap: 10px; margin-bottom: 14px;">
+                    <button type="button" class="menu_button menu_button_icon" id="userInvSaveConfig">
+                        <i class="fa-fw fa-solid fa-floppy-disk"></i><span>保存规则</span>
+                    </button>
+                    <button type="button" class="menu_button menu_button_icon" id="userInvRefreshStats">
+                        <i class="fa-fw fa-solid fa-rotate"></i><span>刷新统计</span>
+                    </button>
+                </div>
+                <div id="userInvSummary" class="flex-container" style="gap: 8px; flex-wrap: wrap; margin-bottom: 12px;"></div>
+                <div class="flex-container alignItemsCenter" style="justify-content: space-between; margin-bottom: 6px;">
+                    <h5 class="margin0">发放者统计（谁邀请了谁）</h5>
+                </div>
+                <div id="userInvStatsContainer" class="flex-container flexFlowColumn" style="gap: 6px; max-height: 360px; overflow-y: auto;">
+                    <div style="color: var(--st-text-muted, #64748b); padding: 14px; text-align: center; font-size: 0.85rem;">点击「刷新统计」加载</div>
                 </div>
             </div>
         </div>
