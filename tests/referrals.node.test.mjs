@@ -193,7 +193,7 @@ test('admins can stop someone inviting: the code dies, they earn nothing more, a
     const [carolBefore, monaBefore] = [await limit('carol'), await limit('mona')];
 
     // Stopped: the code no longer works, no new one, and a pending invitation pays only the new account.
-    assert.deepEqual(await referrals.setInviterBlocked('carol', true, { by: 'admin' }), { ok: true, revoked: 0 });
+    assert.deepEqual(await referrals.setInviterBlocked('carol', true, { by: 'admin' }), { ok: true, mode: 'block', revoked: 0 });
     assert.equal((await referrals.claimReferral('otto', code)).reason, '邀请码不存在或已更换');
     await assert.rejects(referrals.ensureCode('carol'), /停用/);
     const mine = await referrals.getMyReferralData('carol');
@@ -212,7 +212,7 @@ test('admins can stop someone inviting: the code dies, they earn nothing more, a
     assert.equal(listed.top.find(row => row.inviter === 'carol').blocked, true);
 
     // Everything taken back.
-    assert.deepEqual(await referrals.setInviterBlocked('carol', true, { revokeAll: true, reclaim: true, by: 'admin' }), { ok: true, revoked: 2 });
+    assert.deepEqual(await referrals.setInviterBlocked('carol', true, { revokeAll: true, reclaim: true, by: 'admin' }), { ok: true, mode: 'block', revoked: 2 });
     assert.deepEqual([await limit('carol'), await limit('mona'), await limit('nina')], [carolBefore - 500, monaBefore - 300, 2000]);
 
     // Allowed again: a new code, which works.
@@ -225,7 +225,7 @@ test('admins can stop someone inviting: the code dies, they earn nothing more, a
 
 test('the defaults are modest', () => {
     const defaults = referrals.mergeReferralConfig(undefined);
-    assert.deepEqual([defaults.enabled, defaults.inviterRewardMiB, defaults.inviteeRewardMiB, defaults.inviterCapMiB], [false, 150, 150, 1500]);
+    assert.deepEqual([defaults.enabled, defaults.inviterRewardMiB, defaults.inviteeRewardMiB, defaults.inviterCapMiB], [false, 150, 150, 3000]);
 });
 
 /** Waits until check() is true (background work: the outbox, settling). */
@@ -331,4 +331,33 @@ test('the cross-site endpoints answer only signed requests', async t => {
     assert.deepEqual([info.status, info.data.site, info.data.crossSite, info.data.registrationOpen], [200, 'legacy', true, false]);
     assert.equal((await send('/info', {}, 'wrong-secret-0123456789')).status, 403);
     assert.equal((await send('/lookup', { code: 'NOPE2345' })).data.reason, '邀请码不存在或已更换');
+});
+
+test('admins let one person invite below the thresholds, or stop one who meets them', async () => {
+    // The thresholds here: registered for 10 days (set through the API test above).
+    await makeUser('sam', 1);
+    await makeUser('tia', 0);
+    const code = await referrals.ensureCode('sam');
+    assert.equal((await referrals.getMyReferralData('sam')).eligible, false);
+    assert.equal((await referrals.claimReferral('tia', code)).reason, '这个邀请人暂时还不能邀请别人');
+
+    assert.deepEqual(await referrals.setInviterAccess('sam', 'allow', { by: 'admin' }), { ok: true, mode: 'allow', revoked: 0 });
+    assert.equal((await referrals.getMyReferralData('sam')).eligible, true);
+    assert.equal((await referrals.claimReferral('tia', code)).ok, true);
+    const focus = (await referrals.listReferrals({ inviter: 'sam' })).focus;
+    assert.deepEqual([focus.mode, focus.meetsThresholds, focus.eligible, focus.registeredDays, focus.total], ['allow', false, true, 1, 1]);
+    assert.deepEqual((await referrals.listAccess()).filter(row => row.handle === 'sam').map(row => [row.mode, row.by]), [['allow', 'admin']]);
+
+    // Back to the thresholds.
+    await referrals.setInviterAccess('sam', 'default', { by: 'admin' });
+    assert.equal((await referrals.getMyReferralData('sam')).eligible, false);
+    assert.equal((await referrals.listAccess()).some(row => row.handle === 'sam'), false);
+
+    // Someone who meets them, stopped.
+    await referrals.setInviterAccess('frank', 'block', { by: 'admin' });
+    const frank = (await referrals.listReferrals({ inviter: 'frank' })).focus;
+    assert.deepEqual([frank.mode, frank.meetsThresholds, frank.eligible], ['block', true, false]);
+    await referrals.setInviterAccess('frank', 'default', { by: 'admin' });
+    assert.equal((await referrals.setInviterAccess('frank', 'whatever')).ok, false);
+    assert.equal((await referrals.listReferrals({ inviter: 'nobody-here' })).focus.exists, false);
 });

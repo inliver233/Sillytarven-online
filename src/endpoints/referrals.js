@@ -9,7 +9,8 @@
  *   GET  /admin/list         管理员：邀请关系 ?query=&status=&inviter=&offset=&limit=，含汇总和邀请人排行
  *   POST /admin/revoke       管理员：撤销 { invitee, reclaim }
  *   POST /admin/approve      管理员：判定成功 { invitee }
- *   POST /admin/block        管理员：停用 / 恢复一个人的邀请 { handle, blocked, revokeAll, reclaim }
+ *   GET  /admin/access       管理员：单独设置过邀请资格的人
+ *   POST /admin/access       管理员：单独设置一个人 { handle, mode: allow|block|default, revokeAll, reclaim }
  *
  * 跨站邀请的站间接口（peerRouter，挂在 /api/referrals/peer，不用登录，要两站共用的 secret 签名）：
  *   POST /info               本站开没开、开没开跨站邀请、开着注册没有、奖励多少
@@ -29,13 +30,14 @@ import {
     claimReferral,
     ensureCode,
     getCrossSiteStatus,
+    listAccess,
     getMyReferralData,
     getReferralConfig,
     listReferrals,
     resetCode,
     revokeReferral,
     rewardsAvailable,
-    setInviterBlocked,
+    setInviterAccess,
     setReferralConfig,
 } from '../referrals.js';
 import { hadValidReply } from '../usage-meter.js';
@@ -143,14 +145,18 @@ router.post('/admin/approve', requireAdminMiddleware, async (request, response) 
     return result.ok ? response.send({ status: result.link.status }) : response.status(400).send({ error: result.reason });
 });
 
-router.post('/admin/block', requireAdminMiddleware, async (request, response) => {
+router.get('/admin/access', requireAdminMiddleware, async (_request, response) => {
+    return response.send(await listAccess());
+});
+
+router.post('/admin/access', requireAdminMiddleware, async (request, response) => {
     const body = request.body ?? {};
-    const result = await setInviterBlocked(String(body.handle ?? ''), body.blocked === true, {
+    const result = await setInviterAccess(String(body.handle ?? '').trim(), /** @type {any} */ (String(body.mode ?? '')), {
         revokeAll: body.revokeAll === true,
         reclaim: body.reclaim === true,
         by: request.user.profile.handle,
     });
-    return result.ok ? response.send({ revoked: result.revoked }) : response.status(400).send({ error: result.reason });
+    return result.ok ? response.send({ mode: result.mode, revoked: result.revoked }) : response.status(400).send({ error: result.reason });
 });
 
 /** 跨站邀请的站间接口（不用登录，验签名） */

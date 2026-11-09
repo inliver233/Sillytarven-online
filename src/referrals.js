@@ -16,7 +16,8 @@
  * 存储（node-persist）：
  *   referral:config                 设置
  *   referral:code:<码>              { code, owner, createdAt }
- *   referral:owner:<账号>           { code } 或 { blocked: { at, by } }（管理员停用了这个人的邀请）
+ *   referral:owner:<账号>           { code }
+ *   referral:access                 管理员单独设置的邀请资格 { <账号>: { mode: 'allow'|'block', at, by } }
  *   referral:link:<被邀请人>        { invitee, inviter, inviterSite?, inviterName?, code, source, boundAt, status, successAt,
  *                                     inviterRewardMiB, inviteeRewardMiB, revokedAt, revokedBy, reclaimed, expiredAt }
  *   referral:link:@<站>:<账号>      对方站的被邀请人（镜像）{ ..., mirror: true, inviteeSite, remoteInvitee, inviteeName }
@@ -43,6 +44,7 @@ const LINK_PREFIX = 'referral:link:';
 const INVITER_PREFIX = 'referral:inviter:';
 const INDEX_KEY = 'referral:index';
 const OUTBOX_KEY = 'referral:peer-outbox';
+const ACCESS_KEY = 'referral:access';
 /** 不易看错的字符 */
 const CODE_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
 const CODE_LENGTH = 8;
@@ -58,7 +60,7 @@ export const DEFAULT_REFERRAL_CONFIG = Object.freeze({
     inviterRewardMiB: 150,
     inviteeRewardMiB: 150,
     /** 邀请人通过邀请最多拿多少（0 = 不限） */
-    inviterCapMiB: 1500,
+    inviterCapMiB: 3000,
     /** 被邀请人注册多少天内可以绑定 */
     claimWindowDays: 7,
     /** 收到第一条有效 AI 回复才算成功 */
@@ -192,8 +194,8 @@ export function normalizeCode(code) {
  */
 export function ensureCode(handle) {
     return serialized(async () => {
+        if (await isBlocked(handle)) throw new Error('邀请已被停用');
         const owned = await storage.getItem(OWNER_PREFIX + handle);
-        if (owned?.blocked) throw new Error('邀请已被停用');
         if (owned?.code) return owned.code;
         return createCode(handle);
     });
@@ -216,8 +218,8 @@ async function createCode(handle) {
  */
 export function resetCode(handle) {
     return serialized(async () => {
+        if (await isBlocked(handle)) throw new Error('邀请已被停用');
         const owned = await storage.getItem(OWNER_PREFIX + handle);
-        if (owned?.blocked) throw new Error('邀请已被停用');
         if (owned?.code) await storage.removeItem(CODE_PREFIX + owned.code);
         await storage.removeItem(OWNER_PREFIX + handle);
         return createCode(handle);
@@ -229,23 +231,41 @@ export function resetCode(handle) {
 // ---------------------------------------------------------------------------
 
 /**
- * 邀请人够不够格（门槛和用户邀请码共用；不把门槛告诉用户）。
+ * 邀请人够不够格：管理员单独允许的够格、单独停用的不够格，其余按门槛（和用户邀请码共用；不把门槛告诉用户）。
  * @param {any} user
  * @returns {Promise<boolean>}
  */
 async function inviterEligible(user) {
     if (!user || user.enabled === false) return false;
-    if (await isBlocked(user.handle)) return false;
+    const mode = await accessOf(user.handle);
+    if (mode) return mode === 'allow';
+    return (await measureInviter(user)).meetsThresholds;
+}
+
+/** 按门槛看这个人：注册几天、累计在线几小时、够不够 */
+async function measureInviter(user) {
     const thresholds = await getUserInvitationConfig();
     const registeredDays = (Date.now() - (Number(user.created) || Date.now())) / DAY_MS;
-    if (registeredDays < thresholds.minRegisteredDays) return false;
-    if (thresholds.minOnlineHours > 0 && await getInvitationOnlineHours(user.handle) < thresholds.minOnlineHours) return false;
-    return true;
+    const onlineHours = await getInvitationOnlineHours(user.handle).catch(() => 0);
+    const meetsThresholds = registeredDays >= thresholds.minRegisteredDays && !(thresholds.minOnlineHours > 0 && onlineHours < thresholds.minOnlineHours);
+    return { registeredDays, onlineHours, meetsThresholds };
+}
+
+/** 管理员单独设置的邀请资格 */
+async function readAccess() {
+    const value = await storage.getItem(ACCESS_KEY);
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+}
+
+/** @returns {Promise<'allow'|'block'|null>} */
+async function accessOf(handle) {
+    const mode = (await readAccess())[handle]?.mode;
+    return mode === 'allow' || mode === 'block' ? mode : null;
 }
 
 /** 管理员停用了这个人的邀请 */
 async function isBlocked(handle) {
-    return Boolean((await storage.getItem(OWNER_PREFIX + handle))?.blocked);
+    return await accessOf(handle) === 'block';
 }
 
 /** 注册多久以后就不能再绑定邀请人 */
@@ -723,6 +743,19 @@ async function describeInvitee(link) {
     return { inviteeCreated: Number(user?.created) || null, inviteeOnlineHours: Math.round(hours * 10) / 10, inviteeExists: Boolean(user) };
 }
 
+/** 管理员看本站的一个人：按门槛够不够、单独设置了什么、现在能不能邀请 */
+async function describeInviter(handle) {
+    const user = await storage.getItem(toKey(handle));
+    if (!user) return { inviter: handle, inviterName: handle, remote: false, exists: false, blocked: false, mode: null };
+    const measured = await measureInviter(user);
+    const mode = await accessOf(handle);
+    return {
+        inviter: handle, inviterName: await nameOf(handle), remote: false, exists: true, mode, blocked: mode === 'block',
+        registeredDays: Math.floor(measured.registeredDays), onlineHours: Math.round(measured.onlineHours * 10) / 10, meetsThresholds: measured.meetsThresholds,
+        eligible: user.enabled !== false && (mode ? mode === 'allow' : measured.meetsThresholds),
+    };
+}
+
 /** 跨站邀请的情况（管理员面板）：配好了没有、对方站开没开、对方站开着注册没有 */
 export async function getCrossSiteStatus() {
     const { site, url, ready } = peerConfig();
@@ -789,7 +822,7 @@ export function listReferrals({ query = '', status = '', inviter: onlyInviter = 
                     inviter: onlyInviter, handle: known?.handle ?? onlyInviter.split(':').slice(1).join(':'), inviterName: known ? await inviterNameOf(known.link) : onlyInviter,
                     remote: true, siteLabel: siteLabel(known?.site ?? onlyInviter.split(':')[0]), blocked: false, total: rows.length, earnedMiB: known?.earnedMiB ?? 0,
                 }
-                : { inviter: onlyInviter, inviterName: await nameOf(onlyInviter), remote: false, blocked: await isBlocked(onlyInviter), total: (await readList(INVITER_PREFIX + onlyInviter)).length, earnedMiB: known?.earnedMiB ?? 0 };
+                : { ...await describeInviter(onlyInviter), total: (await readList(INVITER_PREFIX + onlyInviter)).length, earnedMiB: known?.earnedMiB ?? 0 };
         }
         return { summary, top: topRows, total: rows.length, rows: page, focus };
     });
@@ -829,34 +862,60 @@ async function revokeLink(link, { reclaim, by }) {
 }
 
 /**
- * 管理员停用 / 恢复一个人的邀请。停用：邀请码作废、不能再邀请，之后成功的邀请也不给邀请人空间；
- * revokeAll 时把这个人已有的邀请都撤销（reclaim：连已发的空间一起收回）。恢复后可以重新生成邀请码。
+ * 管理员单独设置一个人的邀请资格：
+ *   allow    不够门槛也能邀请
+ *   block    够门槛也不能邀请：邀请码作废、不能再生成，之后成功的邀请也不给邀请人空间；revokeAll 时把这个人
+ *            已有的邀请都撤销（reclaim：连已发的空间一起收回）
+ *   default  恢复按门槛（停用过的要重新生成邀请码）
+ * @param {string} handle
+ * @param {'allow'|'block'|'default'} mode
+ * @param {{ revokeAll?: boolean, reclaim?: boolean, by?: string }} [options]
+ */
+export function setInviterAccess(handle, mode, { revokeAll = false, reclaim = false, by = '' } = {}) {
+    return serialized(async () => {
+        if (!['allow', 'block', 'default'].includes(mode)) return { ok: false, reason: '不认识的设置' };
+        if (!handle || !await storage.getItem(toKey(handle))) return { ok: false, reason: '用户不存在' };
+        const access = await readAccess();
+        if (mode === 'default') delete access[handle];
+        else access[handle] = { mode, at: Date.now(), by };
+        await storage.setItem(ACCESS_KEY, access);
+        let revoked = 0;
+        if (mode === 'block') {
+            const owned = await storage.getItem(OWNER_PREFIX + handle);
+            if (owned?.code) await storage.removeItem(CODE_PREFIX + owned.code);
+            await storage.removeItem(OWNER_PREFIX + handle);
+            if (revokeAll) {
+                for (const invitee of await readList(INVITER_PREFIX + handle)) {
+                    const link = await storage.getItem(LINK_PREFIX + invitee);
+                    if (!link || link.status === STATUS.REVOKED) continue;
+                    await revokeLink(link, { reclaim, by });
+                    revoked++;
+                }
+            }
+        }
+        console.info(`[referrals] ${handle}: invitations ${mode === 'default' ? 'back to the thresholds' : `${mode}ed`} by ${by}${revoked ? `, ${revoked} revoked${reclaim ? ' with rewards taken back' : ''}` : ''}`);
+        return { ok: true, mode, revoked };
+    });
+}
+
+/**
+ * 停用 / 恢复（setInviterAccess 的简写）。
  * @param {string} handle
  * @param {boolean} blocked
  * @param {{ revokeAll?: boolean, reclaim?: boolean, by?: string }} [options]
  */
-export function setInviterBlocked(handle, blocked, { revokeAll = false, reclaim = false, by = '' } = {}) {
-    return serialized(async () => {
-        if (!handle || !await storage.getItem(toKey(handle))) return { ok: false, reason: '用户不存在' };
-        const owned = await storage.getItem(OWNER_PREFIX + handle);
-        if (blocked) {
-            if (owned?.code) await storage.removeItem(CODE_PREFIX + owned.code);
-            await storage.setItem(OWNER_PREFIX + handle, { blocked: { at: Date.now(), by } });
-        } else if (owned?.blocked) {
-            await storage.removeItem(OWNER_PREFIX + handle);
-        }
-        let revoked = 0;
-        if (blocked && revokeAll) {
-            for (const invitee of await readList(INVITER_PREFIX + handle)) {
-                const link = await storage.getItem(LINK_PREFIX + invitee);
-                if (!link || link.status === STATUS.REVOKED) continue;
-                await revokeLink(link, { reclaim, by });
-                revoked++;
-            }
-        }
-        console.info(`[referrals] ${handle}: invitations ${blocked ? 'blocked' : 'allowed again'} by ${by}${revoked ? `, ${revoked} revoked${reclaim ? ' with rewards taken back' : ''}` : ''}`);
-        return { ok: true, revoked };
-    });
+export function setInviterBlocked(handle, blocked, options = {}) {
+    return setInviterAccess(handle, blocked ? 'block' : 'default', options);
+}
+
+/** 单独设置过邀请资格的人（管理员面板） */
+export async function listAccess() {
+    const rows = [];
+    for (const [handle, entry] of Object.entries(await readAccess())) {
+        if (entry?.mode !== 'allow' && entry?.mode !== 'block') continue;
+        rows.push({ handle, name: await nameOf(handle), mode: entry.mode, at: Number(entry.at) || 0, by: String(entry.by ?? '') });
+    }
+    return rows.sort((a, b) => b.at - a.at);
 }
 
 /**

@@ -39,6 +39,7 @@ const GROUPS = Object.freeze([
             { key: 'minOnlineHours', label: '累计在线满', unit: '小时', max: 100_000, shared: '#userInvMinOnlineHours' },
         ],
         hint: '和「注册邀请码」页里用户发码的门槛是同一份设置。用户只会看到「暂未达到邀请资格」，看不到具体门槛。',
+        perUser: true,
     },
 ]);
 
@@ -113,6 +114,8 @@ function badge(status) {
 
 function buildView(mount) {
     const root = element('div', 'referralAdmin');
+    /** @type {{ lookupInput?: HTMLInputElement, lookupButton?: HTMLButtonElement, accessList?: HTMLElement }} */
+    const perUserParts = {};
 
     const header = element('header', 'referralAdmin-header');
     header.append(element('h3', '', '邀请奖励'),
@@ -163,6 +166,19 @@ function buildView(mount) {
         }
         box.append(grid);
         if (group.hint) box.append(element('small', 'referralAdmin-muted', group.hint));
+        if (group.perUser) {
+            const lookup = element('div', 'referralAdmin-lookup');
+            const lookupInput = /** @type {HTMLInputElement} */ (element('input', 'text_pole'));
+            lookupInput.type = 'search';
+            lookupInput.placeholder = '输入账号';
+            lookupInput.autocomplete = 'off';
+            lookupInput.spellcheck = false;
+            const lookupButton = button('查看', 'fa-magnifying-glass', 'referralAdmin-small');
+            lookup.append(element('span', 'referralAdmin-fieldLabel', '单独设置某个人：'), lookupInput, lookupButton);
+            const accessList = element('div', 'referralAdmin-accessList');
+            box.append(lookup, element('small', 'referralAdmin-muted', '可以让不够门槛的人也能邀请，或者停用够门槛的人；查看后在下方「邀请关系」上面操作。'), accessList);
+            Object.assign(perUserParts, { lookupInput, lookupButton, accessList });
+        }
         settings.append(box);
     }
 
@@ -181,7 +197,7 @@ function buildView(mount) {
     stats.append(statsHead, tiles);
 
     const top = element('section', 'referralAdmin-section');
-    top.append(element('h4', '', '邀请人排行'), element('p', 'referralAdmin-muted', '点名字只看这个人邀请的，在那里可以停用这个人的邀请。'));
+    top.append(element('h4', '', '邀请人排行'), element('p', 'referralAdmin-muted', '点名字只看这个人邀请的，在那里可以单独允许或停用这个人邀请。'));
     const topTable = element('div', 'referralAdmin-table referralAdmin-top');
     top.append(topTable);
 
@@ -212,7 +228,7 @@ function buildView(mount) {
 
     root.append(header, settings, stats, top, list);
     mount.replaceChildren(root);
-    return { root, warning, crossSite, status, save, refresh, tiles, topTable, search, filter, focus, table, pager, previous, next, pageText };
+    return { root, warning, crossSite, status, save, refresh, tiles, topTable, search, filter, focus, table, pager, previous, next, pageText, ...perUserParts };
 }
 
 function setStatus(view, text, state = '') {
@@ -399,20 +415,63 @@ function renderFocus(view, focus, ctx) {
         view.focus.replaceChildren(text, actions);
         return;
     }
-    const toggle = focus.blocked ? button('恢复邀请', 'fa-unlock', 'referralAdmin-small') : button('停用邀请', 'fa-user-slash', 'referralAdmin-small is-danger');
-    toggle.addEventListener('click', () => void act(toggle, async () => {
-        if (focus.blocked) {
-            await api('/admin/block', { handle: focus.inviter, blocked: false });
-            toastr.success('已恢复，可以重新生成邀请码了');
-            return;
-        }
-        const choice = await confirmBlock(focus);
-        if (!choice) return;
-        const result = await api('/admin/block', { handle: focus.inviter, blocked: true, ...choice });
-        toastr.success(result.revoked ? `已停用，撤销了 ${result.revoked} 条邀请${choice.reclaim ? '并收回空间' : ''}` : '已停用');
-    }, ctx.reloadList));
-    actions.append(toggle, clear);
-    view.focus.replaceChildren(text, actions);
+    if (focus.exists === false) {
+        view.focus.replaceChildren(element('div', 'referralAdmin-focusText', `没有「${focus.inviter}」这个账号。`), actions);
+        actions.append(clear);
+        return;
+    }
+    if (focus.mode === 'allow') text.append(element('span', 'referralAdmin-badge is-ok', '已单独允许'));
+    const standing = focus.mode === 'allow' ? '单独允许，可以邀请' : focus.mode === 'block' ? '已停用，不能邀请' : (focus.eligible ? '现在可以邀请' : '现在不能邀请');
+    const info = element('div', 'referralAdmin-focusInfo',
+        `注册 ${focus.registeredDays} 天 · 累计在线 ${focus.onlineHours} 小时 · 按门槛${focus.meetsThresholds ? '够格' : '不够格'} · ${standing}`);
+    const setAccess = async (mode, extra = {}) => {
+        const result = await api('/admin/access', { handle: focus.inviter, mode, ...extra });
+        const done = { allow: '已允许，这个人现在可以邀请了', block: '已停用', default: '已恢复按门槛' }[mode];
+        toastr.success(result.revoked ? `${done}，撤销了 ${result.revoked} 条邀请${extra.reclaim ? '并收回空间' : ''}` : done);
+    };
+    if (focus.mode !== 'allow' && !focus.meetsThresholds) {
+        const allow = button('允许邀请', 'fa-user-check', 'referralAdmin-small');
+        allow.title = '不够门槛也能邀请';
+        allow.addEventListener('click', () => void act(allow, () => setAccess('allow'), ctx.reloadList));
+        actions.append(allow);
+    }
+    if (focus.mode) {
+        const reset = button('恢复按门槛', 'fa-rotate-left', 'referralAdmin-small');
+        reset.addEventListener('click', () => void act(reset, () => setAccess('default'), ctx.reloadList));
+        actions.append(reset);
+    }
+    if (focus.mode !== 'block') {
+        const block = button('停用邀请', 'fa-user-slash', 'referralAdmin-small is-danger');
+        block.addEventListener('click', () => void act(block, async () => {
+            const choice = await confirmBlock(focus);
+            if (choice) await setAccess('block', choice);
+        }, ctx.reloadList));
+        actions.append(block);
+    }
+    actions.append(clear);
+    view.focus.replaceChildren(text, actions, info);
+}
+
+/** 单独设置过的人 */
+function renderAccess(view, rows, ctx) {
+    if (!view.accessList) return;
+    if (!rows.length) {
+        view.accessList.replaceChildren(element('small', 'referralAdmin-muted', '还没有单独设置过的人。'));
+        return;
+    }
+    const items = rows.map(row => {
+        const item = element('div', 'referralAdmin-accessItem');
+        const reset = button('恢复按门槛', 'fa-rotate-left', 'referralAdmin-small');
+        reset.addEventListener('click', () => void act(reset, async () => {
+            await api('/admin/access', { handle: row.handle, mode: 'default' });
+            toastr.success('已恢复按门槛');
+        }, ctx.reloadList));
+        item.append(inviterButton(row.name, row.handle, row.handle, ctx.focusInviter),
+            element('span', `referralAdmin-badge ${row.mode === 'allow' ? 'is-ok' : 'is-error'}`, row.mode === 'allow' ? '单独允许' : '已停用'),
+            element('span', 'referralAdmin-muted', `${formatDateTime(row.at)}${row.by ? ` · ${row.by}` : ''}`), reset);
+        return item;
+    });
+    view.accessList.replaceChildren(...items);
 }
 
 /** @returns {Promise<{revokeAll: boolean, reclaim: boolean}|null>} null = 取消 */
@@ -532,8 +591,12 @@ export async function openReferralAdmin(mount) {
         renderFocus(view, data.focus, ctx);
         renderLinks(view, data, state, ctx);
     };
+    const loadAccess = async () => renderAccess(view, await api('/admin/access'), ctx);
     const ctx = {
-        reloadList: loadList,
+        reloadList: async () => {
+            await loadList();
+            await loadAccess();
+        },
         focusInviter: handle => {
             state.inviter = handle;
             state.offset = 0;
@@ -542,7 +605,7 @@ export async function openReferralAdmin(mount) {
     };
     const reload = async () => {
         try {
-            const [config] = await Promise.all([api('/admin/config'), loadList()]);
+            const [config] = await Promise.all([api('/admin/config'), loadList(), loadAccess()]);
             fillSettings(view, config);
             setStatus(view, '');
         } catch (error) {
@@ -550,7 +613,17 @@ export async function openReferralAdmin(mount) {
         }
     };
 
-    view.root.querySelector('.referralAdmin-card').addEventListener('input', () => {
+    const lookup = () => {
+        const handle = view.lookupInput?.value.trim();
+        if (handle) ctx.focusInviter(handle);
+    };
+    view.lookupButton?.addEventListener('click', lookup);
+    view.lookupInput?.addEventListener('keydown', event => {
+        if (event.key === 'Enter') lookup();
+    });
+    view.root.querySelector('.referralAdmin-card').addEventListener('input', event => {
+        // 查账号的输入框不算设置
+        if (!(/** @type {HTMLElement} */ (event.target)).matches?.('input[data-key]')) return;
         syncDependent(view);
         setStatus(view, '有未保存的修改', 'dirty');
     });
