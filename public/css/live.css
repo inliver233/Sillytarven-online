@@ -270,3 +270,24 @@
     font-size: 0.82em;
     word-break: break-word;
 }
+
+/* 上线后补发的通知框：一条一条看 */
+.live-notice-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-top: 8px;
+    white-space: normal;
+}
+
+.live-notice-more {
+    opacity: 0.75;
+}
+
+#toast-container .menu_button.live-notice-next {
+    width: auto;
+    margin: 0;
+    padding: 2px 12px;
+    font-size: 0.9em;
+}

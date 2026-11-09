@@ -369,9 +369,13 @@ export async function openLiveAdmin(block) {
         view.typeRow.addEventListener('change', () => renderFields(view));
         view.late.addEventListener('change', () => {
             fillKeep(view);
-            // 补发的消息默认一直显示到对方关掉
+            // 补发的消息放在通知框里，一直显示到对方看完，显示时长不起作用
             const timeout = view.fields.querySelector('[data-key="timeout"]');
-            if (timeout && view.late.checked) timeout.value = '0';
+            if (timeout) {
+                if (view.late.checked) timeout.value = '0';
+                timeout.disabled = view.late.checked;
+                timeout.title = view.late.checked ? '上线后补发的消息一直显示到对方看完' : '';
+            }
         });
         view.targetRow.addEventListener('change', event => {
             if (event.target === view.handles) return;

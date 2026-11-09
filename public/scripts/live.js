@@ -246,15 +246,21 @@ async function reloadPage({ delay = 5, message = '', wait = true } = {}) {
 onLive('reload', data => reloadPage(data));
 
 // ---- 内置：显示消息 ----
-// 「上线后补发」的消息（带 late）：等页面在前台才显示，关掉才算这个账号看到了，告诉服务器（'seen'），
-// 之后再打开网页不会再收到；这个账号别的页面上还显示着的，服务器会让它们一起收起来。
+// 普通消息：页面上方弹一个提示。
+// 「上线后补发」的消息（带 late）：都放进同一个通知框，等页面在前台才显示；积了好几条时一条一条看
+// （「下一条」），没有关闭按钮，最后一条点「知道了」才收起。看过的那条才算这个账号看到了，告诉服务器
+// （'seen'），之后再打开网页不会再收到。这个账号在别的页面上看过的，这里也一起去掉。
 
-/** 显示着的补发消息：id → 提示 @type {Map<string, JQuery<HTMLElement>>} */
-const lateNotices = new Map();
+const LEVELS = ['info', 'success', 'warning', 'error'];
+
 /** 这个账号已经看过的补发消息（可能是在别的页面上） */
 const seenLate = new Set();
-/** 关掉了、还没能告诉服务器的（当时正好断线） */
+/** 看过了、还没能告诉服务器的（当时正好断线） */
 const pendingSeen = new Set();
+/** 还没看的补发消息，按到达的先后 @type {{ id: string, text: string, title: string, level: string }[]} */
+const lateQueue = [];
+/** 显示补发消息的通知框 @type {JQuery<HTMLElement>|null} */
+let lateBox = null;
 
 function sendPendingSeen() {
     for (const id of pendingSeen) {
@@ -274,38 +280,111 @@ function whenVisible() {
     });
 }
 
+/**
+ * 这一条看过了：从队列里拿掉，告诉服务器（断线时连上后补报）。
+ * @param {string} id
+ */
+function markLateSeen(id) {
+    const index = lateQueue.findIndex(notice => notice.id === id);
+    if (index >= 0) lateQueue.splice(index, 1);
+    if (seenLate.has(id)) return;
+    seenLate.add(id);
+    pendingSeen.add(id);
+    sendPendingSeen();
+}
+
+/** 收起通知框（toastr.clear 不调 onHidden：这里自己收尾） */
+function closeLateBox() {
+    const box = lateBox;
+    if (!box) return;
+    lateBox = null;
+    toastr.clear(box, { force: true });
+    // 页面原本的关闭处理（有弹窗开着时，后面的提示还要能显示），等淡出结束再做
+    setTimeout(() => toastr.options.onHidden?.(), (Number(toastr.options.hideDuration) || 250) + 50);
+}
+
+/** 通知框显示队列里最早的一条；队列空了就收起 */
+function renderLateBox() {
+    // 被别处整个清掉了（比如清空所有提示）：重新开一个
+    if (lateBox && !lateBox[0]?.isConnected) {
+        lateBox = null;
+    }
+    if (!lateQueue.length) {
+        closeLateBox();
+        return;
+    }
+    if (!lateBox) {
+        const box = toastr.info(' ', ' ', {
+            timeOut: 0,
+            extendedTimeOut: 0,
+            tapToDismiss: false,
+            // 没有关闭按钮：每条都要看到
+            closeButton: false,
+            escapeHtml: true,
+            messageClass: 'toast-message live-notice-message',
+            onHidden: () => {
+                // 页面原本的处理：有弹窗开着时，后面的提示还要能显示
+                toastr.options.onHidden?.();
+                // 不是点「下一条」「知道了」收起的：不算看过，下次再来
+                if (lateBox === box) lateBox = null;
+            },
+        });
+        lateBox = box;
+    }
+    const box = lateBox;
+    const notice = lateQueue[0];
+    const left = lateQueue.length - 1;
+    box.removeClass(LEVELS.map(level => `toast-${level}`).join(' ')).addClass(`toast-${LEVELS.includes(notice.level) ? notice.level : 'info'}`);
+    box.find('.toast-title').text(notice.title || '通知');
+    const text = document.createElement('div');
+    text.textContent = notice.text;
+    const footer = document.createElement('div');
+    footer.className = 'live-notice-footer';
+    const more = document.createElement('small');
+    more.className = 'live-notice-more';
+    more.textContent = left ? `还有 ${left} 条未读` : '';
+    const next = document.createElement('button');
+    next.type = 'button';
+    next.className = 'menu_button live-notice-next';
+    next.textContent = left ? '下一条' : '知道了';
+    next.addEventListener('click', event => {
+        event.stopPropagation();
+        markLateSeen(notice.id);
+        renderLateBox();
+    });
+    footer.append(more, next);
+    box.find('.toast-message')[0]?.replaceChildren(text, footer);
+}
+
 onLive('notice', async ({ text = '', title = '', level = 'info', timeout = 15 } = {}, message) => {
-    const late = message?.late === true && typeof message.id === 'string';
-    if (late) {
+    if (message?.late === true && typeof message.id === 'string') {
+        if (seenLate.has(message.id) || lateQueue.some(notice => notice.id === message.id)) return;
+        lateQueue.push({ id: message.id, text: String(text), title: String(title), level: String(level) });
         await whenVisible();
-        if (seenLate.has(message.id)) return;
+        renderLateBox();
+        return;
     }
     const show = toastr[level] ?? toastr.info;
     const ms = Math.max(0, Number(timeout) || 0) * 1000;
-    const toast = show(text, title, {
+    show(text, title, {
         timeOut: ms,
         extendedTimeOut: ms ? 5000 : 0,
         tapToDismiss: ms > 0,
         closeButton: true,
         escapeHtml: true,
         messageClass: 'toast-message live-notice-message',
-        onHidden: late ? () => {
-            lateNotices.delete(message.id);
-            if (seenLate.has(message.id)) return;
-            seenLate.add(message.id);
-            pendingSeen.add(message.id);
-            sendPendingSeen();
-        } : undefined,
     });
-    if (late) lateNotices.set(message.id, toast);
 });
 
 onLive('seen', ({ id } = {}) => {
     if (typeof id !== 'string') return;
-    seenLate.add(id);
+    // 在别的页面上看过了：这里不用再报，正显示着就换下一条
     pendingSeen.delete(id);
-    const toast = lateNotices.get(id);
-    if (toast) toastr.clear(toast, { force: true });
+    seenLate.add(id);
+    const index = lateQueue.findIndex(notice => notice.id === id);
+    if (index < 0) return;
+    lateQueue.splice(index, 1);
+    if (lateBox) renderLateBox();
 });
 
 // ---- 启动 ----
