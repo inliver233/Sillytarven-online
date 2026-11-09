@@ -161,7 +161,7 @@ test('the API: a new user binds by code; errors come back as messages; admins on
         body: body ? JSON.stringify(body) : undefined,
     }).then(async response => ({ status: response.status, data: await response.json().catch(() => null) }));
 
-    assert.deepEqual((await call('liam', '/status')).data, { enabled: true });
+    assert.deepEqual((await call('liam', '/status')).data, { enabled: true, rewardMiB: 500 });
     const mine = await call('liam', '/my');
     assert.deepEqual([mine.data.canClaim, mine.data.eligible, mine.data.code], [true, false, null]);
     assert.equal((await call('liam', '/code', {})).status, 403);

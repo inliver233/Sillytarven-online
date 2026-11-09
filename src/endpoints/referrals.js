@@ -1,6 +1,6 @@
 /**
  * 邀请奖励接口（src/referrals.js）：
- *   GET  /status             开没开（决定要不要显示入口）
+ *   GET  /status             开没开、邀请一个人给多少（入口要不要显示、上面写多少）
  *   GET  /my                 自己的邀请码、规则、邀请到的人、被谁邀请
  *   POST /code               生成邀请码（够格才行）；{ reset: true } 换一个
  *   POST /claim              绑定邀请人 { code, source }
@@ -38,7 +38,8 @@ router.use((_request, response, next) => {
 });
 
 router.get('/status', requireLoginMiddleware, async (_request, response) => {
-    return response.send({ enabled: (await getReferralConfig()).enabled });
+    const config = await getReferralConfig();
+    return response.send({ enabled: config.enabled, rewardMiB: rewardsAvailable() ? config.inviterRewardMiB : 0 });
 });
 
 router.get('/my', requireLoginMiddleware, async (request, response) => {

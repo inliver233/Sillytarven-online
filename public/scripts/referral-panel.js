@@ -291,13 +291,31 @@ async function offerPendingReferral() {
     }
 }
 
+/** 启动时查到的开关和奖励 @type {{enabled: boolean, rewardMiB: number}|null} */
+let lastStatus = null;
+
+/**
+ * 入口：用户设置里的按钮、☰ 菜单里的一项开着才显示，账号弹窗里的按钮开着才突出；都写上邀请一个人给多少。
+ * @param {any} [root] 在哪里找（账号弹窗的模板，或整个页面）
+ */
+export function decorateReferralEntries(root = document) {
+    const enabled = Boolean(lastStatus?.enabled);
+    const reward = enabled ? Number(lastStatus.rewardMiB) || 0 : 0;
+    const scope = $(root);
+    scope.find('#referral_button').toggle(enabled);
+    scope.find('#option_referral').toggleClass('displayNone', !enabled);
+    scope.find('.userInvitationCodesButton').toggleClass('referralEntry', enabled);
+    scope.find('.referralEntryPill').text(`+${reward}MB`).prop('hidden', !(reward > 0));
+}
+
 export function initReferrals() {
     $('#referral_button').on('click', () => void openReferralPanel());
     eventSource.on(event_types.APP_READY, () => {
-        void api('/status').then(({ enabled }) => {
-            $('#referral_button').toggle(Boolean(enabled));
+        void api('/status').then(status => {
+            lastStatus = status;
+            decorateReferralEntries();
             // 等其他启动弹窗和提示（公告、新手引导后的提示）先过去
-            if (enabled && localStorage.getItem(PENDING_KEY)) setTimeout(() => void offerPendingReferral(), 4000);
+            if (status.enabled && localStorage.getItem(PENDING_KEY)) setTimeout(() => void offerPendingReferral(), 4000);
         }).catch(() => null);
     });
 }

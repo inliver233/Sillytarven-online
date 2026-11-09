@@ -1574,6 +1574,7 @@ async function openUserProfile() {
         const { openReferralPanel } = await import('./referral-panel.js');
         await openReferralPanel();
     });
+    void import('./referral-panel.js').then(module => module.decorateReferralEntries(template));
 
     bindOwnFullBackupButton(template);
     template.find('.userStorageRedeemButton').on('click', async () => {

@@ -70,6 +70,80 @@
     opacity: 0.85;
 }
 
+/* ---- 入口（用户设置、账号弹窗、☰ 菜单）：比旁边的按钮显眼 ---- */
+.menu_button.referralEntry {
+    --rf-gold: #f59e0b;
+    --rf-pink: #ec4899;
+    position: relative;
+    overflow: hidden;
+    border-color: color-mix(in srgb, var(--rf-gold) 70%, transparent);
+    background-image: linear-gradient(135deg, color-mix(in srgb, var(--rf-gold) 26%, transparent), color-mix(in srgb, var(--rf-pink) 22%, transparent));
+    box-shadow: 0 0 10px color-mix(in srgb, var(--rf-gold) 30%, transparent);
+    color: var(--SmartThemeBodyColor);
+    font-weight: 600;
+}
+
+.menu_button.referralEntry > i {
+    color: #fbbf24;
+}
+
+.menu_button.referralEntry:hover {
+    filter: brightness(1.15);
+}
+
+/* 隔一会儿扫过一道光 */
+.menu_button.referralEntry::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(110deg, transparent 35%, rgba(255, 255, 255, 0.3) 50%, transparent 65%);
+    transform: translateX(-120%);
+    animation: referral-sheen 5s ease-in-out infinite;
+    pointer-events: none;
+}
+
+@keyframes referral-sheen {
+    0%,
+    75% {
+        transform: translateX(-120%);
+    }
+
+    100% {
+        transform: translateX(120%);
+    }
+}
+
+.referralEntryPill {
+    padding: 0 6px;
+    border-radius: 999px;
+    background: linear-gradient(135deg, #fcd34d, #f59e0b);
+    color: #3b2300;
+    font-size: 0.72em;
+    font-weight: 700;
+    line-height: 1.7;
+    white-space: nowrap;
+}
+
+.referralEntryPill[hidden] {
+    display: none;
+}
+
+#options .options-content a.referralMenuEntry {
+    align-items: center;
+    opacity: 1;
+    font-weight: 600;
+}
+
+#options .options-content a.referralMenuEntry > i {
+    color: #fbbf24;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .menu_button.referralEntry::after {
+        display: none;
+    }
+}
+
 /* ---- 用户面板 ---- */
 .referralPanel {
     display: flex;

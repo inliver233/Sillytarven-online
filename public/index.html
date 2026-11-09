@@ -5107,9 +5107,10 @@
                                 <i class="fa-fw fa-solid fa-coins"></i>
                                 <span>用量与花费</span>
                             </div>
-                            <div id="referral_button" class="margin0 menu_button_icon menu_button" title="邀请好友，双方都能获得存储空间" style="display: none;">
+                            <div id="referral_button" class="margin0 menu_button_icon menu_button referralEntry" title="邀请好友，双方都能获得存储空间" style="display: none;">
                                 <i class="fa-fw fa-solid fa-gift"></i>
                                 <span>邀请好友</span>
+                                <span class="referralEntryPill" hidden></span>
                             </div>
                             <div id="admin_button" class="margin0 menu_button_icon menu_button">
                                 <i class="fa-fw fa-solid fa-user-tie"></i>
@@ -8422,6 +8423,11 @@
                 <span data-i18n="Continue">Continue</span>
             </a>
             <hr>
+            <a id="option_referral" class="displayNone referralMenuEntry" title="邀请好友，双方都能获得存储空间">
+                <i class="fa-lg fa-solid fa-gift"></i>
+                <span>邀请好友</span>
+                <span class="referralEntryPill" hidden></span>
+            </a>
             <a id="option_announcements">
                 <i class="fa-lg fa-solid fa-bullhorn"></i>
                 <span>系统公告</span>
