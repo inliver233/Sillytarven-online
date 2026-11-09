@@ -361,3 +361,24 @@ test('admins let one person invite below the thresholds, or stop one who meets t
     assert.equal((await referrals.setInviterAccess('frank', 'whatever')).ok, false);
     assert.equal((await referrals.listReferrals({ inviter: 'nobody-here' })).focus.exists, false);
 });
+
+test('online time is rounded before it meets the threshold: 1.45 hours count as 2', async t => {
+    const { roundOnlineHours } = await import('../src/user-invitations.js');
+    const HOUR = 3_600_000;
+    assert.deepEqual(roundOnlineHours(1.45 * HOUR), { tenths: 1.5, hours: 2 }, '1.45 → 1.5 → 2, despite 1.45 being 1.4499… in floating point');
+    assert.deepEqual(roundOnlineHours(5_219_999), { tenths: 1.4, hours: 1 }, 'just under 1.45');
+    assert.deepEqual(roundOnlineHours(1.5 * HOUR), { tenths: 1.5, hours: 2 });
+    assert.deepEqual(roundOnlineHours(0.45 * HOUR), { tenths: 0.5, hours: 1 });
+    assert.deepEqual(roundOnlineHours(0), { tenths: 0, hours: 0 });
+
+    await setUserInvitationConfig({ minOnlineHours: 2 });
+    t.after(() => setUserInvitationConfig({ minOnlineHours: 0 }));
+    await makeUser('uma', 30);
+    await makeUser('vic', 30);
+    await storage.setItem('user-invitation:online-baseline:uma', { durationMs: 1.45 * HOUR });
+    await storage.setItem('user-invitation:online-baseline:vic', { durationMs: 5_219_999 });
+    assert.equal((await referrals.getMyReferralData('uma')).eligible, true, '1.45 hours: enough');
+    assert.equal((await referrals.getMyReferralData('vic')).eligible, false, '1.44 hours: not');
+    const focus = (await referrals.listReferrals({ inviter: 'uma' })).focus;
+    assert.deepEqual([focus.onlineHours, focus.roundedHours, focus.meetsThresholds], [1.5, 2, true]);
+});

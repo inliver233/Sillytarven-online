@@ -108,6 +108,17 @@ async function getOnlineDurationMs(handle) {
 }
 
 /**
+ * 在线时长和门槛比之前先取整：先四舍五入到 0.1 小时，再四舍五入到整小时（1.45 → 1.5 → 2，1.44 → 1.4 → 1）。
+ * 在整数毫秒上算，免得 1.45 这样的数被浮点误差舍成 1.4。
+ * @param {number} durationMs Online time in milliseconds
+ * @returns {{ tenths: number, hours: number }} 一位小数的小时数（显示用）、和门槛比的整小时数
+ */
+export function roundOnlineHours(durationMs) {
+    const tenths = Math.round(Math.round(Number(durationMs) || 0) / 360_000) / 10;
+    return { tenths, hours: Math.round(tenths) };
+}
+
+/**
  * Total online time counted for invitation eligibility (kept across statistics resets).
  * @param {string} handle User handle
  * @returns {Promise<number>} Hours
@@ -230,7 +241,7 @@ async function evaluateEligibility(handle) {
     if (registeredDays < config.minRegisteredDays) {
         reasons.push('注册时长不足');
     }
-    if (onlineHours < config.minOnlineHours) {
+    if (roundOnlineHours(onlineHours * 3_600_000).hours < config.minOnlineHours) {
         reasons.push('在线时长不足');
     }
 

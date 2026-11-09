@@ -423,7 +423,7 @@ function renderFocus(view, focus, ctx) {
     if (focus.mode === 'allow') text.append(element('span', 'referralAdmin-badge is-ok', '已单独允许'));
     const standing = focus.mode === 'allow' ? '单独允许，可以邀请' : focus.mode === 'block' ? '已停用，不能邀请' : (focus.eligible ? '现在可以邀请' : '现在不能邀请');
     const info = element('div', 'referralAdmin-focusInfo',
-        `注册 ${focus.registeredDays} 天 · 累计在线 ${focus.onlineHours} 小时 · 按门槛${focus.meetsThresholds ? '够格' : '不够格'} · ${standing}`);
+        `注册 ${focus.registeredDays} 天 · 累计在线 ${focus.onlineHours} 小时（按 ${focus.roundedHours} 小时算） · 按门槛${focus.meetsThresholds ? '够格' : '不够格'} · ${standing}`);
     const setAccess = async (mode, extra = {}) => {
         const result = await api('/admin/access', { handle: focus.inviter, mode, ...extra });
         const done = { allow: '已允许，这个人现在可以邀请了', block: '已停用', default: '已恢复按门槛' }[mode];

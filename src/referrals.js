@@ -34,7 +34,7 @@ import { live } from './live.js';
 import { callPeer, getPeerInfo, identityKey, peerConfig, siteLabel } from './referral-peer.js';
 import { getRegistrationMethodConfig } from './registration-policy.js';
 import { getStorageConfig, getUserLimitMiB } from './storage-quota.js';
-import { getInvitationOnlineHours, getUserInvitationConfig } from './user-invitations.js';
+import { getInvitationOnlineHours, getUserInvitationConfig, roundOnlineHours } from './user-invitations.js';
 import { toKey } from './users.js';
 
 const CONFIG_KEY = 'referral:config';
@@ -242,13 +242,13 @@ async function inviterEligible(user) {
     return (await measureInviter(user)).meetsThresholds;
 }
 
-/** 按门槛看这个人：注册几天、累计在线几小时、够不够 */
+/** 按门槛看这个人：注册几天、累计在线几小时（四舍五入后和门槛比，1.45 小时算 2 小时）、够不够 */
 async function measureInviter(user) {
     const thresholds = await getUserInvitationConfig();
     const registeredDays = (Date.now() - (Number(user.created) || Date.now())) / DAY_MS;
-    const onlineHours = await getInvitationOnlineHours(user.handle).catch(() => 0);
-    const meetsThresholds = registeredDays >= thresholds.minRegisteredDays && !(thresholds.minOnlineHours > 0 && onlineHours < thresholds.minOnlineHours);
-    return { registeredDays, onlineHours, meetsThresholds };
+    const online = roundOnlineHours(await getInvitationOnlineHours(user.handle).catch(() => 0) * 3_600_000);
+    const meetsThresholds = registeredDays >= thresholds.minRegisteredDays && !(thresholds.minOnlineHours > 0 && online.hours < thresholds.minOnlineHours);
+    return { registeredDays, onlineHours: online.tenths, roundedHours: online.hours, meetsThresholds };
 }
 
 /** 管理员单独设置的邀请资格 */
@@ -751,7 +751,7 @@ async function describeInviter(handle) {
     const mode = await accessOf(handle);
     return {
         inviter: handle, inviterName: await nameOf(handle), remote: false, exists: true, mode, blocked: mode === 'block',
-        registeredDays: Math.floor(measured.registeredDays), onlineHours: Math.round(measured.onlineHours * 10) / 10, meetsThresholds: measured.meetsThresholds,
+        registeredDays: Math.floor(measured.registeredDays), onlineHours: measured.onlineHours, roundedHours: measured.roundedHours, meetsThresholds: measured.meetsThresholds,
         eligible: user.enabled !== false && (mode ? mode === 'allow' : measured.meetsThresholds),
     };
 }
