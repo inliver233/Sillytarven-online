@@ -88,6 +88,7 @@ import { startGitSync } from './git-sync/router.js';
 import { leaderboard, leaderboardPeerHandler } from './leaderboard-service.js';
 import { live } from './live.js';
 import { startUsageMeter } from './usage-meter.js';
+import { normalizeCode, startReferrals } from './referrals.js';
 
 // Routers
 import { router as usersPublicRouter } from './endpoints/users-public.js';
@@ -334,6 +335,15 @@ app.get('/', cacheBuster.middleware, (request, response) => {
         return sendAppPage(request, response);
     }
     return response.sendFile('welcome.html', { root: path.join(serverDirectory, 'public') });
+});
+
+// Invitation link: remember the inviter's code in this browser, then go on as usual (log in or
+// register); the app offers to bind it once a new account is signed in (referral-panel.js).
+app.get('/invite/:code', (request, response) => {
+    setPrivateNoStoreHeaders(response);
+    const code = normalizeCode(request.params.code);
+    const remember = code ? `try{localStorage.setItem('st_pending_referral',JSON.stringify({code:'${code}',at:Date.now()}))}catch(e){}` : '';
+    response.type('html').send(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>邀请</title><script>${remember};location.replace('/')</script><noscript><meta http-equiv="refresh" content="0;url=/"></noscript>`);
 });
 
 // Explicit welcome route
@@ -675,6 +685,8 @@ async function preSetupTasks() {
     live.start();
     // Prices of official AI services for the usage meter (models.dev, once a day).
     startUsageMeter();
+    // Invitation rewards: pending invitations, expiry of old ones.
+    startReferrals();
     // Scheduled git backups of users who turned them on.
     startGitSync();
 

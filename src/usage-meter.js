@@ -7,6 +7,7 @@ import fetch from 'node-fetch';
 import { sync as writeFileAtomicSync } from 'write-file-atomic';
 
 import { readSecret, SECRET_KEYS } from './endpoints/secrets.js';
+import { noteValidReply } from './referrals.js';
 import { canPersistSharedState, onActivate } from './process-lifecycle.js';
 import { describeRelay, detectRelay, FREE_RELAYS, knownRelay, readRelaySpend, RELAY_LABELS } from './relay-billing.js';
 import { getLocalDateKey } from './storage-quota.js';
@@ -38,6 +39,8 @@ const KEEP_DAYS = 60;
 const KEEP_RECENT = 40;
 /** Larger answers without line breaks are not searched for usage. */
 const MAX_PENDING_CHARS = 16 * 1024 * 1024;
+/** Some generated text in a streamed event ("content" / "text" with at least one character). */
+const TEXT_PATTERN = /"(?:content|text)"\s*:\s*"(?:[^"\\]|\\.)/;
 
 /** Sources billed by the token at published prices → their providers on models.dev. */
 const OFFICIAL_PROVIDERS = Object.freeze({
@@ -72,6 +75,8 @@ export class UsageReader {
         this.pending = '';
         /** @type {{ gemini?: any, openai?: any, claude?: any }} */
         this.found = {};
+        /** Whether the answer carried any generated text */
+        this.sawText = false;
     }
 
     /** @param {Buffer|string} chunk */
@@ -95,6 +100,7 @@ export class UsageReader {
 
     /** @param {string} line */
     line(line) {
+        if (!this.sawText && TEXT_PATTERN.test(line)) this.sawText = true;
         if (!line.includes('sage')) return; // usage / usageMetadata
         const text = line.startsWith('data:') ? line.slice(5).trim() : line.trim();
         if (!text.startsWith('{') && !text.startsWith('[')) return;
@@ -112,6 +118,12 @@ export class UsageReader {
             return;
         }
         if (!value || typeof value !== 'object') return;
+        if (!this.sawText) {
+            const parts = value.candidates?.[0]?.content?.parts;
+            this.sawText = Boolean(String(value.choices?.[0]?.message?.content ?? value.choices?.[0]?.delta?.content ?? value.choices?.[0]?.text ?? '')
+                || (Array.isArray(parts) && parts.some(part => part?.text))
+                || (Array.isArray(value.content) && value.content.some(part => part?.text)));
+        }
         // Gemini / Vertex AI: every chunk carries the totals so far.
         const meta = value.usageMetadata ?? value.response?.usageMetadata;
         if (meta && typeof meta === 'object') this.found.gemini = meta;
@@ -416,6 +428,7 @@ export function readUsage(handle) {
         days: stored?.days && typeof stored.days === 'object' ? stored.days : {},
         recent: Array.isArray(stored?.recent) ? stored.recent : [],
         relays: stored?.relays && typeof stored.relays === 'object' ? stored.relays : {},
+        validReplyAt: Number(stored?.validReplyAt) || 0,
         settings: {
             rate: Number(settings.rate) > 0 ? Number(settings.rate) : DEFAULT_RATE,
             pricing: settings.pricing && typeof settings.pricing === 'object' ? settings.pricing : {},
@@ -472,8 +485,9 @@ function add(totals, entry, reported) {
  * @param {Entry} entry
  * @param {boolean} reported Whether the service reported its usage
  */
-export function recordUsage(handle, entry, reported) {
+export function recordUsage(handle, entry, reported, { validReply = false } = {}) {
     return updateUsage(handle, data => {
+        if (validReply && !data.validReplyAt) data.validReplyAt = entry.at;
         const day = getLocalDateKey(new Date(entry.at));
         const today = data.days[day] ??= { ...emptyTotals(), models: {} };
         add(today, entry, reported);
@@ -737,10 +751,21 @@ export function meterGeneration(request, response) {
             const price = findPrice(source, model, request.body);
             if (price) Object.assign(entry, { cost: priceUsage(price.cost, usage), priced: 'official', provider: price.provider });
         }
-        await recordUsage(handle, entry, Boolean(usage));
+        // A reply with some text in it (or output the service counted): what an invitation waits for.
+        const validReply = (usage?.output ?? 0) > 0 || reader.sawText;
+        await recordUsage(handle, entry, Boolean(usage), { validReply });
+        if (validReply) noteValidReply(handle);
         if (waitForRelay && relay) settleRelay(handle, relay, id, Math.max(1, entry.input + entry.output));
         if (firstReading && relay && entry.relay?.kind) await takeReading(handle, relay, entry.relay.kind);
     }
+}
+
+/**
+ * Whether the user ever got a valid AI reply (recorded since the usage meter exists).
+ * @param {string} handle
+ */
+export function hadValidReply(handle) {
+    return readUsage(handle).validReplyAt > 0;
 }
 
 /** The server calls this: prices are fetched by the serving process, once a day. */

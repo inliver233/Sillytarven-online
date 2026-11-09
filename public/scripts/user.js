@@ -1324,7 +1324,7 @@ async function loadUserStorageStatus(template) {
 
 // ===== 用户层邀请码发放系统 =====
 // 资格不足时只显示"未达到资格"，不透露门槛；列表与状态由后端 /api/user-invitations/my 驱动
-async function openMyInvitationCodes() {
+export async function openMyInvitationCodes() {
     const template = $(await renderTemplateAsync('myInvitationCodes'));
 
     // 先弹出（loading 态），再异步填充数据
@@ -1570,17 +1570,9 @@ async function openUserProfile() {
         template.find('.noPassword').toggle(!currentUser.password);
     }));
 
-    if (currentUser.admin) {
-        template.find('.userInvitationCodesButton')
-            .attr('title', '管理用户发放的邀请码')
-            .find('span').text('用户邀请管理');
-    }
-    template.find('.userInvitationCodesButton').on('click', () => {
-        if (currentUser.admin) {
-            openAdminPanel('userInvitationsAdminBlock');
-        } else {
-            openMyInvitationCodes();
-        }
+    template.find('.userInvitationCodesButton').on('click', async () => {
+        const { openReferralPanel } = await import('./referral-panel.js');
+        await openReferralPanel();
     });
 
     bindOwnFullBackupButton(template);
@@ -1718,7 +1710,7 @@ async function changeAvatar(handle, avatar) {
     }
 }
 
-async function openAdminPanel(initialTab = 'usersList') {
+export async function openAdminPanel(initialTab = 'usersList') {
     if (typeof window.initializeAdminExtensions !== 'function') {
         try {
             await import('./admin-extensions.js');
@@ -2047,6 +2039,9 @@ async function openAdminPanel(initialTab = 'usersList') {
         }
         if (target === 'liveAdminBlock') {
             void import('./live-admin.js').then(module => module.openLiveAdmin(template.find('.liveAdminBlock')[0]));
+        }
+        if (target === 'userInvitationsAdminBlock') {
+            void import('./referral-admin.js').then(module => module.openReferralAdmin(template.find('.referralAdminMount')[0]));
         }
         // 初始化管理员扩展功能
         if (typeof window.initializeAdminExtensions === 'function') {

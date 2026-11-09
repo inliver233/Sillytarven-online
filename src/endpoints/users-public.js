@@ -7,6 +7,7 @@ import { getIpAddress, retryAfter } from '../express-common.js';
 import { color, Cache, getConfigValue } from '../util.js';
 import { KEY_PREFIX, getUserAvatar, toKey, getPasswordHash, getPasswordSalt, getAllUserHandles, getUserDirectories, ensurePublicDirectoriesExist, ensureUserDirectoriesExist, makeUserAccountPermanent, normalizeHandle, getAccountVersion } from '../users.js';
 import { validateInvitationCode, useInvitationCode } from '../invitation-codes.js';
+import { bindFromInvitation } from '../referrals.js';
 import { isUserIssuedInvitation } from '../user-invitation-policy.js';
 import { checkForNewContent, CONTENT_TYPES } from './content-manager.js';
 import { applyDefaultTemplateToUser } from '../default-template.js';
@@ -629,6 +630,8 @@ router.post('/register', async (request, response) => {
                 console.warn('Register failed: Invitation code could not be consumed');
                 return response.status(400).json({ error: invitationUse.reason || '邀请码无效' });
             }
+            // 用户发的注册邀请码：同时记一次邀请奖励
+            void bindFromInvitation(invitationUse.invitation, normalizedHandle);
         }
 
         // 清除已使用的验证码（如果使用了邮件验证）

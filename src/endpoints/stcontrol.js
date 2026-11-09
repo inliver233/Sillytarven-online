@@ -9,6 +9,7 @@ import storage from 'node-persist';
 import { applyDefaultTemplateToUser } from '../default-template.js';
 import { getDiscordGuildMembershipConfig } from '../discord-registration-policy.js';
 import { useInvitationCode } from '../invitation-codes.js';
+import { bindFromInvitation } from '../referrals.js';
 import { getRegistrationMethodConfig } from '../registration-policy.js';
 import {
     STCONTROL_CAPABILITIES,
@@ -155,12 +156,14 @@ router.post('/api/stcontrol/internal/users/provision', async (request, response)
             if (!methodPolicy?.enabled) {
                 throw new AdapterRequestError(409, 'registration_closed');
             }
+            let usedInvitation = null;
             if (methodPolicy.invitation_required) {
                 const used = await useInvitationCode(input.invitation_code, input.handle, null, {
                     required: true,
                     claimId: input.registration_id,
                 });
                 if (!used.success) throw new AdapterRequestError(403, 'invitation_invalid');
+                usedInvitation = used.invitation;
             }
             if (existing) {
                 reclaimProvisionedOAuthOrphan(existing, input);
@@ -179,6 +182,8 @@ router.post('/api/stcontrol/internal/users/provision', async (request, response)
                 await storage.removeItem(key);
                 throw error;
             }
+            // 用户发的注册邀请码：同时记一次邀请奖励
+            if (usedInvitation) void bindFromInvitation(usedInvitation, newUser.handle);
             return { ok: true, handle: newUser.handle, local_user_id: newUser.handle };
         });
         return response.json(result);

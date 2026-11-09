@@ -19,6 +19,7 @@ import {
     validateInvitationCode,
     useInvitationCode,
 } from '../invitation-codes.js';
+import { bindFromInvitation } from '../referrals.js';
 import { getRegistrationConfig, getRegistrationMethodConfig } from '../registration-policy.js';
 import {
     fetchDiscordGuildMembershipEligibility,
@@ -1060,6 +1061,8 @@ router.post('/verify-invitation', async (request, response) => {
                 }
                 return response.status(400).json({ error: invitationUse.reason || '邀请码无效' });
             }
+            // 用户发的注册邀请码：同时记一次邀请奖励
+            void bindFromInvitation(invitationUse.invitation, pendingUser.handle);
 
             // 创建用户目录并初始化默认内容
             console.info('Creating data directories for', pendingUser.handle);

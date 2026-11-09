@@ -61,6 +61,7 @@ import { router as userInvitationsRouter } from './endpoints/user-invitations.js
 import { router as leaderboardRouter } from './endpoints/leaderboard.js';
 import { live, router as liveRouter } from './live.js';
 import { router as usageRouter } from './usage-meter.js';
+import { router as referralsRouter } from './endpoints/referrals.js';
 import { leaderboardGenerationMiddleware } from './leaderboard-service.js';
 import { router as systemLoadRouter } from './endpoints/system-load.js';
 import { router as publicCharactersRouter } from './endpoints/public-characters.js';
@@ -250,6 +251,7 @@ export function setupPrivateEndpoints(app) {
     app.use('/api/leaderboard', leaderboardRouter);
     app.use('/api/live', liveRouter);
     app.use('/api/usage', usageRouter);
+    app.use('/api/referrals', referralsRouter);
     app.use('/api/scheduled-tasks', scheduledTasksRouter);
     app.use('/api/user-storage', userStorageRouter);
     app.use('/api/backup-limits', backupLimitsRouter);

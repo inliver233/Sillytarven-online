@@ -107,6 +107,15 @@ async function getOnlineDurationMs(handle) {
     return baselineMs + (stats?.onlineDuration ?? 0);
 }
 
+/**
+ * Total online time counted for invitation eligibility (kept across statistics resets).
+ * @param {string} handle User handle
+ * @returns {Promise<number>} Hours
+ */
+export async function getInvitationOnlineHours(handle) {
+    return await getOnlineDurationMs(handle) / 3_600_000;
+}
+
 async function persistOnlineBaseline(handle, durationMs) {
     await storage.setItem(getOnlineBaselineKey(handle), {
         durationMs: Math.max(0, Number(durationMs) || 0),

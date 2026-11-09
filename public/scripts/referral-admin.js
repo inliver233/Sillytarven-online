@@ -1,0 +1,473 @@
+// 管理员面板：邀请奖励（src/referrals.js）——设置、统计、邀请人排行、邀请关系（判定成功 / 撤销 / 收回）
+import { getRequestHeaders } from '../script.js';
+import { callGenericPopup, POPUP_RESULT, POPUP_TYPE } from './popup.js';
+
+const PAGE_SIZE = 30;
+/** 已经建好的面板（再次切到这一页时只刷新） @type {WeakMap<HTMLElement, () => Promise<void>>} */
+const opened = new WeakMap();
+
+const STATUS = Object.freeze({
+    pending: ['等待首次回复', 'warn'],
+    success: ['已成功', 'ok'],
+    expired: ['已作废', 'muted'],
+    revoked: ['已撤销', 'error'],
+});
+
+const SOURCES = Object.freeze({ link: '邀请链接', code: '填写邀请码', registration: '注册邀请码' });
+
+/** 数字设置：分组显示；shared 的两项和下方「注册邀请码」共用 */
+const GROUPS = Object.freeze([
+    {
+        title: '奖励',
+        fields: [
+            { key: 'inviterRewardMiB', label: '邀请人每次得到', unit: 'MB', max: 100_000 },
+            { key: 'inviteeRewardMiB', label: '被邀请人得到', unit: 'MB', max: 100_000 },
+            { key: 'inviterCapMiB', label: '邀请人最多得到', unit: 'MB', max: 10_000_000, hint: '0 = 不限；到上限后被邀请人照样得到' },
+        ],
+    },
+    {
+        title: '规则',
+        fields: [
+            { key: 'claimWindowDays', label: '注册后多少天内能绑定', unit: '天', max: 3650, hint: '只有新账号能绑定邀请人' },
+            { key: 'pendingExpireDays', label: '等多久没成功就作废', unit: '天', max: 3650, hint: '0 = 不作废；只在要求 AI 回复时有用' },
+        ],
+    },
+    {
+        title: '谁能邀请',
+        fields: [
+            { key: 'minRegisteredDays', label: '注册满', unit: '天', max: 3650, shared: '#userInvMinRegDays' },
+            { key: 'minOnlineHours', label: '累计在线满', unit: '小时', max: 100_000, shared: '#userInvMinOnlineHours' },
+        ],
+        hint: '和下方「注册邀请码」的门槛是同一份设置。用户只会看到「暂未达到邀请资格」，看不到具体门槛。',
+    },
+]);
+
+async function api(path, body) {
+    const response = await fetch(`/api/referrals${path}`, {
+        method: body ? 'POST' : 'GET',
+        headers: getRequestHeaders(),
+        body: body ? JSON.stringify(body) : undefined,
+        cache: 'no-store',
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data?.error || `请求失败（HTTP ${response.status}）`);
+    return data;
+}
+
+function element(tag, className, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+}
+
+function button(label, icon, className = '') {
+    const node = element('button', `menu_button menu_button_icon ${className}`.trim());
+    node.type = 'button';
+    node.append(element('i', `fa-fw fa-solid ${icon}`), element('span', '', label));
+    return node;
+}
+
+function formatDateTime(at) {
+    if (!at) return '';
+    const date = new Date(at);
+    const pad = value => String(value).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+const formatMiB = mib => (mib >= 1024 ? `${(mib / 1024).toFixed(mib % 1024 ? 1 : 0)} GB` : `${mib} MB`);
+
+function person(name, handle) {
+    const node = element('span', 'referralAdmin-person');
+    node.append(element('span', '', name || handle));
+    if (name && name !== handle) node.append(element('small', '', handle));
+    node.title = handle;
+    return node;
+}
+
+function badge(status) {
+    const [label, tone] = STATUS[status] ?? [status, 'muted'];
+    return element('span', `referralAdmin-badge is-${tone}`, label);
+}
+
+function buildView(mount) {
+    const root = element('div', 'referralAdmin');
+
+    const header = element('header', 'referralAdmin-header');
+    header.append(element('h3', '', '邀请奖励'),
+        element('p', 'referralAdmin-muted', '每个用户有自己的邀请链接和邀请码。新账号绑定邀请人、邀请成功后，双方各加存储空间；邀请人得到的空间有上限。邀请成功和奖励到账会实时通知在线的用户。'));
+
+    const settings = element('section', 'referralAdmin-card');
+    const toggles = element('div', 'referralAdmin-toggles');
+    const toggle = (key, text, hint) => {
+        const label = element('label', 'checkbox_label referralAdmin-toggle');
+        const input = /** @type {HTMLInputElement} */ (element('input'));
+        input.type = 'checkbox';
+        input.dataset.key = key;
+        const texts = element('span');
+        texts.append(element('span', '', text));
+        if (hint) texts.append(element('small', 'referralAdmin-muted', hint));
+        label.append(input, texts);
+        return label;
+    };
+    toggles.append(toggle('enabled', '开启邀请奖励', '关闭后用户设置里不再显示入口，也不能再绑定；已经绑定的保留，等待中的不再结算。'),
+        toggle('requireValidReply', '被邀请人收到第一条 AI 回复才算成功', '由服务器在转发生成时判断（回复里有文字，或服务商报了输出 token）；绑定前已经聊过的立即成功。关闭则绑定即成功。'));
+    settings.append(toggles);
+
+    const warning = element('p', 'referralAdmin-warning', '本站没有开启用户存储空间上限，奖励的空间不会生效。');
+    warning.hidden = true;
+    settings.append(warning);
+
+    for (const group of GROUPS) {
+        const box = element('div', 'referralAdmin-group');
+        box.append(element('h5', '', group.title));
+        const grid = element('div', 'referralAdmin-fields');
+        for (const field of group.fields) {
+            const label = element('label', 'referralAdmin-field');
+            const input = /** @type {HTMLInputElement} */ (element('input', 'text_pole'));
+            input.type = 'number';
+            input.min = '0';
+            input.max = String(field.max);
+            input.step = '1';
+            input.inputMode = 'numeric';
+            input.dataset.key = field.key;
+            if (field.shared) input.dataset.shared = field.shared;
+            const line = element('span', 'referralAdmin-fieldInput');
+            line.append(input, element('span', 'referralAdmin-muted', field.unit));
+            label.append(element('span', 'referralAdmin-fieldLabel', field.label), line);
+            if (field.hint) label.append(element('small', 'referralAdmin-muted', field.hint));
+            grid.append(label);
+        }
+        box.append(grid);
+        if (group.hint) box.append(element('small', 'referralAdmin-muted', group.hint));
+        settings.append(box);
+    }
+
+    const actions = element('div', 'referralAdmin-actions');
+    const status = element('span', 'referralAdmin-status');
+    status.setAttribute('role', 'status');
+    const save = button('保存', 'fa-floppy-disk', 'referralAdmin-save');
+    actions.append(status, save);
+    settings.append(actions);
+
+    const stats = element('section', 'referralAdmin-section');
+    const statsHead = element('div', 'referralAdmin-sectionHead');
+    const refresh = button('刷新', 'fa-rotate', 'referralAdmin-small');
+    statsHead.append(element('h4', '', '统计'), refresh);
+    const tiles = element('div', 'referralAdmin-tiles');
+    stats.append(statsHead, tiles);
+
+    const top = element('section', 'referralAdmin-section');
+    top.append(element('h4', '', '邀请人排行'));
+    const topTable = element('div', 'referralAdmin-table referralAdmin-top');
+    top.append(topTable);
+
+    const list = element('section', 'referralAdmin-section');
+    const listHead = element('div', 'referralAdmin-sectionHead');
+    listHead.append(element('h4', '', '邀请关系'));
+    const tools = element('div', 'referralAdmin-tools');
+    const search = /** @type {HTMLInputElement} */ (element('input', 'text_pole referralAdmin-search'));
+    search.type = 'search';
+    search.placeholder = '搜索账号或邀请码';
+    const filter = /** @type {HTMLSelectElement} */ (element('select', 'text_pole referralAdmin-filter'));
+    for (const [value, label] of [['', '全部状态'], ...Object.entries(STATUS).map(([key, [text]]) => [key, text])]) {
+        const option = element('option', '', label);
+        option.value = value;
+        filter.append(option);
+    }
+    tools.append(search, filter);
+    listHead.append(tools);
+    const table = element('div', 'referralAdmin-table referralAdmin-links');
+    const pager = element('div', 'referralAdmin-pager');
+    const previous = button('上一页', 'fa-chevron-left', 'referralAdmin-small');
+    const next = button('下一页', 'fa-chevron-right', 'referralAdmin-small');
+    const pageText = element('span', 'referralAdmin-muted');
+    pager.append(previous, pageText, next);
+    list.append(listHead, table, pager);
+
+    root.append(header, settings, stats, top, list);
+    mount.replaceChildren(root);
+    return { root, warning, status, save, refresh, tiles, topTable, search, filter, table, pager, previous, next, pageText };
+}
+
+function setStatus(view, text, state = '') {
+    view.status.textContent = text;
+    view.status.dataset.state = state;
+}
+
+function fillSettings(view, config) {
+    for (const input of view.root.querySelectorAll('.referralAdmin-card input[data-key]')) {
+        const value = config[input.dataset.key];
+        if (input.type === 'checkbox') input.checked = Boolean(value);
+        else input.value = String(value ?? 0);
+    }
+    view.warning.hidden = config.rewardsAvailable !== false;
+    syncDependent(view);
+}
+
+/** 不要求 AI 回复时「作废」没有意义 */
+function syncDependent(view) {
+    const requireReply = view.root.querySelector('input[data-key="requireValidReply"]').checked;
+    view.root.querySelector('input[data-key="pendingExpireDays"]').disabled = !requireReply;
+}
+
+function readSettings(view) {
+    const body = {};
+    for (const input of view.root.querySelectorAll('.referralAdmin-card input[data-key]')) {
+        if (input.type === 'checkbox') {
+            body[input.dataset.key] = input.checked;
+            continue;
+        }
+        const value = Number(input.value);
+        if (!Number.isInteger(value) || value < 0 || value > Number(input.max)) {
+            input.focus();
+            throw new Error(`「${input.closest('label').querySelector('.referralAdmin-fieldLabel').textContent}」需要是 0 到 ${input.max} 之间的整数`);
+        }
+        body[input.dataset.key] = value;
+    }
+    return body;
+}
+
+function renderTiles(view, summary) {
+    const tile = (label, value, detail) => {
+        const node = element('div', 'referralAdmin-tile');
+        node.append(element('span', '', label), element('b', '', String(value)));
+        if (detail) node.append(element('small', 'referralAdmin-muted', detail));
+        return node;
+    };
+    view.tiles.replaceChildren(
+        tile('绑定', summary.total),
+        tile('已成功', summary.success, summary.total ? `${Math.round((summary.success / summary.total) * 100)}%` : ''),
+        tile('等待中', summary.pending),
+        tile('作废 / 撤销', `${summary.expired} / ${summary.revoked}`),
+        tile('已发放', formatMiB(summary.inviterMiB + summary.inviteeMiB), `邀请人 ${formatMiB(summary.inviterMiB)} · 被邀请人 ${formatMiB(summary.inviteeMiB)}`),
+    );
+}
+
+function headRow(titles) {
+    const row = element('div', 'referralAdmin-row referralAdmin-rowHead');
+    for (const title of titles) row.append(element('span', '', title));
+    return row;
+}
+
+function cell(label, ...children) {
+    const node = element('span');
+    node.dataset.label = label;
+    node.append(...children);
+    return node;
+}
+
+function renderTop(view, top) {
+    if (!top.length) {
+        view.topTable.replaceChildren(element('p', 'referralAdmin-empty', '还没有人邀请过。'));
+        return;
+    }
+    const rows = [headRow(['邀请人', '成功', '等待中', '得到'])];
+    for (const item of top) {
+        const row = element('div', 'referralAdmin-row');
+        row.append(cell('', person(item.inviterName, item.inviter)), cell('成功', document.createTextNode(String(item.success))),
+            cell('等待', document.createTextNode(String(item.pending))), cell('得到', document.createTextNode(formatMiB(item.earnedMiB))));
+        rows.push(row);
+    }
+    view.topTable.replaceChildren(...rows);
+}
+
+/** 「邀请人 +500 / 被邀请人 +200 MB」，没发过就空 */
+function describeReward(link) {
+    if (!link.successAt) return '';
+    const text = `邀请人 +${link.inviterRewardMiB || 0} / 被邀请人 +${link.inviteeRewardMiB || 0} MB`;
+    if (link.status === 'revoked') return link.reclaimed ? `${text}（已收回）` : `${text}（未收回）`;
+    return text;
+}
+
+function describeTimes(link) {
+    const parts = [`绑定 ${formatDateTime(link.boundAt)}`];
+    if (link.successAt) parts.push(`成功 ${formatDateTime(link.successAt)}`);
+    if (link.expiredAt && link.status === 'expired') parts.push(`作废 ${formatDateTime(link.expiredAt)}`);
+    if (link.revokedAt) parts.push(`撤销 ${formatDateTime(link.revokedAt)}${link.revokedBy ? `（${link.revokedBy}）` : ''}`);
+    return parts.join('\n');
+}
+
+function renderLinks(view, data, state, reload) {
+    if (!data.rows.length) {
+        view.table.replaceChildren(element('p', 'referralAdmin-empty', state.query || state.status ? '没有符合条件的邀请关系。' : '还没有邀请关系。'));
+    } else {
+        const rows = [];
+        for (const link of data.rows) {
+            // 第一行：被邀请人 ← 邀请人、状态；第二行：来源、时间、奖励；右边：操作
+            const row = element('div', 'referralAdmin-link');
+            const main = element('div', 'referralAdmin-linkMain');
+            main.append(person(link.inviteeName, link.invitee), element('span', 'referralAdmin-by', '← 邀请人'), person(link.inviterName, link.inviter), badge(link.status));
+            const source = SOURCES[link.source] ?? link.source;
+            const time = element('span', 'referralAdmin-time', formatDateTime(link.boundAt));
+            time.title = describeTimes(link);
+            const meta = element('div', 'referralAdmin-linkMeta');
+            meta.append(element('span', '', link.code ? `${source} ${link.code}` : source), time);
+            const reward = describeReward(link);
+            if (reward) meta.append(element('span', '', reward));
+            const actions = element('div', 'referralAdmin-rowActions');
+            if (link.status === 'pending' || link.status === 'expired') {
+                const approve = button('判定成功', 'fa-check', 'referralAdmin-small');
+                approve.title = '不等 AI 回复，直接算成功并发奖励';
+                approve.addEventListener('click', () => void act(approve, async () => {
+                    await api('/admin/approve', { invitee: link.invitee });
+                    toastr.success('已判定成功，奖励已发放');
+                }, reload));
+                actions.append(approve);
+            }
+            if (link.status !== 'revoked') {
+                const revoke = button('撤销', 'fa-ban', 'referralAdmin-small is-danger');
+                revoke.addEventListener('click', () => void act(revoke, async () => {
+                    const reclaim = await confirmRevoke(link);
+                    if (reclaim === null) return;
+                    await api('/admin/revoke', { invitee: link.invitee, reclaim });
+                    toastr.success(reclaim ? '已撤销并收回空间' : '已撤销');
+                }, reload));
+                actions.append(revoke);
+            }
+            row.append(main, meta, actions);
+            rows.push(row);
+        }
+        view.table.replaceChildren(...rows);
+    }
+    const from = data.total ? state.offset + 1 : 0;
+    const to = Math.min(data.total, state.offset + PAGE_SIZE);
+    view.pageText.textContent = `第 ${from}–${to} 条，共 ${data.total} 条`;
+    view.previous.disabled = state.offset <= 0;
+    view.next.disabled = state.offset + PAGE_SIZE >= data.total;
+    view.pager.hidden = data.total <= PAGE_SIZE;
+}
+
+/** @returns {Promise<boolean|null>} 收不收回空间；null = 取消 */
+async function confirmRevoke(link) {
+    const box = element('div', 'referralAdmin-confirm');
+    box.append(element('h3', '', '撤销这条邀请'),
+        element('p', '', `${link.inviterName || link.inviter} 邀请 ${link.inviteeName || link.invitee}。撤销后不再计入邀请人的上限和排行，等待中的不会再结算。`));
+    let reclaim = null;
+    if (link.status === 'success' && ((link.inviterRewardMiB || 0) + (link.inviteeRewardMiB || 0)) > 0) {
+        const label = element('label', 'checkbox_label');
+        reclaim = /** @type {HTMLInputElement} */ (element('input'));
+        reclaim.type = 'checkbox';
+        label.append(reclaim, element('span', '', `同时收回已发的空间（邀请人 ${link.inviterRewardMiB || 0} MB，被邀请人 ${link.inviteeRewardMiB || 0} MB）`));
+        box.append(label);
+    }
+    const answer = await callGenericPopup(box, POPUP_TYPE.CONFIRM, '', { okButton: '撤销', cancelButton: '取消' });
+    if (answer !== POPUP_RESULT.AFFIRMATIVE) return null;
+    return Boolean(reclaim?.checked);
+}
+
+async function act(control, task, after) {
+    control.disabled = true;
+    try {
+        await task();
+        await after?.();
+    } catch (error) {
+        toastr.error(error.message);
+    } finally {
+        control.disabled = false;
+    }
+}
+
+/** 共用的门槛：两处输入框保持一致，免得一边保存时用旧值覆盖另一边 */
+function bindShared(view, mount) {
+    const block = mount.closest('.userInvitationsAdminBlock');
+    for (const input of view.root.querySelectorAll('input[data-shared]')) {
+        const other = /** @type {HTMLInputElement|null} */ (block?.querySelector(input.dataset.shared));
+        if (!other) continue;
+        input.addEventListener('input', () => { other.value = input.value; });
+        other.addEventListener('input', () => { input.value = other.value; });
+    }
+}
+
+function writeShared(view, mount, config) {
+    const block = mount.closest('.userInvitationsAdminBlock');
+    for (const input of view.root.querySelectorAll('input[data-shared]')) {
+        const other = /** @type {HTMLInputElement|null} */ (block?.querySelector(input.dataset.shared));
+        if (other) other.value = String(config[input.dataset.key]);
+    }
+}
+
+/**
+ * 打开（或刷新）管理员面板里的「邀请奖励」。
+ * @param {HTMLElement} mount
+ */
+export async function openReferralAdmin(mount) {
+    if (!mount) return;
+    if (opened.has(mount)) return opened.get(mount)();
+
+    const view = buildView(mount);
+    const state = { query: '', status: '', offset: 0 };
+    let searchTimer = 0;
+
+    const loadList = async () => {
+        const params = new URLSearchParams({ query: state.query, status: state.status, offset: String(state.offset), limit: String(PAGE_SIZE) });
+        const data = await api(`/admin/list?${params}`);
+        if (state.offset > 0 && state.offset >= data.total) {
+            state.offset = Math.max(0, Math.floor((data.total - 1) / PAGE_SIZE) * PAGE_SIZE);
+            return loadList();
+        }
+        renderTiles(view, data.summary);
+        renderTop(view, data.top);
+        renderLinks(view, data, state, loadList);
+    };
+    const reload = async () => {
+        try {
+            const [config] = await Promise.all([api('/admin/config'), loadList()]);
+            fillSettings(view, config);
+            setStatus(view, '');
+        } catch (error) {
+            setStatus(view, `加载失败：${error.message}`, 'error');
+        }
+    };
+
+    view.root.querySelector('.referralAdmin-card').addEventListener('input', () => {
+        syncDependent(view);
+        setStatus(view, '有未保存的修改', 'dirty');
+    });
+    view.save.addEventListener('click', () => void (async () => {
+        let body;
+        try {
+            body = readSettings(view);
+        } catch (error) {
+            setStatus(view, error.message, 'error');
+            return;
+        }
+        view.save.disabled = true;
+        try {
+            const saved = await api('/admin/config', body);
+            fillSettings(view, saved);
+            writeShared(view, mount, saved);
+            setStatus(view, '已保存', 'ok');
+        } catch (error) {
+            setStatus(view, `保存失败：${error.message}`, 'error');
+        } finally {
+            view.save.disabled = false;
+        }
+    })());
+    view.refresh.addEventListener('click', () => void act(view.refresh, loadList));
+    view.search.addEventListener('input', () => {
+        clearTimeout(searchTimer);
+        searchTimer = window.setTimeout(() => {
+            state.query = view.search.value.trim();
+            state.offset = 0;
+            void loadList().catch(error => toastr.error(error.message));
+        }, 300);
+    });
+    view.filter.addEventListener('change', () => {
+        state.status = view.filter.value;
+        state.offset = 0;
+        void loadList().catch(error => toastr.error(error.message));
+    });
+    view.previous.addEventListener('click', () => {
+        state.offset = Math.max(0, state.offset - PAGE_SIZE);
+        void loadList().catch(error => toastr.error(error.message));
+    });
+    view.next.addEventListener('click', () => {
+        state.offset += PAGE_SIZE;
+        void loadList().catch(error => toastr.error(error.message));
+    });
+    bindShared(view, mount);
+
+    opened.set(mount, reload);
+    await reload();
+}
