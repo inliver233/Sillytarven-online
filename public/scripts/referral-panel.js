@@ -57,7 +57,8 @@ function formatDate(at) {
     return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
 
-const inviteLink = code => `${location.origin}/invite/${code}`;
+/** 邀请链接：本站的（target.url 为空）或另一个站的 */
+const inviteLink = (code, target) => `${target?.url || location.origin}/invite/${code}`;
 const cleanCode = code => String(code ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 16);
 
 async function copy(text, what) {
@@ -86,11 +87,15 @@ function section(title, ...children) {
 function renderSteps(data) {
     const { rules } = data;
     const steps = element('ol', 'referralSteps');
-    const reward = `你得到 ${rules.inviterRewardMiB} MB，好友得到 ${rules.inviteeRewardMiB} MB 存储空间`;
+    // 好友那边的规则按好友注册的站（本站暂停注册时是另一个站）
+    const target = data.targets?.[0];
+    const where = target?.url ? `在${target.label}` : '';
+    const friend = target ?? { friendRewardMiB: rules.inviteeRewardMiB, claimWindowDays: rules.claimWindowDays, requireValidReply: rules.requireValidReply };
+    const reward = `你得到 ${rules.inviterRewardMiB} MB，好友得到 ${friend.friendRewardMiB} MB 存储空间`;
     const items = [
         ['fa-share-nodes', '分享你的邀请链接或邀请码'],
-        ['fa-user-plus', `好友用链接注册，或注册后 ${rules.claimWindowDays} 天内填写邀请码`],
-        rules.requireValidReply ? ['fa-gift', `好友收到第一条 AI 回复后，${reward}`] : ['fa-gift', `绑定后立即到账：${reward}`],
+        ['fa-user-plus', `好友用链接${where}注册，或注册后 ${friend.claimWindowDays} 天内填写邀请码`],
+        friend.requireValidReply ? ['fa-gift', `好友收到第一条 AI 回复后，${reward}`] : ['fa-gift', `绑定后立即到账：${reward}`],
     ];
     for (const [icon, text] of items) {
         const step = element('li');
@@ -112,9 +117,16 @@ function renderNotes(data) {
 
 function renderMyLink(data, refresh) {
     if (data.code) {
-        const link = inviteLink(data.code);
-        const linkRow = element('div', 'referralRow');
-        linkRow.append(element('code', 'referralLink', link), button('复制链接', 'fa-link', () => copy(link, '邀请链接')));
+        // 本站和（开着跨站邀请时）另一个站，哪边开着注册就给哪边的链接
+        const targets = data.targets ?? [];
+        const linkRows = targets.map(target => {
+            const link = inviteLink(data.code, target);
+            const row = element('div', 'referralRow');
+            if (targets.length > 1 || target.url) row.append(element('span', 'referralMuted', target.url ? `好友在${target.label}注册` : target.label));
+            row.append(element('code', 'referralLink', link), button('复制链接', 'fa-link', () => copy(link, '邀请链接')));
+            return row;
+        });
+        if (!linkRows.length) linkRows.push(element('p', 'referralMuted', '现在暂停注册，邀请链接暂时用不了；新账号仍然可以填写你的邀请码。'));
         const codeRow = element('div', 'referralRow');
         codeRow.append(element('span', 'referralMuted', '邀请码'), element('code', 'referralCode', data.code),
             button('复制', 'fa-copy', () => copy(data.code, '邀请码')),
@@ -129,7 +141,7 @@ function renderMyLink(data, refresh) {
                     toastr.error(error.message);
                 }
             }, 'is-quiet'));
-        return section('我的邀请链接', linkRow, codeRow);
+        return section('我的邀请链接', ...linkRows, codeRow);
     }
     if (data.blocked) return section('我的邀请链接', element('p', 'referralMuted', '你的邀请已被管理员停用。'));
     if (data.eligible) {

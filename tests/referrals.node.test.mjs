@@ -11,13 +11,17 @@ const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sillytavern-referrals-')
 globalThis.DATA_ROOT = dataRoot;
 await storage.init({ dir: path.join(dataRoot, '_storage'), ttl: false, expiredInterval: 0 });
 const configPath = path.join(dataRoot, 'config.yaml');
-fs.writeFileSync(configPath, 'userStorage:\n  enabled: true\n  defaultLimitMiB: 2000\n');
+// This site is the old one; the new one is faked (setPeerTransport) in the cross-site test.
+fs.writeFileSync(configPath, 'userStorage:\n  enabled: true\n  defaultLimitMiB: 2000\nleaderboard:\n  site: legacy\n  secret: test-secret-0123456789\n  peers:\n    - url: http://peer.invalid\n'
+    + 'registration:\n  password:\n    enabled: false\n  github:\n    enabled: false\n  discord:\n    enabled: false\n  linuxdo:\n    enabled: false\n');
 const { setConfigFilePath } = await import('../src/util.js');
 setConfigFilePath(configPath);
 
 const referrals = await import('../src/referrals.js');
+const { setPeerTransport, identityKey } = await import('../src/referral-peer.js');
+const { signPeerRequest } = await import('../src/leaderboard.js');
 const { setUserInvitationConfig } = await import('../src/user-invitations.js');
-const { router } = await import('../src/endpoints/referrals.js');
+const { router, peerRouter } = await import('../src/endpoints/referrals.js');
 const { default: systemMonitor } = await import('../src/system-monitor.js');
 after(() => {
     systemMonitor.destroy();
@@ -222,4 +226,109 @@ test('admins can stop someone inviting: the code dies, they earn nothing more, a
 test('the defaults are modest', () => {
     const defaults = referrals.mergeReferralConfig(undefined);
     assert.deepEqual([defaults.enabled, defaults.inviterRewardMiB, defaults.inviteeRewardMiB, defaults.inviterCapMiB], [false, 150, 150, 1500]);
+});
+
+/** Waits until check() is true (background work: the outbox, settling). */
+async function until(check, what) {
+    for (let i = 0; i < 200; i++) {
+        if (await check()) return;
+        await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    throw new Error(`never: ${what}`);
+}
+
+test('across the two sites: codes of the other site work here, and this site pays its own inviters', async t => {
+    // The other site (new): one user zed with code ZEDZED22, open registration; it records what it is told.
+    const told = [];
+    setPeerTransport(async (path, payload) => {
+        told.push({ path, payload });
+        if (path === '/info') return { ok: true, site: 'modern', enabled: true, crossSite: true, registrationOpen: true, inviteeRewardMiB: 150 };
+        if (path === '/lookup') return payload.code === 'ZEDZED22' ? { ok: true, site: 'modern', inviter: 'zed', inviterName: 'Zed' } : { ok: false, reason: '邀请码不存在或已更换' };
+        if (path === '/sync') return { ok: true, inviterRewardMiB: payload.status === 'success' ? 150 : 0 };
+        return { ok: true };
+    });
+    t.after(() => setPeerTransport(null));
+
+    // Off: the other site's code is unknown here.
+    await makeUser('pia', 0);
+    assert.equal((await referrals.claimReferral('pia', 'ZEDZED22')).reason, '邀请码不存在或已更换');
+    assert.equal(told.length, 0, 'not asked while cross-site invitations are off');
+
+    // On: asked over there, bound here; the other site hears about it, then about the success.
+    await referrals.setReferralConfig({ crossSite: true });
+    const bound = await referrals.claimReferral('pia', 'zedzed22', { source: 'link' });
+    assert.deepEqual([bound.ok, bound.link.inviterSite, bound.link.inviter], [true, 'modern', 'zed']);
+    await until(() => told.some(call => call.path === '/sync' && call.payload.status === 'pending'), 'told about the binding');
+    const piaBefore = await limit('pia');
+    referrals.noteValidReply('pia');
+    await until(async () => (await link('pia'))?.inviterRewardMiB === 150, 'the other site paid zed');
+    assert.equal(await limit('pia'), piaBefore + 300, 'this site pays the new account');
+    assert.equal((await referrals.getMyReferralData('pia')).invitedBy.name, 'Zed（新站）');
+    assert.equal(await limit('zed').catch(() => 'none'), 'none', 'zed is not an account here');
+
+    // Revoked here with the space taken back: both halves.
+    await referrals.revokeReferral('pia', { reclaim: true, by: 'admin' });
+    assert.equal(await limit('pia'), piaBefore);
+    await until(() => told.some(call => call.path === '/sync' && call.payload.status === 'revoked' && call.payload.reclaim === true), 'told about the revocation');
+
+    // Where the links go: this test site has no registration open, the other one has.
+    const frankCode = await referrals.ensureCode('frank');
+    const mine = await referrals.getMyReferralData('frank');
+    assert.deepEqual(mine.targets.map(item => [item.site, item.label, item.url, item.friendRewardMiB]), [['modern', '新站', 'http://peer.invalid', 150]]);
+
+    // This site as the inviter's: the other site asks about frank's code, then tells about quin.
+    assert.deepEqual(await referrals.answerPeerLookup({ code: frankCode }), { ok: true, site: 'legacy', inviter: 'frank', inviterName: 'frank' });
+    await storage.setItem('user:frank', { ...await storage.getItem('user:frank'), oauthIdentities: { discord: '123456789012345678' } });
+    assert.equal((await referrals.answerPeerLookup({ code: frankCode, identity: identityKey('123456789012345678') })).reason, '不能邀请自己在另一个站的账号');
+    const frankBefore = await limit('frank');
+    assert.deepEqual(await referrals.applyPeerSync({ inviteeSite: 'modern', invitee: 'quin', inviteeName: 'Quin', inviter: 'frank', code: frankCode, status: 'pending', boundAt: Date.now() }),
+        { ok: true, inviterRewardMiB: 0, status: 'pending' });
+    const success = { inviteeSite: 'modern', invitee: 'quin', inviteeName: 'Quin', inviter: 'frank', code: frankCode, status: 'success', boundAt: Date.now(), successAt: Date.now(), inviteeRewardMiB: 150 };
+    assert.equal((await referrals.applyPeerSync(success)).inviterRewardMiB, 500, 'paid by this site\'s rules');
+    assert.equal((await referrals.applyPeerSync(success)).inviterRewardMiB, 500, 'told twice, paid once');
+    assert.equal(await limit('frank'), frankBefore + 500);
+    const frankView = await referrals.getMyReferralData('frank');
+    assert.deepEqual(frankView.invitees.filter(item => item.name.startsWith('Quin')).map(item => [item.name, item.status, item.rewardMiB]), [['Quin（新站）', 'success', 500]]);
+    assert.equal((await referrals.approveReferral('@modern:quin')).ok, false, 'decided over there');
+
+    // Stopping frank here takes back what this site paid and tells the other site.
+    await referrals.setInviterBlocked('frank', true, { revokeAll: true, reclaim: true, by: 'admin' });
+    assert.equal(await limit('frank') <= frankBefore, true);
+    await until(() => told.some(call => call.path === '/revoked' && call.payload.invitee === 'quin' && call.payload.inviter === 'frank' && call.payload.reclaim), 'told the other site');
+    await referrals.setInviterBlocked('frank', false, { by: 'admin' });
+
+    // The other site revokes one of its users' invitations here.
+    await makeUser('rae', 0);
+    await referrals.claimReferral('rae', 'ZEDZED22');
+    assert.deepEqual(await referrals.applyPeerRevoke({ inviterSite: 'modern', inviter: 'zed', invitee: 'rae', reclaim: true }), { ok: true });
+    assert.equal((await link('rae')).status, 'revoked');
+    assert.equal((await referrals.applyPeerRevoke({ inviterSite: 'modern', inviter: 'someone', invitee: 'rae' })).ok, false);
+
+    // Admin list: the other site's inviters are kept apart.
+    const listed = await referrals.listReferrals({ inviter: 'modern:zed' });
+    assert.deepEqual(listed.rows.map(row => row.invitee).sort(), ['pia', 'rae']);
+    assert.deepEqual([listed.focus.remote, listed.focus.siteLabel], [true, '新站']);
+    await referrals.setReferralConfig({ crossSite: false });
+});
+
+test('the cross-site endpoints answer only signed requests', async t => {
+    await referrals.setReferralConfig({ crossSite: true });
+    t.after(() => referrals.setReferralConfig({ crossSite: false }));
+    const app = express();
+    app.use(express.json());
+    app.use('/api/referrals/peer', peerRouter);
+    const server = await new Promise(resolve => {
+        const listener = app.listen(0, '127.0.0.1', () => resolve(listener));
+    });
+    t.after(() => new Promise(resolve => server.close(resolve)));
+    const base = `http://127.0.0.1:${server.address().port}/api/referrals/peer`;
+    const send = (path, payload, secret = 'test-secret-0123456789') => {
+        const body = JSON.stringify(payload);
+        return fetch(`${base}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-referral-auth': signPeerRequest(secret, Date.now(), `${path}\n${body}`) }, body })
+            .then(async response => ({ status: response.status, data: await response.json() }));
+    };
+    const info = await send('/info', {});
+    assert.deepEqual([info.status, info.data.site, info.data.crossSite, info.data.registrationOpen], [200, 'legacy', true, false]);
+    assert.equal((await send('/info', {}, 'wrong-secret-0123456789')).status, 403);
+    assert.equal((await send('/lookup', { code: 'NOPE2345' })).data.reason, '邀请码不存在或已更换');
 });

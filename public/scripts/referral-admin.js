@@ -86,18 +86,19 @@ function person(name, handle) {
 }
 
 /** 点了只看这个人邀请的 */
-function inviterButton(name, handle, onClick, blocked = false) {
+function inviterButton(name, handle, key, onClick, blocked = false) {
     const node = element('button', 'referralAdmin-personButton');
     node.type = 'button';
     node.title = `只看 ${handle} 邀请的`;
     node.append(person(name, handle));
     if (blocked) node.append(element('span', 'referralAdmin-badge is-error', '已停用'));
-    node.addEventListener('click', () => onClick(handle));
+    node.addEventListener('click', () => onClick(key));
     return node;
 }
 
 /** 被邀请人现在怎样：判断是不是小号 */
 function describeInvitee(link) {
+    if (link.mirror) return `在${link.inviteeSiteLabel}注册，由${link.inviteeSiteLabel}判断成功`;
     if (link.inviteeExists === false) return '账号已删除';
     const parts = [];
     if (link.inviteeCreated) parts.push(`注册 ${formatDateTime(link.inviteeCreated)}`);
@@ -131,8 +132,10 @@ function buildView(mount) {
         return label;
     };
     toggles.append(toggle('enabled', '开启邀请奖励', '关闭后用户设置里不再显示入口，也不能再绑定；已经绑定的保留，等待中的不再结算。'),
-        toggle('requireValidReply', '被邀请人收到第一条 AI 回复才算成功', '由服务器在转发生成时判断（回复里有文字，或服务商报了输出 token）；绑定前已经聊过的立即成功。关闭则绑定即成功。'));
-    settings.append(toggles);
+        toggle('requireValidReply', '被邀请人收到第一条 AI 回复才算成功', '由服务器在转发生成时判断（回复里有文字，或服务商报了输出 token）；绑定前已经聊过的立即成功。关闭则绑定即成功。'),
+        toggle('crossSite', '跨站邀请：和另一个站互认邀请码', '两个站都打开才生效。被邀请的人在哪个站注册，就由哪个站判断成功、给被邀请人空间；邀请人的空间由邀请人所在的站给，算进那边的上限。本站暂停注册时，用户的邀请链接自动指向另一个站。'));
+    const crossSite = element('p', 'referralAdmin-crossSite');
+    settings.append(toggles, crossSite);
 
     const warning = element('p', 'referralAdmin-warning', '本站没有开启用户存储空间上限，奖励的空间不会生效。');
     warning.hidden = true;
@@ -209,7 +212,7 @@ function buildView(mount) {
 
     root.append(header, settings, stats, top, list);
     mount.replaceChildren(root);
-    return { root, warning, status, save, refresh, tiles, topTable, search, filter, focus, table, pager, previous, next, pageText };
+    return { root, warning, crossSite, status, save, refresh, tiles, topTable, search, filter, focus, table, pager, previous, next, pageText };
 }
 
 function setStatus(view, text, state = '') {
@@ -224,7 +227,20 @@ function fillSettings(view, config) {
         else input.value = String(value ?? 0);
     }
     view.warning.hidden = config.rewardsAvailable !== false;
+    view.crossSite.textContent = describeCrossSite(config.crossSiteStatus);
     syncDependent(view);
+}
+
+/** 两个站现在的情况（跨站邀请开关下面那行） */
+function describeCrossSite(status) {
+    if (!status) return '';
+    if (!status.configured) return '没有配置另一个站（两站 config.yaml 里 leaderboard 的 site、secret、peers），跨站邀请用不了。';
+    const here = `本站（${status.siteLabel}）${status.registrationOpen ? '开放注册' : '暂停注册'}`;
+    if (!status.peer) return `${here}；连不上另一个站（${status.peerUrl}）：${status.error || '没有回应'}。`;
+    const peer = status.peer;
+    const there = `${status.peerLabel}：邀请奖励${peer.enabled ? '开着' : '关着'}，跨站邀请${peer.crossSite ? '开着' : '没开'}，${peer.registrationOpen ? '开放注册' : '暂停注册'}`;
+    const where = !status.registrationOpen && peer.registrationOpen && peer.enabled && peer.crossSite ? `；本站用户的邀请链接会指向${status.peerLabel}` : '';
+    return `${here}；${there}${where}。`;
 }
 
 /** 不要求 AI 回复时「作废」没有意义 */
@@ -287,7 +303,7 @@ function renderTop(view, top, ctx) {
     const rows = [headRow(['邀请人', '成功', '等待中', '得到'])];
     for (const item of top) {
         const row = element('div', 'referralAdmin-row');
-        row.append(cell('', inviterButton(item.inviterName, item.inviter, ctx.focusInviter, item.blocked)), cell('成功', document.createTextNode(String(item.success))),
+        row.append(cell('', inviterButton(item.inviterName, item.handle, item.inviter, ctx.focusInviter, item.blocked)), cell('成功', document.createTextNode(String(item.success))),
             cell('等待', document.createTextNode(String(item.pending))), cell('得到', document.createTextNode(formatMiB(item.earnedMiB))));
         rows.push(row);
     }
@@ -320,8 +336,8 @@ function renderLinks(view, data, state, ctx) {
             // 第一行：被邀请人 ← 邀请人、状态；第二行：来源、时间、奖励；右边：操作
             const row = element('div', 'referralAdmin-link');
             const main = element('div', 'referralAdmin-linkMain');
-            main.append(person(link.inviteeName, link.invitee), element('span', 'referralAdmin-by', '← 邀请人'),
-                inviterButton(link.inviterName, link.inviter, ctx.focusInviter, link.inviterBlocked), badge(link.status));
+            main.append(person(link.inviteeName, link.mirror ? link.inviteeHandle : link.invitee), element('span', 'referralAdmin-by', '← 邀请人'),
+                inviterButton(link.inviterName, link.inviter, link.inviterKey, ctx.focusInviter, link.inviterBlocked), badge(link.status));
             const source = SOURCES[link.source] ?? link.source;
             const time = element('span', 'referralAdmin-time', formatDateTime(link.boundAt));
             time.title = describeTimes(link);
@@ -331,7 +347,7 @@ function renderLinks(view, data, state, ctx) {
             if (reward) meta.append(element('span', '', reward));
             meta.append(element('span', 'referralAdmin-invitee', `被邀请人：${describeInvitee(link)}`));
             const actions = element('div', 'referralAdmin-rowActions');
-            if (link.status === 'pending' || link.status === 'expired') {
+            if (!link.mirror && (link.status === 'pending' || link.status === 'expired')) {
                 const approve = button('判定成功', 'fa-check', 'referralAdmin-small');
                 approve.title = '不等 AI 回复，直接算成功并发奖励';
                 approve.addEventListener('click', () => void act(approve, async () => {
@@ -371,10 +387,18 @@ function renderFocus(view, focus, ctx) {
         return;
     }
     const text = element('div', 'referralAdmin-focusText');
-    text.append(element('span', '', '只看'), person(focus.inviterName, focus.inviter),
+    text.append(element('span', '', '只看'), person(focus.inviterName, focus.handle ?? focus.inviter),
         element('span', '', `邀请的：共 ${focus.total} 人，得到 ${formatMiB(focus.earnedMiB)}`));
     if (focus.blocked) text.append(element('span', 'referralAdmin-badge is-error', '邀请已停用'));
     const actions = element('div', 'referralAdmin-rowActions');
+    const clear = button('看全部', 'fa-xmark', 'referralAdmin-small');
+    clear.addEventListener('click', () => ctx.focusInviter(''));
+    if (focus.remote) {
+        text.append(element('span', 'referralAdmin-muted', `（${focus.siteLabel}的用户，停用要在${focus.siteLabel}操作）`));
+        actions.append(clear);
+        view.focus.replaceChildren(text, actions);
+        return;
+    }
     const toggle = focus.blocked ? button('恢复邀请', 'fa-unlock', 'referralAdmin-small') : button('停用邀请', 'fa-user-slash', 'referralAdmin-small is-danger');
     toggle.addEventListener('click', () => void act(toggle, async () => {
         if (focus.blocked) {
@@ -387,8 +411,6 @@ function renderFocus(view, focus, ctx) {
         const result = await api('/admin/block', { handle: focus.inviter, blocked: true, ...choice });
         toastr.success(result.revoked ? `已停用，撤销了 ${result.revoked} 条邀请${choice.reclaim ? '并收回空间' : ''}` : '已停用');
     }, ctx.reloadList));
-    const clear = button('看全部', 'fa-xmark', 'referralAdmin-small');
-    clear.addEventListener('click', () => ctx.focusInviter(''));
     actions.append(toggle, clear);
     view.focus.replaceChildren(text, actions);
 }
@@ -427,7 +449,11 @@ async function confirmRevoke(link) {
         const label = element('label', 'checkbox_label');
         reclaim = /** @type {HTMLInputElement} */ (element('input'));
         reclaim.type = 'checkbox';
-        label.append(reclaim, element('span', '', `同时收回已发的空间（邀请人 ${link.inviterRewardMiB || 0} MB，被邀请人 ${link.inviteeRewardMiB || 0} MB）`));
+        const other = link.mirror ? link.inviteeSiteLabel : link.inviterSiteLabel;
+        const text = other
+            ? `同时收回已发的空间（邀请人 ${link.inviterRewardMiB || 0} MB，被邀请人 ${link.inviteeRewardMiB || 0} MB；${other}发的那份由${other}收回）`
+            : `同时收回已发的空间（邀请人 ${link.inviterRewardMiB || 0} MB，被邀请人 ${link.inviteeRewardMiB || 0} MB）`;
+        label.append(reclaim, element('span', '', text));
         box.append(label);
     }
     const answer = await callGenericPopup(box, POPUP_TYPE.CONFIRM, '', { okButton: '撤销', cancelButton: '取消' });

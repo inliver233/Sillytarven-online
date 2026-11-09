@@ -10,13 +10,25 @@
  *   POST /admin/revoke       管理员：撤销 { invitee, reclaim }
  *   POST /admin/approve      管理员：判定成功 { invitee }
  *   POST /admin/block        管理员：停用 / 恢复一个人的邀请 { handle, blocked, revokeAll, reclaim }
+ *
+ * 跨站邀请的站间接口（peerRouter，挂在 /api/referrals/peer，不用登录，要两站共用的 secret 签名）：
+ *   POST /info               本站开没开、开没开跨站邀请、开着注册没有、奖励多少
+ *   POST /lookup             对方站来问一个邀请码 { code, identity }
+ *   POST /sync               对方站告诉本站：本站用户邀请的人在那边的状态（发 / 收回邀请人的奖励）
+ *   POST /revoked            对方站撤销了它的用户在本站邀请的人
  */
 import express from 'express';
 
+import { verifyPeer } from '../referral-peer.js';
 import {
+    answerPeerInfo,
+    answerPeerLookup,
+    applyPeerRevoke,
+    applyPeerSync,
     approveReferral,
     claimReferral,
     ensureCode,
+    getCrossSiteStatus,
     getMyReferralData,
     getReferralConfig,
     listReferrals,
@@ -79,10 +91,13 @@ router.post('/claim', requireLoginMiddleware, async (request, response) => {
     }
 });
 
-/** 设置 + 共用的邀请资格门槛 + 奖励能不能生效 */
+/** 设置 + 共用的邀请资格门槛 + 奖励能不能生效 + 跨站邀请的情况 */
 async function adminConfig(config) {
     const eligibility = await getUserInvitationConfig();
-    return { ...config, minRegisteredDays: eligibility.minRegisteredDays, minOnlineHours: eligibility.minOnlineHours, rewardsAvailable: rewardsAvailable() };
+    return {
+        ...config, minRegisteredDays: eligibility.minRegisteredDays, minOnlineHours: eligibility.minOnlineHours, rewardsAvailable: rewardsAvailable(),
+        crossSiteStatus: await getCrossSiteStatus(),
+    };
 }
 
 router.get('/admin/config', requireAdminMiddleware, async (_request, response) => {
@@ -137,3 +152,26 @@ router.post('/admin/block', requireAdminMiddleware, async (request, response) =>
     });
     return result.ok ? response.send({ revoked: result.revoked }) : response.status(400).send({ error: result.reason });
 });
+
+/** 跨站邀请的站间接口（不用登录，验签名） */
+export const peerRouter = express.Router();
+
+const PEER_HANDLERS = Object.freeze({
+    '/info': () => answerPeerInfo(),
+    '/lookup': body => answerPeerLookup(body),
+    '/sync': body => applyPeerSync(body),
+    '/revoked': body => applyPeerRevoke(body),
+});
+
+for (const [path, handle] of Object.entries(PEER_HANDLERS)) {
+    peerRouter.post(path, async (request, response) => {
+        response.set('Cache-Control', 'no-store');
+        if (!verifyPeer(request, path)) return response.status(403).send({ error: '签名不对' });
+        try {
+            return response.send(await handle(request.body ?? {}));
+        } catch (error) {
+            console.error(`[referrals] peer ${path} failed:`, error);
+            return response.status(500).send({ error: '对方站出错了' });
+        }
+    });
+}

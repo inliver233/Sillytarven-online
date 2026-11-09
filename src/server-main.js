@@ -89,6 +89,7 @@ import { leaderboard, leaderboardPeerHandler } from './leaderboard-service.js';
 import { live } from './live.js';
 import { startUsageMeter } from './usage-meter.js';
 import { normalizeCode, startReferrals } from './referrals.js';
+import { peerRouter as referralPeerRouter } from './endpoints/referrals.js';
 
 // Routers
 import { router as usersPublicRouter } from './endpoints/users-public.js';
@@ -306,6 +307,7 @@ if (!cliArgs.disableCsrf) {
             req.path === '/api/users/me' ||
             req.path === '/api/users/heartbeat' ||
             req.path === '/api/invitation-codes/status' ||
+            req.path.startsWith('/api/referrals/peer/') ||
             req.path === '/csrf-token' ||
             req.path === '/api/ping' ||
             req.path === '/api/forum/upload-image' ||
@@ -603,6 +605,9 @@ app.use('/api/email', emailStatusModule.router);
 
 // Leaderboard numbers for the other site (signed with the shared secret, no login)
 app.get('/api/leaderboard/peer', leaderboardPeerHandler);
+
+// Cross-site invitations between the two sites (signed with the leaderboard's shared secret, no login)
+app.use('/api/referrals/peer', referralPeerRouter);
 
 // Public login page announcements (no auth)
 app.get('/api/announcements/login/current', async (req, res) => {
