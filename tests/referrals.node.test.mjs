@@ -221,5 +221,5 @@ test('admins can stop someone inviting: the code dies, they earn nothing more, a
 
 test('the defaults are modest', () => {
     const defaults = referrals.mergeReferralConfig(undefined);
-    assert.deepEqual([defaults.enabled, defaults.inviterRewardMiB, defaults.inviteeRewardMiB, defaults.inviterCapMiB], [false, 100, 50, 500]);
+    assert.deepEqual([defaults.enabled, defaults.inviterRewardMiB, defaults.inviteeRewardMiB, defaults.inviterCapMiB], [false, 150, 150, 1500]);
 });

@@ -39,10 +39,10 @@ export const STATUS = Object.freeze({ PENDING: 'pending', SUCCESS: 'success', RE
 
 export const DEFAULT_REFERRAL_CONFIG = Object.freeze({
     enabled: false,
-    inviterRewardMiB: 100,
-    inviteeRewardMiB: 50,
+    inviterRewardMiB: 150,
+    inviteeRewardMiB: 150,
     /** 邀请人通过邀请最多拿多少（0 = 不限） */
-    inviterCapMiB: 500,
+    inviterCapMiB: 1500,
     /** 被邀请人注册多少天内可以绑定 */
     claimWindowDays: 7,
     /** 收到第一条有效 AI 回复才算成功 */
