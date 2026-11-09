@@ -89,7 +89,10 @@ test('a ticket lets a page connect; others are refused', async t => {
     assert.deepEqual((await page.next('hello')).d, { heartbeat: 30000 });
     assert.equal(hub.clients.size, 1);
 
-    const forged = hub.issueTicket({ handle: 'alice' }).replace(/.$/, c => (c === 'A' ? 'B' : 'A'));
+    // Change a character inside the signature: the last one may only carry base64 padding bits.
+    const ticket = hub.issueTicket({ handle: 'alice' });
+    const at = ticket.length - 5;
+    const forged = ticket.slice(0, at) + (ticket[at] === 'A' ? 'B' : 'A') + ticket.slice(at + 1);
     await assert.rejects(connect(forged), { status: 401 });
     await assert.rejects(connect('not-a-ticket'), { status: 401 });
     await assert.rejects(connect({ handle: 'alice' }, { pathname: '/somewhere-else' }), { status: 404 });
