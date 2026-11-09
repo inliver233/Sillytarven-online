@@ -33,6 +33,7 @@ import { discordIdOf } from './leaderboard.js';
 import { live } from './live.js';
 import { callPeer, getPeerInfo, identityKey, peerConfig, siteLabel } from './referral-peer.js';
 import { getRegistrationMethodConfig } from './registration-policy.js';
+import { getStcontrolControllerUrl, isStcontrolEnabled } from './stcontrol.js';
 import { getStorageConfig, getUserLimitMiB } from './storage-quota.js';
 import { getInvitationOnlineHours, getUserInvitationConfig, roundOnlineHours } from './user-invitations.js';
 import { toKey } from './users.js';
@@ -111,6 +112,30 @@ export async function setReferralConfig(partial) {
 /** 奖励空间要有存储上限这套才有意义 */
 export function rewardsAvailable() {
     return getStorageConfig().enabled;
+}
+
+/**
+ * 本站的邀请链接开头：由总控托管的节点，新人在总控注册，链接是 <总控>/?ref=<码>（总控把码带到开户，
+ * 见 bindFromLink）；没有总控的站是 <本站>/invite/<码>，这里返回空（页面用自己的地址）。
+ */
+export function inviteBase() {
+    const controller = isStcontrolEnabled() ? getStcontrolControllerUrl() : '';
+    return /^https?:\/\//i.test(controller) ? `${controller}/?ref=` : '';
+}
+
+/**
+ * /invite/<码> 的页面：在这个浏览器里记下码（新账号登录后问要不要绑定），然后去首页；由总控托管的节点
+ * 直接去总控的注册页（总控把码带到开户）。
+ * @param {unknown} rawCode
+ * @returns {string} HTML
+ */
+export function renderInvitePage(rawCode) {
+    const code = normalizeCode(rawCode);
+    const remember = code ? `try{localStorage.setItem('st_pending_referral',JSON.stringify({code:'${code}',at:Date.now()}))}catch(e){}` : '';
+    const next = code && inviteBase() ? `${inviteBase()}${code}` : '/';
+    const script = JSON.stringify(next).replace(/</g, '\\u003c');
+    const attribute = next.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
+    return `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>邀请</title><script>${remember};location.replace(${script})</script><noscript><meta http-equiv="refresh" content="0;url=${attribute}"></noscript>`;
 }
 
 /** 本站开着注册没有（任何一种方式） */
@@ -439,6 +464,22 @@ async function claimHere(inviteeHandle, rawCode, { source = 'code', hadValidRepl
 }
 
 /**
+ * 在总控上通过邀请链接（?ref=）注册：总控把码放在开户请求的 invitation_code 里，开户后直接绑定
+ * （失败不影响注册；码是另一个站的也行）。
+ * @param {string} inviteeHandle
+ * @param {unknown} rawCode
+ */
+export async function bindFromLink(inviteeHandle, rawCode) {
+    try {
+        if (!normalizeCode(rawCode)) return;
+        const result = await claimReferral(inviteeHandle, rawCode, { source: 'link' });
+        console.info(`[referrals] ${inviteeHandle} signed up through an invitation link: ${result.ok ? 'bound' : `not bound (${result.reason})`}`);
+    } catch (error) {
+        console.warn('[referrals] Could not bind an invitation link at sign-up:', error?.message ?? error);
+    }
+}
+
+/**
  * 用户发放的注册邀请码在注册时被用掉：记一次邀请（失败不影响注册）。
  * @param {any} invitation 注册邀请码记录
  * @param {string} inviteeHandle
@@ -652,30 +693,31 @@ export async function answerPeerInfo() {
     return {
         ok: true, site: peerConfig().site, enabled: config.enabled, crossSite: config.crossSite, registrationOpen: registrationOpen(),
         inviterRewardMiB: config.inviterRewardMiB, inviteeRewardMiB: rewardsAvailable() ? config.inviteeRewardMiB : 0,
-        claimWindowDays: config.claimWindowDays, requireValidReply: config.requireValidReply,
+        claimWindowDays: config.claimWindowDays, requireValidReply: config.requireValidReply, inviteBase: inviteBase(),
     };
 }
 
 /**
  * 用户的邀请链接指向哪里：本站开着注册就是本站；开着跨站邀请、对方站也开着且开着注册就加上对方站。
  * @param {typeof DEFAULT_REFERRAL_CONFIG} config
- * @returns {Promise<Array<{ site: string, label: string, url: string, friendRewardMiB: number, claimWindowDays: number, requireValidReply: boolean }>>}
- *     url 为空 = 本站；好友那边的规则按好友注册的站
+ * @returns {Promise<Array<{ site: string, label: string, remote: boolean, base: string, friendRewardMiB: number, claimWindowDays: number, requireValidReply: boolean }>>}
+ *     base：链接开头（加上码就是链接；空 = 页面自己的 /invite/）；好友那边的规则按好友注册的站
  */
 async function inviteTargets(config) {
     const targets = [];
     const { site, url } = peerConfig();
     if (registrationOpen()) {
         targets.push({
-            site, label: siteLabel(site) || '本站', url: '', friendRewardMiB: rewardsAvailable() ? config.inviteeRewardMiB : 0,
+            site, label: siteLabel(site) || '本站', remote: false, base: inviteBase(), friendRewardMiB: rewardsAvailable() ? config.inviteeRewardMiB : 0,
             claimWindowDays: config.claimWindowDays, requireValidReply: config.requireValidReply,
         });
     }
     if (config.crossSite && url) {
         const { value } = await getPeerInfo();
         if (value?.enabled && value.crossSite && value.registrationOpen) {
+            const base = /^https?:\/\//i.test(String(value.inviteBase ?? '')) ? String(value.inviteBase) : `${url}/invite/`;
             targets.push({
-                site: String(value.site), label: siteLabel(value.site), url, friendRewardMiB: Number(value.inviteeRewardMiB) || 0,
+                site: String(value.site), label: siteLabel(value.site), remote: true, base, friendRewardMiB: Number(value.inviteeRewardMiB) || 0,
                 claimWindowDays: Number(value.claimWindowDays) || config.claimWindowDays, requireValidReply: value.requireValidReply !== false,
             });
         }

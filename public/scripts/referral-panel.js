@@ -57,8 +57,8 @@ function formatDate(at) {
     return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
 }
 
-/** 邀请链接：本站的（target.url 为空）或另一个站的 */
-const inviteLink = (code, target) => `${target?.url || location.origin}/invite/${code}`;
+/** 邀请链接：target.base 加上码（总控的注册页、另一个站）；没有 base 就是本站的 /invite/ */
+const inviteLink = (code, target) => (target?.base ? `${target.base}${code}` : `${location.origin}/invite/${code}`);
 const cleanCode = code => String(code ?? '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 16);
 
 async function copy(text, what) {
@@ -89,7 +89,7 @@ function renderSteps(data) {
     const steps = element('ol', 'referralSteps');
     // 好友那边的规则按好友注册的站（本站暂停注册时是另一个站）
     const target = data.targets?.[0];
-    const where = target?.url ? `在${target.label}` : '';
+    const where = target?.remote ? `在${target.label}` : '';
     const friend = target ?? { friendRewardMiB: rules.inviteeRewardMiB, claimWindowDays: rules.claimWindowDays, requireValidReply: rules.requireValidReply };
     const reward = `你得到 ${rules.inviterRewardMiB} MB，好友得到 ${friend.friendRewardMiB} MB 存储空间`;
     const items = [
@@ -122,7 +122,7 @@ function renderMyLink(data, refresh) {
         const linkRows = targets.map(target => {
             const link = inviteLink(data.code, target);
             const row = element('div', 'referralRow');
-            if (targets.length > 1 || target.url) row.append(element('span', 'referralMuted', target.url ? `好友在${target.label}注册` : target.label));
+            if (targets.length > 1 || target.remote) row.append(element('span', 'referralMuted', target.remote ? `好友在${target.label}注册` : target.label));
             row.append(element('code', 'referralLink', link), button('复制链接', 'fa-link', () => copy(link, '邀请链接')));
             return row;
         });

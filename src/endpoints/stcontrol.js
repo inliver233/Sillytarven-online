@@ -9,7 +9,7 @@ import storage from 'node-persist';
 import { applyDefaultTemplateToUser } from '../default-template.js';
 import { getDiscordGuildMembershipConfig } from '../discord-registration-policy.js';
 import { useInvitationCode } from '../invitation-codes.js';
-import { bindFromInvitation } from '../referrals.js';
+import { bindFromInvitation, bindFromLink } from '../referrals.js';
 import { getRegistrationMethodConfig } from '../registration-policy.js';
 import {
     STCONTROL_CAPABILITIES,
@@ -184,6 +184,8 @@ router.post('/api/stcontrol/internal/users/provision', async (request, response)
             }
             // 用户发的注册邀请码：同时记一次邀请奖励
             if (usedInvitation) void bindFromInvitation(usedInvitation, newUser.handle);
+            // 这种注册方式不要求注册邀请码时，总控带来的是邀请链接（?ref=）里的邀请奖励的码：直接绑定
+            else if (!methodPolicy.invitation_required && input.invitation_code) void bindFromLink(newUser.handle, input.invitation_code);
             return { ok: true, handle: newUser.handle, local_user_id: newUser.handle };
         });
         return response.json(result);

@@ -88,7 +88,7 @@ import { startGitSync } from './git-sync/router.js';
 import { leaderboard, leaderboardPeerHandler } from './leaderboard-service.js';
 import { live } from './live.js';
 import { startUsageMeter } from './usage-meter.js';
-import { normalizeCode, startReferrals } from './referrals.js';
+import { renderInvitePage, startReferrals } from './referrals.js';
 import { peerRouter as referralPeerRouter } from './endpoints/referrals.js';
 
 // Routers
@@ -341,11 +341,11 @@ app.get('/', cacheBuster.middleware, (request, response) => {
 
 // Invitation link: remember the inviter's code in this browser, then go on as usual (log in or
 // register); the app offers to bind it once a new account is signed in (referral-panel.js).
+// A node managed by the Controller sends the visitor there (sign-up happens on the Controller,
+// which brings the code along to the new account: bindFromLink).
 app.get('/invite/:code', (request, response) => {
     setPrivateNoStoreHeaders(response);
-    const code = normalizeCode(request.params.code);
-    const remember = code ? `try{localStorage.setItem('st_pending_referral',JSON.stringify({code:'${code}',at:Date.now()}))}catch(e){}` : '';
-    response.type('html').send(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>邀请</title><script>${remember};location.replace('/')</script><noscript><meta http-equiv="refresh" content="0;url=/"></noscript>`);
+    response.type('html').send(renderInvitePage(request.params.code));
 });
 
 // Explicit welcome route

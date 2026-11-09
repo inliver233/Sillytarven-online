@@ -274,7 +274,7 @@ test('across the two sites: codes of the other site work here, and this site pay
     // Where the links go: this test site has no registration open, the other one has.
     const frankCode = await referrals.ensureCode('frank');
     const mine = await referrals.getMyReferralData('frank');
-    assert.deepEqual(mine.targets.map(item => [item.site, item.label, item.url, item.friendRewardMiB]), [['modern', '新站', 'http://peer.invalid', 150]]);
+    assert.deepEqual(mine.targets.map(item => [item.site, item.label, item.remote, item.base, item.friendRewardMiB]), [['modern', '新站', true, 'http://peer.invalid/invite/', 150]]);
 
     // This site as the inviter's: the other site asks about frank's code, then tells about quin.
     assert.deepEqual(await referrals.answerPeerLookup({ code: frankCode }), { ok: true, site: 'legacy', inviter: 'frank', inviterName: 'frank' });
@@ -382,3 +382,31 @@ test('online time is rounded before it meets the threshold: 1.45 hours count as 
     const focus = (await referrals.listReferrals({ inviter: 'uma' })).focus;
     assert.deepEqual([focus.onlineHours, focus.roundedHours, focus.meetsThresholds], [1.5, 2, true]);
 });
+
+test('a node managed by the Controller: links go to the Controller, which brings the code to the new account', async t => {
+    assert.equal(referrals.inviteBase(), '', 'a site of its own: pages build <site>/invite/<code>');
+    assert.match(referrals.renderInvitePage('abcd2345'), /location\.replace\("\/"\)/);
+    process.env.SILLYTAVERN_STCONTROL_ENABLED = 'true';
+    process.env.SILLYTAVERN_STCONTROL_CONTROLLERURL = 'https://controller.example/';
+    t.after(() => {
+        delete process.env.SILLYTAVERN_STCONTROL_ENABLED;
+        delete process.env.SILLYTAVERN_STCONTROL_CONTROLLERURL;
+    });
+    assert.equal(referrals.inviteBase(), 'https://controller.example/?ref=');
+    assert.equal((await referrals.answerPeerInfo()).inviteBase, 'https://controller.example/?ref=', 'the other site links here through the Controller too');
+    const page = referrals.renderInvitePage('abcd2345');
+    assert.match(page, /location\.replace\("https:\/\/controller\.example\/\?ref=ABCD2345"\)/, 'an old /invite link goes on to the Controller');
+    assert.match(page, /st_pending_referral/);
+    assert.doesNotMatch(referrals.renderInvitePage('<script>'), /<script>[^;]*<script>/, 'nothing of the address ends up in the page');
+
+    // Sign-up on the Controller: the code arrives with the new account.
+    await makeUser('wes', 0);
+    const code = await referrals.ensureCode('alice');
+    await referrals.bindFromLink('wes', code.toLowerCase());
+    const bound = await link('wes');
+    assert.deepEqual([bound.inviter, bound.source, bound.status], ['alice', 'link', 'pending']);
+    await makeUser('xia', 0);
+    await referrals.bindFromLink('xia', 'not a code');
+    assert.equal(await link('xia'), undefined);
+});
+
