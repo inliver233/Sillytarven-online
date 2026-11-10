@@ -285,6 +285,7 @@ import { initTabSync, noteSettingsSaved, reloadPageKeepingChat, tellOtherTabs } 
 import { chatWriteResponse, readForeignChatWrite, withOwnChatWriteHeader, writesOpenChatAsHeld } from './scripts/foreign-chat-write.js';
 import { confirmUsageBudget, initUsageMeter, renderMessageUsage } from './scripts/usage-meter.js';
 import { initReferrals, openReferralPanel } from './scripts/referral-panel.js';
+import { initOptionsMenuMode } from './scripts/options-menu-mode.js';
 import { initDataMaid } from './scripts/data-maid.js';
 import { clearItemizedPrompts, deleteItemizedPromptForMessage, deleteItemizedPrompts, findItemizedPromptSet, initItemizedPrompts, itemizedParams, itemizedPrompts, loadItemizedPrompts, promptItemize, replaceItemizedPromptText, saveItemizedPrompts, swapItemizedPrompts } from './scripts/itemized-prompts.js';
 import { getSystemMessageByType, initSystemMessages, SAFETY_CHAT, sendSystemMessage, system_message_types, system_messages } from './scripts/system-messages.js';
@@ -1433,6 +1434,7 @@ async function firstLoadInit() {
     initTabSync();
     initUsageMeter();
     initReferrals();
+    initOptionsMenuMode({ onChange: () => optionsPopper.update() });
     startupLap('ui-panels');
     await initScrapers();
     startupLap('scrapers');

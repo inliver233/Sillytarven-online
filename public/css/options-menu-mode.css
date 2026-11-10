@@ -1,0 +1,61 @@
+/* ☰ 菜单最上面的「基础模式 / 完整模式」滑块（options-menu-mode.js） */
+.optionsModeSwitch {
+    position: relative;
+    display: flex;
+    margin: 2px 2px 4px;
+    padding: 2px;
+    border: 1px solid var(--SmartThemeBorderColor);
+    border-radius: 999px;
+    cursor: pointer;
+    user-select: none;
+    font-size: calc(var(--mainFontSize) * 0.95);
+}
+
+.optionsModeLabel {
+    position: relative;
+    z-index: 1;
+    flex: 1 1 0;
+    padding: 3px 12px;
+    color: var(--SmartThemeBodyColor);
+    text-align: center;
+    white-space: nowrap;
+    opacity: 0.55;
+    transition: opacity 0.2s;
+}
+
+.optionsModeSwitch.isBasic .optionsModeLabel[data-mode="basic"],
+.optionsModeSwitch:not(.isBasic) .optionsModeLabel[data-mode="full"] {
+    opacity: 1;
+}
+
+.optionsModeThumb {
+    position: absolute;
+    top: 2px;
+    bottom: 2px;
+    left: 2px;
+    width: calc(50% - 2px);
+    border-radius: 999px;
+    background-color: var(--SmartThemeQuoteColor);
+    opacity: 0.35;
+    transform: translateX(100%);
+    transition: transform 0.2s ease;
+    pointer-events: none;
+}
+
+.optionsModeSwitch.isBasic .optionsModeThumb {
+    transform: translateX(0);
+}
+
+.optionsModeSwitch:focus-visible {
+    outline: 1px solid var(--SmartThemeQuoteColor);
+}
+
+body.reduced-motion .optionsModeThumb,
+body.reduced-motion .optionsModeLabel {
+    transition: none;
+}
+
+/* 基础模式：只留基本的几项，分隔线和其他项（包括扩展加的）都收起来 */
+#options.optionsMenuBasic .options-content > :not(.optionsBasicItem) {
+    display: none !important;
+}
