@@ -70,7 +70,7 @@
     opacity: 0.85;
 }
 
-/* ---- 入口（用户设置、账号弹窗、☰ 菜单）：比旁边的按钮显眼 ---- */
+/* ---- 入口（用户设置、账号弹窗）：比旁边的按钮显眼；☰ 菜单里那项和其他项一样 ---- */
 .menu_button.referralEntry {
     --rf-gold: #f59e0b;
     --rf-pink: #ec4899;
@@ -126,16 +126,6 @@
 
 .referralEntryPill[hidden] {
     display: none;
-}
-
-#options .options-content a.referralMenuEntry {
-    align-items: center;
-    opacity: 1;
-    font-weight: 600;
-}
-
-#options .options-content a.referralMenuEntry > i {
-    color: #fbbf24;
 }
 
 @media (prefers-reduced-motion: reduce) {
