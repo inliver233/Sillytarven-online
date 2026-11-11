@@ -571,6 +571,11 @@ export async function forwardFetchResponse(from, to) {
             const detail = rawErrorText || 'Unknown error occurred';
 
             console.warn(`Streaming request failed with status ${from.status} ${statusText}: ${detail}`);
+            if (to.headersSent && to.locals?.streamKeepalive) {
+                // Only the keepalive went out: the error goes into the stream (src/stream-keepalive.js)
+                to.send(rawErrorText);
+                return;
+            }
             to.end(rawErrorText, 'utf-8');
         } catch {
             console.warn(`Streaming request failed with status ${from.status} ${statusText}: Unknown error occurred`);

@@ -77,6 +77,16 @@ import {
 } from '../../free-gemini-channels.js';
 import { getCookieSecret } from '../../users.js';
 import { fetchGoogleModels, GoogleModelsHttpError } from './google-models.js';
+import { isAwaitingStreamContent, keepStreamAlive } from '../../stream-keepalive.js';
+
+/**
+ * Whether an error can still be answered as a response of its own: nothing was sent yet, or only the
+ * stream keepalive was (then it goes into the stream, see stream-keepalive.js).
+ * @param {import('express').Response} response
+ */
+function canSendError(response) {
+    return !response.headersSent || isAwaitingStreamContent(response);
+}
 
 const API_OPENAI = 'https://api.openai.com/v1';
 const API_CLAUDE = 'https://api.anthropic.com/v1';
@@ -1384,7 +1394,7 @@ async function sendClaudeRequest(request, response) {
         }
     } catch (error) {
         console.error(color.red(`Error communicating with Claude: ${error}\n${divider}`));
-        if (!response.headersSent) {
+        if (canSendError(response)) {
             return response.status(500).send({ error: true });
         }
     }
@@ -1930,7 +1940,7 @@ async function sendMakerSuiteRequest(request, response, options = {}) {
                 return await forwardFetchResponse(generateResponse, response);
             } catch (error) {
                 console.error('Error forwarding streaming response:', error);
-                if (!response.headersSent) {
+                if (canSendError(response)) {
                     return response.status(500).send({ error: true });
                 }
                 return;
@@ -2112,7 +2122,7 @@ async function sendMakerSuiteRequest(request, response, options = {}) {
             return;
         }
         console.error(`Error communicating with ${apiName} API:`, freeGeminiTimedOut ? 'FREE_GEMINI_TIMEOUT' : errorDetails);
-        if (!response.headersSent) {
+        if (canSendError(response)) {
             const status = freeGeminiTimedOut
                 ? 504
                 : freeGeminiChannel
@@ -2215,7 +2225,7 @@ async function sendAI21Request(request, response) {
         }
     } catch (error) {
         console.error('Error communicating with AI21 API: ', error);
-        if (!response.headersSent) {
+        if (canSendError(response)) {
             response.send({ error: true });
         } else {
             response.end();
@@ -2304,7 +2314,7 @@ async function sendMistralAIRequest(request, response) {
         }
     } catch (error) {
         console.error('Error communicating with MistralAI API: ', error);
-        if (!response.headersSent) {
+        if (canSendError(response)) {
             response.send({ error: true });
         } else {
             response.end();
@@ -2403,7 +2413,7 @@ async function sendCohereRequest(request, response) {
         }
     } catch (error) {
         console.error('Error communicating with Cohere API: ', error);
-        if (!response.headersSent) {
+        if (canSendError(response)) {
             response.send({ error: true });
         } else {
             response.end();
@@ -2516,7 +2526,7 @@ async function sendDeepSeekRequest(request, response) {
         }
     } catch (error) {
         console.error('Error communicating with DeepSeek API: ', error);
-        if (!response.headersSent) {
+        if (canSendError(response)) {
             response.send({ error: true });
         } else {
             response.end();
@@ -2621,7 +2631,7 @@ async function sendXaiRequest(request, response) {
         }
     } catch (error) {
         console.error('Error communicating with xAI API: ', error);
-        if (!response.headersSent) {
+        if (canSendError(response)) {
             response.send({ error: true });
         } else {
             response.end();
@@ -2725,7 +2735,7 @@ async function sendAimlapiRequest(request, response) {
         }
     } catch (error) {
         console.error('Error communicating with AI/ML API: ', error);
-        if (!response.headersSent) {
+        if (canSendError(response)) {
             response.send({ error: true });
         } else {
             response.end();
@@ -2836,7 +2846,7 @@ async function sendElectronHubRequest(request, response) {
         }
     } catch (error) {
         console.error('Error communicating with Electron Hub: ', error);
-        if (!response.headersSent) {
+        if (canSendError(response)) {
             response.send({ error: true });
         } else {
             response.end();
@@ -2936,7 +2946,7 @@ async function sendChutesRequest(request, response) {
         }
     } catch (error) {
         console.error('Error communicating with Chutes: ', error);
-        if (!response.headersSent) {
+        if (canSendError(response)) {
             response.send({ error: true });
         } else {
             response.end();
@@ -3017,7 +3027,7 @@ async function sendMinimaxRequest(request, response) {
         }
     } catch (error) {
         console.error('Error communicating with MiniMax: ', error);
-        if (!response.headersSent) {
+        if (canSendError(response)) {
             response.send({ error: true });
         } else {
             response.end();
@@ -3603,6 +3613,12 @@ router.post('/generate', async function (request, response) {
     try {
         if (!request.body) return response.status(400).send({ error: true });
         meterGeneration(request, response);
+        // Long thinking before the first token: keep the connection busy so the proxy in front does not
+        // cut it (Cloudflare gives up after about 100 s). Free Gemini fails over between channels by
+        // whether anything was sent yet, so it is left alone.
+        if (request.body.stream && request.body.chat_completion_source !== CHAT_COMPLETION_SOURCES.FREE_GEMINI) {
+            keepStreamAlive(response);
+        }
 
         const postProcessingType = request.body.custom_prompt_post_processing;
         if (Array.isArray(request.body.messages) && postProcessingType) {
@@ -4166,7 +4182,7 @@ router.post('/generate', async function (request, response) {
             const quota_error = fetchResponse.status === 429 && errorData?.error?.type === 'insufficient_quota';
             console.error('Chat completion request error: ', message, responseText);
 
-            if (!response.headersSent) {
+            if (canSendError(response)) {
                 response.send({ error: { message }, quota_error: quota_error });
             } else if (!response.writableEnded) {
                 response.write(responseText);
@@ -4180,7 +4196,7 @@ router.post('/generate', async function (request, response) {
             ? `Connection refused: ${error.message}`
             : error.message || 'Unknown error occurred';
 
-        if (!response.headersSent) {
+        if (canSendError(response)) {
             response.status(502).send({ error: { message, ...error } });
         } else {
             response.end();
