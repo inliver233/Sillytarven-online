@@ -44,8 +44,12 @@ const pinnedChatsKey = 'pinnedChats';
 const recentChatsSettingsKey = 'recentChatsSettings';
 const defaultAssistantAvatar = 'default_Assistant.png';
 
-const DEFAULT_MAX_DISPLAYED = 15;
+/** 最近聊天展开后每页几个、收起时显示几个（用户可在设置里改） */
+const DEFAULT_MAX_DISPLAYED = 10;
 const DEFAULT_COLLAPSED_DISPLAYED = 3;
+const MAX_RECENT_CHATS_PER_PAGE = 100;
+/** 最近聊天展开后看到第几页（收起时总是最新的几个） */
+let recentChatsCurrentPage = 1;
 
 /**
  * Gets the current recent chats settings from account storage.
@@ -56,9 +60,11 @@ function getRecentChatsSettings() {
     if (value) {
         try {
             const parsed = JSON.parse(value);
+            // 以前的「最多显示几个」现在是展开后每页几个，一页最多 MAX_RECENT_CHATS_PER_PAGE 个
+            const maxDisplayed = clamp(parseInt(parsed.maxDisplayed) || DEFAULT_MAX_DISPLAYED, 1, MAX_RECENT_CHATS_PER_PAGE);
             return {
-                maxDisplayed: Math.max(1, parseInt(parsed.maxDisplayed) || DEFAULT_MAX_DISPLAYED),
-                collapsedDisplayed: Math.max(1, parseInt(parsed.collapsedDisplayed) || DEFAULT_COLLAPSED_DISPLAYED),
+                maxDisplayed,
+                collapsedDisplayed: clamp(parseInt(parsed.collapsedDisplayed) || DEFAULT_COLLAPSED_DISPLAYED, 1, maxDisplayed),
             };
         } catch {
             // Ignore parse errors
@@ -229,16 +235,17 @@ export function getPermanentAssistantAvatar() {
  * @param {object} param Additional parameters
  * @param {boolean} [param.force] If true, forces clearing of the welcome screen.
  * @param {boolean} [param.expand] If true, expands the recent chats section.
+ * @param {boolean} [param.keepPage] Stay on the page of recent chats shown before (when expanded).
  * @returns {Promise<void>}
  */
-export async function openWelcomeScreen({ force = false, expand = false } = {}) {
+export async function openWelcomeScreen({ force = false, expand = false, keepPage = false } = {}) {
     cancelWelcomeMotion();
     const currentChatId = getCurrentChatId();
     if (currentChatId !== undefined || (chat.length > 0 && !force)) {
         return;
     }
 
-    const recentChats = await getRecentChats();
+    const recentChats = await getRecentChats({ page: expand && keepPage ? recentChatsCurrentPage : 1, expanded: expand });
     const chatAfterFetch = getCurrentChatId();
     if (chatAfterFetch !== currentChatId) {
         console.debug('Chat changed while fetching recent chats.');
@@ -251,6 +258,7 @@ export async function openWelcomeScreen({ force = false, expand = false } = {}) 
         $('#chat').empty();
     }
 
+    recentChatsCurrentPage = recentChats.page;
     await sendWelcomePanel(recentChats, expand);
 }
 
@@ -478,11 +486,218 @@ function initCollapsibleSections(root) {
 }
 
 /**
- * Sends the welcome panel to the chat.
- * @param {RecentChat[]} chats List of recent chats
- * @param {boolean} [expand=false] If true, expands the recent chats section
+ * Template data for the welcome panel.
+ * @param {RecentChatsPage} recent Page of recent chats
+ * @param {boolean} expanded Whether the recent chats are expanded
  */
-async function sendWelcomePanel(chats, expand = false) {
+function getWelcomeTemplateData(recent, expanded) {
+    const { collapsedDisplayed } = getRecentChatsSettings();
+    return {
+        chats: recent.chats,
+        empty: !recent.chats.length,
+        version: displayVersion,
+        // 收起时只露出最新几个，还有更多（这一页或后面几页）就给展开按钮
+        more: recent.total > collapsedDisplayed,
+        expanded,
+        recentTotal: recent.total,
+        recentPaged: recent.totalPages > 1,
+        recentPage: recent.page,
+        recentPages: recent.totalPages,
+        recentCanPrev: recent.page > 1,
+        recentCanNext: recent.page < recent.totalPages,
+        ...getWelcomeCharactersData(welcomeCharactersCurrentPage),
+    };
+}
+
+/**
+ * @param {RecentChatsPage} recent Page of recent chats
+ * @param {boolean} expanded Whether the recent chats are expanded
+ * @returns {Promise<DocumentFragment>}
+ */
+async function renderWelcomeFragment(recent, expanded) {
+    const template = await renderTemplateAsync('welcomePanel', getWelcomeTemplateData(recent, expanded));
+    return document.createRange().createContextualFragment(template);
+}
+
+/** 翻页请求的序号：连点时只认最后一次 */
+let recentChatsPageRequest = 0;
+
+/**
+ * Shows another page of recent chats (or page 1 collapsed), replacing only the list.
+ * @param {number} page Page number
+ * @param {object} options
+ * @param {boolean} options.expanded Whether the list is expanded
+ */
+async function showRecentChatsPage(page, { expanded }) {
+    const current = document.querySelector('#chat .welcomePanel .recentChatList');
+    if (!current) {
+        return;
+    }
+    const request = ++recentChatsPageRequest;
+    current.querySelectorAll('.recentChatsPagination button').forEach(button => button.setAttribute('disabled', ''));
+    const recent = await getRecentChats({ page, expanded });
+    if (request !== recentChatsPageRequest || !current.isConnected) {
+        return;
+    }
+    recentChatsCurrentPage = recent.page;
+    const fragment = await renderWelcomeFragment(recent, expanded);
+    const list = fragment.querySelector('.recentChatList');
+    if (!(list instanceof HTMLElement) || !current.isConnected) {
+        return;
+    }
+    bindRecentChatList(list, recent);
+    current.replaceWith(list);
+    const count = document.querySelector('#chat .welcomePanel .welcomeRecentCount');
+    const newCount = fragment.querySelector('.welcomeRecentCount');
+    if (count && newCount) {
+        count.replaceWith(newCount);
+    }
+}
+
+/**
+ * Binds the recent chat items, the show more button and the page buttons of a rendered list.
+ * @param {HTMLElement} list The .recentChatList element
+ * @param {RecentChatsPage} recent Page of recent chats it shows
+ */
+function bindRecentChatList(list, recent) {
+    const chats = recent.chats;
+    list.querySelectorAll('.recentChat').forEach((item) => {
+        item.addEventListener('click', () => {
+            const avatarId = item.getAttribute('data-avatar');
+            const groupId = item.getAttribute('data-group');
+            const fileName = item.getAttribute('data-file');
+            if (!fileName || (!avatarId && !groupId)) {
+                return;
+            }
+            void runRecentChatTransition({
+                card: item,
+                openChat: () => avatarId
+                    ? openRecentCharacterChat(avatarId, fileName)
+                    : openRecentGroupChat(groupId, fileName),
+                getTarget: getRecentChatMotionTarget,
+            });
+        });
+    });
+
+    const pagination = list.querySelector('.recentChatsPagination');
+    list.querySelectorAll('button.showMoreChats').forEach((button) => {
+        const showRecentChatsTitle = t`Show more recent chats`;
+        const hideRecentChatsTitle = t`Show less recent chats`;
+        const isExpanded = () => button.classList.contains('rotated');
+
+        button.setAttribute('title', isExpanded() ? hideRecentChatsTitle : showRecentChatsTitle);
+        button.addEventListener('click', () => {
+            const expanded = !isExpanded();
+            if (!expanded && recentChatsCurrentPage !== 1) {
+                // 收起总是回到最新的几个
+                void showRecentChatsPage(1, { expanded: false });
+                return;
+            }
+            button.classList.toggle('rotated', expanded);
+            button.setAttribute('title', expanded ? hideRecentChatsTitle : showRecentChatsTitle);
+            if (pagination instanceof HTMLElement) {
+                pagination.hidden = !expanded;
+            }
+            const { collapsedDisplayed } = getRecentChatsSettings();
+            const extra = [...list.querySelectorAll('.recentChat')].slice(collapsedDisplayed);
+            void runShowMoreTransition({ items: extra, expanded });
+        });
+    });
+    list.querySelectorAll('.recentPagePrev').forEach((button) => {
+        button.addEventListener('click', () => {
+            if (recent.page > 1) {
+                void showRecentChatsPage(recent.page - 1, { expanded: true });
+            }
+        });
+    });
+    list.querySelectorAll('.recentPageNext').forEach((button) => {
+        button.addEventListener('click', () => {
+            if (recent.page < recent.totalPages) {
+                void showRecentChatsPage(recent.page + 1, { expanded: true });
+            }
+        });
+    });
+
+    list.querySelectorAll('.recentChat.group').forEach((groupChat) => {
+        const groupId = groupChat.getAttribute('data-group');
+        const group = groups.find(x => x.id === groupId);
+        if (group) {
+            const avatar = groupChat.querySelector('.avatar');
+            if (!avatar) {
+                return;
+            }
+            const groupAvatar = getGroupAvatar(group);
+            $(avatar).replaceWith(groupAvatar);
+        }
+    });
+    list.querySelectorAll('.recentChat .renameChat').forEach((renameButton) => {
+        renameButton.addEventListener('click', (event) => {
+            event.stopPropagation();
+            const chatItem = renameButton.closest('.recentChat');
+            if (!chatItem) {
+                return;
+            }
+            const avatarId = chatItem.getAttribute('data-avatar');
+            const groupId = chatItem.getAttribute('data-group');
+            const fileName = chatItem.getAttribute('data-file');
+            if (avatarId && fileName) {
+                void renameRecentCharacterChat(avatarId, fileName);
+            }
+            if (groupId && fileName) {
+                void renameRecentGroupChat(groupId, fileName);
+            }
+        });
+    });
+    list.querySelectorAll('.recentChat .deleteChat').forEach((deleteButton) => {
+        deleteButton.addEventListener('click', (event) => {
+            event.stopPropagation();
+            const chatItem = deleteButton.closest('.recentChat');
+            if (!chatItem) {
+                return;
+            }
+            const avatarId = chatItem.getAttribute('data-avatar');
+            const groupId = chatItem.getAttribute('data-group');
+            const fileName = chatItem.getAttribute('data-file');
+            if (avatarId && fileName) {
+                void deleteRecentCharacterChat(avatarId, fileName);
+            }
+            if (groupId && fileName) {
+                void deleteRecentGroupChat(groupId, fileName);
+            }
+        });
+    });
+    list.querySelectorAll('.recentChat .pinChat').forEach((pinButton) => {
+        pinButton.addEventListener('click', async (event) => {
+            event.stopPropagation();
+            const chatItem = pinButton.closest('.recentChat');
+            if (!chatItem) {
+                return;
+            }
+            const avatarId = chatItem.getAttribute('data-avatar');
+            const groupId = chatItem.getAttribute('data-group');
+            const fileName = chatItem.getAttribute('data-file');
+            const recentChat = chats.find(c => c.chat_name === fileName && ((c.is_group && c.group === groupId) || (!c.is_group && c.avatar === avatarId)));
+            if (!recentChat) {
+                console.error('Recent chat not found for pinning.');
+                return;
+            }
+            const currentlyPinned = PinnedChatsManager.isPinned(recentChat);
+            PinnedChatsManager.toggle(recentChat, !currentlyPinned);
+            if (!currentlyPinned) {
+                // 置顶的排在第 1 页最上面
+                recentChatsCurrentPage = 1;
+            }
+            await refreshWelcomeScreen({ flashChat: recentChat });
+        });
+    });
+}
+
+/**
+ * Shows the welcome panel.
+ * @param {RecentChatsPage} recent Page of recent chats
+ * @param {boolean} [expand] Show the recent chats expanded
+ */
+async function sendWelcomePanel(recent, expand = false) {
     try {
         const chatElement = document.getElementById('chat');
         const sendTextArea = document.getElementById('send_textarea');
@@ -491,18 +706,7 @@ async function sendWelcomePanel(chats, expand = false) {
             return;
         }
 
-        // 获取角色卡数据
-        const charactersData = getWelcomeCharactersData(welcomeCharactersCurrentPage);
-
-        const templateData = {
-            chats,
-            empty: !chats.length,
-            version: displayVersion,
-            more: chats.some(chat => chat.hidden),
-            ...charactersData,
-        };
-        const template = await renderTemplateAsync('welcomePanel', templateData);
-        const fragment = document.createRange().createContextualFragment(template);
+        const fragment = await renderWelcomeFragment(recent, expand);
         fragment.querySelectorAll('.welcomePanel').forEach((root) => {
             initCollapsibleSections(root);
             root.querySelectorAll('.recentChatsSettings').forEach((button) => {
@@ -512,35 +716,10 @@ async function sendWelcomePanel(chats, expand = false) {
                 });
             });
         });
-        fragment.querySelectorAll('.recentChat').forEach((item) => {
-            item.addEventListener('click', () => {
-                const avatarId = item.getAttribute('data-avatar');
-                const groupId = item.getAttribute('data-group');
-                const fileName = item.getAttribute('data-file');
-                if (!fileName || (!avatarId && !groupId)) {
-                    return;
-                }
-                void runRecentChatTransition({
-                    card: item,
-                    openChat: () => avatarId
-                        ? openRecentCharacterChat(avatarId, fileName)
-                        : openRecentGroupChat(groupId, fileName),
-                    getTarget: getRecentChatMotionTarget,
-                });
-            });
-        });
-        const hiddenChats = fragment.querySelectorAll('.recentChat.hidden');
-        fragment.querySelectorAll('button.showMoreChats').forEach((button) => {
-            const showRecentChatsTitle = t`Show more recent chats`;
-            const hideRecentChatsTitle = t`Show less recent chats`;
-
-            button.setAttribute('title', showRecentChatsTitle);
-            button.addEventListener('click', () => {
-                const expanded = !button.classList.contains('rotated');
-                button.classList.toggle('rotated', expanded);
-                button.setAttribute('title', expanded ? hideRecentChatsTitle : showRecentChatsTitle);
-                void runShowMoreTransition({ items: hiddenChats, expanded });
-            });
+        fragment.querySelectorAll('.recentChatList').forEach((list) => {
+            if (list instanceof HTMLElement) {
+                bindRecentChatList(list, recent);
+            }
         });
         fragment.querySelectorAll('button.openTemporaryChat').forEach((button) => {
             button.addEventListener('click', async () => {
@@ -583,86 +762,12 @@ async function sendWelcomePanel(chats, expand = false) {
                 }
             });
         });
-        fragment.querySelectorAll('.recentChat.group').forEach((groupChat) => {
-            const groupId = groupChat.getAttribute('data-group');
-            const group = groups.find(x => x.id === groupId);
-            if (group) {
-                const avatar = groupChat.querySelector('.avatar');
-                if (!avatar) {
-                    return;
-                }
-                const groupAvatar = getGroupAvatar(group);
-                $(avatar).replaceWith(groupAvatar);
-            }
-        });
-        fragment.querySelectorAll('.recentChat .renameChat').forEach((renameButton) => {
-            renameButton.addEventListener('click', (event) => {
-                event.stopPropagation();
-                const chatItem = renameButton.closest('.recentChat');
-                if (!chatItem) {
-                    return;
-                }
-                const avatarId = chatItem.getAttribute('data-avatar');
-                const groupId = chatItem.getAttribute('data-group');
-                const fileName = chatItem.getAttribute('data-file');
-                if (avatarId && fileName) {
-                    void renameRecentCharacterChat(avatarId, fileName);
-                }
-                if (groupId && fileName) {
-                    void renameRecentGroupChat(groupId, fileName);
-                }
-            });
-        });
-        fragment.querySelectorAll('.recentChat .deleteChat').forEach((deleteButton) => {
-            deleteButton.addEventListener('click', (event) => {
-                event.stopPropagation();
-                const chatItem = deleteButton.closest('.recentChat');
-                if (!chatItem) {
-                    return;
-                }
-                const avatarId = chatItem.getAttribute('data-avatar');
-                const groupId = chatItem.getAttribute('data-group');
-                const fileName = chatItem.getAttribute('data-file');
-                if (avatarId && fileName) {
-                    void deleteRecentCharacterChat(avatarId, fileName);
-                }
-                if (groupId && fileName) {
-                    void deleteRecentGroupChat(groupId, fileName);
-                }
-            });
-        });
-        fragment.querySelectorAll('.recentChat .pinChat').forEach((pinButton) => {
-            pinButton.addEventListener('click', async (event) => {
-                event.stopPropagation();
-                const chatItem = pinButton.closest('.recentChat');
-                if (!chatItem) {
-                    return;
-                }
-                const avatarId = chatItem.getAttribute('data-avatar');
-                const groupId = chatItem.getAttribute('data-group');
-                const fileName = chatItem.getAttribute('data-file');
-                const recentChat = chats.find(c => c.chat_name === fileName && ((c.is_group && c.group === groupId) || (!c.is_group && c.avatar === avatarId)));
-                if (!recentChat) {
-                    console.error('Recent chat not found for pinning.');
-                    return;
-                }
-                const currentlyPinned = PinnedChatsManager.isPinned(recentChat);
-                PinnedChatsManager.toggle(recentChat, !currentlyPinned);
-                await refreshWelcomeScreen({ flashChat: recentChat });
-            });
-        });
         chatElement.append(fragment.firstChild);
-        if (expand) {
-            chatElement.querySelectorAll('button.showMoreChats').forEach((button) => {
-                if (button instanceof HTMLButtonElement) {
-                    button.click();
-                }
-            });
-        }
     } catch (error) {
         console.error('Welcome screen error:', error);
     }
 }
+
 
 function getRecentChatMotionTarget() {
     const messages = [...document.querySelectorAll('#chat > .mes')];
@@ -878,7 +983,7 @@ async function refreshWelcomeScreen({ flashChat = null } = {}) {
     const scrollHeight = chatElement.scrollHeight;
     const expand = chatElement.querySelectorAll('button.showMoreChats.rotated').length > 0;
 
-    await openWelcomeScreen({ force: true, expand });
+    await openWelcomeScreen({ force: true, expand, keepPage: true });
 
     // Restore scroll position or flash specific chat
     if (flashChat) {
@@ -909,13 +1014,13 @@ async function openRecentChatsSettingsPopup() {
     const settings = getRecentChatsSettings();
 
     const MIN_CHATS = 1;
-    const MAX_CHATS = 1000;
+    const MAX_CHATS = MAX_RECENT_CHATS_PER_PAGE;
 
     /** @type {import('./popup.js').CustomPopupInput} */
     const maxRecentChatsInput = {
         id: 'maxRecentChats',
         type: 'number',
-        label: t`Max recent chats`,
+        label: '展开后每页显示几个',
         tooltip: t`${MIN_CHATS} - ${MAX_CHATS}`,
         defaultState: String(settings.maxDisplayed),
         min: MIN_CHATS,
@@ -927,7 +1032,7 @@ async function openRecentChatsSettingsPopup() {
     const collapsedRecentChatsInput = {
         id: 'collapsedRecentChats',
         type: 'number',
-        label: t`Collapsed recent chats`,
+        label: '收起时显示几个',
         tooltip: t`${MIN_CHATS} - ${MAX_CHATS}`,
         defaultState: String(settings.collapsedDisplayed),
         min: MIN_CHATS,
@@ -958,8 +1063,20 @@ async function openRecentChatsSettingsPopup() {
 }
 
 /**
- * Gets the list of recent chats from the server.
- * @returns {Promise<RecentChat[]>} List of recent chats
+ * @typedef {object} RecentChatsPage
+ * @property {RecentChat[]} chats Chats on this page
+ * @property {number} total Chats in the whole list
+ * @property {number} page Page number (from 1)
+ * @property {number} totalPages Number of pages
+ */
+
+/**
+ * Gets a page of recent chats from the server (pinned chats first, then the latest).
+ * Collapsed, only the first few of page 1 show; the rest are marked hidden.
+ * @param {object} [options]
+ * @param {number} [options.page] Page to get (from 1); past the last page gives the last page
+ * @param {boolean} [options.expanded] Whether the list is expanded
+ * @returns {Promise<RecentChatsPage>}
  *
  * @typedef {object} RecentChat
  * @property {string} file_name Name of the chat file
@@ -978,25 +1095,43 @@ async function openRecentChatsSettingsPopup() {
  * @property {boolean} hidden Chat will be hidden by default
  * @property {boolean} pinned Indicates if the chat is pinned
  */
-async function getRecentChats() {
+async function getRecentChats({ page = 1, expanded = false } = {}) {
     const settings = getRecentChatsSettings();
-    const response = await fetch('/api/chats/recent', {
+    const pageSize = settings.maxDisplayed;
+    const fetchPage = (/** @type {number} */ number) => fetch('/api/chats/recent', {
         method: 'POST',
         headers: getRequestHeaders(),
-        body: JSON.stringify({ max: settings.maxDisplayed, pinned: PinnedChatsManager.getAll() }),
+        body: JSON.stringify({ max: pageSize, offset: (number - 1) * pageSize, pinned: PinnedChatsManager.getAll() }),
         cache: 'no-cache',
     });
+    const empty = { chats: [], total: 0, page: 1, totalPages: 1 };
 
+    let current = Math.max(1, Math.floor(page) || 1);
+    let response = await fetchPage(current);
     if (!response.ok) {
         console.warn('Failed to fetch recent character chats');
-        return [];
+        return empty;
+    }
+    /** @type {RecentChat[]} */
+    let data = await response.json();
+    const reportedTotal = Number(response.headers.get('X-Recent-Chats-Total'));
+    let total = Number.isFinite(reportedTotal) ? reportedTotal : (Array.isArray(data) ? data.length : 0);
+    let totalPages = Math.max(1, Math.ceil(total / pageSize));
+    if (current > totalPages) {
+        // Chats were deleted meanwhile: the last page there is now
+        current = totalPages;
+        response = await fetchPage(current);
+        if (!response.ok) {
+            return empty;
+        }
+        data = await response.json();
+        const newTotal = Number(response.headers.get('X-Recent-Chats-Total'));
+        total = Number.isFinite(newTotal) ? newTotal : total;
+        totalPages = Math.max(1, Math.ceil(total / pageSize));
     }
 
-    /** @type {RecentChat[]} */
-    const data = await response.json();
-
     if (!Array.isArray(data) || data.length === 0) {
-        return [];
+        return { ...empty, total, page: current, totalPages };
     }
 
     const dataWithEntities = data
@@ -1025,13 +1160,13 @@ async function getRecentChats() {
         chat.chat_name = chat.file_name.replace('.jsonl', '');
         chat.char_thumbnail = character ? getThumbnailUrl('avatar', character.avatar) : system_avatar;
         chat.is_group = !!group;
-        chat.hidden = index >= settings.collapsedDisplayed;
+        chat.hidden = !expanded && index >= settings.collapsedDisplayed;
         chat.avatar = chat.avatar || '';
         chat.group = chat.group || '';
         chat.pinned = PinnedChatsManager.isPinned(chat);
     });
 
-    return dataWithEntities.map(t => t.chat);
+    return { chats: dataWithEntities.map(t => t.chat), total, page: current, totalPages };
 }
 
 export async function openPermanentAssistantChat({ tryCreate = true, created = false } = {}) {

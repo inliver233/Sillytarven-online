@@ -43,7 +43,8 @@
     color: #667eea;
 }
 
-.welcomeCharactersCount {
+.welcomeCharactersCount,
+.welcomeRecentCount {
     font-size: calc(var(--mainFontSize) * 0.85);
     color: var(--SmartThemeQuoteColor);
     background: rgba(102, 126, 234, 0.15);
@@ -194,6 +195,15 @@
     justify-content: center;
     gap: 15px;
     padding-top: 10px;
+}
+
+/* 最近聊天的翻页条：展开时才有，接在列表后面、收起按钮上面 */
+.welcomeRecent .recentChatsPagination {
+    padding-top: 6px;
+}
+
+.welcomeRecent .recentChatsPagination[hidden] {
+    display: none;
 }
 
 .welcomeCharactersPagination .menu_button {

@@ -15,6 +15,7 @@
                 最近聊天
             </h3>
             <div class="welcomeSectionTools">
+                {{#if recentTotal}}<span class="welcomeRecentCount">{{recentTotal}} 个聊天</span>{{/if}}
                 <button class="menu_button menu_button_icon openTemporaryChat" title="开始临时聊天">
                     <i class="fa-solid fa-comment-dots"></i>
                     <span>临时聊天</span>
@@ -78,8 +79,19 @@
             </div>
             {{/with}}
         {{/each}}
+        {{#if recentPaged}}
+            <div class="welcomeCharactersPagination recentChatsPagination" {{#unless expanded}}hidden{{/unless}}>
+                <button class="menu_button recentPagePrev" title="上一页" {{#unless recentCanPrev}}disabled{{/unless}}>
+                    <i class="fa-solid fa-chevron-left"></i>
+                </button>
+                <span class="characterPageInfo recentPageInfo">{{recentPage}} / {{recentPages}}</span>
+                <button class="menu_button recentPageNext" title="下一页" {{#unless recentCanNext}}disabled{{/unless}}>
+                    <i class="fa-solid fa-chevron-right"></i>
+                </button>
+            </div>
+        {{/if}}
         {{#if more}}
-            <button class="menu_button menu_button_icon showMoreChats">
+            <button class="menu_button menu_button_icon showMoreChats {{#if expanded}}rotated{{/if}}">
                 <small class="fa-solid fa-chevron-down fa-fw fa-1x"></small>
             </button>
         {{/if}}

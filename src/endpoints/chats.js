@@ -4788,8 +4788,13 @@ router.post('/recent', async function (request, response) {
         const pinnedChats = Array.isArray(request.body.pinned)
             ? request.body.pinned.filter(p => p && typeof p.file_name === 'string').slice(0, 200)
             : [];
-        // Pinned chats are listed first, on top of the requested number of recent chats.
-        const max = parseInt(request.body.max ?? Number.MAX_SAFE_INTEGER) + pinnedChats.length;
+        // A page of the list (the welcome screen pages through it): `offset` skips that many chats,
+        // pinned chats are ordinary entries at its start, and the size of the whole list comes back
+        // in X-Recent-Chats-Total. Without `offset`, pinned chats are listed on top of `max` chats.
+        const paged = request.body.offset !== undefined;
+        const offset = paged ? Math.max(0, parseInt(request.body.offset) || 0) : 0;
+        const requested = parseInt(request.body.max ?? Number.MAX_SAFE_INTEGER);
+        const max = paged ? Math.max(1, requested || 1) : requested + pinnedChats.length;
         const pinnedVariant = pinnedChats.length
             ? crypto.createHash('sha1').update(JSON.stringify(pinnedChats.map(p => [p.file_name, p.avatar ?? null, p.group ?? null]))).digest('base64url')
             : '';
@@ -4799,7 +4804,7 @@ router.post('/recent', async function (request, response) {
             directories: request.user.directories,
             max,
             metadata: withMetadata,
-            variant: pinnedVariant,
+            variant: paged ? `${pinnedVariant}:offset=${offset}` : pinnedVariant,
             load: async () => {
                 /** @typedef {{pngFile?: string, groupId?: string, filePath: string, mtime: number}} ChatFile */
                 /** @type {ChatFile[]} */
@@ -4874,7 +4879,9 @@ router.post('/recent', async function (request, response) {
                 await performanceTimer.measureAsync('scan', () => Promise.allSettled([getCharacterChatFiles(), getGroupChatFiles(), getRootChatFiles()]));
 
                 const isPinned = (/** @type {ChatFile} */ chatFile) => pinnedChats.some(p => p.file_name === path.basename(chatFile.filePath) && (p.avatar === chatFile.pngFile || p.group === chatFile.groupId));
-                const recentChats = allChatFiles.sort((a, b) => {
+                // Pages count only chats of a character or a group: the welcome screen lists no others.
+                const listed = paged ? allChatFiles.filter(file => file.pngFile || file.groupId) : allChatFiles;
+                const recentChats = listed.sort((a, b) => {
                     const isAPinned = isPinned(a);
                     const isBPinned = isPinned(b);
 
@@ -4882,7 +4889,7 @@ router.post('/recent', async function (request, response) {
                     if (!isAPinned && isBPinned) return 1;
 
                     return b.mtime - a.mtime;
-                }).slice(0, max);
+                }).slice(offset, offset + max);
                 performanceTimer.setCounter('candidates', allChatFiles.length);
                 performanceTimer.setCounter('top', recentChats.length);
                 const jsonFilesPromise = recentChats.map((file) => {
@@ -4895,15 +4902,16 @@ router.post('/recent', async function (request, response) {
                 const chatData = (await performanceTimer.measureAsync('chat-info', () => Promise.allSettled(jsonFilesPromise)))
                     .filter(x => x.status === 'fulfilled')
                     .map(x => x.value);
-                return chatData.filter(i => i.file_name);
+                return { chats: chatData.filter(i => i.file_name), total: listed.length };
             },
         }));
         performanceTimer.increment(`recent-cache-${result.state}`);
-        performanceTimer.setCounter('returned', result.value.length);
+        performanceTimer.setCounter('returned', result.value.chats.length);
         performanceTimer.setCacheState(result.state === 'miss' ? 'miss' : 'hit');
 
         performanceTimer.startPhase('serialize');
-        return response.send(result.value);
+        response.setHeader('X-Recent-Chats-Total', String(result.value.total));
+        return response.send(result.value.chats);
     } catch (error) {
         console.error(error);
         performanceTimer.startPhase('serialize');

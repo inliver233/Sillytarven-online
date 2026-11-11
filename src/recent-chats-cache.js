@@ -43,8 +43,8 @@ export class RecentChatsCache {
      * @param {number} options.max Requested result limit
      * @param {boolean} options.metadata Whether metadata is included
      * @param {string} [options.variant] Other request options that change the result (e.g. pinned chats)
-     * @param {() => Promise<object[]>} options.load Native list builder
-     * @returns {Promise<{value: object[], state: 'hit'|'miss'|'shared'}>}
+     * @param {() => Promise<any>} options.load Native list builder
+     * @returns {Promise<{value: any, state: 'hit'|'miss'|'shared'}>}
      */
     async get({ userKey, directories, max, metadata, variant = '', load }) {
         const trustedKey = String(userKey);
