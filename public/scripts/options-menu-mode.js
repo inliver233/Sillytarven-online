@@ -1,5 +1,5 @@
 /**
- * ☰ 菜单最上面的「基础模式 / 完整模式」滑块。基础模式只留最基本的几项（开始新聊天、管理聊天文件、
+ * ☰ 菜单最上面的「基础模式 / 完整模式」滑块。基础模式只留最基本的几项（开始新聊天、关闭聊天、管理聊天文件、
  * 删除消息、重新生成、继续），其余的（包括扩展加进来的）都收起来；点一下立刻切换，不用刷新。
  * 选择跟着账号走，默认完整模式。
  */
@@ -8,7 +8,7 @@ import { eventSource, event_types } from './events.js';
 
 const STORAGE_KEY = 'optionsMenuMode';
 /** 基础模式下留着的菜单项 */
-const BASIC_ITEMS = ['option_start_new_chat', 'option_select_chat', 'option_delete_mes', 'option_regenerate', 'option_continue'];
+const BASIC_ITEMS = ['option_start_new_chat', 'option_close_chat', 'option_select_chat', 'option_delete_mes', 'option_regenerate', 'option_continue'];
 
 /**
  * @param {object} [options]
@@ -19,8 +19,9 @@ export function initOptionsMenuMode({ onChange = () => {} } = {}) {
     if (!menu || menu.querySelector('.optionsModeSwitch')) {
         return;
     }
+    // 同一个 id 菜单里可能有两处（关闭聊天就是），都要标上
     for (const id of BASIC_ITEMS) {
-        document.getElementById(id)?.classList.add('optionsBasicItem');
+        menu.querySelectorAll(`[id="${id}"]`).forEach(item => item.classList.add('optionsBasicItem'));
     }
 
     // 放在菜单内容外面：扩展往菜单最前面插的项不会跑到它上面。
