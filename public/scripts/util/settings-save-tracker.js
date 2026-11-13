@@ -50,51 +50,99 @@ export class SettingsSaveQueue {
 }
 
 /**
- * Tracks the last confirmed serialized settings payload for exact no-op detection.
+ * @typedef {object} SettingsFingerprint
+ * @property {number} length Serialized length
+ * @property {string|null} text The payload itself, when small enough to keep
+ * @property {string|null} hash SHA-256 of a larger payload (null when it could not be computed)
+ */
+
+/**
+ * SHA-256 of a text, hex.
+ * @param {string} text
+ * @returns {Promise<string|null>} Null without Web Crypto (an http page that is not localhost)
+ */
+async function sha256Hex(text) {
+    if (!globalThis.crypto?.subtle) {
+        return null;
+    }
+    const digest = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+    return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * Tracks the last confirmed settings payload, so an unchanged one is not uploaded again.
+ * Small payloads are compared as they are; larger ones (some are tens of MB) by length and SHA-256,
+ * so the page does not keep a second copy of them.
  */
 export class SettingsSaveTracker {
+    /** @type {SettingsFingerprint|null} */
     #baseline = null;
     #maxBaselineLength;
+    #hash;
 
     /**
      * @param {object} [options] Tracker options
-     * @param {number} [options.maxBaselineLength] Maximum serialized characters retained in memory
+     * @param {number} [options.maxBaselineLength] Largest payload kept as it is (longer ones are hashed)
+     * @param {(text: string) => Promise<string|null>} [options.hash] Hash of a larger payload (tests)
      */
-    constructor({ maxBaselineLength = DEFAULT_MAX_BASELINE_LENGTH } = {}) {
+    constructor({ maxBaselineLength = DEFAULT_MAX_BASELINE_LENGTH, hash = sha256Hex } = {}) {
         const requestedLimit = Number(maxBaselineLength);
         if (!Number.isFinite(requestedLimit) || requestedLimit < 0) {
             throw new TypeError('maxBaselineLength must be a non-negative finite number');
         }
         this.#maxBaselineLength = Math.floor(requestedLimit);
+        this.#hash = hash;
     }
 
     /**
-     * Check whether an enabled save exactly matches the last confirmed payload.
+     * Fingerprint of a serialized payload, for isUnchanged and commit.
      * @param {string} serializedPayload Serialized settings payload
-     * @param {boolean} enabled Whether no-op detection is enabled
-     * @returns {boolean} Whether the network save can be skipped
+     * @returns {Promise<SettingsFingerprint>}
      */
-    isUnchanged(serializedPayload, enabled) {
+    async fingerprint(serializedPayload) {
         if (typeof serializedPayload !== 'string') {
             throw new TypeError('serializedPayload must be a string');
         }
-        return Boolean(enabled) && this.#baseline !== null && serializedPayload === this.#baseline;
+        const length = serializedPayload.length;
+        if (length <= this.#maxBaselineLength) {
+            return { length, text: serializedPayload, hash: null };
+        }
+        let hash = null;
+        try {
+            hash = await this.#hash(serializedPayload);
+        } catch (error) {
+            console.warn('Could not hash the settings payload', error);
+        }
+        return { length, text: null, hash: typeof hash === 'string' && hash ? hash : null };
+    }
+
+    /**
+     * Whether a payload exactly matches the last confirmed one.
+     * @param {SettingsFingerprint} fingerprint From fingerprint()
+     * @returns {boolean} Whether the network save can be skipped
+     */
+    isUnchanged(fingerprint) {
+        const baseline = this.#baseline;
+        if (!baseline || !fingerprint || baseline.length !== fingerprint.length) {
+            return false;
+        }
+        if (baseline.text !== null) {
+            return fingerprint.text === baseline.text;
+        }
+        return baseline.hash !== null && fingerprint.hash === baseline.hash;
     }
 
     /**
      * Retain a payload only after its full save succeeds.
-     * @param {string} serializedPayload Serialized settings payload
+     * @param {SettingsFingerprint} fingerprint From fingerprint()
      * @returns {boolean} Whether the payload was retained
      */
-    commit(serializedPayload) {
-        if (typeof serializedPayload !== 'string') {
-            throw new TypeError('serializedPayload must be a string');
-        }
-        if (serializedPayload.length > this.#maxBaselineLength) {
+    commit(fingerprint) {
+        if (!fingerprint || (fingerprint.text === null && fingerprint.hash === null)) {
             this.clear();
             return false;
         }
-        this.#baseline = serializedPayload;
+        this.#baseline = fingerprint;
         return true;
     }
 

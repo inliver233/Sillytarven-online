@@ -548,7 +548,6 @@ export const DEFAULT_PRINT_TIMEOUT = debounce_timeout.quick;
 
 const settingsSaveTracker = new SettingsSaveTracker();
 const settingsSaveQueue = new SettingsSaveQueue();
-let settingsSaveRequestsInFlight = 0;
 export const saveSettingsDebounced = debounce((loopCounter = 0) => saveSettings(loopCounter), DEFAULT_SAVE_EDIT_TIMEOUT);
 export const saveCharacterDebounced = debounce(() => $('#create_button').trigger('click'), DEFAULT_SAVE_EDIT_TIMEOUT);
 
@@ -8683,12 +8682,13 @@ async function saveChatTail(options = {}) {
         force: force,
         allow_shrink: canShrinkSavedChat(),
     });
-    const result = await sendWithRetry(() => fetch('/api/chats/save-tail', {
+    const request = await compressRequest({
         method: 'POST',
         cache: 'no-cache',
         headers: getRequestHeaders(),
         body,
-    }));
+    });
+    const result = await sendWithRetry(() => fetch('/api/chats/save-tail', request));
 
     let errorData = null;
     let savedRevision = null;
@@ -8780,12 +8780,13 @@ async function saveChatPatch({ session, messages, header, force = false }) {
     const prepared = session.prepareSave(messages, { header, force, nextRevision });
     let result;
     try {
-        result = await sendWithRetry(() => fetch(`${session.baseUrl}/save-patch`, {
+        const request = await compressRequest({
             method: 'POST',
             cache: 'no-cache',
             headers: getRequestHeaders(),
             body: prepared.body,
-        }));
+        });
+        result = await sendWithRetry(() => fetch(`${session.baseUrl}/save-patch`, request));
     } catch (error) {
         prepared.rollback();
         throw error;
@@ -8955,7 +8956,7 @@ async function saveChatCopyFromPagedChat({ fileName, metadata, mesId, chatData =
  * @param {object[]} options.messages Header and messages to write
  */
 async function saveChatCopy({ character, fileName, messages }) {
-    const result = await fetch('/api/chats/save', {
+    const result = await fetch('/api/chats/save', await compressRequest({
         method: 'POST',
         cache: 'no-cache',
         headers: withOwnChatWriteHeader(getRequestHeaders()),
@@ -8967,7 +8968,7 @@ async function saveChatCopy({ character, fileName, messages }) {
             // A copy of the stored chat, so it may replace a longer checkpoint.
             allow_shrink: true,
         }),
-    });
+    }));
     if (result.ok) {
         return;
     }
@@ -9941,22 +9942,20 @@ export async function saveSettings(loopCounter = 0) {
     try {
         const serializeStartedAt = performance.now();
         const serializedPayload = JSON.stringify(payload);
-        const isUnchanged = settingsSaveRequestsInFlight === 0
-            && settingsSaveTracker.isUnchanged(serializedPayload, power_user.settings_save_noop);
-        recordPerformanceSample('settings-save-serialize', performance.now() - serializeStartedAt, {
-            characters: serializedPayload.length,
-            noop: Number(isUnchanged),
-        });
+        const serializeMs = performance.now() - serializeStartedAt;
 
-        if (isUnchanged) {
-            settings = payload;
-            await eventSource.emit(event_types.SETTINGS_UPDATED);
-            return;
-        }
-
-        settingsSaveRequestsInFlight++;
-        try {
-            await settingsSaveQueue.enqueue(async () => {
+        // 设置没变就不上传（有人的设置几十 MB）。在保存队列里比，前面的保存都有结果了，比的是服务器上现在那份
+        const uploaded = await settingsSaveQueue.enqueue(async () => {
+            const fingerprint = await settingsSaveTracker.fingerprint(serializedPayload);
+            const isUnchanged = settingsSaveTracker.isUnchanged(fingerprint);
+            recordPerformanceSample('settings-save-serialize', serializeMs, {
+                characters: serializedPayload.length,
+                noop: Number(isUnchanged),
+            });
+            if (isUnchanged) {
+                return false;
+            }
+            try {
                 const saveSettingsRequest = await compressRequest({
                     method: 'POST',
                     headers: getRequestHeaders(),
@@ -9966,14 +9965,19 @@ export async function saveSettings(loopCounter = 0) {
                 // 网络抖一下自动重试（整份覆盖，重发同一份没有副作用）
                 const response = await sendWithRetry(() => fetch('/api/settings/save', saveSettingsRequest));
                 await requireSettingsSaveSuccess(response);
-                settingsSaveTracker.commit(serializedPayload);
-            });
-        } finally {
-            settingsSaveRequestsInFlight--;
-        }
+            } catch (error) {
+                // 可能其实存上了（回应丢了），服务器上是哪份说不准
+                settingsSaveTracker.clear();
+                throw error;
+            }
+            settingsSaveTracker.commit(fingerprint);
+            return true;
+        });
 
         settings = payload;
-        noteSettingsSaved(payload);
+        if (uploaded) {
+            noteSettingsSaved(payload);
+        }
         await eventSource.emit(event_types.SETTINGS_UPDATED);
     } catch (error) {
         console.error('Error saving settings:', error);

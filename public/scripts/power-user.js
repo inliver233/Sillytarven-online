@@ -307,7 +307,6 @@ export const power_user = {
     encode_tags: false,
     experimental_macro_engine: true,
     prompt_manager_background_tokens: false,
-    settings_save_noop: false,
     extension_resource_preload: true,
     extension_resource_preload_migration_version: EXTENSION_RESOURCE_PRELOAD_MIGRATION_VERSION,
     servers: [],
@@ -1729,7 +1728,6 @@ export async function loadPowerUserSettings(settings, data) {
     $('#encode_tags').prop('checked', power_user.encode_tags);
     $('#experimental_macro_engine').prop('checked', power_user.experimental_macro_engine);
     $('#prompt_manager_background_tokens').prop('checked', power_user.prompt_manager_background_tokens);
-    $('#settings_save_noop').prop('checked', power_user.settings_save_noop);
     $('#extension_resource_preload').prop('checked', power_user.extension_resource_preload);
     $('#example_messages_behavior').val(getExampleMessagesBehavior());
     $(`#example_messages_behavior option[value="${getExampleMessagesBehavior()}"]`).prop('selected', true);
@@ -3966,11 +3964,6 @@ jQuery(() => {
     $('#prompt_manager_background_tokens').on('input', function () {
         power_user.prompt_manager_background_tokens = !!$(this).prop('checked');
         void eventSource.emit(event_types.PROMPT_MANAGER_BACKGROUND_TOKENS_CHANGED, power_user.prompt_manager_background_tokens);
-        saveSettingsDebounced();
-    });
-
-    $('#settings_save_noop').on('input', function () {
-        power_user.settings_save_noop = !!$(this).prop('checked');
         saveSettingsDebounced();
     });
 

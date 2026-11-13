@@ -827,11 +827,12 @@ async function saveGroupChat(groupId, shouldSaveGroup, force = false) {
         }
         let response;
         try {
-            response = await sendWithRetry(() => fetch(saveRequest.url, {
+            const request = await compressRequest({
                 method: 'POST',
                 headers: withOwnChatWriteHeader(getRequestHeaders()),
                 body: saveRequest.body,
-            }));
+            });
+            response = await sendWithRetry(() => fetch(saveRequest.url, request));
         } catch (error) {
             prepared?.rollback();
             throw error;

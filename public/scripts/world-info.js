@@ -23,6 +23,7 @@ import { renderTemplateAsync } from './templates.js';
 import { t } from './i18n.js';
 import { accountStorage } from './util/AccountStorage.js';
 import { getOrCreatePersonaDescriptor, setPersonaDescription, user_avatar } from './personas.js';
+import { compressRequest } from './request-compression.js';
 
 export const world_info_insertion_strategy = {
     evenly: 0,
@@ -4152,11 +4153,11 @@ async function _save(name, data) {
     // Prevent double saving if both immediate and debounced save are called
     cancelDebounce(saveWorldDebounced);
 
-    await fetch('/api/worldinfo/edit', {
+    await fetch('/api/worldinfo/edit', await compressRequest({
         method: 'POST',
         headers: getRequestHeaders(),
         body: JSON.stringify({ name: name, data: data }),
-    });
+    }));
     await eventSource.emit(event_types.WORLDINFO_UPDATED, name, data);
 }
 
