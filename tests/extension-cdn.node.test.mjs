@@ -130,7 +130,7 @@ test('a mirrored extension resolves its relative imports to the app, to itself a
     assert.notEqual(withUser, page);
     const script = /<script>(\(function \(o\)[\s\S]*?)<\/script>/.exec(withUser)[1];
     const inserted = [];
-    const element = tagName => ({ tagName, after(next) { inserted.push(next); } });
+    const element = tagName => ({ tagName, after(next) { inserted.push(next); }, addEventListener: () => {} });
     const context = {
         HTMLScriptElement: { supports: type => type === 'importmap' },
         localStorage: { getItem: () => null, setItem: () => {} },
@@ -139,6 +139,9 @@ test('a mirrored extension resolves its relative imports to the app, to itself a
         addEventListener: () => {},
         location: { origin: 'https://site.example', reload: () => {} },
         console: { warn: () => {} },
+        // The mirror watchdog's timer (asset-version.js); never runs here
+        setInterval: () => 0,
+        clearInterval: () => {},
         Worker: function Worker(url, options) { this.url = String(url); this.options = options; },
     };
     context.window = context;

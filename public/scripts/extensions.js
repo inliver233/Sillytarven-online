@@ -11,7 +11,7 @@ import { addLocaleData, getCurrentLocale, t } from './i18n.js';
 import { debounce_timeout } from './constants.js';
 import { accountStorage } from './util/AccountStorage.js';
 import { preloadExtensionResources } from './util/extension-resource-preload.js';
-import { getExtensionModuleUrl, getExtensionStyleUrl } from './util/module-url.js';
+import { fetchAsset, getExtensionModuleUrl, getExtensionStyleUrl } from './util/module-url.js';
 import { getExtensionActivationPlan } from './util/extension-eligibility.js';
 import { SimpleMutex } from './util/SimpleMutex.js';
 import { power_user } from './power-user.js';
@@ -575,7 +575,7 @@ async function getManifests(names) {
 
     for (const name of names) {
         const promise = new Promise((resolve, reject) => {
-            fetch(getExtensionModuleUrl(name, 'manifest.json')).then(async response => {
+            fetchAsset(getExtensionModuleUrl(name, 'manifest.json')).then(async response => {
                 if (response.ok) {
                     const json = await response.json();
                     obj[name] = json;
@@ -877,7 +877,7 @@ function addExtensionLocale(name, manifest) {
         return Promise.resolve();
     }
 
-    return fetch(getExtensionModuleUrl(name, localeFile))
+    return fetchAsset(getExtensionModuleUrl(name, localeFile))
         .then(async response => {
             if (!response.ok) {
                 throw new Error(`HTTP ${response.status}: ${response.statusText}`);

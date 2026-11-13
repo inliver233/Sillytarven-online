@@ -407,6 +407,9 @@ function getAssetScript(manifest, preload, cdn) {
                 var reason = event.reason && (event.reason.message || String(event.reason));
                 if (typeof reason === 'string' && reason.indexOf(o.cdn) !== -1) fail(false, reason);
             });
+            // A file the page fetched itself did not come from the mirror (module-url.js fetchAsset):
+            // this server from the next page on.
+            window.__stAssetCdn.failed = function (what) { fail(false, what); };
         }
         // Versioned URL of each file by its plain path, for templates, styles and the like (see module-url.js).
         window.__stAssets = { urls: urls };
@@ -414,10 +417,76 @@ function getAssetScript(manifest, preload, cdn) {
         map.type = 'importmap';
         map.textContent = JSON.stringify({ imports: mapped });
         document.currentScript.after(map);
+        // A mirror that hangs instead of failing gives no error event: the page would wait forever.
+        // Until the app is ready, when mirror files are still awaited and none has arrived for STALL ms,
+        // a small file is asked for: no answer within PROBE ms means the mirror cannot be reached, and the
+        // page loads from this server (for half an hour). A slow mirror still answers, and is waited for.
+        var watch = null;
+        if (use) {
+            var STALL = 10e3, PROBE = 5e3;
+            watch = { pending: 0, last: Date.now(), probing: false, done: false };
+            watch.add = function (node) {
+                var settled = false;
+                watch.pending++;
+                var settle = function () {
+                    if (settled) return;
+                    settled = true;
+                    watch.pending--;
+                    watch.last = Date.now();
+                };
+                node.addEventListener('load', settle);
+                node.addEventListener('error', settle);
+            };
+            var stalled = function (what) {
+                watch.done = true;
+                try {
+                    localStorage.setItem(KEY, JSON.stringify({ at: Date.now(), count: 2, what: 'stalled: ' + String(what || '').slice(0, 280) }));
+                } catch (e) { return; }
+                console.warn('The CDN mirror does not answer; loading the app from this server.');
+                location.reload();
+            };
+            var probeUrl = urls['/locales/lang.json'] || urls['/' + o.preload[0]];
+            var timer = setInterval(function () {
+                if (watch.done || window.__stAppReady) {
+                    clearInterval(timer);
+                    watch.done = true;
+                    return;
+                }
+                if (watch.probing || watch.pending <= 0 || Date.now() - watch.last < STALL || !probeUrl) return;
+                watch.probing = true;
+                var controller = window.AbortController ? new AbortController() : null;
+                var giveUp = setTimeout(function () {
+                    if (controller) controller.abort();
+                    stalled(probeUrl);
+                }, PROBE);
+                fetch(probeUrl, { mode: 'no-cors', cache: 'no-store', signal: controller ? controller.signal : undefined }).then(function () {
+                    // Reachable, just slow: keep waiting
+                    clearTimeout(giveUp);
+                    watch.probing = false;
+                    watch.last = Date.now();
+                }, function () {
+                    clearTimeout(giveUp);
+                    if (!watch.done) stalled(probeUrl);
+                });
+            }, 1000);
+            // Extension scripts the app adds later, from the mirror
+            if (window.MutationObserver) {
+                var observer = new MutationObserver(function (records) {
+                    if (watch.done) return observer.disconnect();
+                    records.forEach(function (record) {
+                        record.addedNodes.forEach(function (node) {
+                            if (node.tagName === 'SCRIPT' && node.src && node.src.indexOf(o.cdn) === 0) watch.add(node);
+                        });
+                    });
+                });
+                observer.observe(document.documentElement, { childList: true, subtree: true });
+            }
+        }
         o.preload.forEach(function (path) {
             var link = document.createElement('link');
             link.rel = 'modulepreload';
             link.href = urls['/' + path];
+            if (watch) watch.add(link);
             last.after(link);
             last = link;
         });
@@ -435,6 +504,7 @@ function getAssetScript(manifest, preload, cdn) {
             link.as = 'fetch';
             link.crossOrigin = 'anonymous';
             link.href = urls['/' + path];
+            if (watch) watch.add(link);
             last.after(link);
             last = link;
         });

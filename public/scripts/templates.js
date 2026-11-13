@@ -1,6 +1,6 @@
 import { DOMPurify, Handlebars } from '../lib.js';
 import { applyLocale } from './i18n.js';
-import { getVersionedAssetUrl } from './util/module-url.js';
+import { fetchAsset, getVersionedAssetUrl } from './util/module-url.js';
 
 /**
  * @type {Map<string, function>}
@@ -32,7 +32,7 @@ function getUrlSync(url) {
  * @returns {Promise<string>} Response text
  */
 async function getUrlAsync(url) {
-    const response = await fetch(url);
+    const response = await fetchAsset(url);
     if (!response.ok) {
         throw new Error(`Error loading ${url}: ${response.status} ${response.statusText}`);
     }

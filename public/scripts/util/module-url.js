@@ -62,3 +62,44 @@ export function getVersionedAssetUrl(url) {
     }
     return ASSET_URLS[path] ?? url;
 }
+
+/** A file on the CDN mirror that has not started to arrive by then is fetched from this server instead */
+const MIRROR_RESPONSE_TIMEOUT_MS = 10_000;
+
+/**
+ * fetch() for the app's files: one on the CDN mirror that fails or does not answer within
+ * MIRROR_RESPONSE_TIMEOUT_MS comes from this server instead (the same path is served here), and the
+ * page loads from this server from the next time on. A mirror that hangs gives no error otherwise.
+ * @param {string} url URL from getVersionedAssetUrl()
+ * @param {RequestInit} [init] fetch() options
+ * @param {{ timeoutMs?: number }} [options]
+ * @returns {Promise<Response>}
+ */
+export async function fetchAsset(url, init = {}, { timeoutMs = MIRROR_RESPONSE_TIMEOUT_MS } = {}) {
+    const mirror = globalThis.__stAssetCdn ? String(new URL(url, location.href).origin) : '';
+    if (!mirror || mirror === location.origin) {
+        return fetch(url, init);
+    }
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    init.signal?.addEventListener('abort', abort, { once: true });
+    const timeout = setTimeout(abort, timeoutMs);
+    try {
+        const response = await fetch(url, { ...init, signal: controller.signal });
+        if (response.ok || response.status === 404) {
+            return response;
+        }
+        throw new Error(`HTTP ${response.status}`);
+    } catch (error) {
+        if (init.signal?.aborted) {
+            throw error;
+        }
+        console.warn('Could not get a file from the CDN mirror; getting it from this server.', url, error);
+        globalThis.__stAssetCdn?.failed?.(url);
+        const local = new URL(url, location.href);
+        return fetch(location.origin + local.pathname + local.search, init);
+    } finally {
+        clearTimeout(timeout);
+        init.signal?.removeEventListener('abort', abort);
+    }
+}

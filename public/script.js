@@ -1453,6 +1453,8 @@ async function firstLoadInit() {
     recordStartupMilestone('first-ui');
     await fixViewport();
     await eventSource.emit(event_types.APP_READY);
+    // The page's mirror watchdog stops here (src/asset-version.js)
+    globalThis.__stAppReady = true;
     finishStartupLaps('app-ready');
     recordStartupMilestone('chat-input-ready');
 }

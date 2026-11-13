@@ -29,11 +29,27 @@ const MANIFEST = Object.freeze({
  * @param {string} page Page
  * @param {{zone?: string, storage?: Record<string, string>, importMaps?: boolean}} [browser] Time zone, localStorage, import map support
  */
-function runAssetScript(page, { zone = 'Asia/Shanghai', storage = {}, importMaps = true, language = 'zh-CN' } = {}) {
+function runAssetScript(page, { zone = 'Asia/Shanghai', storage = {}, importMaps = true, language = 'zh-CN', fetch = () => new Promise(() => {}) } = {}) {
     const script = /<script>(\(function \(o\)[\s\S]*?)<\/script>/.exec(page)[1];
     const listeners = {};
     const inserted = [];
-    const element = tagName => ({ tagName, after(next) { inserted.push(next); } });
+    // Timers run when the test moves the clock (tick)
+    const clock = { now: Date.now(), timers: [] };
+    const addTimer = (fn, ms, repeat) => {
+        const timer = { fn, ms, repeat, at: clock.now + ms };
+        clock.timers.push(timer);
+        return timer;
+    };
+    const clearTimer = timer => { clock.timers = clock.timers.filter(item => item !== timer); };
+    const element = tagName => {
+        const handlers = {};
+        return {
+            tagName,
+            after(next) { inserted.push(next); },
+            addEventListener(type, handler) { (handlers[type] ??= []).push(handler); },
+            fire(type) { (handlers[type] ?? []).forEach(handler => handler()); },
+        };
+    };
     const context = {
         HTMLScriptElement: { supports: type => importMaps && type === 'importmap' },
         localStorage: { getItem: key => storage[key] ?? null, setItem: (key, value) => { storage[key] = value; } },
@@ -43,12 +59,33 @@ function runAssetScript(page, { zone = 'Asia/Shanghai', storage = {}, importMaps
         location: { origin: 'https://example.org', reload: () => { context.reloaded = true; } },
         navigator: { language },
         console: { warn: () => {} },
+        Date: { now: () => clock.now },
+        setInterval: (fn, ms) => addTimer(fn, ms, true),
+        clearInterval: clearTimer,
+        setTimeout: (fn, ms) => addTimer(fn, ms, false),
+        clearTimeout: clearTimer,
+        fetch,
         reloaded: false,
     };
     context.window = context;
     vm.runInNewContext(script, context);
     const map = inserted.find(item => item.type === 'importmap');
+    /** Moves the clock by ms, a second at a time, running the timers that come due */
+    const tick = async (ms) => {
+        for (let passed = 0; passed < ms; passed += 1000) {
+            clock.now += 1000;
+            for (const timer of clock.timers.filter(item => item.at <= clock.now)) {
+                if (timer.repeat) timer.at += timer.ms;
+                else clearTimer(timer);
+                timer.fn();
+            }
+            await new Promise(resolve => setImmediate(resolve));
+        }
+    };
     return {
+        tick,
+        clock,
+        preloadLinks: inserted.filter(item => item.rel === 'modulepreload' || item.rel === 'preload'),
         imports: map ? JSON.parse(map.textContent).imports : null,
         preloads: inserted.filter(item => item.rel === 'modulepreload').map(item => item.href),
         fetchPreloads: inserted.filter(item => item.rel === 'preload').map(item => `${item.as} ${item.crossOrigin} ${item.href}`),
@@ -364,4 +401,42 @@ test('the CDN mirror address is checked', () => {
     for (const value of ['', '   ', 'static.example.cn', 'ftp://static.example.cn', 'https://static.example.cn/?x=1', 'https://a:b@static.example.cn', 'javascript:alert(1)', null, 42]) {
         assert.equal(normalizeAssetCdnBaseUrl(value), null, String(value));
     }
+});
+
+test('a mirror that stops answering is left for this server; a slow one is waited for', async () => {
+    const html = '<html><head></head><body><script type="module" src="script.js"></script></body></html>';
+    const page = transformAppHtml(html, { manifest: MANIFEST, preload: ['script.js'], cdn: { baseUrl: 'https://static.example.cn/st', timeZones: [] } });
+    const scriptOf = run => run.imports['/scripts/a.js'];
+
+    // Hangs: a module never arrives and the small probe gets no answer either.
+    let probed = '';
+    const hung = runAssetScript(page, { fetch: url => { probed = url; return new Promise(() => {}); } });
+    await hung.tick(9000);
+    assert.equal(hung.context.reloaded, false, 'not before ten quiet seconds');
+    await hung.tick(7000);
+    assert.equal(probed, 'https://static.example.cn/st/v/s/script.js?v=11111111');
+    assert.equal(hung.context.reloaded, true);
+    const failure = JSON.parse(hung.storage['st-asset-cdn-failed']);
+    assert.equal(failure.count, 2);
+    assert.match(failure.what, /^stalled: /);
+    assert.equal(scriptOf(runAssetScript(page, { storage: hung.storage })), '/v/s/scripts/a.js?v=33333333', 'this server next time');
+
+    // Slow: the probe answers, so the page keeps waiting.
+    let probes = 0;
+    const slow = runAssetScript(page, { fetch: () => { probes++; return Promise.resolve({}); } });
+    await slow.tick(40_000);
+    assert.equal(slow.context.reloaded, false);
+    assert.ok(probes >= 1);
+    assert.equal(slow.storage['st-asset-cdn-failed'], undefined);
+
+    // Everything arrived, or the app is ready: nothing to watch.
+    let asked = 0;
+    const fine = runAssetScript(page, { fetch: () => { asked++; return new Promise(() => {}); } });
+    fine.preloadLinks.forEach(link => link.fire('load'));
+    await fine.tick(40_000);
+    const ready = runAssetScript(page, { fetch: () => { asked++; return new Promise(() => {}); } });
+    ready.context.__stAppReady = true;
+    await ready.tick(40_000);
+    assert.equal(asked, 0);
+    assert.equal(fine.context.reloaded || ready.context.reloaded, false);
 });
