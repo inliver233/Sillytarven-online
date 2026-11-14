@@ -206,8 +206,8 @@ test('stcontrol disables every implicit auto-login path even during an independe
 
 test('browser-facing login, register and LinuxDo compatibility callback use the same guards', () => {
     const source = fs.readFileSync(new URL('../src/server-main.js', import.meta.url), 'utf8');
-    assert.match(source, /app\.get\('\/login', stcontrolPublicAccountGuard,/);
-    assert.match(source, /app\.get\('\/register', stcontrolPublicAccountGuard,/);
+    assert.match(source, /app\.get\('\/login', sendToControllerAccountPage\('login'\), stcontrolPublicAccountGuard,/);
+    assert.match(source, /app\.get\('\/register', sendToControllerAccountPage\('register'\), stcontrolPublicAccountGuard,/);
     assert.match(source, /app\.get\('\/oauth', stcontrolOAuthGuard,/);
 });
 
@@ -297,4 +297,32 @@ test('a controller administrator page heartbeat is accepted instead of being ans
     } finally {
         await new Promise(resolve => server.close(resolve));
     }
+});
+
+// Last: it changes the control mode.
+test('the sign-in and sign-up pages send the browser to the Controller instead of a 423 dead end', async () => {
+    const controller = 'https://controller.example/';
+    assert.equal(adapter.getControllerAccountPage('register', controller), 'https://controller.example/register');
+    // No usable Controller address: answer as before
+    assert.equal(adapter.getControllerAccountPage('login', ''), '');
+    assert.equal(adapter.getControllerAccountPage('login', 'javascript:alert(1)'), '');
+
+    await adapter.applyStcontrolMode({
+        mode: adapter.STCONTROL_MODES.MANAGED,
+        mode_generation: 5,
+        controller_generation: 3,
+        reason_code: 'controller_recovered',
+    });
+    assert.equal(adapter.getControllerAccountPage('login', controller), 'https://controller.example/login');
+    assert.equal(adapter.getControllerAccountPage('register', controller), 'https://controller.example/register');
+
+    await adapter.applyStcontrolMode({
+        mode: adapter.STCONTROL_MODES.INDEPENDENT,
+        mode_generation: 6,
+        controller_generation: 3,
+        reason_code: 'outage_confirmed',
+    });
+    // Independent (outage): native sign-in works on the node, sign-up still belongs to the Controller
+    assert.equal(adapter.getControllerAccountPage('login', controller), '');
+    assert.equal(adapter.getControllerAccountPage('register', controller), 'https://controller.example/register');
 });

@@ -95,6 +95,20 @@ export function getStcontrolControllerUrl() {
     return String(getConfigValue('stcontrol.controllerUrl', '', 'string')).replace(/\/+$/, '');
 }
 
+/**
+ * A browser asking this node for its sign-in or sign-up page, while the Controller runs accounts:
+ * where to send it. The node has neither page then (it answers 423 JSON, a dead end on screen);
+ * the Controller has both. Native sign-in stays here while the node runs independently (outage).
+ * @param {'login'|'register'} page Page asked for
+ * @param {string} [controllerUrl] Controller address (the configured one by default)
+ * @returns {string} Controller page to go to, or '' to answer as before
+ */
+export function getControllerAccountPage(page, controllerUrl = getStcontrolControllerUrl()) {
+    if (!isStcontrolEnabled() || !/^https?:\/\//i.test(controllerUrl)) return '';
+    if (page === 'login' && loadStateSync().mode === STCONTROL_MODES.INDEPENDENT) return '';
+    return `${controllerUrl.replace(/\/+$/, '')}/${page}`;
+}
+
 export function getStcontrolAgentUrl() {
     return String(getConfigValue('stcontrol.agentUrl', '', 'string')).replace(/\/+$/, '');
 }

@@ -109,7 +109,7 @@ import { migrateGroupChatsMetadataFormat } from './endpoints/groups.js';
 import { initializeUserInvitationSystem } from './user-invitations.js';
 import { getRegistrationMethodConfig } from './registration-policy.js';
 import { beginEndpointPerformance, finalizeRequestPerformance, performanceRequestStartMiddleware } from './performance-monitor.js';
-import { getStcontrolControllerUrl, isStcontrolEnabled, stcontrolOAuthGuard, stcontrolPublicAccountGuard } from './stcontrol.js';
+import { getControllerAccountPage, getStcontrolControllerUrl, isStcontrolEnabled, stcontrolOAuthGuard, stcontrolPublicAccountGuard } from './stcontrol.js';
 import { DISCORD_PUBLIC_PAGES, handleDiscordInteraction, isDiscordApplicationEnabled } from './discord-public-endpoints.js';
 
 // Work around a node v20.0.0, v20.1.0, and v20.2.0 bug. The issue was fixed in v20.3.0.
@@ -385,14 +385,28 @@ app.get('/oauth', stcontrolOAuthGuard, (request, response, next) => {
     return linuxdoCallbackHandler(request, response, next);
 });
 
+/**
+ * Sends a browser to the Controller's own page when this node has none (see getControllerAccountPage).
+ * @param {'login'|'register'} page Page asked for
+ * @returns {import('express').RequestHandler}
+ */
+function sendToControllerAccountPage(page) {
+    return (request, response, next) => {
+        const target = getControllerAccountPage(page);
+        if (!target) return next();
+        setPrivateNoStoreHeaders(response);
+        return response.redirect(302, target);
+    };
+}
+
 // Host login page
-app.get('/login', stcontrolPublicAccountGuard, (request, response, next) => {
+app.get('/login', sendToControllerAccountPage('login'), stcontrolPublicAccountGuard, (request, response, next) => {
     setPrivateNoStoreHeaders(response);
     return loginPageMiddleware(request, response, next);
 });
 
 // Host additional pages
-app.get('/register', stcontrolPublicAccountGuard, (request, response) => {
+app.get('/register', sendToControllerAccountPage('register'), stcontrolPublicAccountGuard, (request, response) => {
     setPrivateNoStoreHeaders(response);
     return response.sendFile('register.html', { root: path.join(serverDirectory, 'public') });
 });
