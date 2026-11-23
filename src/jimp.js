@@ -2,11 +2,14 @@ import { createJimp } from '@jimp/core';
 
 // Optimized image formats
 import webp from '@jimp/wasm-webp';
-import png from '@jimp/wasm-png';
 import jpeg from '@jimp/wasm-jpeg';
 import avif from '@jimp/wasm-avif';
 
 // Other image formats
+// PNG uses the JS codec: the WASM one cannot read a text chunk over ~1 MB (character cards with a big
+// lorebook), and each such failure leaves its memory damaged; after a few hundred it fails on every PNG
+// and finally loops forever inside a decode, which stalled the whole server (2026-11-23).
+import png from '@jimp/js-png';
 import bmp, { msBmp } from '@jimp/js-bmp';
 import gif from '@jimp/js-gif';
 import tiff from '@jimp/js-tiff';
@@ -44,7 +47,7 @@ const defaultPlugins = [
     quantize.methods,
 ];
 
-// A custom jimp that uses WASM for optimized formats and JS for the rest
+// A custom jimp that uses WASM for some optimized formats and JS for the rest
 const Jimp = createJimp({
     formats: [webp, png, jpeg, avif, bmp, msBmp, gif, tiff],
     plugins: [...defaultPlugins],
