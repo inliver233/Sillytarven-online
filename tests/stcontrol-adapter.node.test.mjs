@@ -461,6 +461,54 @@ test('a stale managed page remains readable, including settings/get, but cannot 
     }
 });
 
+test('a request whose client left while it waited does not stay counted in flight', async () => {
+    const previousDataRoot = globalThis.DATA_ROOT;
+    const previousEnabled = process.env.SILLYTAVERN_STCONTROL_ENABLED;
+    const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sillytavern-stcontrol-inflight-'));
+    const sessionId = 'cccccccc-3333-4333-8333-cccccccccccc';
+    globalThis.DATA_ROOT = dataRoot;
+    process.env.SILLYTAVERN_STCONTROL_ENABLED = 'true';
+    resetStcontrolStateForTests();
+    try {
+        const state = getStcontrolState();
+        const now = Date.now();
+        state.mode = STCONTROL_MODES.MANAGED;
+        state.controllerGeneration = 2;
+        state.sessions[sessionId] = {
+            handle: 'dora', loginMode: STCONTROL_MODES.MANAGED, activityEpoch: 4, controllerGeneration: 2,
+            lastSeenAt: now, lastPageAt: now, lastRequestAt: now, inFlightReads: 0, inFlightWrites: 0,
+        };
+        state.leases.dora = { sessionId, activityEpoch: 4, controllerGeneration: 2, leaseExpiresAt: now + 120_000, confirmedAt: now };
+        fs.mkdirSync(path.join(dataRoot, '_stcontrol'), { recursive: true });
+        fs.writeFileSync(path.join(dataRoot, '_stcontrol', 'adapter-state.json'), JSON.stringify(state));
+        resetStcontrolStateForTests();
+
+        const request = {
+            method: 'POST',
+            path: '/api/chats/save-tail',
+            destroyed: true,
+            user: { profile: { handle: 'dora' } },
+            session: { stcontrol: { sessionId, loginMode: STCONTROL_MODES.MANAGED, activityEpoch: 4, controllerGeneration: 2 } },
+        };
+        // Closed before the tracker could listen: no close event will come
+        const response = new EventEmitter();
+        response.destroyed = true;
+        response.status = status => { response.statusCode = status; return response; };
+        response.json = body => { response.body = body; return response; };
+        await stcontrolRequestTracker(request, response, () => undefined);
+        await new Promise(resolve => setTimeout(resolve, 20));
+        const fact = getStcontrolSessionTelemetry().find(item => item.session_id === sessionId);
+        assert.equal(fact.in_flight_writes, 0);
+        assert.equal(fact.in_flight_reads, 0);
+    } finally {
+        resetStcontrolStateForTests();
+        globalThis.DATA_ROOT = previousDataRoot;
+        if (previousEnabled === undefined) delete process.env.SILLYTAVERN_STCONTROL_ENABLED;
+        else process.env.SILLYTAVERN_STCONTROL_ENABLED = previousEnabled;
+        fs.rmSync(dataRoot, { recursive: true, force: true });
+    }
+});
+
 test('Controller-confirmed lease snapshots revoke omissions and fence writes at the exact deadline', async () => {
     const previousDataRoot = globalThis.DATA_ROOT;
     const previousEnabled = process.env.SILLYTAVERN_STCONTROL_ENABLED;

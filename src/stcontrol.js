@@ -1311,6 +1311,10 @@ export async function stcontrolRequestTracker(request, response, next) {
     };
     response.once('finish', finish);
     response.once('close', finish);
+    // A client that left while the request waited for the state queue has already closed the
+    // response: no event comes any more, and the count would never go down (the session then
+    // never expires and always reads as online to the Controller).
+    if (response.writableEnded || response.destroyed || request.destroyed) finish();
     return next();
 }
 
