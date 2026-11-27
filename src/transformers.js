@@ -11,18 +11,25 @@ import { serverDirectory } from './server-directory.js';
 
 configureTransformers();
 
-function configureTransformers() {
-    // Limit the number of threads to 1 to avoid issues on Android
-    env.backends.onnx.wasm.numThreads = 1;
-    // Keep the JavaScript runtime and its WASM binaries on the same locked
-    // onnxruntime-web version. The transformers package also bundles older
-    // WASM files; mixing those with the security-updated runtime fails only
-    // when the first model is loaded.
+/**
+ * Keep the JavaScript runtime and its WASM binaries on the same locked
+ * onnxruntime-web version. The transformers package also bundles older
+ * WASM files; mixing those with the security-updated runtime fails only
+ * when the first model is loaded.
+ * @returns {string} Directory of the locked WASM binaries, with a trailing separator
+ */
+function getOnnxWasmPaths() {
     const onnxWasmDirectory = path.join(serverDirectory, 'node_modules', 'onnxruntime-web', 'dist');
     if (!fs.existsSync(onnxWasmDirectory)) {
         throw new Error('The locked onnxruntime-web WASM directory is missing');
     }
-    env.backends.onnx.wasm.wasmPaths = onnxWasmDirectory + path.sep;
+    return onnxWasmDirectory + path.sep;
+}
+
+function configureTransformers() {
+    // Limit the number of threads to 1 to avoid issues on Android
+    env.backends.onnx.wasm.numThreads = 1;
+    env.backends.onnx.wasm.wasmPaths = getOnnxWasmPaths();
 }
 
 const tasks = {
@@ -121,6 +128,23 @@ async function migrateCacheToDataDir() {
             }
         }
     }
+}
+
+/**
+ * Everything needed to load a task's pipeline somewhere else (a worker thread), as getPipeline would.
+ * @param {keyof typeof tasks} task Pipeline task
+ * @returns {Promise<{task: string, model: string, cacheDir: string, quantized: boolean, localOnly: boolean, onnxWasmPaths: string}>}
+ */
+export async function getPipelineOptions(task) {
+    await migrateCacheToDataDir();
+    return {
+        task,
+        model: getModelForTask(task),
+        cacheDir: path.join(globalThis.DATA_ROOT, '_cache'),
+        quantized: tasks[task].quantized ?? true,
+        localOnly: !getConfigValue('extensions.models.autoDownload', true, 'boolean'),
+        onnxWasmPaths: getOnnxWasmPaths(),
+    };
 }
 
 /**
