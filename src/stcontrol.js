@@ -1055,6 +1055,9 @@ export async function applyStcontrolActivityLeaseConfirmations(input) {
         let appliedLeases = 0;
         for (const [handle, lease] of Object.entries(state.leases)) {
             if (lease.confirmedAt > input.confirmed_at) continue;
+            // Granted on this node after the Agent read the sessions this snapshot answers: the Controller
+            // could not see it yet (the Agent's clock is this machine's). The next snapshot decides it.
+            if (Number(lease.registeredAt || 0) > input.confirmed_at) continue;
             const confirmation = exact.get(handle);
             if (!confirmation || lease.sessionId !== confirmation.sessionId ||
                 lease.activityEpoch !== confirmation.activityEpoch ||
@@ -1114,6 +1117,7 @@ export async function registerStcontrolSession(request, claims, loginMode = STCO
                 controllerGeneration: Number(claims.controller_generation || 0),
                 leaseExpiresAt: Number(claims.lease_expires_at || 0),
                 confirmedAt: Number(claims.lease_confirmed_at || 0),
+                registeredAt: now,
             };
         }
     });

@@ -19,6 +19,7 @@ import {
     holdStcontrolWrite,
     markUserSynchronized,
     noteStcontrolPageHeartbeat,
+    registerStcontrolSession,
     resetStcontrolStateForTests,
     runIdempotentStcontrolOperation,
     setUserWriteGate,
@@ -500,6 +501,39 @@ test('a request whose client left while it waited does not stay counted in fligh
         const fact = getStcontrolSessionTelemetry().find(item => item.session_id === sessionId);
         assert.equal(fact.in_flight_writes, 0);
         assert.equal(fact.in_flight_reads, 0);
+    } finally {
+        resetStcontrolStateForTests();
+        globalThis.DATA_ROOT = previousDataRoot;
+        if (previousEnabled === undefined) delete process.env.SILLYTAVERN_STCONTROL_ENABLED;
+        else process.env.SILLYTAVERN_STCONTROL_ENABLED = previousEnabled;
+        fs.rmSync(dataRoot, { recursive: true, force: true });
+    }
+});
+
+test('a lease granted after the Agent read the sessions survives that snapshot, not the next one', async () => {
+    const previousDataRoot = globalThis.DATA_ROOT;
+    const previousEnabled = process.env.SILLYTAVERN_STCONTROL_ENABLED;
+    const dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'sillytavern-stcontrol-lease-race-'));
+    const sessionId = 'eeeeeeee-5555-4555-8555-eeeeeeeeeeee';
+    globalThis.DATA_ROOT = dataRoot;
+    process.env.SILLYTAVERN_STCONTROL_ENABLED = 'true';
+    resetStcontrolStateForTests();
+    try {
+        // The Agent reads the node's sessions here; the user enters a moment later. The Controller
+        // redeemed the handoff a little before the node registered it (its clock, its round trip).
+        const observedAt = Date.now();
+        await new Promise(resolve => setTimeout(resolve, 5));
+        const redeemedAt = observedAt - 300;
+        await registerStcontrolSession({ session: {} }, {
+            handle: 'erin', session_id: sessionId, activity_epoch: 4, controller_generation: 3,
+            lease_confirmed_at: redeemedAt, lease_expires_at: redeemedAt + 900_000,
+        });
+        // The snapshot answering that read cannot know erin
+        await applyStcontrolActivityLeaseConfirmations({ controller_generation: 3, confirmed_at: observedAt, leases: [] });
+        assert.equal(getStcontrolState().leases.erin?.sessionId, sessionId, 'a snapshot that could not see the new lease revoked it');
+        // The next one did see it: without a confirmation it is revoked
+        await applyStcontrolActivityLeaseConfirmations({ controller_generation: 3, confirmed_at: Date.now() + 1, leases: [] });
+        assert.equal(getStcontrolState().leases.erin, undefined);
     } finally {
         resetStcontrolStateForTests();
         globalThis.DATA_ROOT = previousDataRoot;
